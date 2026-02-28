@@ -1,0 +1,342 @@
+<!--
+TITLE: API Reference — wafer.run docs
+ACTIVE: api-reference
+EXTRA_STYLES_INLINE:
+        .docs-content h4 { margin-top: 1rem; margin-bottom: 0.25rem; color: #4b5563; font-size: 1rem; }
+        .docs-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+        .docs-content th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); color: var(--text); font-weight: 600; }
+        .docs-content td { padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .docs-content td code { font-size: 0.85em; }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>API Reference</h2>
+<p>Complete method listing for the wafer runtime (<code>wafer-run</code>) and guest SDK (<code>wafer-sdk</code>).</p>
+
+<!-- ============================================================ -->
+<h2>Wafer Runtime</h2>
+<p>The host runtime that loads blocks, builds chains, and executes messages. Available as a Rust crate (<code>wafer-run</code>), Go module (<code>wafer-run-go</code>), and Node.js package (<code>wafer-run</code>).</p>
+
+<h3>Wafer (Runtime)</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Wafer::new()</code></td><td>Create a new runtime instance</td></tr>
+    <tr><td><code>register_block(name, block)</code></td><td>Register a native block instance</td></tr>
+    <tr><td><code>register_block_func(name, handler)</code></td><td>Register an inline handler function as a block (Rust only)</td></tr>
+    <tr><td><code>add_chain(chain)</code></td><td>Add a programmatic chain</td></tr>
+    <tr><td><code>add_chain_def(def)</code></td><td>Add a chain from a JSON <code>ChainDef</code></td></tr>
+    <tr><td><code>resolve()</code></td><td>Resolve all chain block references</td></tr>
+    <tr><td><code>register_service(name, svc)</code></td><td>Register a named service</td></tr>
+    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service by name</td></tr>
+    <tr><td><code>register_platform_services(svc)</code></td><td>Set platform-level services (database, storage, etc.)</td></tr>
+    <tr><td><code>has_block(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
+    <tr><td><code>registry() &rarr; &amp;Registry</code></td><td>Access the block registry</td></tr>
+</table>
+
+<h3>Block Trait</h3>
+<p>The core interface every block must implement:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>info() &rarr; BlockInfo</code></td><td>Return block metadata (name, version, interface, summary, instance mode)</td></tr>
+    <tr><td><code>handle(ctx, msg) &rarr; Result_</code></td><td>Process a message and return a result</td></tr>
+    <tr><td><code>lifecycle(ctx, event) &rarr; Result</code></td><td>Handle lifecycle events (Init, Start, Stop)</td></tr>
+    <tr><td><code>block_capabilities() &rarr; Option</code></td><td>Return capability restrictions (WASM blocks only)</td></tr>
+</table>
+
+<h3>BlockInfo</h3>
+<table>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>name</code></td><td><code>String</code></td><td>Unique block identifier</td></tr>
+    <tr><td><code>version</code></td><td><code>String</code></td><td>Semver version string</td></tr>
+    <tr><td><code>interface</code></td><td><code>String</code></td><td>Interface contract (e.g. <code>"handler@v1"</code>)</td></tr>
+    <tr><td><code>summary</code></td><td><code>String</code></td><td>Human-readable description</td></tr>
+    <tr><td><code>instance_mode</code></td><td><code>InstanceMode</code></td><td><code>Singleton</code>, <code>PerChain</code>, <code>PerNode</code>, or <code>PerExecution</code></td></tr>
+    <tr><td><code>allowed_modes</code></td><td><code>Vec</code></td><td>Additional allowed instance modes</td></tr>
+    <tr><td><code>admin_ui</code></td><td><code>Option</code></td><td>Admin UI info (path, icon, title)</td></tr>
+</table>
+
+<h3>Message</h3>
+<p>The message object passed through blocks. Available in both runtime and SDK.</p>
+
+<h4>Construction</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Message::new(kind, data)</code></td><td>Create a new message</td></tr>
+    <tr><td><code>set_data&lt;T&gt;(v)</code></td><td>Serialize and set the message payload</td></tr>
+    <tr><td><code>set_meta(key, value)</code></td><td>Set a metadata key-value pair</td></tr>
+</table>
+
+<h4>Reading</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>unmarshal&lt;T&gt;() / decode&lt;T&gt;()</code></td><td>Deserialize the message data</td></tr>
+    <tr><td><code>get_meta(key) &rarr; &amp;str</code></td><td>Get a metadata value</td></tr>
+    <tr><td><code>path() &rarr; &amp;str</code></td><td>Request resource path</td></tr>
+    <tr><td><code>action() &rarr; &amp;str</code></td><td>Semantic request action (Retrieve, Create, Update, Delete)</td></tr>
+    <tr><td><code>var(name) &rarr; &amp;str</code></td><td>Path variable (e.g. <code>{id}</code>)</td></tr>
+    <tr><td><code>query(name) &rarr; &amp;str</code></td><td>Query parameter</td></tr>
+    <tr><td><code>query_params() &rarr; HashMap</code></td><td>All query parameters</td></tr>
+    <tr><td><code>header(name) &rarr; &amp;str</code></td><td>Request header</td></tr>
+    <tr><td><code>content_type() &rarr; &amp;str</code></td><td>Request content type</td></tr>
+    <tr><td><code>body() &rarr; &amp;[u8]</code></td><td>Raw request body</td></tr>
+    <tr><td><code>cookie(name) &rarr; &amp;str</code></td><td>Cookie value</td></tr>
+    <tr><td><code>remote_addr() &rarr; &amp;str</code></td><td>Client IP address</td></tr>
+    <tr><td><code>user_id() &rarr; &amp;str</code></td><td>Authenticated user ID</td></tr>
+    <tr><td><code>user_email() &rarr; &amp;str</code></td><td>Authenticated user email</td></tr>
+    <tr><td><code>user_roles() &rarr; Vec&lt;&amp;str&gt;</code></td><td>User roles</td></tr>
+    <tr><td><code>is_admin() &rarr; bool</code></td><td>Whether user has admin role</td></tr>
+    <tr><td><code>pagination_params(default_page_size) &rarr; (page, page_size, offset)</code></td><td>Parse pagination from query params</td></tr>
+</table>
+
+<h4>Actions</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>cont() &rarr; Result_</code></td><td>Continue to the next block</td></tr>
+    <tr><td><code>respond(response) &rarr; Result_</code></td><td>Short-circuit with a response</td></tr>
+    <tr><td><code>drop_msg() &rarr; Result_</code></td><td>Silently drop the message</td></tr>
+    <tr><td><code>err(error) &rarr; Result_</code></td><td>Short-circuit with an error</td></tr>
+</table>
+
+<h3>Context</h3>
+<p>Passed to <code>handle()</code> and <code>lifecycle()</code>. Provides access to services and runtime state.</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>send(msg) &rarr; Result_</code></td><td>Send a message to another chain</td></tr>
+    <tr><td><code>capabilities() &rarr; Vec</code></td><td>List available capabilities</td></tr>
+    <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled</td></tr>
+    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service (runtime only)</td></tr>
+    <tr><td><code>services() &rarr; Option&lt;&amp;Services&gt;</code></td><td>Get platform services (runtime only)</td></tr>
+    <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value (runtime only)</td></tr>
+</table>
+
+<h3>Response Helpers</h3>
+<p>Convenience functions for building responses:</p>
+<table>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>respond(msg, status, data, content_type)</code></td><td>Send a raw response</td></tr>
+    <tr><td><code>json_respond(msg, status, data)</code></td><td>Send a JSON response</td></tr>
+    <tr><td><code>error(msg, status, code, message)</code></td><td>Send an error response</td></tr>
+    <tr><td><code>err_bad_request(msg, message)</code></td><td>400 Bad Request</td></tr>
+    <tr><td><code>err_unauthorized(msg, message)</code></td><td>401 Unauthorized</td></tr>
+    <tr><td><code>err_forbidden(msg, message)</code></td><td>403 Forbidden</td></tr>
+    <tr><td><code>err_not_found(msg, message)</code></td><td>404 Not Found</td></tr>
+    <tr><td><code>err_conflict(msg, message)</code></td><td>409 Conflict</td></tr>
+    <tr><td><code>err_validation(msg, message)</code></td><td>422 Validation Error</td></tr>
+    <tr><td><code>err_internal(msg, message)</code></td><td>500 Internal Server Error</td></tr>
+</table>
+
+<h3>ResponseBuilder</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>new_response(msg, status) &rarr; ResponseBuilder</code></td><td>Start building a response</td></tr>
+    <tr><td><code>.set_header(key, value)</code></td><td>Add a response header</td></tr>
+    <tr><td><code>.set_cookie(cookie)</code></td><td>Set a cookie</td></tr>
+    <tr><td><code>.json(data) &rarr; Result_</code></td><td>Finish with JSON body</td></tr>
+    <tr><td><code>.body(data, content_type) &rarr; Result_</code></td><td>Finish with raw body</td></tr>
+</table>
+
+<h3>Router (Rust only)</h3>
+<p>Declarative routing within a block:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Router::new()</code></td><td>Create a new router</td></tr>
+    <tr><td><code>retrieve(pattern, handler)</code></td><td>Register a GET route</td></tr>
+    <tr><td><code>create(pattern, handler)</code></td><td>Register a POST route</td></tr>
+    <tr><td><code>update(pattern, handler)</code></td><td>Register a PUT/PATCH route</td></tr>
+    <tr><td><code>delete(pattern, handler)</code></td><td>Register a DELETE route</td></tr>
+    <tr><td><code>on(action, pattern, handler)</code></td><td>Register a route for any action</td></tr>
+    <tr><td><code>route(ctx, msg) &rarr; Result_</code></td><td>Route a message</td></tr>
+</table>
+
+<h3>Registry</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Registry::new()</code></td><td>Create an empty registry</td></tr>
+    <tr><td><code>register(type_name, factory)</code></td><td>Register a block factory</td></tr>
+    <tr><td><code>register_func(type_name, handler)</code></td><td>Register an inline function</td></tr>
+    <tr><td><code>get(type_name) &rarr; Option</code></td><td>Get a block factory</td></tr>
+    <tr><td><code>has(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
+    <tr><td><code>list() &rarr; Vec</code></td><td>List all registered blocks</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>Platform Services (Runtime)</h2>
+<p>Services available through <code>Context</code> in native blocks. WASM blocks access these via typed clients in the SDK.</p>
+
+<h3>DatabaseService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>get(collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
+    <tr><td><code>list(collection, opts) &rarr; RecordList</code></td><td>List records with filtering and pagination</td></tr>
+    <tr><td><code>create(collection, data) &rarr; Record</code></td><td>Create a new record</td></tr>
+    <tr><td><code>update(collection, id, data) &rarr; Record</code></td><td>Update an existing record</td></tr>
+    <tr><td><code>delete(collection, id)</code></td><td>Delete a record</td></tr>
+    <tr><td><code>count(collection, filters) &rarr; i64</code></td><td>Count matching records</td></tr>
+    <tr><td><code>sum(collection, field, filters) &rarr; f64</code></td><td>Sum a numeric field</td></tr>
+    <tr><td><code>query_raw(query, args) &rarr; Vec&lt;Record&gt;</code></td><td>Execute a raw SQL query</td></tr>
+    <tr><td><code>exec_raw(query, args) &rarr; i64</code></td><td>Execute a raw SQL statement</td></tr>
+</table>
+
+<h3>StorageService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>put(folder, key, data, content_type)</code></td><td>Upload an object</td></tr>
+    <tr><td><code>get(folder, key) &rarr; (bytes, ObjectInfo)</code></td><td>Download an object</td></tr>
+    <tr><td><code>delete(folder, key)</code></td><td>Delete an object</td></tr>
+    <tr><td><code>list(folder, opts) &rarr; ObjectList</code></td><td>List objects in a folder</td></tr>
+    <tr><td><code>create_folder(name, public)</code></td><td>Create a storage folder</td></tr>
+    <tr><td><code>delete_folder(name)</code></td><td>Delete a storage folder</td></tr>
+    <tr><td><code>list_folders() &rarr; Vec&lt;FolderInfo&gt;</code></td><td>List all folders</td></tr>
+</table>
+
+<h3>CryptoService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>hash(password) &rarr; String</code></td><td>Hash a password (bcrypt)</td></tr>
+    <tr><td><code>compare_hash(password, hash)</code></td><td>Verify a password against a hash</td></tr>
+    <tr><td><code>sign(claims, expiry) &rarr; String</code></td><td>Create a signed JWT token</td></tr>
+    <tr><td><code>verify(token) &rarr; HashMap</code></td><td>Verify and decode a JWT token</td></tr>
+    <tr><td><code>random_bytes(n) &rarr; Vec&lt;u8&gt;</code></td><td>Generate random bytes</td></tr>
+</table>
+
+<h3>NetworkService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>do_request(req) &rarr; Response</code></td><td>Make an outbound HTTP request</td></tr>
+</table>
+
+<h3>LoggerService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>debug(msg, fields)</code></td><td>Log at debug level</td></tr>
+    <tr><td><code>info(msg, fields)</code></td><td>Log at info level</td></tr>
+    <tr><td><code>warn(msg, fields)</code></td><td>Log at warn level</td></tr>
+    <tr><td><code>error(msg, fields)</code></td><td>Log at error level</td></tr>
+</table>
+
+<h3>ConfigService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>get(key) &rarr; Option&lt;String&gt;</code></td><td>Read a config value</td></tr>
+    <tr><td><code>set(key, value)</code></td><td>Write a config value</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>Guest SDK (WASM Blocks)</h2>
+<p>The SDK is available for Rust (<code>wafer-sdk</code>), Go (<code>wafer-sdk-go</code>), and AssemblyScript (<code>wafer-sdk-as</code>). WASM blocks implement the same Block interface and use typed service clients to access runtime services.</p>
+
+<h3>Block Trait (SDK)</h3>
+<p>Same interface as the runtime — implement these three methods:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>info() &rarr; BlockInfo</code></td><td>Return block metadata</td></tr>
+    <tr><td><code>handle(ctx, msg) &rarr; Result_</code></td><td>Process a message</td></tr>
+    <tr><td><code>lifecycle(ctx, event) &rarr; Result</code></td><td>Handle lifecycle events (optional, default no-op)</td></tr>
+</table>
+<p>Export your block with <code>wafer_sdk::export!(MyBlock)</code> (Rust), <code>wafer.Export(&amp;MyBlock{})</code> (Go), or <code>export(new MyBlock())</code> (AssemblyScript).</p>
+
+<h3>DatabaseClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>DatabaseClient::new(ctx)</code></td><td>Create a database client</td></tr>
+    <tr><td><code>get(collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
+    <tr><td><code>list(collection, opts) &rarr; RecordList</code></td><td>List records with filtering</td></tr>
+    <tr><td><code>create(collection, data) &rarr; Record</code></td><td>Create a record</td></tr>
+    <tr><td><code>update(collection, id, data) &rarr; Record</code></td><td>Update a record</td></tr>
+    <tr><td><code>delete(collection, id)</code></td><td>Delete a record</td></tr>
+</table>
+
+<h3>StorageClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>StorageClient::new(ctx)</code></td><td>Create a storage client</td></tr>
+    <tr><td><code>put(bucket, key, data, content_type)</code></td><td>Upload an object</td></tr>
+    <tr><td><code>get(bucket, key) &rarr; Object</code></td><td>Download an object</td></tr>
+    <tr><td><code>delete(bucket, key)</code></td><td>Delete an object</td></tr>
+</table>
+
+<h3>CryptoClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>CryptoClient::new(ctx)</code></td><td>Create a crypto client</td></tr>
+    <tr><td><code>hash(password) &rarr; String</code></td><td>Hash a password</td></tr>
+    <tr><td><code>compare_hash(password, hash)</code></td><td>Verify a password hash</td></tr>
+    <tr><td><code>sign(claims, expiry_secs) &rarr; String</code></td><td>Create a signed JWT</td></tr>
+    <tr><td><code>verify(token) &rarr; HashMap</code></td><td>Verify and decode a JWT</td></tr>
+</table>
+
+<h3>NetworkClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>NetworkClient::new(ctx)</code></td><td>Create a network client</td></tr>
+    <tr><td><code>do_request(req) &rarr; Response</code></td><td>Make an HTTP request</td></tr>
+    <tr><td><code>get(url) &rarr; Response</code></td><td>GET shorthand</td></tr>
+    <tr><td><code>post_json(url, body) &rarr; Response</code></td><td>POST JSON shorthand</td></tr>
+</table>
+
+<h3>LoggerClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>LoggerClient::new(ctx)</code></td><td>Create a logger client</td></tr>
+    <tr><td><code>debug(message) / debug_with(message, fields)</code></td><td>Log at debug level</td></tr>
+    <tr><td><code>info(message) / info_with(message, fields)</code></td><td>Log at info level</td></tr>
+    <tr><td><code>warn(message) / warn_with(message, fields)</code></td><td>Log at warn level</td></tr>
+    <tr><td><code>error(message) / error_with(message, fields)</code></td><td>Log at error level</td></tr>
+</table>
+
+<h3>ConfigClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>ConfigClient::new(ctx)</code></td><td>Create a config client</td></tr>
+    <tr><td><code>get(key) &rarr; Option&lt;String&gt;</code></td><td>Read a config value</td></tr>
+    <tr><td><code>get_default(key, default_value) &rarr; String</code></td><td>Read with a default fallback</td></tr>
+    <tr><td><code>set(key, value)</code></td><td>Write a config value</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>Enums &amp; Constants</h2>
+
+<h3>InstanceMode</h3>
+<table>
+    <tr><th>Value</th><th>Description</th></tr>
+    <tr><td><code>Singleton</code></td><td>One instance shared across all chains</td></tr>
+    <tr><td><code>PerChain</code></td><td>One instance per chain</td></tr>
+    <tr><td><code>PerNode</code></td><td>One instance per node in a chain tree</td></tr>
+    <tr><td><code>PerExecution</code></td><td>Fresh instance for every message</td></tr>
+</table>
+
+<h3>LifecycleType</h3>
+<table>
+    <tr><th>Value</th><th>Description</th></tr>
+    <tr><td><code>Init</code></td><td>Block is being initialized</td></tr>
+    <tr><td><code>Start</code></td><td>Runtime is starting</td></tr>
+    <tr><td><code>Stop</code></td><td>Runtime is shutting down</td></tr>
+</table>
+
+<h3>RequestAction</h3>
+<table>
+    <tr><th>Value</th><th>HTTP Method</th></tr>
+    <tr><td><code>Retrieve</code></td><td>GET</td></tr>
+    <tr><td><code>Create</code></td><td>POST</td></tr>
+    <tr><td><code>Update</code></td><td>PUT / PATCH</td></tr>
+    <tr><td><code>Delete</code></td><td>DELETE</td></tr>
+    <tr><td><code>Execute</code></td><td>Custom actions</td></tr>
+</table>
+
+<h3>Meta Key Constants</h3>
+<table>
+    <tr><th>Constant</th><th>Description</th></tr>
+    <tr><td><code>META_REQ_ACTION</code></td><td>Request action</td></tr>
+    <tr><td><code>META_REQ_RESOURCE</code></td><td>Request resource path</td></tr>
+    <tr><td><code>META_REQ_PARAM_PREFIX</code></td><td>Path parameter prefix (<code>req.param.</code>)</td></tr>
+    <tr><td><code>META_REQ_QUERY_PREFIX</code></td><td>Query parameter prefix (<code>req.query.</code>)</td></tr>
+    <tr><td><code>META_REQ_CLIENT_IP</code></td><td>Client IP address</td></tr>
+    <tr><td><code>META_REQ_CONTENT_TYPE</code></td><td>Request content type</td></tr>
+    <tr><td><code>META_AUTH_USER_ID</code></td><td>Authenticated user ID</td></tr>
+    <tr><td><code>META_AUTH_USER_EMAIL</code></td><td>Authenticated user email</td></tr>
+    <tr><td><code>META_AUTH_USER_ROLES</code></td><td>User roles (comma-separated)</td></tr>
+    <tr><td><code>META_RESP_STATUS</code></td><td>Response HTTP status</td></tr>
+    <tr><td><code>META_RESP_CONTENT_TYPE</code></td><td>Response content type</td></tr>
+    <tr><td><code>META_RESP_HEADER_PREFIX</code></td><td>Response header prefix</td></tr>
+    <tr><td><code>META_RESP_COOKIE_PREFIX</code></td><td>Set-Cookie header prefix</td></tr>
+</table>

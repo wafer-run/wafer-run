@@ -1,0 +1,14 @@
+/// The guest-exported block interface.
+
+interface block {
+    use types.{block-info, message, block-result, lifecycle-event, wafer-error};
+
+    /// Return metadata describing this block.
+    info: func() -> block-info;
+
+    /// Process an incoming message and return a result.
+    handle: func(msg: message) -> block-result;
+
+    /// Handle a lifecycle event (init, start, stop).
+    lifecycle: func(event: lifecycle-event) -> result<_, wafer-error>;
+}

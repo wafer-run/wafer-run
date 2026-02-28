@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/wafer-sdk-ts",
+    "packages/wafer-client-js",
+    "packages/wafer-cli",
+    "crates/wafer-run-node",
+    "crates/wafer-site"
+  ]
+}

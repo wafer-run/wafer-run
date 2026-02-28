@@ -1,0 +1,11 @@
+
+    <script>
+    function switchTab(lang) {
+        document.querySelectorAll('.tab').forEach(function(t) {
+            t.classList.toggle('active', t.getAttribute('onclick').indexOf(lang) !== -1);
+        });
+        document.querySelectorAll('.tab-panel').forEach(function(p) {
+            p.style.display = p.dataset.lang === lang ? '' : 'none';
+        });
+    }
+    </script>

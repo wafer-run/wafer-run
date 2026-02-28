@@ -1,0 +1,97 @@
+/// Core types shared across all WAFER interfaces.
+
+interface types {
+    /// A key-value metadata entry. WIT has no map type, so we use a list of pairs.
+    record meta-entry {
+        key: string,
+        value: string,
+    }
+
+    /// A message flowing through the block chain.
+    record message {
+        kind: string,
+        data: list<u8>,
+        meta: list<meta-entry>,
+    }
+
+    /// The action a block wants the runtime to take after processing a message.
+    enum action {
+        %continue,
+        respond,
+        drop,
+        error,
+    }
+
+    /// A response payload returned when a block short-circuits the chain.
+    record response {
+        data: list<u8>,
+        meta: list<meta-entry>,
+    }
+
+    /// gRPC-style error codes for WAFER.
+    enum error-code {
+        ok,
+        cancelled,
+        unknown,
+        invalid-argument,
+        deadline-exceeded,
+        not-found,
+        already-exists,
+        permission-denied,
+        resource-exhausted,
+        failed-precondition,
+        aborted,
+        out-of-range,
+        unimplemented,
+        internal,
+        unavailable,
+        data-loss,
+        unauthenticated,
+    }
+
+    /// A structured error returned by a block.
+    record wafer-error {
+        code: error-code,
+        message: string,
+        meta: list<meta-entry>,
+    }
+
+    /// The result of processing a message.
+    record block-result {
+        action: action,
+        response: option<response>,
+        error: option<wafer-error>,
+        message: option<message>,
+    }
+
+    /// How many block instances are created and when.
+    enum instance-mode {
+        per-node,
+        singleton,
+        per-chain,
+        per-execution,
+    }
+
+    /// Metadata describing a block.
+    record block-info {
+        name: string,
+        version: string,
+        %interface: string,
+        summary: string,
+        instance-mode: instance-mode,
+        allowed-modes: list<instance-mode>,
+    }
+
+    /// The kind of lifecycle event.
+    enum lifecycle-type {
+        init,
+        start,
+        stop,
+    }
+
+    /// A lifecycle event sent to blocks during transitions.
+    record lifecycle-event {
+        event-type: lifecycle-type,
+        data: list<u8>,
+    }
+}

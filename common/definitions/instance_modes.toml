@@ -1,0 +1,7 @@
+# Block instance mode values.
+
+[modes]
+per_node      = { value = "per-node",      description = "One instance per node (default)" }
+singleton     = { value = "singleton",     description = "Single shared instance" }
+per_chain     = { value = "per-chain",     description = "One instance per chain" }
+per_execution = { value = "per-execution", description = "New instance per execution" }

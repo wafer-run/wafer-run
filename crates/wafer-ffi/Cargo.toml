@@ -1,0 +1,13 @@
+[package]
+name = "wafer-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C shared library exposing the WAFER runtime via extern \"C\" functions"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-run = { path = "../wafer-run", features = ["full"] }
+serde_json = { workspace = true }

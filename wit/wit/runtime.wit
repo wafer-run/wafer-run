@@ -1,0 +1,6 @@
+/// Host-imported runtime utilities.
+
+interface runtime {
+    /// Check whether the current execution context has been cancelled.
+    is-cancelled: func() -> bool;
+}

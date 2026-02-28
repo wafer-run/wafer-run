@@ -1,0 +1,28 @@
+{
+  "name": "wafer-sdk-ts",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for WAFER — write WAFER blocks that compile to WebAssembly components",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --outDir dist/",
+    "componentize": "jco componentize dist/index.js --wit ../../wit/wit --world-name wafer-block -o block.wasm"
+  },
+  "dependencies": {
+    "@bytecodealliance/jco": "^1.8.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "wafer",
+    "wasm",
+    "webassembly",
+    "typescript",
+    "component-model",
+    "block",
+    "pipeline"
+  ],
+  "license": "MIT"
+}

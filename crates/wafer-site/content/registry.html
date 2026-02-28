@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>wafer.run — Block Registry</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Itim&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/theme.css">
+    <style>
+        /* Content */
+        .container { max-width: 1000px; margin: 2rem auto; padding: 0 1.5rem; }
+        .search-box {
+            width: 100%; padding: 0.75rem 1rem; border: 2px solid var(--border);
+            border-radius: 0.5rem; font-size: 1rem; margin-bottom: 2rem;
+            background: var(--bg-white);
+        }
+        .search-box:focus { outline: none; border-color: var(--accent); }
+        .package-list { list-style: none; }
+        .package-card {
+            background: var(--bg-white); border: 1px solid var(--border); border-radius: 0.75rem;
+            padding: 1.5rem; margin-bottom: 1rem; transition: border-color 0.3s;
+        }
+        .package-card:hover { border-color: var(--wafer); }
+        .package-card h3 { color: var(--accent); margin-bottom: 0.25rem; }
+        .package-card h3 a { color: inherit; text-decoration: none; }
+        .package-card h3 a:hover { text-decoration: underline; }
+        .package-card .description { margin-top: 0.5rem; color: var(--text-secondary); }
+        .package-card .meta { margin-top: 0.75rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+        .badge {
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500;
+        }
+        .badge-downloads { background: var(--wafer-cream); color: var(--blue-dark); }
+        .badge-version { background: #f0fdf4; color: #166534; }
+        .repo-link { font-size: 0.8rem; color: var(--text-secondary); text-decoration: none; }
+        .repo-link:hover { color: var(--accent); text-decoration: underline; }
+
+        /* Empty state */
+        .empty { text-align: center; padding: 3rem 1rem; color: var(--text-secondary); }
+        .empty h3 { font-size: 1.3rem; color: var(--text); margin-bottom: 0.5rem; }
+        .empty .subtitle { margin-bottom: 1.5rem; }
+        .empty .api-guide { text-align: left; max-width: 540px; margin: 0 auto; }
+        .empty .api-guide p { margin-bottom: 0.5rem; color: var(--text-secondary); font-size: 0.95rem; }
+        .empty .api-guide strong { color: var(--text); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-inner">
+            <a class="brand" href="/"><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/registry">Registry</a>
+                <a href="/docs">Docs</a>
+                <a href="/playground">Playground</a>
+            </nav>
+        </div>
+    </div>
+    <div class="page-title">
+        <h1>Block Registry</h1>
+        <p>Discover and share wafer blocks</p>
+    </div>
+    <div class="container">
+        <input type="text" class="search-box" id="search" placeholder="Search packages..." oninput="searchPackages(this.value)">
+        <ul class="package-list" id="packages">
+            <li class="empty">Loading packages...</li>
+        </ul>
+    </div>
+    <script>
+        let debounceTimer;
+
+        async function searchPackages(query) {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+                const url = query
+                    ? '/registry/search?q=' + encodeURIComponent(query)
+                    : '/registry/search?q=';
+                try {
+                    const resp = await fetch(url);
+                    const data = await resp.json();
+                    renderPackages(data.packages || []);
+                } catch (e) {
+                    document.getElementById('packages').innerHTML =
+                        '<li class="empty">Failed to load packages</li>';
+                }
+            }, 300);
+        }
+
+        function formatDownloads(n) {
+            n = parseInt(n) || 0;
+            if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+            return n.toString();
+        }
+
+        function renderPackages(packages) {
+            const list = document.getElementById('packages');
+            if (packages.length === 0) {
+                list.innerHTML = '<li class="empty">'
+                    + '<h3>No packages found</h3>'
+                    + '<p class="subtitle">No blocks have been indexed yet.</p>'
+                    + '<div class="api-guide">'
+                    + '<p>Packages are auto-indexed from GitHub the first time someone requests them.</p>'
+                    + '<p>Just push your block to GitHub, <a href="/docs/registry">create a release</a>, and it will appear here.</p>'
+                    + '</div>'
+                    + '</li>';
+                return;
+            }
+            list.innerHTML = packages.map(pkg => {
+                const data = pkg.data || pkg;
+                const name = data.name || 'unnamed';
+                const desc = data.description || 'No description';
+                const downloads = data.download_count || '0';
+                const repoUrl = data.repo_url || ('https://' + name);
+
+                return '<li class="package-card">'
+                    + '<h3><a href="' + esc(repoUrl) + '" target="_blank" rel="noopener">' + esc(name) + '</a></h3>'
+                    + '<p class="description">' + esc(desc) + '</p>'
+                    + '<div class="meta">'
+                    + '<span class="badge badge-downloads">' + formatDownloads(downloads) + ' downloads</span>'
+                    + '<a class="repo-link" href="' + esc(repoUrl) + '" target="_blank" rel="noopener">View on GitHub</a>'
+                    + '</div>'
+                    + '</li>';
+            }).join('');
+        }
+
+        function esc(s) {
+            const el = document.createElement('span');
+            el.textContent = s;
+            return el.innerHTML;
+        }
+
+        // Initial load
+        searchPackages('');
+    </script>
+</body>
+</html>

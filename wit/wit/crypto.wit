@@ -1,0 +1,27 @@
+/// Host-imported cryptographic operations service.
+
+interface crypto {
+    /// Crypto error details.
+    enum crypto-error {
+        hash-error,
+        password-mismatch,
+        sign-error,
+        verify-error,
+        other,
+    }
+
+    /// Produce a one-way hash of a password.
+    hash: func(password: string) -> result<string, crypto-error>;
+
+    /// Check a password against a hash. Returns ok if match, error if mismatch.
+    compare-hash: func(password: string, hash: string) -> result<_, crypto-error>;
+
+    /// Create a signed token from JSON-encoded claims with expiry in seconds.
+    sign: func(claims: string, expiry-secs: u64) -> result<string, crypto-error>;
+
+    /// Validate a token and return its JSON-encoded claims.
+    verify: func(token: string) -> result<string, crypto-error>;
+
+    /// Generate n cryptographically-secure random bytes.
+    random-bytes: func(n: u32) -> result<list<u8>, crypto-error>;
+}

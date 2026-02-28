@@ -1,0 +1,20 @@
+# Build artifacts
+dist/
+build/
+node_modules/
+target/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docusaurus
+site/node_modules/
+site/build/
+site/.docusaurus/

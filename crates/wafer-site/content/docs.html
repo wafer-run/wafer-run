@@ -1,0 +1,47 @@
+<!--
+TITLE: Quick Start — wafer.run docs
+ACTIVE: quick-start
+-->
+
+<h2>Quick Start</h2>
+<p>Create and run your first block in under a minute.</p>
+
+<h3>1. Install the CLI</h3>
+<pre><code>npm install -g wafer-run</code></pre>
+
+<h3>2. Create a Project</h3>
+<pre><code>wafer init my-app
+cd my-app
+npm install</code></pre>
+<p>This scaffolds a project with a hello-world block, chain config, and build setup.</p>
+
+<h3>3. Your Block</h3>
+<p>Open <code>blocks/hello/index.ts</code> — the generated starter block:</p>
+<pre><code>import { Block, BlockInfo, Context, Message, Result, export } from "wafer-sdk-as/assembly";
+
+class HelloBlock extends Block {
+    info(): BlockInfo {
+        return new BlockInfo("hello", "1.0.0", "handler@v1", "Says hello");
+    }
+
+    handle(ctx: Context, msg: Message): Result {
+        return msg.respond(200, '{"hello":"world"}', "application/json");
+    }
+}
+
+export(new HelloBlock());</code></pre>
+
+<h3>4. Run It</h3>
+<pre><code>wafer dev</code></pre>
+<p>This builds your block to WASM and starts a dev server with live reload on port 8080.</p>
+
+<h3>5. Test It</h3>
+<pre><code>curl http://localhost:8080
+# {"hello":"world"}</code></pre>
+
+<h3>Next Steps</h3>
+<ul>
+    <li><a href="/docs/creating-a-block">Creating a Block</a> — write blocks in AssemblyScript, Go, or Rust</li>
+    <li><a href="/docs/running-a-block">Running a Block</a> — host blocks with the Node.js, Go, or Rust runtime</li>
+    <li><a href="/docs/cli">CLI</a> — full command reference for <code>wafer</code></li>
+</ul>

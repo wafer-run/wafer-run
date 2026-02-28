@@ -1,0 +1,34 @@
+# Canonical metadata key constants used across WAFER components.
+
+[request]
+client_ip    = "req.client.ip"
+method       = "req.method"
+path         = "req.path"
+content_type = "req.content_type"
+action       = "req.action"
+resource     = "req.resource"
+
+[request.prefixes]
+param = "req.param."
+query = "req.query."
+
+[response]
+status       = "resp.status"
+content_type = "resp.content_type"
+
+[response.prefixes]
+header = "resp.header."
+cookie = "resp.set_cookie."
+
+[auth]
+user_id    = "auth.user_id"
+user_email = "auth.user_email"
+user_roles = "auth.user_roles"
+
+[database]
+collection = "collection"
+record_id  = "id"
+
+[storage]
+bucket = "bucket"
+key    = "key"

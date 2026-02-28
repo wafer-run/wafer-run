@@ -1,0 +1,111 @@
+<!--
+TITLE: Block Registry — wafer.run docs
+ACTIVE: registry
+EXTRA_STYLES: lang_tabs.css
+EXTRA_STYLES_MOBILE: lang_tabs_mobile.css
+AFTER_BODY_OPEN: svg_icons.html
+BEFORE_BODY_CLOSE: switch_tab_script.html
+EXTRA_STYLES_INLINE:
+        .docs-content ol { margin-left: 1.5rem; margin-bottom: 1rem; color: var(--text-secondary); }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>Block Registry</h2>
+<p>The <a href="/registry">block registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks. Like Go modules, there is no registration step — just push your code to GitHub, tag a release, and the registry indexes it automatically the first time someone looks it up.</p>
+
+<h3>Publishing a Block</h3>
+<p>Publishing is three steps — all on GitHub, nothing to do on wafer.run:</p>
+<ol>
+    <li><strong>Push your block</strong> to a public GitHub repository</li>
+    <li><strong>Build the .wasm file</strong> from your block source</li>
+    <li><strong>Create a GitHub Release</strong> and attach the <code>.wasm</code> as a release asset</li>
+</ol>
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('as')">
+            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
+            AssemblyScript
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="as">
+<pre><code># Build your block as WASM
+npx asc assembly/index.ts --outFile myblock.wasm --optimize
+
+# Tag and push
+git tag v0.1.0
+git push origin v0.1.0
+
+# Then create a release on GitHub and upload the .wasm file</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code># Build your block as WASM
+GOOS=wasip1 GOARCH=wasm go build -o myblock.wasm .
+
+# Tag and push
+git tag v0.1.0
+git push origin v0.1.0
+
+# Then create a release on GitHub and upload the .wasm file</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code># Build your block as WASM
+cargo build --release --target wasm32-wasip1
+
+# Tag and push
+git tag v0.1.0
+git push origin v0.1.0
+
+# Then create a release on GitHub and upload the .wasm file</code></pre>
+    </div>
+</div>
+<p>That's it. The registry will auto-index your package (name, description, versions) from GitHub the first time anyone requests it. Download counts are tracked automatically.</p>
+
+<h3>Installing a Block</h3>
+<p>Reference a published block by name in your chain configuration with <code>@version</code> — the runtime will automatically download the <code>.wasm</code> file from the corresponding GitHub Release during startup:</p>
+<pre><code>{
+    "root": {
+        "block": "github.com/acme/auth-block@v1.0.0",
+        "next": [
+            { "match": "GET:/api/data", "block": "my-handler" }
+        ]
+    }
+}</code></pre>
+<p>The version must match a GitHub Release tag (e.g. <code>v1.0.0</code>, <code>v2.0.0-rc.1</code>). The runtime expects a <code>{repo}.wasm</code> asset attached to the release — in this example, <code>auth-block.wasm</code>.</p>
+
+<p>You can also omit the version to automatically resolve the latest release that has a <code>.wasm</code> asset:</p>
+<pre><code>{ "block": "github.com/acme/auth-block" }</code></pre>
+<p>The runtime queries the GitHub Releases API and picks the first release with a <code>.wasm</code> file attached. This is convenient for development, but pinning a version is recommended for production.</p>
+
+<h3>Browsing and Searching</h3>
+<ul>
+    <li><a href="/registry">Browse the registry</a> at <code>https://wafer.run/registry</code></li>
+    <li>Search via API: <code>GET https://wafer.run/registry/search?q=auth</code></li>
+</ul>
+<p>Only packages that have been looked up at least once appear in search results (just like Go's <code>pkg.go.dev</code>).</p>
+
+<h3>Registry API</h3>
+<p>All endpoints are at <code>https://wafer.run</code>:</p>
+<ul>
+    <li><code>GET /registry/search?q=term</code> — search indexed packages</li>
+    <li><code>GET /registry/packages/{owner}/{repo}</code> — package details + versions (auto-indexes on first request)</li>
+    <li><code>GET /registry/packages/{owner}/{repo}/versions</code> — version list from GitHub releases</li>
+    <li><code>GET /registry/packages/{owner}/{repo}/download/{version}</code> — redirects to the GitHub release asset</li>
+</ul>
+
+<h3>Removing a Package</h3>
+<p>There is no delete API. If you remove your GitHub repository or delete a release, the versions will stop resolving. The package entry will remain in the index but with no available versions.</p>
+
+<h3>Blocking a Package</h3>
+<p>The registry includes an admin-only blocklist to prevent malicious or harmful packages from being indexed or returned in search results. Blocked packages cannot be auto-indexed from GitHub, and already-indexed packages that are later blocked will be filtered from search results and return 404 on direct lookup.</p>
+<p>The blocklist is managed by wafer.run administrators — there is no public API to modify it. Admins can block individual packages (e.g. <code>github.com/baduser/badrepo</code>) or an entire owner's packages using a wildcard pattern (e.g. <code>github.com/baduser/*</code>).</p>
+
+<h3>Reporting a Bad Package</h3>
+<p>If you find a package that is malicious, contains malware, or otherwise violates the terms of use, please <a href="https://github.com/wafer-run/wafer-site/issues/new">open a GitHub issue</a> to request an admin review. Include the package name and a description of the problem, and we will investigate and block the package if necessary.</p>

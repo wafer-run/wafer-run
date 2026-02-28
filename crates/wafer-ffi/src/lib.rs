@@ -1,0 +1,342 @@
+//! wafer-ffi — C shared library exposing the WAFER runtime.
+//!
+//! Design:
+//! - Rust owns all memory; callers hold an opaque `*mut WaferRuntime` pointer.
+//! - All complex data crosses the FFI boundary as JSON C strings.
+//! - Caller must free returned strings via `wafer_free_string()`.
+//! - Functions that can fail return NULL on success, or a JSON error string.
+//! - Panics are caught at every FFI boundary.
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int};
+
+use wafer_run::{ChainDef, Message, Result_, Wafer, WASMBlock};
+
+/// Opaque handle wrapping the Rust runtime.
+pub struct WaferRuntime {
+    inner: Wafer,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a Rust string into a heap-allocated C string (caller must free via
+/// `wafer_free_string`).  Returns a null pointer if the string contains
+/// interior NUL bytes (should never happen with JSON).
+fn to_c_string(s: &str) -> *mut c_char {
+    match CString::new(s) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Build a JSON error string: `{"error":"<msg>"}`.
+fn error_json(msg: &str) -> *mut c_char {
+    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    let json = format!(r#"{{"error":"{}"}}"#, escaped);
+    to_c_string(&json)
+}
+
+/// Safely dereference a `*mut WaferRuntime`.
+/// Returns `None` (and a null-safe no-op) when the pointer is null.
+unsafe fn deref_mut<'a>(ptr: *mut WaferRuntime) -> Option<&'a mut WaferRuntime> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(&mut *ptr)
+    }
+}
+
+unsafe fn deref_ref<'a>(ptr: *mut WaferRuntime) -> Option<&'a WaferRuntime> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(&*ptr)
+    }
+}
+
+/// Read a `*const c_char` into a `&str`. Returns `None` on null or invalid UTF-8.
+unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
+    if ptr.is_null() {
+        None
+    } else {
+        CStr::from_ptr(ptr).to_str().ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+/// Create a new WAFER runtime instance.
+#[no_mangle]
+pub extern "C" fn wafer_new() -> *mut WaferRuntime {
+    let result = std::panic::catch_unwind(|| {
+        let rt = WaferRuntime {
+            inner: Wafer::new(),
+        };
+        Box::into_raw(Box::new(rt))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Free a WAFER runtime instance.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
+    if !w.is_null() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(Box::from_raw(w));
+        }));
+    }
+}
+
+/// Resolve all block references in registered chains.
+/// Returns NULL on success, or a JSON error string on failure.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_mut(w) {
+            Some(r) => r,
+            None => return error_json("null runtime pointer"),
+        };
+        match rt.inner.resolve() {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => error_json(&e),
+        }
+    }));
+    result.unwrap_or_else(|_| error_json("panic in wafer_resolve"))
+}
+
+/// Start the runtime.
+/// Returns NULL on success, or a JSON error string on failure.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_mut(w) {
+            Some(r) => r,
+            None => return error_json("null runtime pointer"),
+        };
+        match rt.inner.start() {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => error_json(&e),
+        }
+    }));
+    result.unwrap_or_else(|_| error_json("panic in wafer_start"))
+}
+
+/// Stop the runtime.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(rt) = deref_ref(w) {
+            rt.inner.stop();
+        }
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Block Registration
+// ---------------------------------------------------------------------------
+
+/// Register a WASM block from a file path.
+/// Returns NULL on success, or a JSON error string on failure.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_register_wasm_block(
+    w: *mut WaferRuntime,
+    type_name: *const c_char,
+    wasm_path: *const c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_mut(w) {
+            Some(r) => r,
+            None => return error_json("null runtime pointer"),
+        };
+        let name = match c_str_to_str(type_name) {
+            Some(s) => s,
+            None => return error_json("invalid type_name"),
+        };
+        let path = match c_str_to_str(wasm_path) {
+            Some(s) => s,
+            None => return error_json("invalid wasm_path"),
+        };
+
+        match WASMBlock::load(path) {
+            Ok(block) => {
+                rt.inner.register_block(name, std::sync::Arc::new(block));
+                std::ptr::null_mut()
+            }
+            Err(e) => error_json(&e),
+        }
+    }));
+    result.unwrap_or_else(|_| error_json("panic in wafer_register_wasm_block"))
+}
+
+// ---------------------------------------------------------------------------
+// Chain Management
+// ---------------------------------------------------------------------------
+
+/// Add a chain definition from JSON.
+/// Returns NULL on success, or a JSON error string on failure.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_add_chain_def(
+    w: *mut WaferRuntime,
+    chain_def_json: *const c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_mut(w) {
+            Some(r) => r,
+            None => return error_json("null runtime pointer"),
+        };
+        let json_str = match c_str_to_str(chain_def_json) {
+            Some(s) => s,
+            None => return error_json("invalid chain_def_json"),
+        };
+
+        let def: ChainDef = match serde_json::from_str(json_str) {
+            Ok(d) => d,
+            Err(e) => return error_json(&format!("invalid ChainDef JSON: {}", e)),
+        };
+
+        rt.inner.add_chain_def(&def);
+        std::ptr::null_mut()
+    }));
+    result.unwrap_or_else(|_| error_json("panic in wafer_add_chain_def"))
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+/// Execute a chain with the given message.
+/// Returns a JSON result string (always non-NULL).
+#[no_mangle]
+pub unsafe extern "C" fn wafer_execute(
+    w: *mut WaferRuntime,
+    chain_id: *const c_char,
+    message_json: *const c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_ref(w) {
+            Some(r) => r,
+            None => {
+                return to_c_string(
+                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
+                        "ffi_error",
+                        "null runtime pointer",
+                    )))
+                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"null runtime pointer"}}"#.to_string()),
+                );
+            }
+        };
+        let cid = match c_str_to_str(chain_id) {
+            Some(s) => s,
+            None => {
+                return to_c_string(
+                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
+                        "ffi_error",
+                        "invalid chain_id",
+                    )))
+                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid chain_id"}}"#.to_string()),
+                );
+            }
+        };
+        let msg_str = match c_str_to_str(message_json) {
+            Some(s) => s,
+            None => {
+                return to_c_string(
+                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
+                        "ffi_error",
+                        "invalid message_json",
+                    )))
+                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid message_json"}}"#.to_string()),
+                );
+            }
+        };
+
+        let mut msg: Message = match serde_json::from_str(msg_str) {
+            Ok(m) => m,
+            Err(e) => {
+                let err_result = Result_::error(wafer_run::WaferError::new(
+                    "ffi_error",
+                    format!("invalid Message JSON: {}", e),
+                ));
+                return to_c_string(
+                    &serde_json::to_string(&err_result).unwrap_or_else(|_| {
+                        r#"{"action":"error","error":{"code":"ffi_error","message":"json error"}}"#
+                            .to_string()
+                    }),
+                );
+            }
+        };
+
+        let result = rt.inner.execute(cid, &mut msg);
+
+        to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
+            r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#
+                .to_string()
+        }))
+    }));
+    result.unwrap_or_else(|_| {
+        to_c_string(
+            r#"{"action":"error","error":{"code":"ffi_error","message":"panic in wafer_execute"}}"#,
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Introspection
+// ---------------------------------------------------------------------------
+
+/// Get info about all registered chains as a JSON array.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_chains_info(w: *mut WaferRuntime) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_ref(w) {
+            Some(r) => r,
+            None => return to_c_string("[]"),
+        };
+        let info = rt.inner.chains_info();
+        to_c_string(&serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string()))
+    }));
+    result.unwrap_or_else(|_| to_c_string("[]"))
+}
+
+/// Check whether a block type is registered.
+/// Returns 1 if registered, 0 if not.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_has_block(
+    w: *mut WaferRuntime,
+    type_name: *const c_char,
+) -> c_int {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rt = match deref_ref(w) {
+            Some(r) => r,
+            None => return 0,
+        };
+        let name = match c_str_to_str(type_name) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if rt.inner.has_block(name) {
+            1
+        } else {
+            0
+        }
+    }));
+    result.unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+/// Free a string previously returned by any wafer_* function.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(CString::from_raw(s));
+        }));
+    }
+}

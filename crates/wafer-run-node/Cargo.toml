@@ -1,0 +1,15 @@
+[package]
+name = "wafer-run-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node.js native addon for the WAFER runtime via napi-rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-run = { path = "../wafer-run", features = ["full"] }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+serde_json = { workspace = true }

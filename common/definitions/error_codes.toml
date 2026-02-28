@@ -1,0 +1,21 @@
+# gRPC-style canonical error codes for WAFER.
+# These are the 17 standard gRPC status codes used across all WAFER components.
+
+[codes]
+ok                  = { value = 0,  description = "Success" }
+cancelled           = { value = 1,  description = "Operation was cancelled" }
+unknown             = { value = 2,  description = "Unknown error" }
+invalid_argument    = { value = 3,  description = "Invalid argument provided" }
+deadline_exceeded   = { value = 4,  description = "Deadline expired before operation completed" }
+not_found           = { value = 5,  description = "Requested entity not found" }
+already_exists      = { value = 6,  description = "Entity already exists" }
+permission_denied   = { value = 7,  description = "Permission denied" }
+resource_exhausted  = { value = 8,  description = "Resource exhausted" }
+failed_precondition = { value = 9,  description = "Operation rejected due to failed precondition" }
+aborted             = { value = 10, description = "Operation aborted" }
+out_of_range        = { value = 11, description = "Value out of valid range" }
+unimplemented       = { value = 12, description = "Operation not implemented" }
+internal            = { value = 13, description = "Internal error" }
+unavailable         = { value = 14, description = "Service unavailable" }
+data_loss           = { value = 15, description = "Unrecoverable data loss" }
+unauthenticated     = { value = 16, description = "Request not authenticated" }

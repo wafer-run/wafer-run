@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>wafer.run — Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Itim&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/theme.css">
+    <style>
+        /* Playground card */
+        .playground-card {
+            max-width: 72rem; margin: 2rem auto; border-radius: 0.75rem;
+            background: #1a1a2e; overflow: hidden;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+        }
+
+        .toolbar { padding: 0.6rem 2rem; background: #1a1a2e; border-bottom: 1px solid #2d2d44; display: flex; gap: 0.75rem; align-items: center; }
+        select {
+            padding: 0.4rem 0.75rem; border: 1px solid #3d3d5c; border-radius: 6px;
+            font-size: 0.85rem; background: #2d2d44; color: #e2e8f0; outline: none;
+        }
+        select:focus { border-color: var(--accent); }
+        .btn {
+            padding: 0.4rem 1.2rem; border: none; border-radius: 6px; cursor: pointer;
+            font-weight: 600; font-size: 0.8rem; transition: all 0.15s; display: inline-flex;
+            align-items: center; gap: 0.4rem;
+        }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-run { background: #48bb78; color: white; }
+        .btn-run:hover:not(:disabled) { background: #38a169; }
+        .btn-ghost { background: transparent; color: #a0aec0; border: 1px solid #3d3d5c; }
+        .btn-ghost:hover:not(:disabled) { background: #2d2d44; color: #e2e8f0; }
+        .status { font-size: 0.75rem; color: #718096; margin-left: auto; }
+        .status.running { color: #ecc94b; }
+        .status.success { color: #48bb78; }
+        .status.error { color: #fc8181; }
+        .shortcut { font-size: 0.7rem; color: #4a5568; margin-left: 0.25rem; }
+        .container {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+            min-height: 400px; height: 60vh; max-height: 600px;
+        }
+        .panel { display: flex; flex-direction: column; overflow: hidden; }
+        .panel + .panel { border-left: 1px solid #2d2d44; }
+        .panel-header {
+            padding: 0.5rem 1rem; background: #16162a; border-bottom: 1px solid #2d2d44;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .panel-header h2 { font-size: 0.75rem; color: var(--wafer); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+        .editor {
+            flex: 1; padding: 1rem; font-family: 'Fira Code', 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+            font-size: 0.85rem; border: none; resize: none; outline: none;
+            background: #1a1a2e; color: #e2e8f0; line-height: 1.7; tab-size: 4;
+        }
+        .output {
+            flex: 1; padding: 1rem; font-family: 'Fira Code', 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+            font-size: 0.82rem; overflow-y: auto; background: #1a1a2e; color: #c9d1d9;
+            white-space: pre-wrap; line-height: 1.6;
+        }
+        .output .err { color: #fc8181; }
+        .output .ok { color: #68d391; }
+        .output .info { color: #63b3ed; }
+        .output .dim { color: #4a5568; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .running { animation: pulse 1.2s ease-in-out infinite; }
+        @media (max-width: 900px) {
+            .container { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; height: auto; min-height: 300px; }
+            .panel + .panel { border-left: none; border-top: 1px solid #2d2d44; }
+            .toolbar { padding: 0.6rem 1rem; flex-wrap: wrap; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-inner">
+            <a class="brand" href="/"><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/registry">Registry</a>
+                <a href="/docs">Docs</a>
+                <a href="/playground">Playground</a>
+            </nav>
+        </div>
+    </div>
+    <div class="page-title">
+        <h1>Playground</h1>
+        <p>Write and run wafer blocks in your browser</p>
+    </div>
+    <div class="playground-card">
+        <div class="toolbar">
+            <select id="language" onchange="switchLanguage()">
+                <option value="rust">Rust</option>
+                <option value="go">Go</option>
+                <option value="javascript" selected>JavaScript</option>
+            </select>
+            <button class="btn btn-run" id="runBtn" onclick="run()">&#9654; Run</button>
+            <span class="shortcut">Ctrl+Enter</span>
+            <button class="btn btn-ghost" onclick="resetCode()">Reset</button>
+            <button class="btn btn-ghost" onclick="clearOutput()">Clear Output</button>
+            <span class="status" id="status">Ready</span>
+        </div>
+        <div class="container">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 id="editorLabel">Source — JavaScript</h2>
+                </div>
+                <textarea class="editor" id="editor" spellcheck="false"></textarea>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>Output</h2>
+                </div>
+                <div class="output" id="output"><span class="dim">Click Run or press Ctrl+Enter to execute your code.</span></div>
+            </div>
+        </div>
+    </div>
+
+<script>
+// --------------- Templates ---------------
+const TEMPLATES = {
+rust: `use std::collections::HashMap;
+
+fn main() {
+    println!("=== WAFER Block Example ===\\n");
+
+    // Simulate incoming request headers
+    let mut headers = HashMap::new();
+    headers.insert("content-type", "application/json");
+    headers.insert("x-request-id", "req-42");
+    headers.insert("x-wafer-chain", "main");
+
+    println!("Incoming message:");
+    for (key, value) in &headers {
+        println!("  {}: {}", key, value);
+    }
+
+    // Block processing
+    let items: Vec<i32> = (1..=5).map(|x| x * x).collect();
+    println!("\\nProcessed: {:?}", items);
+    let sum: i32 = items.iter().sum();
+    println!("Sum of squares: {}", sum);
+
+    // Response
+    println!("\\nBlock response:");
+    println!("  {{\\"status\\": 200, \\"hello\\": \\"world\\", \\"sum\\": {}}}", sum);
+}`,
+
+go: `package main
+
+import (
+\t"encoding/json"
+\t"fmt"
+)
+
+type Message struct {
+\tPath   string      \`json:"path"\`
+\tMethod string      \`json:"method"\`
+\tData   string      \`json:"data"\`
+}
+
+type Response struct {
+\tStatus int         \`json:"status"\`
+\tBody   interface{} \`json:"body"\`
+}
+
+func main() {
+\tfmt.Println("=== WAFER Block Example ===")
+\tfmt.Println()
+
+\t// Simulate incoming message
+\tmsg := Message{
+\t\tPath:   "/api/hello",
+\t\tMethod: "GET",
+\t\tData:   "Hello from playground",
+\t}
+
+\tmsgJSON, _ := json.MarshalIndent(msg, "", "  ")
+\tfmt.Printf("Incoming message:\\n%s\\n", string(msgJSON))
+
+\t// Process and respond
+\tresp := Response{
+\t\tStatus: 200,
+\t\tBody: map[string]interface{}{
+\t\t\t"hello": "world",
+\t\t\t"items": []int{1, 4, 9, 16, 25},
+\t\t},
+\t}
+
+\trespJSON, _ := json.MarshalIndent(resp, "", "  ")
+\tfmt.Printf("\\nBlock response:\\n%s\\n", string(respJSON))
+}`,
+
+javascript: `// WAFER Block Example — JavaScript/Node.js
+
+class HelloBlock {
+    info() {
+        return {
+            name: "hello",
+            version: "1.0.0",
+            interface: "handler@v1",
+            summary: "Says hello",
+        };
+    }
+
+    handle(message) {
+        console.log("=== WAFER Block Example ===\\n");
+
+        console.log("Incoming message:");
+        console.log("  path:", message.path);
+        console.log("  method:", message.method);
+        console.log("  data:", message.data);
+
+        // Process
+        const items = [1, 2, 3, 4, 5].map(x => x * x);
+        console.log("\\nProcessed:", items);
+        const sum = items.reduce((a, b) => a + b, 0);
+        console.log("Sum of squares:", sum);
+
+        // Respond
+        const response = {
+            status: 200,
+            body: { hello: "world", sum },
+        };
+
+        console.log("\\nBlock response:");
+        console.log(JSON.stringify(response, null, 2));
+        return response;
+    }
+}
+
+// Run the block
+const block = new HelloBlock();
+console.log("Block:", JSON.stringify(block.info(), null, 2));
+console.log();
+
+block.handle({
+    path: "/api/hello",
+    method: "GET",
+    data: "Hello from playground",
+});`
+};
+
+const LANG_LABELS = { rust: 'Rust', go: 'Go', javascript: 'JavaScript' };
+
+// --------------- UI helpers ---------------
+function $(id) { return document.getElementById(id); }
+
+function setStatus(text, cls) {
+    const el = $('status');
+    el.textContent = text;
+    el.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function out(text, cls) {
+    const el = $('output');
+    if (cls) {
+        const span = document.createElement('span');
+        span.className = cls;
+        span.textContent = text;
+        el.appendChild(span);
+    } else {
+        el.appendChild(document.createTextNode(text));
+    }
+    el.scrollTop = el.scrollHeight;
+}
+
+function clearOutput() { $('output').innerHTML = ''; }
+
+function switchLanguage() {
+    const lang = $('language').value;
+    $('editorLabel').textContent = 'Source — ' + LANG_LABELS[lang];
+    $('editor').value = TEMPLATES[lang];
+    $('output').innerHTML = '<span class="dim">Click Run or press Ctrl+Enter to execute your code.</span>';
+    setStatus('Ready', '');
+}
+
+function resetCode() {
+    $('editor').value = TEMPLATES[$('language').value];
+}
+
+// --------------- Execution ---------------
+async function run() {
+    const lang = $('language').value;
+    const source = $('editor').value;
+    const runBtn = $('runBtn');
+
+    if (!source.trim()) {
+        clearOutput();
+        out('Error: no source code to run.\n', 'err');
+        return;
+    }
+
+    clearOutput();
+    runBtn.disabled = true;
+    setStatus('Running...', 'running');
+
+    try {
+        switch (lang) {
+            case 'rust': await runRust(source); break;
+            case 'go': await runGo(source); break;
+            case 'javascript': runJavaScript(source); break;
+        }
+    } catch (e) {
+        out('\nNetwork error: ' + e.message + '\n', 'err');
+        out('Make sure the wafer.run site server is running.\n', 'dim');
+        setStatus('Error', 'error');
+    } finally {
+        runBtn.disabled = false;
+    }
+}
+
+async function runRust(source) {
+    out('Compiling and running Rust...\n\n', 'info');
+
+    const resp = await fetch('/playground/run/rust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source })
+    });
+
+    const data = await resp.json();
+
+    if (data.error) {
+        out(data.error + '\n', 'err');
+        setStatus('Error', 'error');
+        return;
+    }
+
+    if (data.stderr) {
+        out(data.stderr, data.success ? 'dim' : 'err');
+        if (!data.stderr.endsWith('\n')) out('\n');
+    }
+    if (data.stdout) {
+        out(data.stdout);
+        if (!data.stdout.endsWith('\n')) out('\n');
+    }
+
+    if (data.success) {
+        out('\n--- Exited successfully ---\n', 'ok');
+        setStatus('Done', 'success');
+    } else {
+        out('\n--- Compilation failed ---\n', 'err');
+        setStatus('Error', 'error');
+    }
+}
+
+async function runGo(source) {
+    out('Compiling and running Go...\n\n', 'info');
+
+    const resp = await fetch('/playground/run/go', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source })
+    });
+
+    const data = await resp.json();
+
+    if (data.error) {
+        out(data.error + '\n', 'err');
+        setStatus('Error', 'error');
+        return;
+    }
+
+    if (data.Errors) {
+        out(data.Errors + '\n', 'err');
+        out('\n--- Compilation failed ---\n', 'err');
+        setStatus('Error', 'error');
+        return;
+    }
+
+    if (data.Events) {
+        for (const ev of data.Events) {
+            out(ev.Message, ev.Kind === 'stderr' ? 'err' : '');
+        }
+    }
+
+    if (data.VetErrors) {
+        out('\nVet warnings:\n' + data.VetErrors + '\n', 'err');
+    }
+
+    out('\n--- Exited successfully ---\n', 'ok');
+    setStatus('Done', 'success');
+}
+
+function runJavaScript(source) {
+    out('Running JavaScript...\n\n', 'info');
+
+    const logs = [];
+    const orig = { log: console.log, error: console.error, warn: console.warn };
+
+    const fmt = (a) => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a);
+
+    console.log   = (...args) => logs.push({ cls: '',    text: args.map(fmt).join(' ') });
+    console.error = (...args) => logs.push({ cls: 'err', text: args.map(fmt).join(' ') });
+    console.warn  = (...args) => logs.push({ cls: 'err', text: 'WARN: ' + args.map(fmt).join(' ') });
+
+    try {
+        const result = new Function(source)();
+        for (const l of logs) { out(l.text + '\n', l.cls); }
+        if (result !== undefined) {
+            out('\n=> ' + fmt(result) + '\n', 'dim');
+        }
+        out('\n--- Exited successfully ---\n', 'ok');
+        setStatus('Done', 'success');
+    } catch (e) {
+        for (const l of logs) { out(l.text + '\n', l.cls); }
+        out('\n' + e.name + ': ' + e.message + '\n', 'err');
+        out('\n--- Execution failed ---\n', 'err');
+        setStatus('Error', 'error');
+    } finally {
+        console.log   = orig.log;
+        console.error = orig.error;
+        console.warn  = orig.warn;
+    }
+}
+
+// --------------- Init ---------------
+switchLanguage();
+
+// Tab key inserts spaces, Ctrl+Enter runs
+$('editor').addEventListener('keydown', function(e) {
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        const s = this.selectionStart;
+        this.value = this.value.substring(0, s) + '    ' + this.value.substring(this.selectionEnd);
+        this.selectionStart = this.selectionEnd = s + 4;
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        run();
+    }
+});
+</script>
+</body>
+</html>

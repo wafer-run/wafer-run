@@ -1,0 +1,19 @@
+[package]
+name = "wafer-site"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER website, documentation, playground, and block registry"
+
+[dependencies]
+wafer-run = { path = "../wafer-run", features = ["full"] }
+wafer-core = { path = "../wafer-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }

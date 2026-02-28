@@ -1,0 +1,45 @@
+<!--
+TITLE: HTTP Bridge — wafer.run docs
+ACTIVE: http-bridge
+-->
+
+<h2>HTTP Bridge</h2>
+<p>The HTTP bridge converts incoming HTTP requests into wafer messages and routes them to chains.</p>
+
+<h3>Method to Action Mapping</h3>
+<ul>
+    <li><code>GET</code> → <code>read</code></li>
+    <li><code>POST</code> → <code>create</code></li>
+    <li><code>PUT</code> → <code>update</code></li>
+    <li><code>DELETE</code> → <code>delete</code></li>
+</ul>
+
+<h3>Meta Keys</h3>
+<p>The bridge populates these meta fields on each message:</p>
+<ul>
+    <li><code>http.method</code> — the HTTP method (GET, POST, etc.)</li>
+    <li><code>http.path</code> — the request path</li>
+    <li><code>req.query.*</code> — query string parameters</li>
+    <li><code>req.param.*</code> — path parameters from <code>{var}</code> captures</li>
+</ul>
+
+<h3>Response Helpers</h3>
+<pre><code>// Simple text response
+respond(msg, 200, "OK")
+
+// JSON response
+json_respond(msg, 200, &json!({"status": "ok"}))
+
+// Error helpers
+err_bad_request(msg, "Invalid input")
+err_not_found(msg, "User not found")
+err_unauthorized(msg, "Token expired")
+err_internal(msg, "Something went wrong")</code></pre>
+
+<h3>ResponseBuilder</h3>
+<p>For fine-grained control over the response:</p>
+<pre><code>ResponseBuilder::new(200)
+    .header("X-Custom", "value")
+    .content_type("application/json")
+    .body(json!({"ok": true}))
+    .build(msg)</code></pre>

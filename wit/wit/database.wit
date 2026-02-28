@@ -1,0 +1,84 @@
+/// Host-imported database service providing CRUD operations on collections.
+
+interface database {
+    /// A database record with an ID and JSON-encoded data fields.
+    record db-record {
+        id: string,
+        /// JSON-encoded map of field name to value.
+        data: string,
+    }
+
+    /// A paginated list of records.
+    record record-list {
+        records: list<db-record>,
+        total-count: s64,
+        page: s64,
+        page-size: s64,
+    }
+
+    /// Supported filter operators.
+    enum filter-op {
+        eq,
+        neq,
+        gt,
+        gte,
+        lt,
+        lte,
+        like,
+        %in,
+        is-null,
+        is-not-null,
+    }
+
+    /// A single filter condition.
+    record filter {
+        field: string,
+        operator: filter-op,
+        /// JSON-encoded filter value.
+        value: string,
+    }
+
+    /// A sort directive.
+    record sort-field {
+        field: string,
+        desc: bool,
+    }
+
+    /// Options for listing records.
+    record list-options {
+        filters: list<filter>,
+        sort: list<sort-field>,
+        limit: s64,
+        offset: s64,
+    }
+
+    /// Database error details.
+    enum database-error {
+        not-found,
+        internal,
+    }
+
+    /// Retrieve a single record by ID.
+    get: func(collection: string, id: string) -> result<db-record, database-error>;
+
+    /// List records with optional filtering, sorting, and pagination.
+    %list: func(collection: string, options: list-options) -> result<record-list, database-error>;
+
+    /// Create a new record. Data is a JSON-encoded map.
+    create: func(collection: string, data: string) -> result<db-record, database-error>;
+
+    /// Update an existing record by ID. Data is a JSON-encoded map.
+    update: func(collection: string, id: string, data: string) -> result<db-record, database-error>;
+
+    /// Delete a record by ID.
+    delete: func(collection: string, id: string) -> result<_, database-error>;
+
+    /// Count records matching filters.
+    count: func(collection: string, filters: list<filter>) -> result<s64, database-error>;
+
+    /// Execute a raw SELECT query. Args is a JSON-encoded array.
+    query-raw: func(query: string, args: string) -> result<list<db-record>, database-error>;
+
+    /// Execute a raw non-SELECT statement. Args is a JSON-encoded array.
+    exec-raw: func(query: string, args: string) -> result<s64, database-error>;
+}

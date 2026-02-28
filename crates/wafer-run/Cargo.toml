@@ -1,0 +1,67 @@
+[package]
+name = "wafer-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER runtime — WebAssembly Architecture for Flow Execution & Routing"
+repository = "https://github.com/wafer-run/wafer-run"
+
+[features]
+default = ["sqlite", "http", "wasm"]
+sqlite = ["dep:rusqlite"]
+http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper"]
+wasm = ["dep:wasmtime"]
+crypto = ["dep:argon2", "dep:jsonwebtoken"]
+storage-local = []
+storage-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+network = ["dep:reqwest"]
+config-toml = ["dep:toml"]
+postgres = ["dep:sqlx"]
+full = ["sqlite", "http", "wasm", "crypto", "storage-local", "network", "config-toml", "storage-s3", "postgres"]
+
+[dependencies]
+# Core
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+
+# HTTP bridge (axum)
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+
+# SQLite
+rusqlite = { workspace = true, optional = true }
+
+# WASM (Wasmtime)
+wasmtime = { workspace = true, optional = true }
+
+# Crypto
+argon2 = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+
+# Storage (S3)
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+
+# Network
+reqwest = { workspace = true, optional = true }
+
+# Config (TOML)
+toml = { workspace = true, optional = true }
+
+# PostgreSQL
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }

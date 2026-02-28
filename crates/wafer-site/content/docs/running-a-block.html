@@ -1,0 +1,208 @@
+<!--
+TITLE: Running a Block — wafer.run docs
+ACTIVE: running-a-block
+EXTRA_STYLES: lang_tabs.css
+EXTRA_STYLES_MOBILE: lang_tabs_mobile.css
+AFTER_BODY_OPEN: svg_icons.html
+BEFORE_BODY_CLOSE: switch_tab_script.html
+-->
+
+<h2>Running a Block</h2>
+<p>Once you have a block, you need a wafer runtime to host it. The Rust runtime supports native blocks and includes a built-in HTTP bridge. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose an <code>execute()</code> API you wire into your own HTTP framework.</p>
+
+<h3>Install</h3>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('node')">
+            <svg viewBox="0 0 24 24" fill="#5FA04E"><use href="#icon-node"/></svg>
+            Node.js
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="node">
+<pre><code>npm install wafer-run</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>go get github.com/wafer-run/wafer-run-go</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code># Cargo.toml
+[dependencies]
+wafer-run = { version = "0.1", features = ["full"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"</code></pre>
+    </div>
+</div>
+
+<h3>Minimal Server</h3>
+<p>A complete runnable example — registers a block, defines a chain, and starts an HTTP server on port 8080:</p>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('node')">
+            <svg viewBox="0 0 24 24" fill="#5FA04E"><use href="#icon-node"/></svg>
+            Node.js
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="node">
+<pre><code>const { WaferRuntime } = require("wafer-run");
+const http = require("http");
+
+const w = new WaferRuntime();
+w.registerWasmBlock("hello", "./hello.wasm");
+w.addChainDef(JSON.stringify({
+    id: "main",
+    root: { block: "hello" },
+    http: { routes: [{ path: "/", path_prefix: true }] }
+}));
+w.resolve();
+w.start();
+
+// Wire into Node's HTTP server
+http.createServer((req, res) =&gt; {
+    const chunks = [];
+    req.on("data", (c) =&gt; chunks.push(c));
+    req.on("end", () =&gt; {
+        const body = Buffer.concat(chunks).toString();
+        const msg = JSON.stringify({
+            kind: req.method + ":" + req.url,
+            data: body,
+            meta: { "http.method": req.method, "http.path": req.url }
+        });
+        const result = JSON.parse(w.execute("main", msg));
+        const status = result.action === "error" ? 500 : 200;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(result.response?.data ?? "{}");
+    });
+}).listen(8080);
+
+console.log("listening on :8080");</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+
+    wafer "github.com/wafer-run/wafer-run-go"
+)
+
+func main() {
+    w := wafer.New()
+    defer w.Close()
+
+    w.RegisterWASMBlock("hello", "./hello.wasm")
+    w.AddChain(wafer.ChainDef{
+        ID:   "main",
+        Root: wafer.NodeDef{Block: "hello"},
+        HTTP: &amp;wafer.HTTPRouteDef{
+            Routes: []wafer.HTTPRoute{{Path: "/", PathPrefix: true}},
+        },
+    })
+    w.Resolve()
+    w.Start()
+
+    // Wire into net/http
+    http.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
+        body, _ := io.ReadAll(r.Body)
+        msg := wafer.NewMessage(r.Method+":"+r.URL.Path, body)
+        msg.SetMeta("http.method", r.Method)
+        msg.SetMeta("http.path", r.URL.Path)
+
+        result := w.Execute("main", msg)
+        rw.Header().Set("Content-Type", "application/json")
+        if result.IsError() {
+            rw.WriteHeader(500)
+        }
+        if result.Response != nil {
+            rw.Write(result.Response.Data)
+        }
+    })
+
+    fmt.Println("listening on :8080")
+    http.ListenAndServe(":8080", nil)
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code>use wafer_run::*;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let mut w = Wafer::new();
+
+    // Rust can define blocks inline — no .wasm needed
+    w.register_block_func("hello", |_ctx, msg| {
+        json_respond(msg.clone(), 200, &amp;serde_json::json!({"hello": "world"}))
+    });
+
+    let chain: ChainDef = serde_json::from_str(r#"{
+        "id": "main",
+        "root": { "block": "hello" },
+        "http": { "routes": [{ "path": "/", "path_prefix": true }] }
+    }"#).unwrap();
+    w.add_chain_def(&amp;chain);
+    w.resolve().unwrap();
+    w.start().unwrap();
+
+    // Built-in HTTP bridge auto-registers chain routes
+    let app = wafer_run::bridge::auto_register(Arc::new(w));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    println!("listening on :8080");
+    axum::serve(listener, app).await.unwrap();
+}</code></pre>
+    </div>
+</div>
+
+<h3>Run It</h3>
+<p>Start the server and test with <code>curl</code>:</p>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('node')">
+            <svg viewBox="0 0 24 24" fill="#5FA04E"><use href="#icon-node"/></svg>
+            Node.js
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="node">
+<pre><code>node index.js</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>go run .</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code>cargo run</code></pre>
+    </div>
+</div>
+
+<p>Then in another terminal:</p>
+<pre><code>curl http://localhost:8080/
+# {"hello":"world"}</code></pre>

@@ -1,0 +1,36 @@
+<!--
+TITLE: Core Concepts — wafer.run docs
+ACTIVE: core-concepts
+-->
+
+<h2>Core Concepts</h2>
+
+<h3>Messages</h3>
+<p>Every request becomes a <code>Message</code> with three fields:</p>
+<ul>
+    <li><code>kind</code> — the message type (e.g. <code>"action"</code>, <code>"event"</code>)</li>
+    <li><code>data</code> — the payload (JSON value)</li>
+    <li><code>meta</code> — a key-value map of metadata (headers, path params, etc.)</li>
+</ul>
+<p>Helper methods on <code>Message</code>:</p>
+<ul>
+    <li><code>action(kind, data)</code> — create an action message</li>
+    <li><code>path()</code> — read <code>meta["http.path"]</code></li>
+    <li><code>cont(msg)</code> — continue with a modified message</li>
+    <li><code>respond(msg, status, body)</code> — send a response</li>
+</ul>
+
+<h3>Blocks</h3>
+<p>A <strong>Block</strong> is any struct that implements the <code>Block</code> trait. Blocks are the fundamental unit of logic — they receive a message, do work, and return a result.</p>
+
+<h3>Chains</h3>
+<p>Chains are trees of blocks. When a message arrives, it flows through the tree. Each node can match on the message (by HTTP method, path, etc.) and route to child blocks. Chains are defined in JSON and loaded at startup.</p>
+
+<h3>Actions</h3>
+<p>Each block returns one of four actions:</p>
+<ul>
+    <li><code>Continue</code> — pass the message to the next block in the chain</li>
+    <li><code>Respond</code> — send a response back to the caller immediately</li>
+    <li><code>Drop</code> — silently discard the message</li>
+    <li><code>Error</code> — signal an error (the chain's <code>on_error</code> policy decides what happens)</li>
+</ul>

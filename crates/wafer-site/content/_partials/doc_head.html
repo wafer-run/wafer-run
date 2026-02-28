@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{TITLE}}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Itim&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/theme.css">
+    <style>
+        .docs-layout {
+            max-width: 72rem; margin: 0 auto; padding: 2rem 1.5rem;
+            display: grid; grid-template-columns: 220px 1fr; gap: 2.5rem;
+        }
+        .sidebar {
+            position: sticky; top: 5rem; align-self: start; max-height: calc(100vh - 6rem); overflow-y: auto;
+        }
+        .sidebar a {
+            display: block; padding: 0.4rem 0.75rem; margin-bottom: 0.15rem;
+            color: var(--text-secondary); text-decoration: none; font-size: 0.9rem;
+            border-radius: 0.375rem; transition: all 0.15s;
+        }
+        .sidebar a:hover { color: var(--accent); background: var(--wafer-cream); }
+        .sidebar a.active { color: var(--accent); background: var(--wafer-cream); font-weight: 600; }
+        .docs-content { min-width: 0; }
+        .docs-content h2 {
+            margin-top: 3rem; margin-bottom: 0.75rem; padding-top: 1rem;
+            color: var(--text); font-size: 1.5rem;
+            border-top: 1px solid var(--border);
+        }
+        .docs-content h2:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+        .docs-content h3 { margin-top: 1.5rem; margin-bottom: 0.5rem; color: #374151; font-size: 1.15rem; }
+        .docs-content p { margin-bottom: 1rem; color: var(--text-secondary); }
+        .docs-content ul { margin-left: 1.5rem; margin-bottom: 1rem; color: var(--text-secondary); }
+        .docs-content li { margin-bottom: 0.4rem; }
+{{EXTRA_STYLES}}
+        @media (max-width: 768px) {
+            .docs-layout { grid-template-columns: 1fr; gap: 1rem; }
+            .sidebar {
+                position: static; display: flex; gap: 0.25rem; flex-wrap: wrap;
+                overflow-x: auto; max-height: none;
+                padding-bottom: 1rem; border-bottom: 1px solid var(--border);
+            }
+            .sidebar a {
+                padding: 0.3rem 0.65rem; font-size: 0.8rem;
+                background: var(--code-bg); border-radius: 999px; margin-bottom: 0;
+            }
+            .sidebar a.active { background: var(--wafer-cream); }
+{{EXTRA_STYLES_MOBILE}}
+        }
+    </style>
+</head>
+<body>
+{{AFTER_BODY_OPEN}}
+    <div class="header">
+        <div class="header-inner">
+            <a class="brand" href="/"><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/registry">Registry</a>
+                <a href="/docs">Docs</a>
+                <a href="/playground">Playground</a>
+            </nav>
+        </div>
+    </div>
+    <div class="page-title">
+        <h1>Documentation</h1>
+        <p>Everything you need to build with wafer.run</p>
+    </div>
+    <div class="docs-layout">
+        <aside class="sidebar">
+            <a href="/docs"{{ACTIVE_quick-start}}>Quick Start</a>
+            <a href="/docs/creating-a-block"{{ACTIVE_creating-a-block}}>Creating a Block</a>
+            <a href="/docs/running-a-block"{{ACTIVE_running-a-block}}>Running a Block</a>
+            <a href="/docs/cli"{{ACTIVE_cli}}>CLI</a>
+            <a href="/docs/chain-configuration"{{ACTIVE_chain-configuration}}>Chain Configuration</a>
+            <a href="/docs/built-in-blocks"{{ACTIVE_built-in-blocks}}>Built-in Blocks</a>
+            <a href="/docs/services"{{ACTIVE_services}}>Services</a>
+            <a href="/docs/http-bridge"{{ACTIVE_http-bridge}}>HTTP Bridge</a>
+            <a href="/docs/api-reference"{{ACTIVE_api-reference}}>API Reference</a>
+            <a href="/docs/registry"{{ACTIVE_registry}}>Block Registry</a>
+            <a href="/docs/deployment"{{ACTIVE_deployment}}>Deployment</a>
+        </aside>
+        <main class="docs-content">

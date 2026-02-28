@@ -1,0 +1,30 @@
+/// Host-imported outbound network connectivity service.
+
+interface network {
+    use types.{meta-entry};
+
+    /// An outbound HTTP request.
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<meta-entry>,
+        body: option<list<u8>>,
+    }
+
+    /// An HTTP response.
+    record http-response {
+        status-code: u16,
+        headers: list<meta-entry>,
+        body: list<u8>,
+    }
+
+    /// Network error details.
+    enum network-error {
+        request-error,
+        ssrf-blocked,
+        other,
+    }
+
+    /// Execute an outbound HTTP request.
+    do-request: func(req: http-request) -> result<http-response, network-error>;
+}

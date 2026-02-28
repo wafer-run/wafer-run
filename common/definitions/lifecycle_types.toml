@@ -1,0 +1,6 @@
+# Lifecycle event type values.
+
+[types]
+init  = { value = "init",  description = "Block initialization" }
+start = { value = "start", description = "Block startup" }
+stop  = { value = "stop",  description = "Block shutdown" }

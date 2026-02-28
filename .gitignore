@@ -1,0 +1,7 @@
+/target
+node_modules/
+dist/
+*.wasm
+.data/
+test-results/
+playwright-report/

@@ -1,0 +1,26 @@
+<!--
+TITLE: Deployment — wafer.run docs
+ACTIVE: deployment
+-->
+
+<h2>Deployment</h2>
+<p>wafer compiles to a single binary with all blocks, chains, and static assets embedded.</p>
+
+<h3>Local</h3>
+<pre><code>cargo build --release
+PORT=8080 ./target/release/my-app</code></pre>
+
+<h3>Docker</h3>
+<pre><code>FROM rust:1-slim AS build
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+COPY --from=build /app/target/release/my-app /usr/local/bin/
+ENV PORT=8080
+EXPOSE 8080
+CMD ["my-app"]</code></pre>
+
+<h3>Fly.io / Railway</h3>
+<p>Set the <code>PORT</code> environment variable (both platforms inject it automatically) and deploy the binary. No additional configuration needed — wafer reads <code>PORT</code> at startup and binds to <code>0.0.0.0:$PORT</code>.</p>

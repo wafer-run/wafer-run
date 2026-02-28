@@ -1,0 +1,82 @@
+/* wafer.run — common theme
+   Palette: warm wafer tones + dark blue */
+
+:root {
+    /* Wafer tones (golden biscuit) */
+    --wafer:          #D4A574;
+    --wafer-cream:    #FFF8F0;
+
+    /* Blue tones */
+    --blue-dark:      #1e3a5f;
+
+    /* Semantic tokens */
+    --accent:         var(--blue-dark);
+    --accent-hover:   #162d4a;
+
+    --text:           #1f2937;
+    --text-secondary: #6b7280;
+    --bg:             #f9fafb;
+    --bg-white:       #ffffff;
+    --border:         #e5e7eb;
+    --code-bg:        #f3f4f6;
+    --code-block-bg:  #1e1e1e;
+    --code-block-fg:  #d4d4d4;
+}
+
+/* ─── Reset ──────────────────────────────────────────────── */
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Itim', cursive; }
+body { line-height: 1.6; color: var(--text); background: var(--bg); }
+input, select, button, textarea { font-family: inherit; }
+code, pre { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
+
+/* ─── Header ─────────────────────────────────────────────── */
+.header {
+    background: var(--bg-white); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 40;
+}
+.header-inner {
+    max-width: 72rem; margin: 0 auto; padding: 0 1.5rem;
+    display: flex; align-items: center; justify-content: space-between; height: 4rem;
+}
+
+/* Brand: wafer.run */
+.brand {
+    font-size: 1.5rem; font-weight: 700; text-decoration: none;
+    display: inline-flex; align-items: baseline;
+}
+.brand-wafer {
+    color: var(--wafer);
+}
+.brand-run {
+    color: var(--blue-dark);
+}
+
+/* Nav */
+.header nav a {
+    color: var(--text-secondary); text-decoration: none; margin-left: 1.5rem;
+    transition: color 0.2s;
+}
+.header nav a:hover { color: var(--wafer); }
+
+/* ─── Page title banner ──────────────────────────────────── */
+.page-title {
+    background: linear-gradient(135deg, var(--wafer-cream) 0%, var(--bg-white) 100%);
+    padding: 2rem 1.5rem; text-align: center;
+}
+.page-title h1 { font-size: 2rem; color: var(--text); margin-bottom: 0.25rem; }
+.page-title p { color: var(--text-secondary); }
+
+/* ─── Common typography ──────────────────────────────────── */
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+code:not(pre code) {
+    background: var(--code-bg); color: var(--text);
+    padding: 0.125rem 0.25rem; border-radius: 0.25rem; font-size: 0.9em;
+}
+pre {
+    background: var(--code-block-bg); color: var(--code-block-fg);
+    padding: 1rem 1.25rem; border-radius: 0.5rem; overflow-x: auto;
+    margin: 1rem 0; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    font-size: 0.85rem; line-height: 1.6;
+}

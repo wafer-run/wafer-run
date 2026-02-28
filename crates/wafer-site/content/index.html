@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>wafer.run — A Wafer Thin Runtime</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Itim&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/theme.css">
+    <style>
+        /* Hero */
+        .hero {
+            background: linear-gradient(135deg, var(--wafer-cream) 0%, var(--bg-white) 100%);
+            padding: 3rem 1.5rem 2rem; text-align: center;
+        }
+        .hero img {
+            max-width: 400px; width: 100%; height: auto;
+            border-radius: 0.5rem;
+            margin-bottom: 2rem;
+        }
+        .hero h1 {
+            font-size: 3.5rem; font-weight: 700;
+            letter-spacing: -0.02em; margin-bottom: 0.75rem;
+        }
+        .hero-wafer { color: var(--wafer); }
+        .hero-run { color: var(--blue-dark); }
+        .hero p {
+            font-size: 1.25rem; color: var(--text-secondary); max-width: 36rem;
+            margin: 0 auto;
+        }
+
+        /* Features */
+        .features {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem; padding: 3rem 1.5rem; max-width: 72rem; margin: 0 auto;
+        }
+        .feature {
+            background: var(--bg-white); border-radius: 0.75rem; padding: 1.5rem;
+            border: 1px solid var(--border); transition: border-color 0.3s;
+        }
+        .feature:hover { border-color: var(--wafer); }
+        .feature h3 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.1rem; }
+        .feature p { color: var(--text-secondary); font-size: 0.95rem; }
+
+        /* CTA */
+        .cta { text-align: center; padding: 3rem 1.5rem; }
+        .cta a {
+            display: inline-block; background: var(--accent); color: white;
+            padding: 0.75rem 2rem; border-radius: 0.5rem; text-decoration: none;
+            font-weight: 600; transition: all 0.2s;
+        }
+        .cta a:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(30,58,95,0.3); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-inner">
+            <a class="brand" href="/"><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
+            <nav>
+                <a href="/">Home</a>
+                <a href="/registry">Registry</a>
+                <a href="/docs">Docs</a>
+                <a href="/playground">Playground</a>
+            </nav>
+        </div>
+    </div>
+    <div class="hero">
+        <img src="/images/hero.webp" alt="wafer.run">
+        <h1><span class="hero-wafer">wafer</span><span class="hero-run">.run</span></h1>
+        <p>a wafer thin runtime</p>
+    </div>
+    <div class="features">
+        <div class="feature">
+            <h3>Block-Based Architecture</h3>
+            <p>Build your backend from composable blocks. Each block handles a message and returns a result. Chain them together for complex workflows.</p>
+        </div>
+        <div class="feature">
+            <h3>Multi-Language Blocks</h3>
+            <p>Write blocks in Rust, Go, or JavaScript. Compile to WebAssembly and run them all in the same runtime.</p>
+        </div>
+        <div class="feature">
+            <h3>Built-in Services</h3>
+            <p>Database, storage, crypto, logging, config, and network services are built-in. Blocks access them through a clean service interface.</p>
+        </div>
+        <div class="feature">
+            <h3>HTTP Bridge</h3>
+            <p>Automatic HTTP-to-message conversion with axum. Define routes in JSON and the runtime handles the rest.</p>
+        </div>
+        <div class="feature">
+            <h3>Shared Block Ecosystem</h3>
+            <p>Use pre-built blocks from wafer-core: CORS, rate limiting, security headers, auth, monitoring, and more.</p>
+        </div>
+        <div class="feature">
+            <h3>Single Binary Deploy</h3>
+            <p>Compile everything into a single binary. Deploy to Fly.io, Railway, Docker, or bare metal.</p>
+        </div>
+    </div>
+    <div class="cta">
+        <a href="/docs">Read the Documentation</a>
+    </div>
+</body>
+</html>

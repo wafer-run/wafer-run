@@ -1,0 +1,41 @@
+<!--
+TITLE: Chain Configuration — wafer.run docs
+ACTIVE: chain-configuration
+-->
+
+<h2>Chain Configuration</h2>
+<p>Chains are defined in JSON using the <code>ChainDef</code> format:</p>
+<pre><code>{
+    "id": "api",
+    "summary": "API chain",
+    "config": { "on_error": "stop" },
+    "http": {
+        "routes": [{ "path": "/api", "path_prefix": true }]
+    },
+    "root": {
+        "block": "@wafer/cors",
+        "next": [
+            { "match": "GET:/api/hello", "block": "hello" },
+            { "match": "POST:/api/users", "block": "create-user" },
+            { "match": "*:/api/items/{id}", "block": "items" },
+            { "match": "*:/api/files/**", "block": "file-handler" }
+        ]
+    }
+}</code></pre>
+
+<h3>Match Patterns</h3>
+<ul>
+    <li><code>METHOD:/path</code> — match a specific HTTP method and path (e.g. <code>GET:/api/hello</code>)</li>
+    <li><code>*:/path</code> — match any method</li>
+    <li><code>{var}</code> — capture a path parameter (available as <code>req.param.var</code> in meta)</li>
+    <li><code>/**</code> — wildcard suffix, matches any remaining path segments</li>
+</ul>
+
+<h3>Chain Tree Structure</h3>
+<p>Each node in the chain tree has:</p>
+<ul>
+    <li><code>block</code> — the block to execute at this node</li>
+    <li><code>chain</code> — optional sub-chain reference</li>
+    <li><code>match</code> — the pattern to match against</li>
+    <li><code>next</code> — an array of child nodes</li>
+</ul>

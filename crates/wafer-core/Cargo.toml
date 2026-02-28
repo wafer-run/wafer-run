@@ -1,0 +1,18 @@
+[package]
+name = "wafer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared reusable WAFER blocks and chain templates"
+
+[dependencies]
+wafer-run = { path = "../wafer-run", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[lib]
+name = "wafer_core"
+path = "src/lib.rs"

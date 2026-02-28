@@ -1,0 +1,224 @@
+<!--
+TITLE: WASM Blocks — wafer.run docs
+ACTIVE: wasm-blocks
+EXTRA_STYLES: lang_tabs.css
+EXTRA_STYLES_MOBILE: lang_tabs_mobile.css
+AFTER_BODY_OPEN: svg_icons.html
+BEFORE_BODY_CLOSE: switch_tab_script.html
+-->
+
+<h2>WASM Blocks</h2>
+<p>Write blocks in any language that compiles to WebAssembly. WASM blocks declare what services they need via a capability model, and the runtime provides only those. This is the guest-side counterpart to the <a href="/docs/creating-a-block">native Block trait</a> — same interface, but compiled to <code>.wasm</code> and loaded by the runtime at startup.</p>
+
+<h3>Guest SDKs</h3>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('as')">
+            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
+            AssemblyScript
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="as">
+<pre><code># package.json
+{
+  "dependencies": {
+    "assemblyscript": "^0.27.0",
+    "wafer-sdk-as": "^0.1.0"
+  }
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code># terminal
+go mod init my-block
+go get github.com/wafer-run/wafer-sdk-go</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code># Cargo.toml
+[package]
+name = "my-block"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-sdk = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true</code></pre>
+    </div>
+</div>
+
+<h3>Writing a Block</h3>
+<p>Implement the Block interface and register it. The SDK generates the four WASM exports (<code>malloc</code>, <code>info</code>, <code>handle</code>, <code>lifecycle</code>) that the runtime calls.</p>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('as')">
+            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
+            AssemblyScript
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="as">
+<pre><code>import {
+    Block, BlockInfo, Context, Message, Result, export
+} from "wafer-sdk-as/assembly";
+import { LoggerClient } from "wafer-sdk-as/assembly/services/logger";
+
+class MyBlock extends Block {
+    info(): BlockInfo {
+        return new BlockInfo(
+            "@app/my-block",  // name
+            "1.0.0",          // version
+            "processor@v1",   // interface
+            "Processes incoming messages"
+        );
+    }
+
+    handle(ctx: Context, msg: Message): Result {
+        const logger = new LoggerClient(ctx);
+        logger.info("handling: " + msg.kind);
+        return msg.continue();
+    }
+}
+
+export(new MyBlock());</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>package main
+
+import wafer "github.com/wafer-run/wafer-sdk-go"
+
+type MyBlock struct{}
+
+func (b *MyBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
+        Name:      "@app/my-block",
+        Version:   "1.0.0",
+        Interface: "processor@v1",
+        Summary:   "Processes incoming messages",
+    }
+}
+
+func (b *MyBlock) Handle(ctx *wafer.Context, msg *wafer.Message) *wafer.Result {
+    return wafer.ContinueResult()
+}
+
+func (b *MyBlock) Lifecycle(ctx *wafer.Context, event wafer.LifecycleEvent) error {
+    return nil
+}
+
+func main() {
+    wafer.Export(&amp;MyBlock{})
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code>use wafer_sdk::*;
+
+struct MyBlock;
+
+impl Default for MyBlock {
+    fn default() -&gt; Self { Self }
+}
+
+impl Block for MyBlock {
+    fn info(&amp;self) -&gt; BlockInfo {
+        BlockInfo {
+            name: "@app/my-block".into(),
+            version: "1.0.0".into(),
+            interface: "processor@v1".into(),
+            summary: "Processes incoming messages".into(),
+            instance_mode: InstanceMode::PerNode,
+            allowed_modes: vec![],
+        }
+    }
+
+    fn handle(&amp;self, ctx: &amp;Context, msg: &amp;mut Message) -&gt; Result_ {
+        msg.clone().cont()
+    }
+}
+
+wafer_sdk::export!(MyBlock);</code></pre>
+    </div>
+</div>
+
+<h3>Build to WASM</h3>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('as')">
+            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
+            AssemblyScript
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="as">
+<pre><code>npx asc assembly/index.ts -o block.wasm --optimize --exportRuntime</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>GOOS=wasip1 GOARCH=wasm go build -o block.wasm .</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="rust" style="display:none">
+<pre><code>cargo build --target wasm32-wasip1 --release
+# output: target/wasm32-wasip1/release/my_block.wasm</code></pre>
+    </div>
+</div>
+
+<h3>Instance Modes</h3>
+<p>Control how many WASM instances the runtime creates:</p>
+<ul>
+    <li><code>Singleton</code> — one instance shared across all chains (default)</li>
+    <li><code>PerChain</code> — one instance per chain (isolated state per chain)</li>
+    <li><code>PerNode</code> — one instance per node in a chain tree</li>
+    <li><code>PerExecution</code> — a fresh instance for every message (full isolation, higher cost)</li>
+</ul>
+
+<h3>WASM ABI</h3>
+<p>All three SDKs generate the same four WASM exports that the runtime calls:</p>
+<ul>
+    <li><code>malloc(size) &rarr; ptr</code> — allocate memory for the host to write input into</li>
+    <li><code>info() &rarr; i64</code> — return block metadata as a packed <code>(ptr, len)</code> pointing to JSON</li>
+    <li><code>handle(ptr, len) &rarr; i64</code> — process a message, return a JSON result</li>
+    <li><code>lifecycle(ptr, len) &rarr; i64</code> — handle init/start/stop events</li>
+</ul>
+<p>The host writes JSON into guest memory via <code>malloc</code>, calls the function, and reads the JSON result back from the returned <code>(ptr, len)</code>.</p>
+
+<h3>Available Services</h3>
+<p>WASM blocks can access runtime services through the <code>Context</code> object. Each SDK provides typed clients:</p>
+<ul>
+    <li><strong>Logger</strong> — structured logging (debug, info, warn, error)</li>
+    <li><strong>Config</strong> — read/write block configuration key-value pairs</li>
+    <li><strong>Database</strong> — CRUD operations on collections (get, list, create, update, delete)</li>
+    <li><strong>Network</strong> — outbound HTTP requests (GET, POST, etc.)</li>
+    <li><strong>Storage</strong> — object storage (put, get, delete, list)</li>
+    <li><strong>Crypto</strong> — hashing, signing, token verification</li>
+</ul>
+<p>See <a href="/docs/services">Services</a> for the full API reference.</p>
