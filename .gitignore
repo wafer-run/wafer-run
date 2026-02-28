@@ -1,7 +1,32 @@
+# Rust
 /target
+
+# Node
 node_modules/
 dist/
+
+# WASM
 *.wasm
+
+# Docusaurus
+.docusaurus/
+**/site/build/
+
+# Data & test artifacts
 .data/
 test-results/
 playwright-report/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
