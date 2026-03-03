@@ -7,10 +7,9 @@ description = "WAFER runtime — WebAssembly Architecture for Flow Execution & R
 repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
-default = ["http", "wasm"]
-http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper"]
+default = ["wasm"]
 wasm = ["dep:wasmtime", "dep:reqwest"]
-full = ["http", "wasm"]
+full = ["wasm"]
 
 [dependencies]
 # Core
@@ -25,12 +24,6 @@ parking_lot = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
-
-# HTTP bridge (axum)
-axum = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true }
 
 # WASM (Wasmtime)
 wasmtime = { workspace = true, optional = true }

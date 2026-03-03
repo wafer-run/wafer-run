@@ -3,19 +3,10 @@ export interface NodeDef {
   next?: string[];
 }
 
-export interface HTTPRoute {
-  path: string;
-  path_prefix?: boolean;
-  chain?: string;
-}
-
 export interface ChainDef {
   id: string;
   root: NodeDef;
   nodes?: Record<string, NodeDef>;
-  http?: {
-    routes: HTTPRoute[];
-  };
 }
 
 export interface BlockEntry {

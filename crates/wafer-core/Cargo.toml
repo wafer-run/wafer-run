@@ -14,6 +14,7 @@ storage-local = []
 storage-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 network = ["dep:reqwest"]
 config-toml = ["dep:toml"]
+http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper"]
 full = ["sqlite", "postgres", "crypto", "storage-local", "storage-s3", "network", "config-toml"]
 
 [dependencies]
@@ -46,6 +47,12 @@ reqwest = { workspace = true, optional = true }
 
 # Config (optional)
 toml = { workspace = true, optional = true }
+
+# HTTP bridge (optional)
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
 
 [lib]
 name = "wafer_core"

@@ -5,9 +5,9 @@ use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::meta::*;
-use crate::runtime::Wafer;
-use crate::types::*;
+use wafer_run::meta::*;
+use wafer_run::runtime::Wafer;
+use wafer_run::types::*;
 
 /// Convert an HTTP method to a semantic request action.
 fn http_method_to_action(method: &Method) -> &'static str {
@@ -21,7 +21,7 @@ fn http_method_to_action(method: &Method) -> &'static str {
 }
 
 /// Convert an HTTP request into a WAFER Message.
-async fn http_to_message(
+pub fn http_to_message(
     method: Method,
     uri_path: &str,
     raw_query: &str,
@@ -161,7 +161,7 @@ fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
 }
 
 /// Convert a WAFER Result to an HTTP response.
-fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
+pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
     match result.action {
         Action::Respond => {
             let empty_meta = HashMap::new();
@@ -259,7 +259,8 @@ fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
     }
 }
 
-/// Create an axum handler that converts HTTP requests to WAFER messages.
+/// Create an axum handler that converts HTTP requests to WAFER messages
+/// and dispatches them to a specific chain.
 pub fn wafer_handler(
     wafer: Arc<Wafer>,
     chain_id: String,
@@ -289,8 +290,7 @@ pub fn wafer_handler(
                 .to_string();
 
             let mut msg =
-                http_to_message(parts.method, path, query, &parts.headers, &remote_addr, body_bytes)
-                    .await;
+                http_to_message(parts.method, path, query, &parts.headers, &remote_addr, body_bytes);
 
             let result = w.execute(&cid, &mut msg);
             wafer_result_to_response(result)
@@ -298,37 +298,10 @@ pub fn wafer_handler(
     })
 }
 
-/// AutoRegister reads all chains with HTTP route declarations and registers axum routes.
-pub fn auto_register(wafer: Arc<Wafer>) -> Router {
-    let mut router = Router::new();
-
-    let chains = wafer.chains_with_http();
-    for chain in chains {
-        let chain_id = chain.id.clone();
-
-        if let Some(ref http_def) = chain.http {
-            for route in &http_def.routes {
-                let handler = wafer_handler(wafer.clone(), chain_id.clone());
-
-                // In axum 0.8, path parameters use {param} syntax (same as wafer)
-                // and wildcards use {*rest} syntax
-                let axum_path = route.path.clone();
-
-                if route.path_prefix {
-                    // For path prefix, add a wildcard using axum 0.8 syntax
-                    let prefix_path = if axum_path.ends_with('/') {
-                        format!("{}{{*rest}}", axum_path)
-                    } else {
-                        format!("{}/{{*rest}}", axum_path)
-                    };
-                    router = router.route(&prefix_path, handler.clone());
-                    router = router.route(&axum_path, handler);
-                } else {
-                    router = router.route(&axum_path, handler);
-                }
-            }
-        }
-    }
-
-    router
+/// Create a catch-all axum Router that dispatches all requests to a single chain.
+pub fn create_router(wafer: Arc<Wafer>, chain_id: &str) -> Router {
+    let handler = wafer_handler(wafer, chain_id.to_string());
+    Router::new()
+        .route("/{*rest}", handler.clone())
+        .route("/", handler)
 }

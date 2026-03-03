@@ -39,7 +39,6 @@ fn make_chain(id: &str, root: Box<Node>) -> Chain {
         id: id.to_string(),
         summary: format!("Test chain: {}", id),
         config: ChainConfig::default(),
-        http: None,
         root,
     }
 }
@@ -52,7 +51,6 @@ fn make_chain_with_on_error(id: &str, root: Box<Node>, on_error: &str) -> Chain 
             on_error: on_error.to_string(),
             timeout: Duration::ZERO,
         },
-        http: None,
         root,
     }
 }
@@ -971,7 +969,6 @@ fn test_add_chain_def() {
             on_error: "stop".to_string(),
             timeout: "30s".to_string(),
         },
-        http: None,
         root: NodeDef {
             block: "echo".to_string(),
             chain: String::new(),
@@ -1075,32 +1072,6 @@ fn test_wafer_error_display() {
     assert_eq!(err.meta.get("id").unwrap(), "42");
 }
 
-// ===========================================================================
-// 21. HTTP route declarations on chains
-// ===========================================================================
-
-#[test]
-fn test_chains_with_http() {
-    let mut w = Wafer::new();
-
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
-
-    let mut http_chain = make_chain("api", block_node("noop"));
-    http_chain.http = Some(HTTPRouteDef {
-        routes: vec![HTTPRoute {
-            methods: vec!["GET".to_string()],
-            path: "/api/items".to_string(),
-            path_prefix: false,
-        }],
-    });
-
-    w.add_chain(http_chain);
-    w.add_chain(make_chain("no-http", block_node("noop")));
-
-    let http_chains = w.chains_with_http();
-    assert_eq!(http_chains.len(), 1);
-    assert_eq!(http_chains[0].id, "api");
-}
 
 // ===========================================================================
 // Test context helper (minimal Context implementation for router tests)
@@ -1263,7 +1234,6 @@ fn test_resolve_versioned_block_download_error() {
         id: "remote-test".to_string(),
         summary: "test".to_string(),
         config: ChainConfig::default(),
-        http: None,
         root: Box::new(root),
     };
     w.add_chain(chain);
@@ -1295,7 +1265,6 @@ fn test_resolve_unversioned_block_download_error() {
         id: "unversioned-test".to_string(),
         summary: "test".to_string(),
         config: ChainConfig::default(),
-        http: None,
         root: Box::new(root),
     };
     w.add_chain(chain);

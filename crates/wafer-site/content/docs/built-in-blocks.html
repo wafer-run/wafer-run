@@ -6,6 +6,31 @@ ACTIVE: built-in-blocks
 <h2>Built-in Blocks</h2>
 <p>wafer ships with ready-to-use infrastructure blocks in the <code>@wafer</code> namespace. All are registered automatically when you call <code>wafer_core::register_all()</code>.</p>
 
+<h3>@wafer/http-router</h3>
+<p>Config-driven HTTP router that matches incoming requests by method and path, then dispatches to handler blocks via <code>ctx.call_block()</code>. Returns <code>404 Not Found</code> when no route matches.</p>
+<p>Config:</p>
+<ul>
+    <li><code>routes</code> — array of route objects, each with:
+        <ul>
+            <li><code>path</code> — path pattern with <code>{var}</code> params and <code>/**</code> wildcard support</li>
+            <li><code>methods</code> — optional array of HTTP methods (e.g. <code>["GET", "POST"]</code>); if omitted, matches any method</li>
+            <li><code>block</code> — the block name to call when matched</li>
+        </ul>
+    </li>
+</ul>
+<p>Path variables captured by <code>{var}</code> patterns are set as <code>req.param.var</code> in the message meta. Routes are evaluated in order — the first match wins.</p>
+<pre><code>{
+    "block": "@wafer/http-router",
+    "config": {
+        "routes": [
+            { "path": "/users", "methods": ["GET"], "block": "my-app/list-users" },
+            { "path": "/users/{id}", "methods": ["GET"], "block": "my-app/get-user" },
+            { "path": "/users", "methods": ["POST"], "block": "my-app/create-user" },
+            { "path": "/health", "block": "my-app/health" }
+        ]
+    }
+}</code></pre>
+
 <h3>@wafer/security-headers</h3>
 <p>Adds standard security headers to all responses: <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code>, <code>X-XSS-Protection</code>, <code>Referrer-Policy</code>, <code>Strict-Transport-Security</code>, <code>Content-Security-Policy</code>, and <code>Permissions-Policy</code>.</p>
 <p>Config: <code>csp</code> — override the default Content-Security-Policy value.</p>
@@ -72,8 +97,13 @@ ACTIVE: built-in-blocks
     "id": "api",
     "root": {
         "chain": "http-infra",
-        "next": [
-            { "match": "GET:/api/hello", "block": "hello" }
-        ]
+        "next": [{
+            "block": "@wafer/http-router",
+            "config": {
+                "routes": [
+                    { "path": "/api/hello", "methods": ["GET"], "block": "hello" }
+                ]
+            }
+        }]
     }
 }</code></pre>

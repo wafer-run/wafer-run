@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Running a Block</h2>
-<p>Once you have a block, you need a wafer runtime to host it. The Rust runtime supports native blocks and includes a built-in HTTP bridge. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose an <code>execute()</code> API you wire into your own HTTP framework.</p>
+<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/chain executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge">HTTP bridge</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to chains. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose an <code>execute()</code> API you wire into your own HTTP framework.</p>
 
 <h3>Install</h3>
 
@@ -36,7 +36,8 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
     <div class="tab-panel" data-lang="rust" style="display:none">
 <pre><code># Cargo.toml
 [dependencies]
-wafer-run = { version = "0.1", features = ["full"] }
+wafer-run = "0.1"
+wafer-core = { version = "0.1", features = ["http"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"</code></pre>
@@ -69,8 +70,7 @@ const w = new WaferRuntime();
 w.registerWasmBlock("hello", "./hello.wasm");
 w.addChainDef(JSON.stringify({
     id: "main",
-    root: { block: "hello" },
-    http: { routes: [{ path: "/", path_prefix: true }] }
+    root: { block: "hello" }
 }));
 w.resolve();
 w.start();
@@ -115,9 +115,6 @@ func main() {
     w.AddChain(wafer.ChainDef{
         ID:   "main",
         Root: wafer.NodeDef{Block: "hello"},
-        HTTP: &amp;wafer.HTTPRouteDef{
-            Routes: []wafer.HTTPRoute{{Path: "/", PathPrefix: true}},
-        },
     })
     w.Resolve()
     w.Start()
@@ -158,15 +155,14 @@ async fn main() {
 
     let chain: ChainDef = serde_json::from_str(r#"{
         "id": "main",
-        "root": { "block": "hello" },
-        "http": { "routes": [{ "path": "/", "path_prefix": true }] }
+        "root": { "block": "hello" }
     }"#).unwrap();
     w.add_chain_def(&amp;chain);
     w.resolve().unwrap();
     w.start().unwrap();
 
-    // Built-in HTTP bridge auto-registers chain routes
-    let app = wafer_run::bridge::auto_register(Arc::new(w));
+    // HTTP bridge from wafer-core converts requests to messages
+    let app = wafer_core::bridge::create_router(Arc::new(w), "main");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("listening on :8080");
     axum::serve(listener, app).await.unwrap();

@@ -24,11 +24,16 @@ impl BlockFactory for DatabaseBlockFactory {
             .unwrap_or_else(|| "sqlite".to_string());
 
         // Parse collections from config (includes merged contributions from `uses`)
-        let tables = config
-            .and_then(|c| c.get("collections"))
-            .and_then(|v| serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()).ok())
-            .map(|colls| collections_to_tables(&colls))
-            .unwrap_or_default();
+        let tables = match config.and_then(|c| c.get("collections")) {
+            Some(v) => match serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()) {
+                Ok(colls) => collections_to_tables(&colls),
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to parse database collections config — no tables will be created");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
 
         match db_type.as_str() {
             #[cfg(feature = "sqlite")]

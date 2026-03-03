@@ -37,46 +37,23 @@ async fn main() {
         "id": "site-main",
         "summary": "Website main chain",
         "config": { "on_error": "stop", "timeout": "30s" },
-        "http": {
-            "routes": [
-                { "path": "/", "path_prefix": true }
-            ]
-        },
         "root": {
             "chain": "http-infra",
-            "next": [
-                {
-                    "match": "*:/api/**",
-                    "block": "@wafer-site/api"
-                },
-                {
-                    "match": "*:/playground/**",
-                    "block": "@wafer-site/playground"
-                },
-                {
-                    "match": "*:/playground",
-                    "block": "@wafer-site/playground"
-                },
-                {
-                    "match": "*:/registry/**",
-                    "block": "@wafer-site/registry"
-                },
-                {
-                    "match": "*:/registry",
-                    "block": "@wafer-site/registry"
-                },
-                {
-                    "match": "*:/docs/**",
-                    "block": "@wafer-site/docs"
-                },
-                {
-                    "match": "*:/docs",
-                    "block": "@wafer-site/docs"
-                },
-                {
-                    "block": "@wafer-site/docs"
+            "next": [{
+                "block": "@wafer/http-router",
+                "config": {
+                    "routes": [
+                        { "path": "/api/**", "block": "@wafer-site/api" },
+                        { "path": "/playground/**", "block": "@wafer-site/playground" },
+                        { "path": "/playground", "block": "@wafer-site/playground" },
+                        { "path": "/registry/**", "block": "@wafer-site/registry" },
+                        { "path": "/registry", "block": "@wafer-site/registry" },
+                        { "path": "/docs/**", "block": "@wafer-site/docs" },
+                        { "path": "/docs", "block": "@wafer-site/docs" },
+                        { "path": "/**", "block": "@wafer-site/docs" }
+                    ]
                 }
-            ]
+            }]
         }
     }"#).expect("invalid chain JSON");
 
@@ -92,7 +69,7 @@ async fn main() {
     let w = Arc::new(w);
 
     // Build axum router
-    let app = wafer_run::bridge::auto_register(w.clone());
+    let app = wafer_core::bridge::create_router(w.clone(), "site-main");
 
     // Start server
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
@@ -174,6 +151,7 @@ fn register_site_blocks(w: &mut Wafer) {
                 200,
                 &serde_json::json!({
                     "blocks": [
+                        {"name": "@wafer/http-router", "version": "0.1.0"},
                         {"name": "@wafer/security-headers", "version": "0.1.0"},
                         {"name": "@wafer/cors", "version": "0.1.0"},
                         {"name": "@wafer/rate-limit", "version": "0.1.0"},

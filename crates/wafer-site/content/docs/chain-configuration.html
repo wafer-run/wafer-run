@@ -9,21 +9,33 @@ ACTIVE: chain-configuration
     "id": "api",
     "summary": "API chain",
     "config": { "on_error": "stop" },
-    "http": {
-        "routes": [{ "path": "/api", "path_prefix": true }]
-    },
     "root": {
-        "block": "@wafer/cors",
+        "chain": "http-infra",
+        "next": [{
+            "block": "@wafer/http-router",
+            "config": {
+                "routes": [
+                    { "path": "/api/hello", "methods": ["GET"], "block": "hello" },
+                    { "path": "/api/users", "methods": ["POST"], "block": "create-user" },
+                    { "path": "/api/items/{id}", "block": "items" },
+                    { "path": "/api/files/**", "block": "file-handler" }
+                ]
+            }
+        }]
+    }
+}</code></pre>
+<p>The <code>@wafer/http-router</code> block is the recommended way to route HTTP requests to handler blocks. Routes are evaluated in order — the first match wins. See <a href="/docs/built-in-blocks">Built-in Blocks</a> for full config details.</p>
+
+<h3>Match Patterns</h3>
+<p>Chains also support inline <code>match</code> patterns on nodes for lightweight routing without the router block:</p>
+<pre><code>{
+    "root": {
         "next": [
             { "match": "GET:/api/hello", "block": "hello" },
-            { "match": "POST:/api/users", "block": "create-user" },
-            { "match": "*:/api/items/{id}", "block": "items" },
-            { "match": "*:/api/files/**", "block": "file-handler" }
+            { "match": "POST:/api/users", "block": "create-user" }
         ]
     }
 }</code></pre>
-
-<h3>Match Patterns</h3>
 <ul>
     <li><code>METHOD:/path</code> — match a specific HTTP method and path (e.g. <code>GET:/api/hello</code>)</li>
     <li><code>*:/path</code> — match any method</li>

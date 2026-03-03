@@ -3,22 +3,6 @@ use std::time::Duration;
 
 use crate::types::InstanceMode;
 
-/// HTTPRoute defines an HTTP route that a chain handles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HTTPRoute {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub methods: Vec<String>,
-    pub path: String,
-    #[serde(default)]
-    pub path_prefix: bool,
-}
-
-/// HTTPRouteDef declares HTTP routes for a chain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HTTPRouteDef {
-    pub routes: Vec<HTTPRoute>,
-}
-
 /// ChainDef defines a chain in JSON configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainDef {
@@ -27,8 +11,6 @@ pub struct ChainDef {
     pub summary: String,
     #[serde(default)]
     pub config: ChainConfigDef,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http: Option<HTTPRouteDef>,
     pub root: NodeDef,
 }
 
@@ -63,7 +45,6 @@ pub struct Chain {
     pub id: String,
     pub summary: String,
     pub config: ChainConfig,
-    pub http: Option<HTTPRouteDef>,
     pub root: Box<Node>,
 }
 
@@ -167,7 +148,6 @@ pub fn chain_def_to_chain(def: &ChainDef) -> Chain {
             },
             timeout: parse_duration(&def.config.timeout),
         },
-        http: def.http.clone(),
         root: Box::new(node_def_to_node(&def.root)),
     }
 }
@@ -203,7 +183,6 @@ pub fn chain_to_chain_def(c: &Chain) -> ChainDef {
                 format!("{}s", c.config.timeout.as_secs())
             },
         },
-        http: c.http.clone(),
         root: node_to_node_def(&c.root),
     }
 }

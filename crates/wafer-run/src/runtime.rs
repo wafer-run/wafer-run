@@ -870,14 +870,6 @@ impl Wafer {
         Result_::continue_with(msg.clone())
     }
 
-    /// ChainsWithHTTP returns all chains that have HTTP route declarations.
-    pub fn chains_with_http(&self) -> Vec<&Chain> {
-        self.chains
-            .values()
-            .filter(|c| c.http.as_ref().map_or(false, |h| !h.routes.is_empty()))
-            .collect()
-    }
-
     /// GetChain returns a chain by ID.
     pub fn get_chain(&self, id: &str) -> Option<&Chain> {
         self.chains.get(id)

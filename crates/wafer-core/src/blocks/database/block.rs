@@ -345,14 +345,23 @@ impl Block for DatabaseBlock {
         _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if event.event_type == LifecycleType::Init && !self.tables.is_empty() {
-            self.service
-                .ensure_schema_tables(&self.tables)
-                .map_err(|e| WaferError::new("schema_migration", e.to_string()))?;
-            tracing::info!(
-                tables = self.tables.len(),
-                "database schema migrations applied"
-            );
+        if event.event_type == LifecycleType::Init {
+            if self.tables.is_empty() {
+                tracing::debug!("no schema tables configured — skipping migration");
+            } else {
+                self.service
+                    .ensure_schema_tables(&self.tables)
+                    .map_err(|e| {
+                        WaferError::new(
+                            ErrorCode::INTERNAL,
+                            format!("schema migration failed: {}", e),
+                        )
+                    })?;
+                tracing::info!(
+                    tables = self.tables.len(),
+                    "database schema migrations applied"
+                );
+            }
         }
         Ok(())
     }

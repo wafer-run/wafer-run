@@ -5,7 +5,6 @@
 //! that determines the next step in the chain.
 
 pub mod block;
-pub mod bridge;
 pub mod common;
 pub mod config;
 pub mod context;
@@ -25,7 +24,7 @@ pub mod wasm;
 // Re-exports for convenience
 pub use block::{AdminUIInfo, Block, BlockInfo};
 pub use config::{
-    Chain, ChainConfig, ChainConfigDef, ChainDef, ChainInfo, HTTPRoute, HTTPRouteDef, Node,
+    Chain, ChainConfig, ChainConfigDef, ChainDef, ChainInfo, Node,
     NodeDef,
 };
 pub use context::{Context, RuntimeContext};

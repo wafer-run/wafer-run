@@ -4,10 +4,14 @@ use crate::schema::types::*;
 use super::types::*;
 
 /// Convert a map of collection definitions directly to schema Table definitions.
+/// Tables are sorted by name for deterministic creation order (important for
+/// foreign key references between tables).
 pub fn collections_to_tables(collections: &HashMap<String, CollectionDef>) -> Vec<Table> {
-    collections
+    let mut names: Vec<_> = collections.keys().collect();
+    names.sort();
+    names
         .iter()
-        .map(|(name, coll)| collection_to_table(name, coll))
+        .map(|name| collection_to_table(name, &collections[*name]))
         .collect()
 }
 
@@ -106,6 +110,7 @@ fn field_type_to_data_type(t: &str) -> DataType {
 
 fn to_default_value(v: &serde_json::Value, field_type: &str) -> DefaultValue {
     match v {
+        serde_json::Value::Null => default_null(),
         serde_json::Value::Bool(b) => {
             if *b {
                 default_true()

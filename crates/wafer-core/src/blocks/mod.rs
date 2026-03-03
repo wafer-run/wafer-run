@@ -16,6 +16,7 @@ pub use storage::StorageBlock;
 // Application blocks
 pub mod auth;
 pub mod cors;
+pub mod http_router;
 pub mod iam;
 pub mod monitoring;
 pub mod rate_limit;
