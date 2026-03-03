@@ -133,7 +133,15 @@ fn register_site_blocks(w: &mut Wafer) {
             "/docs/services" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/services.html")),
             "/docs/http-bridge" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/http-bridge.html")),
             "/docs/wasm-blocks" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/wasm-blocks.html")),
-            "/docs/api-reference" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-reference.html")),
+            "/docs/api-runtime" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-runtime.html")),
+            "/docs/api-services" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-services.html")),
+            "/docs/api-sdk" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-sdk.html")),
+            "/docs/api-types" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-types.html")),
+            "/docs/api-reference" => {
+                return ResponseBuilder::new(msg.clone(), 301)
+                    .set_header("Location", "/docs/api-runtime")
+                    .body(b"Redirecting to /docs/api-runtime".to_vec(), "text/plain");
+            }
             "/docs/registry" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/registry.html")),
             "/docs/deployment" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/deployment.html")),
             _ => {

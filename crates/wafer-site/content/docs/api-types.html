@@ -1,0 +1,71 @@
+<!--
+TITLE: Types & Constants — wafer.run docs
+ACTIVE: api-types
+EXTRA_STYLES_INLINE:
+        .docs-content h4 { margin-top: 1rem; margin-bottom: 0.25rem; color: #4b5563; font-size: 1rem; }
+        .docs-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+        .docs-content th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); color: var(--text); font-weight: 600; }
+        .docs-content td { padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .docs-content td code { font-size: 0.85em; }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>Types &amp; Constants</h2>
+<p>Enumerations and meta key constants used across the runtime and SDK.</p>
+
+<h3>InstanceMode</h3>
+<table>
+    <tr><th>Value</th><th>Description</th></tr>
+    <tr><td><code>Singleton</code></td><td>One instance shared across all chains</td></tr>
+    <tr><td><code>PerChain</code></td><td>One instance per chain</td></tr>
+    <tr><td><code>PerNode</code></td><td>One instance per node in a chain tree</td></tr>
+    <tr><td><code>PerExecution</code></td><td>Fresh instance for every message</td></tr>
+</table>
+
+<h3>LifecycleType</h3>
+<table>
+    <tr><th>Value</th><th>Description</th></tr>
+    <tr><td><code>Init</code></td><td>Block is being initialized</td></tr>
+    <tr><td><code>Start</code></td><td>Runtime is starting</td></tr>
+    <tr><td><code>Stop</code></td><td>Runtime is shutting down</td></tr>
+</table>
+
+<h3>RequestAction</h3>
+<table>
+    <tr><th>Value</th><th>HTTP Method</th></tr>
+    <tr><td><code>retrieve</code></td><td>GET / HEAD</td></tr>
+    <tr><td><code>create</code></td><td>POST</td></tr>
+    <tr><td><code>update</code></td><td>PUT / PATCH</td></tr>
+    <tr><td><code>delete</code></td><td>DELETE</td></tr>
+    <tr><td><code>execute</code></td><td>Any other method</td></tr>
+</table>
+
+<h3>Meta Key Constants</h3>
+
+<h4>Request (set by bridge, read by blocks)</h4>
+<table>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_REQ_ACTION</code></td><td><code>req.action</code></td><td>Semantic action (retrieve, create, update, delete, execute)</td></tr>
+    <tr><td><code>META_REQ_RESOURCE</code></td><td><code>req.resource</code></td><td>Request resource path</td></tr>
+    <tr><td><code>META_REQ_PARAM_PREFIX</code></td><td><code>req.param.</code></td><td>Path parameter prefix (e.g. <code>req.param.id</code>)</td></tr>
+    <tr><td><code>META_REQ_QUERY_PREFIX</code></td><td><code>req.query.</code></td><td>Query parameter prefix (e.g. <code>req.query.page</code>)</td></tr>
+    <tr><td><code>META_REQ_CLIENT_IP</code></td><td><code>req.client.ip</code></td><td>Client IP address</td></tr>
+    <tr><td><code>META_REQ_CONTENT_TYPE</code></td><td><code>req.content_type</code></td><td>Request content type</td></tr>
+</table>
+
+<h4>Auth (set by auth block, read by blocks)</h4>
+<table>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_AUTH_USER_ID</code></td><td><code>auth.user_id</code></td><td>Authenticated user ID</td></tr>
+    <tr><td><code>META_AUTH_USER_EMAIL</code></td><td><code>auth.user_email</code></td><td>Authenticated user email</td></tr>
+    <tr><td><code>META_AUTH_USER_ROLES</code></td><td><code>auth.user_roles</code></td><td>User roles (comma-separated)</td></tr>
+</table>
+
+<h4>Response (set by blocks, read by bridge)</h4>
+<table>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_RESP_STATUS</code></td><td><code>resp.status</code></td><td>Response HTTP status code</td></tr>
+    <tr><td><code>META_RESP_CONTENT_TYPE</code></td><td><code>resp.content_type</code></td><td>Response content type</td></tr>
+    <tr><td><code>META_RESP_HEADER_PREFIX</code></td><td><code>resp.header.</code></td><td>Response header prefix (e.g. <code>resp.header.X-Custom</code>)</td></tr>
+    <tr><td><code>META_RESP_COOKIE_PREFIX</code></td><td><code>resp.set_cookie.</code></td><td>Set-Cookie header prefix</td></tr>
+</table>

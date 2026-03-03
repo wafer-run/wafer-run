@@ -5,6 +5,7 @@ import { blockCommand } from "./commands/block.js";
 import { buildCommand } from "./commands/build.js";
 import { devCommand } from "./commands/dev.js";
 import { publishCommand } from "./commands/publish.js";
+import { typesAddCommand } from "./commands/types.js";
 
 const program = new Command();
 
@@ -42,6 +43,16 @@ program
   .option("--bump <type>", "version bump type (patch, minor, major)")
   .description("Build and publish blocks as a GitHub release")
   .action(publishCommand);
+
+const typesCmd = program
+  .command("types")
+  .description("Manage interface type packages");
+
+typesCmd
+  .command("add")
+  .argument("<ref>", "interface reference (e.g. github.com/owner/repo@v1.0.0)")
+  .description("Fetch an interface package and add it to the project")
+  .action(typesAddCommand);
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

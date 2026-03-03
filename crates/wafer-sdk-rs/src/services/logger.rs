@@ -1,55 +1,55 @@
-//! Logger service client using WIT-generated imports.
+//! Logger service client — uses `runtime::log` directly.
 
-use crate::wafer::block_world::logger as wit;
+use crate::wafer::block_world::runtime;
 
 /// Log a message at the DEBUG level.
 pub fn debug(msg: &str) {
-    wit::debug(msg, &[]);
+    runtime::log("debug", msg);
 }
 
 /// Log a message at the DEBUG level with structured fields.
 pub fn debug_with(msg: &str, fields: &[(&str, &str)]) {
-    let wit_fields: Vec<wit::LogField> = fields.iter()
-        .map(|(k, v)| wit::LogField { key: k.to_string(), value: v.to_string() })
-        .collect();
-    wit::debug(msg, &wit_fields);
+    let formatted = format_with_fields(msg, fields);
+    runtime::log("debug", &formatted);
 }
 
 /// Log a message at the INFO level.
 pub fn info(msg: &str) {
-    wit::info(msg, &[]);
+    runtime::log("info", msg);
 }
 
 /// Log a message at the INFO level with structured fields.
 pub fn info_with(msg: &str, fields: &[(&str, &str)]) {
-    let wit_fields: Vec<wit::LogField> = fields.iter()
-        .map(|(k, v)| wit::LogField { key: k.to_string(), value: v.to_string() })
-        .collect();
-    wit::info(msg, &wit_fields);
+    let formatted = format_with_fields(msg, fields);
+    runtime::log("info", &formatted);
 }
 
 /// Log a message at the WARN level.
 pub fn warn(msg: &str) {
-    wit::warn(msg, &[]);
+    runtime::log("warn", msg);
 }
 
 /// Log a message at the WARN level with structured fields.
 pub fn warn_with(msg: &str, fields: &[(&str, &str)]) {
-    let wit_fields: Vec<wit::LogField> = fields.iter()
-        .map(|(k, v)| wit::LogField { key: k.to_string(), value: v.to_string() })
-        .collect();
-    wit::warn(msg, &wit_fields);
+    let formatted = format_with_fields(msg, fields);
+    runtime::log("warn", &formatted);
 }
 
 /// Log a message at the ERROR level.
 pub fn error(msg: &str) {
-    wit::error(msg, &[]);
+    runtime::log("error", msg);
 }
 
 /// Log a message at the ERROR level with structured fields.
 pub fn error_with(msg: &str, fields: &[(&str, &str)]) {
-    let wit_fields: Vec<wit::LogField> = fields.iter()
-        .map(|(k, v)| wit::LogField { key: k.to_string(), value: v.to_string() })
-        .collect();
-    wit::error(msg, &wit_fields);
+    let formatted = format_with_fields(msg, fields);
+    runtime::log("error", &formatted);
+}
+
+fn format_with_fields(msg: &str, fields: &[(&str, &str)]) -> String {
+    if fields.is_empty() {
+        return msg.to_string();
+    }
+    let kv: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{msg} {}", kv.join(" "))
 }

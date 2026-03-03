@@ -1,0 +1,158 @@
+<!--
+TITLE: Runtime API — wafer.run docs
+ACTIVE: api-runtime
+EXTRA_STYLES_INLINE:
+        .docs-content h4 { margin-top: 1rem; margin-bottom: 0.25rem; color: #4b5563; font-size: 1rem; }
+        .docs-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+        .docs-content th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); color: var(--text); font-weight: 600; }
+        .docs-content td { padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .docs-content td code { font-size: 0.85em; }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>Runtime API</h2>
+<p>The host runtime that loads blocks, builds chains, and executes messages. Available as a Rust crate (<code>wafer-run</code>), Go module (<code>wafer-run-go</code>), and Node.js package (<code>wafer-run</code>).</p>
+
+<h3>Wafer (Runtime)</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Wafer::new()</code></td><td>Create a new runtime instance</td></tr>
+    <tr><td><code>register_block(name, block)</code></td><td>Register a native block instance</td></tr>
+    <tr><td><code>register_block_func(name, handler)</code></td><td>Register an inline handler function as a block (Rust only)</td></tr>
+    <tr><td><code>add_chain(chain)</code></td><td>Add a programmatic chain</td></tr>
+    <tr><td><code>add_chain_def(def)</code></td><td>Add a chain from a JSON <code>ChainDef</code></td></tr>
+    <tr><td><code>resolve()</code></td><td>Resolve all chain block references</td></tr>
+    <tr><td><code>register_service(name, svc)</code></td><td>Register a named service</td></tr>
+    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service by name</td></tr>
+    <tr><td><code>register_platform_services(svc)</code></td><td>Set platform-level services (database, storage, etc.)</td></tr>
+    <tr><td><code>has_block(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
+    <tr><td><code>registry() &rarr; &amp;Registry</code></td><td>Access the block registry</td></tr>
+</table>
+
+<h3>Block Trait</h3>
+<p>The core interface every block must implement:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>info() &rarr; BlockInfo</code></td><td>Return block metadata (name, version, interface, summary, instance mode)</td></tr>
+    <tr><td><code>handle(ctx, msg) &rarr; Result_</code></td><td>Process a message and return a result</td></tr>
+    <tr><td><code>lifecycle(ctx, event) &rarr; Result</code></td><td>Handle lifecycle events (Init, Start, Stop)</td></tr>
+    <tr><td><code>block_capabilities() &rarr; Option</code></td><td>Return capability restrictions (WASM blocks only)</td></tr>
+</table>
+
+<h3>BlockInfo</h3>
+<table>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>name</code></td><td><code>String</code></td><td>Unique block identifier</td></tr>
+    <tr><td><code>version</code></td><td><code>String</code></td><td>Semver version string</td></tr>
+    <tr><td><code>interface</code></td><td><code>String</code></td><td>Interface contract (e.g. <code>"handler@v1"</code>)</td></tr>
+    <tr><td><code>summary</code></td><td><code>String</code></td><td>Human-readable description</td></tr>
+    <tr><td><code>instance_mode</code></td><td><code>InstanceMode</code></td><td><code>Singleton</code>, <code>PerChain</code>, <code>PerNode</code>, or <code>PerExecution</code></td></tr>
+    <tr><td><code>allowed_modes</code></td><td><code>Vec</code></td><td>Additional allowed instance modes</td></tr>
+    <tr><td><code>admin_ui</code></td><td><code>Option</code></td><td>Admin UI info (path, icon, title)</td></tr>
+</table>
+
+<h3>Message</h3>
+<p>The message object passed through blocks. Available in both runtime and SDK.</p>
+
+<h4>Construction</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Message::new(kind, data)</code></td><td>Create a new message</td></tr>
+    <tr><td><code>set_data&lt;T&gt;(v)</code></td><td>Serialize and set the message payload</td></tr>
+    <tr><td><code>set_meta(key, value)</code></td><td>Set a metadata key-value pair</td></tr>
+</table>
+
+<h4>Reading</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>unmarshal&lt;T&gt;() / decode&lt;T&gt;()</code></td><td>Deserialize the message data</td></tr>
+    <tr><td><code>get_meta(key) &rarr; &amp;str</code></td><td>Get a metadata value</td></tr>
+    <tr><td><code>path() &rarr; &amp;str</code></td><td>Request resource path</td></tr>
+    <tr><td><code>action() &rarr; &amp;str</code></td><td>Semantic request action (Retrieve, Create, Update, Delete)</td></tr>
+    <tr><td><code>var(name) &rarr; &amp;str</code></td><td>Path variable (e.g. <code>{id}</code>)</td></tr>
+    <tr><td><code>query(name) &rarr; &amp;str</code></td><td>Query parameter</td></tr>
+    <tr><td><code>query_params() &rarr; HashMap</code></td><td>All query parameters</td></tr>
+    <tr><td><code>header(name) &rarr; &amp;str</code></td><td>Request header</td></tr>
+    <tr><td><code>content_type() &rarr; &amp;str</code></td><td>Request content type</td></tr>
+    <tr><td><code>body() &rarr; &amp;[u8]</code></td><td>Raw request body</td></tr>
+    <tr><td><code>cookie(name) &rarr; &amp;str</code></td><td>Cookie value</td></tr>
+    <tr><td><code>remote_addr() &rarr; &amp;str</code></td><td>Client IP address</td></tr>
+    <tr><td><code>user_id() &rarr; &amp;str</code></td><td>Authenticated user ID</td></tr>
+    <tr><td><code>user_email() &rarr; &amp;str</code></td><td>Authenticated user email</td></tr>
+    <tr><td><code>user_roles() &rarr; Vec&lt;&amp;str&gt;</code></td><td>User roles</td></tr>
+    <tr><td><code>is_admin() &rarr; bool</code></td><td>Whether user has admin role</td></tr>
+    <tr><td><code>pagination_params(default_page_size) &rarr; (page, page_size, offset)</code></td><td>Parse pagination from query params</td></tr>
+</table>
+
+<h4>Actions</h4>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>cont() &rarr; Result_</code></td><td>Continue to the next block</td></tr>
+    <tr><td><code>respond(response) &rarr; Result_</code></td><td>Short-circuit with a response</td></tr>
+    <tr><td><code>drop_msg() &rarr; Result_</code></td><td>Silently drop the message</td></tr>
+    <tr><td><code>err(error) &rarr; Result_</code></td><td>Short-circuit with an error</td></tr>
+</table>
+
+<h3>Context</h3>
+<p>Passed to <code>handle()</code> and <code>lifecycle()</code>. Provides access to services and runtime state.</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>call_block(block_name, msg) &rarr; Result_</code></td><td>Call another block by name (with recursion depth protection)</td></tr>
+    <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled (timeout or explicit)</td></tr>
+    <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value from the block's node config</td></tr>
+    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service (runtime only)</td></tr>
+    <tr><td><code>services() &rarr; Option&lt;&amp;Services&gt;</code></td><td>Get platform services (runtime only)</td></tr>
+    <tr><td><code>capabilities() &rarr; Vec</code></td><td>List available capabilities</td></tr>
+    <tr><td><code>send(msg) &rarr; Result_</code></td><td><em>Deprecated</em> — use <code>call_block()</code> instead. Routes <code>svc.*</code> messages to infrastructure blocks.</td></tr>
+</table>
+
+<h3>Response Helpers</h3>
+<p>Convenience functions for building responses. All take ownership of the <code>Message</code>.</p>
+<table>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>respond(msg, status, data: Vec&lt;u8&gt;, content_type)</code></td><td>Send a raw response with explicit content type</td></tr>
+    <tr><td><code>json_respond(msg, status, data)</code></td><td>Serialize data as JSON and send (sets <code>application/json</code>)</td></tr>
+    <tr><td><code>error(msg, status, code, message)</code></td><td>Send an error response with an error code</td></tr>
+    <tr><td><code>err_bad_request(msg, message)</code></td><td>400 Bad Request</td></tr>
+    <tr><td><code>err_unauthorized(msg, message)</code></td><td>401 Unauthorized</td></tr>
+    <tr><td><code>err_forbidden(msg, message)</code></td><td>403 Forbidden</td></tr>
+    <tr><td><code>err_not_found(msg, message)</code></td><td>404 Not Found</td></tr>
+    <tr><td><code>err_conflict(msg, message)</code></td><td>409 Conflict</td></tr>
+    <tr><td><code>err_validation(msg, message)</code></td><td>422 Validation Error</td></tr>
+    <tr><td><code>err_internal(msg, message)</code></td><td>500 Internal Server Error</td></tr>
+</table>
+
+<h3>ResponseBuilder</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>ResponseBuilder::new(msg, status) &rarr; ResponseBuilder</code></td><td>Start building a response</td></tr>
+    <tr><td><code>.set_header(key, value) &rarr; Self</code></td><td>Add a response header</td></tr>
+    <tr><td><code>.set_cookie(cookie) &rarr; Self</code></td><td>Set a Set-Cookie header</td></tr>
+    <tr><td><code>.json(data) &rarr; Result_</code></td><td>Finish with JSON body</td></tr>
+    <tr><td><code>.body(data, content_type) &rarr; Result_</code></td><td>Finish with raw body and content type</td></tr>
+</table>
+<p>A convenience function <code>new_response(msg, status)</code> is also available as a shorthand for <code>ResponseBuilder::new(msg, status)</code>.</p>
+
+<h3>Router (Rust only)</h3>
+<p>Declarative routing within a block:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Router::new()</code></td><td>Create a new router</td></tr>
+    <tr><td><code>retrieve(pattern, handler)</code></td><td>Register a GET route</td></tr>
+    <tr><td><code>create(pattern, handler)</code></td><td>Register a POST route</td></tr>
+    <tr><td><code>update(pattern, handler)</code></td><td>Register a PUT/PATCH route</td></tr>
+    <tr><td><code>delete(pattern, handler)</code></td><td>Register a DELETE route</td></tr>
+    <tr><td><code>on(action, pattern, handler)</code></td><td>Register a route for any action</td></tr>
+    <tr><td><code>route(ctx, msg) &rarr; Result_</code></td><td>Route a message</td></tr>
+</table>
+
+<h3>Registry</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>Registry::new()</code></td><td>Create an empty registry</td></tr>
+    <tr><td><code>register(type_name, factory)</code></td><td>Register a block factory</td></tr>
+    <tr><td><code>register_func(type_name, handler)</code></td><td>Register an inline function</td></tr>
+    <tr><td><code>get(type_name) &rarr; Option</code></td><td>Get a block factory</td></tr>
+    <tr><td><code>has(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
+    <tr><td><code>list() &rarr; Vec</code></td><td>List all registered blocks</td></tr>
+</table>

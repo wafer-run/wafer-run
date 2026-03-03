@@ -1,6 +1,15 @@
 /// Host-imported runtime utilities.
 
 interface runtime {
+    use types.{message, block-result};
+
     /// Check whether the current execution context has been cancelled.
     is-cancelled: func() -> bool;
+
+    /// Call another block by name, passing a message and receiving its result.
+    /// Any block can call any other block — no distinction between system and application blocks.
+    call-block: func(block-name: string, msg: message) -> block-result;
+
+    /// Emit a log message at the given level (debug, info, warn, error).
+    log: func(level: string, msg: string);
 }

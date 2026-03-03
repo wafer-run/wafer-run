@@ -31,11 +31,27 @@ ACTIVE: chain-configuration
     <li><code>/**</code> — wildcard suffix, matches any remaining path segments</li>
 </ul>
 
+<h3>Chain Config</h3>
+<p>The top-level <code>config</code> object supports:</p>
+<ul>
+    <li><code>on_error</code> — error policy: <code>"stop"</code> (abort chain) or <code>"continue"</code> (skip failed block)</li>
+    <li><code>timeout</code> — request timeout (e.g. <code>"30s"</code>, <code>"5m"</code>)</li>
+</ul>
+
 <h3>Chain Tree Structure</h3>
 <p>Each node in the chain tree has:</p>
 <ul>
     <li><code>block</code> — the block to execute at this node</li>
-    <li><code>chain</code> — optional sub-chain reference</li>
+    <li><code>chain</code> — reference to a pre-built chain (e.g. <code>"http-infra"</code>, <code>"auth-pipe"</code>)</li>
     <li><code>match</code> — the pattern to match against</li>
     <li><code>next</code> — an array of child nodes</li>
+    <li><code>config</code> — key-value config passed to the block via <code>ctx.config_get()</code></li>
 </ul>
+
+<h3>Node Config</h3>
+<p>Pass configuration to a block at a specific node:</p>
+<pre><code>{
+    "block": "@wafer/iam",
+    "config": { "role": "editor" }
+}</code></pre>
+<p>The block reads these values with <code>ctx.config_get("role")</code>.</p>

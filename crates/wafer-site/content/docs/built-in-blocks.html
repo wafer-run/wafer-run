@@ -4,14 +4,76 @@ ACTIVE: built-in-blocks
 -->
 
 <h2>Built-in Blocks</h2>
-<p>wafer ships with several ready-to-use blocks in the <code>@wafer</code> namespace:</p>
+<p>wafer ships with ready-to-use infrastructure blocks in the <code>@wafer</code> namespace. All are registered automatically when you call <code>wafer_core::register_all()</code>.</p>
+
+<h3>@wafer/security-headers</h3>
+<p>Adds standard security headers to all responses: <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code>, <code>X-XSS-Protection</code>, <code>Referrer-Policy</code>, <code>Strict-Transport-Security</code>, <code>Content-Security-Policy</code>, and <code>Permissions-Policy</code>.</p>
+<p>Config: <code>csp</code> — override the default Content-Security-Policy value.</p>
+
+<h3>@wafer/cors</h3>
+<p>Handles CORS preflight (<code>OPTIONS</code>) requests and injects <code>Access-Control-*</code> headers. Supports origin allowlisting, credentials, and configurable max-age.</p>
+<p>Config:</p>
 <ul>
-    <li><code>@wafer/security-headers</code> — adds standard security headers (X-Frame-Options, CSP, etc.)</li>
-    <li><code>@wafer/cors</code> — handles CORS preflight and response headers</li>
-    <li><code>@wafer/rate-limit</code> — token-bucket rate limiting per client IP</li>
-    <li><code>@wafer/readonly-guard</code> — rejects write operations (POST, PUT, DELETE) in read-only mode</li>
-    <li><code>@wafer/monitoring</code> — request logging, timing, and metrics collection</li>
-    <li><code>@wafer/auth</code> — JWT/Bearer token validation and user extraction</li>
-    <li><code>@wafer/iam</code> — role-based access control and permission checks</li>
-    <li><code>@wafer/web</code> — static file serving with caching and content-type detection</li>
+    <li><code>allowed_origins</code> — comma-separated origins or <code>*</code> (default: <code>*</code>)</li>
+    <li><code>allowed_methods</code> — allowed HTTP methods (default: <code>GET, POST, PUT, PATCH, DELETE, OPTIONS</code>)</li>
+    <li><code>allowed_headers</code> — allowed headers (default: <code>Content-Type, Authorization, X-Requested-With</code>)</li>
+    <li><code>max_age</code> — preflight cache duration in seconds (default: <code>86400</code>)</li>
 </ul>
+
+<h3>@wafer/rate-limit</h3>
+<p>Per-IP sliding-window rate limiting. Returns <code>429 Too Many Requests</code> when the limit is exceeded and sets <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, and <code>Retry-After</code> headers.</p>
+<p>Config:</p>
+<ul>
+    <li><code>max_requests</code> — max requests per window (default: <code>1000</code>)</li>
+    <li><code>window_seconds</code> — window duration in seconds (default: <code>60</code>)</li>
+</ul>
+
+<h3>@wafer/readonly-guard</h3>
+<p>Rejects write operations (<code>create</code>, <code>update</code>, <code>delete</code> actions) with <code>403 Forbidden</code> when read-only mode is enabled.</p>
+<p>Config: <code>readonly</code> — set to <code>"true"</code> to enable (default: <code>"false"</code>).</p>
+
+<h3>@wafer/monitoring</h3>
+<p>Tracks request metrics: total count, error count, status code distribution, and path frequency. Exposes a stats endpoint at <code>/_stats</code> or <code>/_monitoring</code> that returns JSON with uptime and request data.</p>
+
+<h3>@wafer/auth</h3>
+<p>Authentication middleware supporting three token types:</p>
+<ul>
+    <li><strong>JWT Bearer tokens</strong> — validated via the crypto service</li>
+    <li><strong>API keys</strong> (<code>sb_</code> prefix) — hashed with SHA-256 and checked against the database for revocation/expiration</li>
+    <li><strong>httpOnly cookies</strong> — session-based authentication</li>
+</ul>
+<p>On success, sets <code>auth.user_id</code>, <code>auth.user_email</code>, and <code>auth.user_roles</code> in the message meta for downstream blocks.</p>
+
+<h3>@wafer/iam</h3>
+<p>Role-based access control. Checks if the authenticated user has the required role. Returns <code>401</code> if not authenticated, <code>403</code> if the role is missing.</p>
+<p>Config: <code>role</code> — required role name (default: <code>"admin"</code>).</p>
+
+<h3>@wafer/web</h3>
+<p>Static file server with MIME detection, SPA support, and intelligent caching. Blocks path traversal and dotfile access.</p>
+<p>Config:</p>
+<ul>
+    <li><code>web_root</code> — directory to serve from (default: <code>"./public"</code>)</li>
+    <li><code>web_prefix</code> — URL prefix to strip (default: empty)</li>
+    <li><code>web_spa</code> — serve index.html for missing routes (default: <code>"false"</code>)</li>
+    <li><code>web_index</code> — index filename (default: <code>"index.html"</code>)</li>
+    <li><code>cache_max_age</code> — cache duration in seconds (default: <code>3600</code>)</li>
+    <li><code>immutable_max_age</code> — cache duration for hashed assets (default: <code>31536000</code>)</li>
+</ul>
+
+<h2>Pre-built Chains</h2>
+<p>wafer-core also registers three chain templates you can reference by ID:</p>
+<ul>
+    <li><code>http-infra</code> — security-headers &rarr; cors &rarr; readonly-guard &rarr; rate-limit &rarr; monitoring</li>
+    <li><code>auth-pipe</code> — http-infra &rarr; auth (requires authentication)</li>
+    <li><code>admin-pipe</code> — http-infra &rarr; auth &rarr; iam[role=admin] (requires admin role)</li>
+</ul>
+<p>Reference them in your chain config with <code>"chain": "http-infra"</code>:</p>
+<pre><code>{
+    "id": "api",
+    "root": {
+        "chain": "http-infra",
+        "next": [
+            { "match": "GET:/api/hello", "block": "hello" }
+        ]
+    }
+}</code></pre>

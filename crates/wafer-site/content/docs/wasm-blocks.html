@@ -14,9 +14,9 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 
 <div class="lang-tabs">
     <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('as')">
-            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
-            AssemblyScript
+        <button class="tab active" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
         </button>
         <button class="tab" onclick="switchTab('go')">
             <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
@@ -27,12 +27,11 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
             Rust
         </button>
     </div>
-    <div class="tab-panel" data-lang="as">
+    <div class="tab-panel" data-lang="ts">
 <pre><code># package.json
 {
   "dependencies": {
-    "assemblyscript": "^0.27.0",
-    "wafer-sdk-as": "^0.1.0"
+    "wafer-sdk-ts": "^0.1.0"
   }
 }</code></pre>
     </div>
@@ -67,9 +66,9 @@ strip = true</code></pre>
 
 <div class="lang-tabs">
     <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('as')">
-            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
-            AssemblyScript
+        <button class="tab active" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
         </button>
         <button class="tab" onclick="switchTab('go')">
             <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
@@ -80,20 +79,20 @@ strip = true</code></pre>
             Rust
         </button>
     </div>
-    <div class="tab-panel" data-lang="as">
+    <div class="tab-panel" data-lang="ts">
 <pre><code>import {
-    Block, BlockInfo, Context, Message, Result, export
-} from "wafer-sdk-as/assembly";
-import { LoggerClient } from "wafer-sdk-as/assembly/services/logger";
+    Block, BlockInfo, Context, Message, Result, register
+} from "wafer-sdk-ts";
+import { LoggerClient } from "wafer-sdk-ts/services/logger";
 
 class MyBlock extends Block {
     info(): BlockInfo {
-        return new BlockInfo(
-            "@app/my-block",  // name
-            "1.0.0",          // version
-            "processor@v1",   // interface
-            "Processes incoming messages"
-        );
+        return {
+            name: "@app/my-block",
+            version: "1.0.0",
+            interface: "processor@v1",
+            summary: "Processes incoming messages",
+        };
     }
 
     handle(ctx: Context, msg: Message): Result {
@@ -103,7 +102,7 @@ class MyBlock extends Block {
     }
 }
 
-export(new MyBlock());</code></pre>
+register(new MyBlock());</code></pre>
     </div>
     <div class="tab-panel" data-lang="go" style="display:none">
 <pre><code>package main
@@ -167,9 +166,9 @@ wafer_sdk::export!(MyBlock);</code></pre>
 
 <div class="lang-tabs">
     <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('as')">
-            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
-            AssemblyScript
+        <button class="tab active" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
         </button>
         <button class="tab" onclick="switchTab('go')">
             <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
@@ -180,8 +179,8 @@ wafer_sdk::export!(MyBlock);</code></pre>
             Rust
         </button>
     </div>
-    <div class="tab-panel" data-lang="as">
-<pre><code>npx asc assembly/index.ts -o block.wasm --optimize --exportRuntime</code></pre>
+    <div class="tab-panel" data-lang="ts">
+<pre><code>npx wafer-sdk-ts build -o block.wasm</code></pre>
     </div>
     <div class="tab-panel" data-lang="go" style="display:none">
 <pre><code>GOOS=wasip1 GOARCH=wasm go build -o block.wasm .</code></pre>

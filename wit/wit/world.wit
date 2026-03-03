@@ -1,16 +1,10 @@
 /// WAFER Block World — the top-level component model definition.
 ///
-/// This world ties together all host-imported services that a block can use
-/// and the guest-exported block interface that the runtime calls.
-package wafer:block-world@0.1.0;
+/// Blocks import the runtime interface (which includes call-block for
+/// inter-block communication) and export the block interface.
+package wafer:block-world@0.2.0;
 
 world wafer-block {
-    import database;
-    import storage;
-    import crypto;
-    import network;
-    import logger;
-    import config;
     import runtime;
     export block;
 }

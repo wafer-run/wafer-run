@@ -438,16 +438,16 @@ fn test_json_respond_helper() {
 fn test_standard_error_helpers() {
     let msg = Message::new("test", "");
     let r = err_bad_request(msg, "bad");
-    assert_eq!(r.error.as_ref().unwrap().code, "bad_request");
+    assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
     assert_eq!(r.error.as_ref().unwrap().meta.get("resp.status").unwrap(), "400");
 
     let msg = Message::new("test", "");
     let r = err_unauthorized(msg, "no auth");
-    assert_eq!(r.error.as_ref().unwrap().code, "unauthorized");
+    assert_eq!(r.error.as_ref().unwrap().code, "unauthenticated");
 
     let msg = Message::new("test", "");
     let r = err_forbidden(msg, "denied");
-    assert_eq!(r.error.as_ref().unwrap().code, "forbidden");
+    assert_eq!(r.error.as_ref().unwrap().code, "permission_denied");
 
     let msg = Message::new("test", "");
     let r = err_not_found(msg, "gone");
@@ -455,15 +455,15 @@ fn test_standard_error_helpers() {
 
     let msg = Message::new("test", "");
     let r = err_conflict(msg, "exists");
-    assert_eq!(r.error.as_ref().unwrap().code, "conflict");
+    assert_eq!(r.error.as_ref().unwrap().code, "already_exists");
 
     let msg = Message::new("test", "");
     let r = err_validation(msg, "invalid");
-    assert_eq!(r.error.as_ref().unwrap().code, "validation_error");
+    assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
 
     let msg = Message::new("test", "");
     let r = err_internal(msg, "oops");
-    assert_eq!(r.error.as_ref().unwrap().code, "internal_error");
+    assert_eq!(r.error.as_ref().unwrap().code, "internal");
 }
 
 #[test]
@@ -1109,7 +1109,7 @@ fn test_chains_with_http() {
 struct TestContext;
 
 impl Context for TestContext {
-    fn send(&self, _msg: &Message) -> Result_ {
+    fn call_block(&self, _block_name: &str, _msg: &mut Message) -> Result_ {
         Result_ {
             action: Action::Continue,
             response: None,
@@ -1118,20 +1118,8 @@ impl Context for TestContext {
         }
     }
 
-    fn capabilities(&self) -> Vec<CapabilityInfo> {
-        vec![]
-    }
-
     fn is_cancelled(&self) -> bool {
         false
-    }
-
-    fn service(&self, _name: &str) -> Option<&dyn std::any::Any> {
-        None
-    }
-
-    fn services(&self) -> Option<&wafer_run::services::Services> {
-        None
     }
 
     fn config_get(&self, _key: &str) -> Option<&str> {

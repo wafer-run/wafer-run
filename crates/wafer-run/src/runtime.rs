@@ -97,6 +97,8 @@ pub struct Wafer {
     pub(crate) resolved: HashMap<String, Arc<dyn Block>>,
     pub(crate) named_services: Arc<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>,
     pub(crate) platform_services: Option<Arc<Services>>,
+    /// All registered blocks (infrastructure + application), shared with contexts.
+    pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
     /// Shared WASM engine for all WASM blocks (enables epoch-based interruption).
     #[cfg(feature = "wasm")]
@@ -112,10 +114,26 @@ impl Wafer {
             resolved: HashMap::new(),
             named_services: Arc::new(HashMap::new()),
             platform_services: None,
+            all_blocks: Arc::new(HashMap::new()),
             hooks: ObservabilityBus::new(),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
         }
+    }
+
+    /// Returns all blocks (resolved + infrastructure) as an Arc for use in contexts.
+    fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
+        self.all_blocks.clone()
+    }
+
+    /// Rebuild the all_blocks map from the resolved blocks.
+    /// Call this after resolve() completes and after registering infrastructure blocks.
+    pub fn rebuild_all_blocks(&mut self) {
+        let mut map = HashMap::new();
+        for (name, block) in &self.resolved {
+            map.insert(name.clone(), block.clone());
+        }
+        self.all_blocks = Arc::new(map);
     }
 
     /// Registry returns the block registry.
@@ -181,7 +199,7 @@ impl Wafer {
         let chain_ids: Vec<String> = self.chains.keys().cloned().collect();
         for chain_id in chain_ids {
             // Take chain out temporarily
-            let mut chain = self.chains.remove(&chain_id).unwrap();
+            let mut chain = self.chains.remove(&chain_id).expect("BUG: chain disappeared during iteration");
             self.resolve_node(&mut chain.root)?;
             self.chains.insert(chain_id.clone(), chain);
         }
@@ -209,7 +227,9 @@ impl Wafer {
                     deadline: None,
                     named_services: self.named_services.clone(),
                     platform_services: self.platform_services.clone(),
-                    capabilities: None,
+                    all_blocks: self.all_blocks_arc(),
+                    call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    max_call_depth: 16,
                 };
 
                 block
@@ -248,7 +268,9 @@ impl Wafer {
                         deadline: None,
                         named_services: self.named_services.clone(),
                         platform_services: self.platform_services.clone(),
-                        capabilities: None,
+                        all_blocks: self.all_blocks_arc(),
+                        call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                        max_call_depth: 16,
                     };
 
                     block
@@ -471,7 +493,7 @@ impl Wafer {
                 .expect("failed to create hardened WASM engine");
             self.wasm_engine = Some(Arc::new(engine));
         }
-        self.wasm_engine.as_ref().unwrap()
+        self.wasm_engine.as_ref().expect("BUG: wasm engine not initialized")
     }
 
     /// Start initializes the runtime.
@@ -479,6 +501,9 @@ impl Wafer {
         if self.resolved.is_empty() {
             self.resolve()?;
         }
+
+        // Rebuild the all_blocks map so contexts can see all resolved blocks
+        self.rebuild_all_blocks();
 
         // Spawn epoch ticker for WASM engine interrupt support
         #[cfg(feature = "wasm")]
@@ -505,7 +530,9 @@ impl Wafer {
             deadline: None,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
-            capabilities: None,
+            all_blocks: self.all_blocks_arc(),
+            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            max_call_depth: 16,
         };
         for block in self.resolved.values() {
             let _ = block.lifecycle(
@@ -614,7 +641,9 @@ impl Wafer {
             deadline,
             named_services: self.named_services.clone(),
             platform_services: self.platform_services.clone(),
-            capabilities: block.block_capabilities().cloned(),
+            all_blocks: self.all_blocks_arc(),
+            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            max_call_depth: 16,
         };
 
         // Observability: block start

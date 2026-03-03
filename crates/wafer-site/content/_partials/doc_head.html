@@ -23,6 +23,20 @@
         }
         .sidebar a:hover { color: var(--accent); background: var(--wafer-cream); }
         .sidebar a.active { color: var(--accent); background: var(--wafer-cream); font-weight: 600; }
+        .sidebar details { margin-bottom: 0.5rem; }
+        .sidebar summary {
+            cursor: pointer; padding: 0.4rem 0.75rem;
+            font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.05em; color: var(--text-secondary);
+            list-style: none;
+        }
+        .sidebar summary::-webkit-details-marker { display: none; }
+        .sidebar summary::before {
+            content: '\25B8'; display: inline-block; margin-right: 0.35rem;
+            transition: transform 0.15s;
+        }
+        .sidebar details[open] > summary::before { transform: rotate(90deg); }
+        .sidebar details .sidebar-links { padding-left: 0.5rem; }
         .docs-content { min-width: 0; }
         .docs-content h2 {
             margin-top: 3rem; margin-bottom: 0.75rem; padding-top: 1rem;
@@ -38,9 +52,13 @@
         @media (max-width: 768px) {
             .docs-layout { grid-template-columns: 1fr; gap: 1rem; }
             .sidebar {
-                position: static; display: flex; gap: 0.25rem; flex-wrap: wrap;
-                overflow-x: auto; max-height: none;
+                position: static; max-height: none;
                 padding-bottom: 1rem; border-bottom: 1px solid var(--border);
+            }
+            .sidebar details { margin-bottom: 0.25rem; }
+            .sidebar summary { font-size: 0.7rem; padding: 0.3rem 0.5rem; }
+            .sidebar details .sidebar-links {
+                display: flex; gap: 0.25rem; flex-wrap: wrap; padding-left: 0;
             }
             .sidebar a {
                 padding: 0.3rem 0.65rem; font-size: 0.8rem;
@@ -70,16 +88,46 @@
     </div>
     <div class="docs-layout">
         <aside class="sidebar">
-            <a href="/docs"{{ACTIVE_quick-start}}>Quick Start</a>
-            <a href="/docs/creating-a-block"{{ACTIVE_creating-a-block}}>Creating a Block</a>
-            <a href="/docs/running-a-block"{{ACTIVE_running-a-block}}>Running a Block</a>
-            <a href="/docs/cli"{{ACTIVE_cli}}>CLI</a>
-            <a href="/docs/chain-configuration"{{ACTIVE_chain-configuration}}>Chain Configuration</a>
-            <a href="/docs/built-in-blocks"{{ACTIVE_built-in-blocks}}>Built-in Blocks</a>
-            <a href="/docs/services"{{ACTIVE_services}}>Services</a>
-            <a href="/docs/http-bridge"{{ACTIVE_http-bridge}}>HTTP Bridge</a>
-            <a href="/docs/api-reference"{{ACTIVE_api-reference}}>API Reference</a>
-            <a href="/docs/registry"{{ACTIVE_registry}}>Block Registry</a>
-            <a href="/docs/deployment"{{ACTIVE_deployment}}>Deployment</a>
+            <details open>
+                <summary>Getting Started</summary>
+                <div class="sidebar-links">
+                    <a href="/docs"{{ACTIVE_quick-start}}>Quick Start</a>
+                    <a href="/docs/core-concepts"{{ACTIVE_core-concepts}}>Core Concepts</a>
+                </div>
+            </details>
+            <details open>
+                <summary>Guides</summary>
+                <div class="sidebar-links">
+                    <a href="/docs/creating-a-block"{{ACTIVE_creating-a-block}}>Creating a Block</a>
+                    <a href="/docs/running-a-block"{{ACTIVE_running-a-block}}>Running a Block</a>
+                    <a href="/docs/wasm-blocks"{{ACTIVE_wasm-blocks}}>WASM Blocks</a>
+                    <a href="/docs/cli"{{ACTIVE_cli}}>CLI</a>
+                </div>
+            </details>
+            <details open>
+                <summary>Architecture</summary>
+                <div class="sidebar-links">
+                    <a href="/docs/chain-configuration"{{ACTIVE_chain-configuration}}>Chain Configuration</a>
+                    <a href="/docs/built-in-blocks"{{ACTIVE_built-in-blocks}}>Built-in Blocks</a>
+                    <a href="/docs/services"{{ACTIVE_services}}>Services</a>
+                    <a href="/docs/http-bridge"{{ACTIVE_http-bridge}}>HTTP Bridge</a>
+                </div>
+            </details>
+            <details open>
+                <summary>API Reference</summary>
+                <div class="sidebar-links">
+                    <a href="/docs/api-runtime"{{ACTIVE_api-runtime}}>Runtime</a>
+                    <a href="/docs/api-services"{{ACTIVE_api-services}}>Platform Services</a>
+                    <a href="/docs/api-sdk"{{ACTIVE_api-sdk}}>Guest SDK</a>
+                    <a href="/docs/api-types"{{ACTIVE_api-types}}>Types &amp; Constants</a>
+                </div>
+            </details>
+            <details open>
+                <summary>Resources</summary>
+                <div class="sidebar-links">
+                    <a href="/docs/registry"{{ACTIVE_registry}}>Package Registry</a>
+                    <a href="/docs/deployment"{{ACTIVE_deployment}}>Deployment</a>
+                </div>
+            </details>
         </aside>
         <main class="docs-content">

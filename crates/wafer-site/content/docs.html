@@ -17,11 +17,11 @@ npm install</code></pre>
 
 <h3>3. Your Block</h3>
 <p>Open <code>blocks/hello/index.ts</code> — the generated starter block:</p>
-<pre><code>import { Block, BlockInfo, Context, Message, Result, export } from "wafer-sdk-as/assembly";
+<pre><code>import { Block, BlockInfo, Context, Message, Result, register } from "wafer-sdk-ts";
 
 class HelloBlock extends Block {
     info(): BlockInfo {
-        return new BlockInfo("hello", "1.0.0", "handler@v1", "Says hello");
+        return { name: "hello", version: "1.0.0", interface: "handler@v1", summary: "Says hello" };
     }
 
     handle(ctx: Context, msg: Message): Result {
@@ -29,7 +29,7 @@ class HelloBlock extends Block {
     }
 }
 
-export(new HelloBlock());</code></pre>
+register(new HelloBlock());</code></pre>
 
 <h3>4. Run It</h3>
 <pre><code>wafer dev</code></pre>
@@ -41,7 +41,9 @@ export(new HelloBlock());</code></pre>
 
 <h3>Next Steps</h3>
 <ul>
-    <li><a href="/docs/creating-a-block">Creating a Block</a> — write blocks in AssemblyScript, Go, or Rust</li>
+    <li><a href="/docs/core-concepts">Core Concepts</a> — understand messages, blocks, chains, interfaces, and actions</li>
+    <li><a href="/docs/creating-a-block">Creating a Block</a> — write blocks in TypeScript, Go, or Rust</li>
     <li><a href="/docs/running-a-block">Running a Block</a> — host blocks with the Node.js, Go, or Rust runtime</li>
     <li><a href="/docs/cli">CLI</a> — full command reference for <code>wafer</code></li>
+    <li><a href="/docs/registry">Package Registry</a> — publish and install blocks, chains, and interfaces</li>
 </ul>

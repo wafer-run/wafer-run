@@ -17,10 +17,10 @@ npm install</code></pre>
 <p>This creates:</p>
 <ul>
     <li><code>wafer.json</code> — block definitions and publish settings</li>
-    <li><code>package.json</code> — npm project with AssemblyScript as a dev dependency</li>
+    <li><code>package.json</code> — npm project with <code>wafer-sdk-ts</code> as a dependency</li>
     <li><code>blocks/hello/index.ts</code> — a starter block that returns <code>{"hello":"world"}</code></li>
     <li><code>chains/main.json</code> — the default chain configuration</li>
-    <li><code>tsconfig.json</code> — extends the AssemblyScript standard library types</li>
+    <li><code>tsconfig.json</code> — TypeScript configuration for the project</li>
     <li><code>.gitignore</code> — ignores <code>node_modules/</code>, <code>dist/</code>, and <code>*.wasm</code></li>
 </ul>
 
@@ -35,11 +35,16 @@ npm install</code></pre>
   "chains": [
     { "name": "main", "source": "chains/main.json" }
   ],
+  "interfaces": [
+    { "ref": "github.com/wafer-run/interfaces/http-request@v1.0.0",
+      "local": ".wafer/interfaces/http-request@v1.0.0.interface.json" }
+  ],
   "publish": {
     "repo": "wafer-run/my-app",
     "blocks": ["hello"]
   }
 }</code></pre>
+<p>The <code>interfaces</code> array is optional and managed by <code>wafer types add</code>.</p>
 
 <h3>chains/main.json</h3>
 <p>Chain definitions live in the <code>chains/</code> folder as separate JSON files:</p>
@@ -58,16 +63,16 @@ npm install</code></pre>
 
 <h3>Language option</h3>
 <p>Use <code>--lang</code> to choose a different guest SDK:</p>
-<pre><code>wafer block greet --lang assemblyscript   # default, creates blocks/greet/index.ts
-wafer block greet --lang go               # creates blocks/greet/index.go
-wafer block greet --lang rust             # creates blocks/greet/index.rs</code></pre>
+<pre><code>wafer block greet --lang typescript   # default, creates blocks/greet/index.ts
+wafer block greet --lang go           # creates blocks/greet/index.go
+wafer block greet --lang rust         # creates blocks/greet/index.rs</code></pre>
 
 <h2>wafer build</h2>
 <p>Compile all blocks defined in <code>wafer.json</code> to WebAssembly. Output goes to <code>dist/</code>.</p>
 <pre><code>wafer build</code></pre>
 <p>The compiler is selected automatically based on the entry point in each block folder:</p>
 <ul>
-    <li><code>.ts</code> — AssemblyScript via <code>npx asc</code> with <code>--optimize --exportRuntime</code></li>
+    <li><code>.ts</code> — TypeScript via <code>npx wafer-sdk-ts build</code></li>
     <li><code>.go</code> — Go via <code>GOOS=wasip1 GOARCH=wasm go build</code></li>
     <li><code>.rs</code> — Rust via <code>cargo build --target wasm32-wasip1 --release</code></li>
 </ul>
@@ -102,4 +107,21 @@ wafer publish --bump major   # 0.1.0 → 1.0.0</code></pre>
 <p>Publishing uses the <code>gh</code> CLI if available (inherits your GitHub auth). If <code>gh</code> is not installed, it falls back to the GitHub REST API using a <code>GITHUB_TOKEN</code> environment variable.</p>
 
 <h3>Registry integration</h3>
-<p>Published <code>.wasm</code> assets are automatically discoverable by the <a href="/docs/registry">block registry</a>. The registry scans GitHub release assets for <code>.wasm</code> files and makes them available for download.</p>
+<p>Published <code>.wasm</code> assets are automatically discoverable by the <a href="/docs/registry">package registry</a>. The registry scans GitHub release assets for <code>.wasm</code>, <code>.chain.json</code>, and <code>.interface.json</code> files and makes them available for download.</p>
+
+<h2>wafer types</h2>
+<p>Manage interface type packages — reusable JSON Schema definitions that blocks can reference for their input/output contracts.</p>
+
+<h3>wafer types add</h3>
+<p>Fetch an interface package from the registry and add it to the project:</p>
+<pre><code>wafer types add github.com/wafer-run/interfaces/http-request@v1.0.0</code></pre>
+<p>This downloads the <code>.interface.json</code> file to <code>.wafer/interfaces/</code> and adds an entry to the <code>interfaces</code> array in <code>wafer.json</code>. You can then reference it in your <code>block.json</code>:</p>
+<pre><code>{
+  "actions": {
+    "POST:/api/data": {
+      "input": "github.com/wafer-run/interfaces/http-request@v1.0.0",
+      "output": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+    }
+  }
+}</code></pre>
+<p>When <code>input</code> or <code>output</code> is a string, it is treated as an interface reference. When it is an object, it is inline JSON Schema. Both work together — interfaces are opt-in for shared contracts.</p>

@@ -193,7 +193,7 @@ fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .map(|r| r.data)
                 .unwrap_or_default();
 
-            builder.body(Body::from(body)).unwrap()
+            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
         }
 
         Action::Error => {
@@ -226,7 +226,7 @@ fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 "{}".to_string()
             };
 
-            builder.body(Body::from(body)).unwrap()
+            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
         }
 
         Action::Drop => {
@@ -237,7 +237,7 @@ fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 builder = apply_response_meta(builder, &msg.meta);
             }
 
-            builder.body(Body::empty()).unwrap()
+            builder.body(Body::empty()).expect("BUG: failed to build HTTP response")
         }
 
         Action::Continue => {
@@ -254,7 +254,7 @@ fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .map(|m| m.data)
                 .unwrap_or_default();
 
-            builder.body(Body::from(body)).unwrap()
+            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
         }
     }
 }

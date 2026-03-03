@@ -52,6 +52,24 @@ type Block interface {
 	Lifecycle(event LifecycleEvent) error
 }
 
+// ContextBlock is an optional interface that blocks may implement to receive
+// a Context. When the runtime detects a ContextBlock, it passes a Context
+// that provides CallBlock and other runtime capabilities.
+//
+// Usage:
+//
+//	func (b *MyBlock) HandleWithContext(ctx wafer.Context, msg *wafer.Message) *wafer.BlockResult {
+//	    result := ctx.CallBlock("wafer/database", wafer.NewMessage("database.get", nil))
+//	    ...
+//	}
+type ContextBlock interface {
+	Block
+
+	// HandleWithContext processes a message with access to runtime capabilities.
+	// When implemented, the runtime will call this method instead of Handle.
+	HandleWithContext(ctx Context, msg *Message) *BlockResult
+}
+
 // registeredBlock holds the globally registered block instance.
 var registeredBlock Block
 

@@ -104,6 +104,14 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
+/// Sanitize an identifier to prevent SQL injection. Only allows
+/// alphanumeric characters and underscores.
+fn sanitize_ident(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
 fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::Null => SqlValue::Null,
@@ -133,24 +141,25 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<SqlValue>) {
     let mut values = Vec::new();
 
     for filter in filters {
+        let safe_field = sanitize_ident(&filter.field);
         match filter.operator {
             FilterOp::IsNull => {
-                clauses.push(format!("{} IS NULL", filter.field));
+                clauses.push(format!("{} IS NULL", safe_field));
             }
             FilterOp::IsNotNull => {
-                clauses.push(format!("{} IS NOT NULL", filter.field));
+                clauses.push(format!("{} IS NOT NULL", safe_field));
             }
             FilterOp::In => {
                 if let serde_json::Value::Array(arr) = &filter.value {
                     let placeholders: Vec<String> = arr.iter().map(|_| "?".to_string()).collect();
-                    clauses.push(format!("{} IN ({})", filter.field, placeholders.join(", ")));
+                    clauses.push(format!("{} IN ({})", safe_field, placeholders.join(", ")));
                     for v in arr {
                         values.push(json_to_sql_value(v));
                     }
                 }
             }
             _ => {
-                clauses.push(format!("{} {} ?", filter.field, filter.operator.as_sql()));
+                clauses.push(format!("{} {} ?", safe_field, filter.operator.as_sql()));
                 values.push(json_to_sql_value(&filter.value));
             }
         }
@@ -163,12 +172,14 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<SqlValue>) {
 /// Uses TEXT type for all columns (SQLite is dynamically typed anyway).
 /// The `id` column is used as the primary key.
 fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json::Value>) {
+    let safe_table = sanitize_ident(table);
     let mut col_defs = Vec::new();
     for key in data.keys() {
+        let safe_key = sanitize_ident(key);
         if key == "id" {
             col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
         } else {
-            col_defs.push(format!("{} TEXT", key));
+            col_defs.push(format!("{} TEXT", safe_key));
         }
     }
     if !data.contains_key("id") {
@@ -176,16 +187,17 @@ fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json:
     }
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} ({})",
-        table,
+        safe_table,
         col_defs.join(", ")
     );
     db.execute_batch(&sql).ok();
 
     // Also ensure any missing columns are added (for when a table exists but new fields are inserted)
-    if let Ok(existing) = table_columns(db, table) {
+    if let Ok(existing) = table_columns(db, &safe_table) {
         for key in data.keys() {
-            if !existing.contains(&key.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, key);
+            let safe_key = sanitize_ident(key);
+            if !existing.contains(&safe_key.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_key);
                 db.execute_batch(&alter).ok();
             }
         }
@@ -194,8 +206,9 @@ fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json:
 
 /// Get list of column names for an existing table.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
+    let safe_table = sanitize_ident(table);
     let mut stmt = db
-        .prepare(&format!("PRAGMA table_info({})", table))
+        .prepare(&format!("PRAGMA table_info({})", safe_table))
         .map_err(|_| ())?;
     let cols: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
@@ -220,16 +233,19 @@ fn table_exists(db: &Connection, table: &str) -> bool {
 /// Ensure that columns referenced in filters and sorts exist on the table.
 /// Adds missing columns as TEXT (they'll default to NULL).
 fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], sort: &[SortField]) {
-    if let Ok(existing) = table_columns(db, table) {
+    let safe_table = sanitize_ident(table);
+    if let Ok(existing) = table_columns(db, &safe_table) {
         for f in filters {
-            if !existing.contains(&f.field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, f.field);
+            let safe_field = sanitize_ident(&f.field);
+            if !existing.contains(&safe_field.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_field);
                 db.execute_batch(&alter).ok();
             }
         }
         for s in sort {
-            if !existing.contains(&s.field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, s.field);
+            let safe_field = sanitize_ident(&s.field);
+            if !existing.contains(&safe_field.to_lowercase()) {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_field);
                 db.execute_batch(&alter).ok();
             }
         }
@@ -244,10 +260,11 @@ fn build_order_clause(sort: &[SortField]) -> String {
     let parts: Vec<String> = sort
         .iter()
         .map(|s| {
+            let safe_field = sanitize_ident(&s.field);
             if s.desc {
-                format!("{} DESC", s.field)
+                format!("{} DESC", safe_field)
             } else {
-                format!("{} ASC", s.field)
+                format!("{} ASC", safe_field)
             }
         })
         .collect();
@@ -258,7 +275,8 @@ fn build_order_clause(sort: &[SortField]) -> String {
 impl DatabaseService for SQLiteDatabaseService {
     fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = format!("SELECT * FROM {} WHERE id = ?1", collection);
+        let table = sanitize_ident(collection);
+        let sql = format!("SELECT * FROM {} WHERE id = ?1", table);
         db.query_row(&sql, [id], Self::row_to_record)
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
@@ -268,6 +286,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
     fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let collection = &sanitize_ident(collection);
         if !table_exists(&db, collection) {
             return Ok(RecordList {
                 records: Vec::new(),
@@ -334,6 +353,7 @@ impl DatabaseService for SQLiteDatabaseService {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
 
         let mut data = data;
 
@@ -361,17 +381,17 @@ impl DatabaseService for SQLiteDatabaseService {
         }
 
         // Auto-create table if it doesn't exist
-        ensure_table(&db, collection, &data);
+        ensure_table(&db, &table, &data);
 
         let columns: Vec<&String> = data.keys().collect();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
         let values: Vec<SqlValue> = columns.iter().map(|k| json_to_sql_value(&data[*k])).collect();
 
-        let col_names: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
+        let safe_col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            collection,
-            col_names.join(", "),
+            table,
+            safe_col_names.join(", "),
             placeholders.join(", ")
         );
 
@@ -397,6 +417,7 @@ impl DatabaseService for SQLiteDatabaseService {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
 
         let mut data = data;
 
@@ -411,7 +432,7 @@ impl DatabaseService for SQLiteDatabaseService {
         let set_clauses: Vec<String> = data
             .keys()
             .enumerate()
-            .map(|(i, k)| format!("{} = ?{}", k, i + 1))
+            .map(|(i, k)| format!("{} = ?{}", sanitize_ident(k), i + 1))
             .collect();
 
         let mut values: Vec<SqlValue> = data.values().map(json_to_sql_value).collect();
@@ -419,7 +440,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
         let sql = format!(
             "UPDATE {} SET {} WHERE id = ?{}",
-            collection,
+            table,
             set_clauses.join(", "),
             values.len()
         );
@@ -442,7 +463,8 @@ impl DatabaseService for SQLiteDatabaseService {
 
     fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = format!("DELETE FROM {} WHERE id = ?1", collection);
+        let table = sanitize_ident(collection);
+        let sql = format!("DELETE FROM {} WHERE id = ?1", table);
         let rows = db
             .execute(&sql, [id])
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
@@ -454,12 +476,13 @@ impl DatabaseService for SQLiteDatabaseService {
 
     fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        if !table_exists(&db, collection) {
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
             return Ok(0);
         }
-        ensure_columns_for_query(&db, collection, filters, &[]);
+        ensure_columns_for_query(&db, &table, filters, &[]);
         let (where_clause, params) = build_where_clause(filters);
-        let sql = format!("SELECT COUNT(*) FROM {}{}", collection, where_clause);
+        let sql = format!("SELECT COUNT(*) FROM {}{}", table, where_clause);
         let query_params: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
         db.query_row(&sql, query_params.as_slice(), |row| row.get(0))
@@ -473,10 +496,12 @@ impl DatabaseService for SQLiteDatabaseService {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        let safe_field = sanitize_ident(field);
         let (where_clause, params) = build_where_clause(filters);
         let sql = format!(
             "SELECT COALESCE(SUM({}), 0) FROM {}{}",
-            field, collection, where_clause
+            safe_field, table, where_clause
         );
         let query_params: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();

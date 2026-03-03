@@ -1,13 +1,15 @@
-//! Block Registry: Go-module-style, GitHub-backed versions.
+//! Package Registry: Go-module-style, GitHub-backed versions for blocks, chains, and interfaces.
 //!
 //! GitHub is the source of truth. There is no registration step — packages
 //! are auto-indexed the first time someone looks them up, just like Go modules.
+//! Packages can be blocks (.wasm), chains (.chain.json), interfaces (.interface.json),
+//! or any combination (stored as a comma-separated `package_type` string).
 //!
-//! GET  /registry                                   — browse (HTML UI)
-//! GET  /registry/search?q=term                     — search indexed packages
-//! GET  /registry/packages/{owner}/{repo}           — package details + versions (auto-indexes)
-//! GET  /registry/packages/{owner}/{repo}/versions  — version list from GitHub (auto-indexes)
-//! GET  /registry/packages/{owner}/{repo}/download/{version} — redirect to GitHub asset
+//! GET  /registry                                                            — browse (HTML UI)
+//! GET  /registry/search?q=term&type=block|chain|interface                   — search indexed packages
+//! GET  /registry/packages/{owner}/{repo}                                    — package details + versions (auto-indexes)
+//! GET  /registry/packages/{owner}/{repo}/versions                           — version list from GitHub (auto-indexes)
+//! GET  /registry/packages/{owner}/{repo}/download/{version}?type=block|chain|interface — redirect to GitHub asset
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +41,14 @@ struct GitHubRelease {
     has_wasm_asset: bool,
     #[serde(default)]
     wasm_download_url: Option<String>,
+    #[serde(default)]
+    has_chain_asset: bool,
+    #[serde(default)]
+    chain_download_url: Option<String>,
+    #[serde(default)]
+    has_interface_asset: bool,
+    #[serde(default)]
+    interface_download_url: Option<String>,
     #[serde(default)]
     published_at: Option<String>,
 }
@@ -72,6 +82,7 @@ impl RegistryBlock {
     // -----------------------------------------------------------------------
     fn handle_search(msg: &mut Message, ctx: &dyn Context) -> Result_ {
         let query = msg.query("q").to_string();
+        let type_filter = msg.query("type").to_string();
 
         let db = match Self::get_db(ctx) {
             Some(db) => db,
@@ -104,7 +115,7 @@ impl RegistryBlock {
 
         match db.list("packages", &opts) {
             Ok(result) => {
-                // Filter out blocked packages
+                // Filter out blocked packages and apply type filter
                 let blocked = Self::get_blocked_patterns(ctx);
                 let filtered: Vec<_> = result
                     .records
@@ -115,7 +126,26 @@ impl RegistryBlock {
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        !Self::matches_any_pattern(name, &blocked)
+                        if Self::matches_any_pattern(name, &blocked) {
+                            return false;
+                        }
+                        // Apply type filter: check if the filter appears in the comma-separated pkg_type
+                        if !type_filter.is_empty() {
+                            let pkg_type = pkg
+                                .data
+                                .get("package_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("block");
+                            // Legacy "both" means "block,chain"
+                            let types: Vec<&str> = if pkg_type == "both" {
+                                vec!["block", "chain"]
+                            } else {
+                                pkg_type.split(',').collect()
+                            };
+                            types.contains(&type_filter.as_str())
+                        } else {
+                            true
+                        }
                     })
                     .collect();
                 let filtered_count = filtered.len() as i64;
@@ -151,13 +181,23 @@ impl RegistryBlock {
 
         let db = Self::get_db(ctx).ok_or_else(|| "Registry not configured".to_string())?;
 
-        // Already indexed? Return it.
+        // Already indexed? Return it (backfilling package_type if missing).
         if let Ok(record) = database::get_by_field(
             db.as_ref(),
             "packages",
             "name",
             serde_json::Value::String(name.to_string()),
         ) {
+            if record.data.get("package_type").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                let versions = Self::fetch_versions_cached(ctx, name);
+                let pkg_type = Self::detect_package_type(&versions);
+                let mut update = HashMap::new();
+                update.insert(
+                    "package_type".to_string(),
+                    serde_json::Value::String(pkg_type.to_string()),
+                );
+                let _ = db.update("packages", &record.id, update);
+            }
             return Ok(record);
         }
 
@@ -192,6 +232,14 @@ impl RegistryBlock {
         record.insert(
             "download_count".to_string(),
             serde_json::Value::String("0".to_string()),
+        );
+
+        // Detect package type from release assets
+        let versions = Self::fetch_versions_cached(ctx, name);
+        let pkg_type = Self::detect_package_type(&versions);
+        record.insert(
+            "package_type".to_string(),
+            serde_json::Value::String(pkg_type.to_string()),
         );
 
         db.create("packages", record)
@@ -303,19 +351,46 @@ impl RegistryBlock {
             None => return err_bad_request(msg.clone(), "Invalid package name"),
         };
 
-        // Try to find the exact wasm_download_url from cached release data
+        // Determine asset type: "chain", "interface", or "block" (default)
+        let asset_type = msg.query("type").to_string();
+
+        // Try to find the download URL from cached release data
         let versions = Self::fetch_versions_cached(ctx, name);
-        let asset_url = versions
-            .iter()
-            .find(|r| r.tag_name == version)
-            .and_then(|r| r.wasm_download_url.clone())
-            .unwrap_or_else(|| {
-                // Convention: https://github.com/{owner}/{repo}/releases/download/{version}/{repo}.wasm
-                format!(
-                    "https://github.com/{}/{}/releases/download/{}/{}.wasm",
-                    owner, repo, version, repo
-                )
-            });
+        let asset_url = match asset_type.as_str() {
+            "chain" => versions
+                .iter()
+                .find(|r| r.tag_name == version)
+                .and_then(|r| r.chain_download_url.clone())
+                .unwrap_or_else(|| {
+                    // Convention: {repo}.chain.json
+                    format!(
+                        "https://github.com/{}/{}/releases/download/{}/{}.chain.json",
+                        owner, repo, version, repo
+                    )
+                }),
+            "interface" => versions
+                .iter()
+                .find(|r| r.tag_name == version)
+                .and_then(|r| r.interface_download_url.clone())
+                .unwrap_or_else(|| {
+                    // Convention: {repo}.interface.json
+                    format!(
+                        "https://github.com/{}/{}/releases/download/{}/{}.interface.json",
+                        owner, repo, version, repo
+                    )
+                }),
+            _ => versions
+                .iter()
+                .find(|r| r.tag_name == version)
+                .and_then(|r| r.wasm_download_url.clone())
+                .unwrap_or_else(|| {
+                    // Convention: {repo}.wasm
+                    format!(
+                        "https://github.com/{}/{}/releases/download/{}/{}.wasm",
+                        owner, repo, version, repo
+                    )
+                }),
+        };
 
         // Increment download count atomically
         let _ = db.exec_raw(
@@ -526,14 +601,69 @@ impl RegistryBlock {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
+                // Look for .chain.json asset
+                let chain_asset = assets.iter().find(|a| {
+                    a.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.ends_with(".chain.json"))
+                        .unwrap_or(false)
+                });
+
+                let has_chain_asset = chain_asset.is_some();
+                let chain_download_url = chain_asset
+                    .and_then(|a| a.get("browser_download_url"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // Look for .interface.json asset
+                let interface_asset = assets.iter().find(|a| {
+                    a.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.ends_with(".interface.json"))
+                        .unwrap_or(false)
+                });
+
+                let has_interface_asset = interface_asset.is_some();
+                let interface_download_url = interface_asset
+                    .and_then(|a| a.get("browser_download_url"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 GitHubRelease {
                     tag_name,
                     has_wasm_asset,
                     wasm_download_url,
+                    has_chain_asset,
+                    chain_download_url,
+                    has_interface_asset,
+                    interface_download_url,
                     published_at,
                 }
             })
             .collect()
+    }
+
+    /// Determine package type from release assets as a comma-separated string.
+    /// Possible components: "block", "chain", "interface".
+    fn detect_package_type(releases: &[GitHubRelease]) -> String {
+        let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
+        let has_chain = releases.iter().any(|r| r.has_chain_asset);
+        let has_interface = releases.iter().any(|r| r.has_interface_asset);
+        let mut types = Vec::new();
+        if has_wasm {
+            types.push("block");
+        }
+        if has_chain {
+            types.push("chain");
+        }
+        if has_interface {
+            types.push("interface");
+        }
+        if types.is_empty() {
+            "block".to_string()
+        } else {
+            types.join(",")
+        }
     }
 
     fn return_stale_cache(
@@ -675,9 +805,9 @@ impl Block for RegistryBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "@wafer-site/registry".to_string(),
-            version: "0.2.0".to_string(),
+            version: "0.4.0".to_string(),
             interface: "handler@v1".to_string(),
-            summary: "Block registry: Go-module-style, GitHub-backed versions".to_string(),
+            summary: "Package registry: Go-module-style, GitHub-backed blocks, chains, and interfaces".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
@@ -724,9 +854,18 @@ impl Block for RegistryBlock {
 
     fn lifecycle(
         &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        ctx: &dyn Context,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if let LifecycleType::Init = event.event_type {
+            if let Some(db) = Self::get_db(ctx) {
+                // Backfill: set package_type = 'block' for any rows missing it
+                let _ = db.exec_raw(
+                    "UPDATE packages SET package_type = 'block' WHERE package_type IS NULL",
+                    &[],
+                );
+            }
+        }
         Ok(())
     }
 }

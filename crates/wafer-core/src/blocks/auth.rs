@@ -55,16 +55,8 @@ impl AuthBlock {
             None => return Err(auth_error(msg, 500, "Database service unavailable")),
         };
 
-        let crypto = match &services.crypto {
-            Some(c) => c,
-            None => return Err(auth_error(msg, 500, "Crypto service unavailable")),
-        };
-
-        // Hash the token for lookup
-        let key_hash = match crypto.hash(token) {
-            Ok(h) => h,
-            Err(_) => return Err(auth_error(msg, 500, "Failed to hash API key")),
-        };
+        // Use deterministic SHA-256 for key lookup (argon2 is non-deterministic)
+        let key_hash = sha256_hex(token.as_bytes());
 
         // Look up in api_keys table
         let filters = vec![wafer_run::services::database::Filter {

@@ -147,14 +147,19 @@ fn assemble_doc_page(
     let active = meta.get("ACTIVE").cloned().unwrap_or_default();
     let sidebar_items = [
         "quick-start",
+        "core-concepts",
         "creating-a-block",
         "running-a-block",
+        "wasm-blocks",
         "cli",
         "chain-configuration",
         "built-in-blocks",
         "services",
         "http-bridge",
-        "api-reference",
+        "api-runtime",
+        "api-services",
+        "api-sdk",
+        "api-types",
         "registry",
         "deployment",
     ];

@@ -101,21 +101,22 @@ END_EXTRA_STYLES_INLINE
 <p>Passed to <code>handle()</code> and <code>lifecycle()</code>. Provides access to services and runtime state.</p>
 <table>
     <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>send(msg) &rarr; Result_</code></td><td>Send a message to another chain</td></tr>
-    <tr><td><code>capabilities() &rarr; Vec</code></td><td>List available capabilities</td></tr>
-    <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled</td></tr>
+    <tr><td><code>call_block(block_name, msg) &rarr; Result_</code></td><td>Call another block by name (with recursion depth protection)</td></tr>
+    <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled (timeout or explicit)</td></tr>
+    <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value from the block's node config</td></tr>
     <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service (runtime only)</td></tr>
     <tr><td><code>services() &rarr; Option&lt;&amp;Services&gt;</code></td><td>Get platform services (runtime only)</td></tr>
-    <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value (runtime only)</td></tr>
+    <tr><td><code>capabilities() &rarr; Vec</code></td><td>List available capabilities</td></tr>
+    <tr><td><code>send(msg) &rarr; Result_</code></td><td><em>Deprecated</em> — use <code>call_block()</code> instead. Routes <code>svc.*</code> messages to infrastructure blocks.</td></tr>
 </table>
 
 <h3>Response Helpers</h3>
-<p>Convenience functions for building responses:</p>
+<p>Convenience functions for building responses. All take ownership of the <code>Message</code>.</p>
 <table>
     <tr><th>Function</th><th>Description</th></tr>
-    <tr><td><code>respond(msg, status, data, content_type)</code></td><td>Send a raw response</td></tr>
-    <tr><td><code>json_respond(msg, status, data)</code></td><td>Send a JSON response</td></tr>
-    <tr><td><code>error(msg, status, code, message)</code></td><td>Send an error response</td></tr>
+    <tr><td><code>respond(msg, status, data: Vec&lt;u8&gt;, content_type)</code></td><td>Send a raw response with explicit content type</td></tr>
+    <tr><td><code>json_respond(msg, status, data)</code></td><td>Serialize data as JSON and send (sets <code>application/json</code>)</td></tr>
+    <tr><td><code>error(msg, status, code, message)</code></td><td>Send an error response with an error code</td></tr>
     <tr><td><code>err_bad_request(msg, message)</code></td><td>400 Bad Request</td></tr>
     <tr><td><code>err_unauthorized(msg, message)</code></td><td>401 Unauthorized</td></tr>
     <tr><td><code>err_forbidden(msg, message)</code></td><td>403 Forbidden</td></tr>
@@ -128,12 +129,13 @@ END_EXTRA_STYLES_INLINE
 <h3>ResponseBuilder</h3>
 <table>
     <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>new_response(msg, status) &rarr; ResponseBuilder</code></td><td>Start building a response</td></tr>
-    <tr><td><code>.set_header(key, value)</code></td><td>Add a response header</td></tr>
-    <tr><td><code>.set_cookie(cookie)</code></td><td>Set a cookie</td></tr>
+    <tr><td><code>ResponseBuilder::new(msg, status) &rarr; ResponseBuilder</code></td><td>Start building a response</td></tr>
+    <tr><td><code>.set_header(key, value) &rarr; Self</code></td><td>Add a response header</td></tr>
+    <tr><td><code>.set_cookie(cookie) &rarr; Self</code></td><td>Set a Set-Cookie header</td></tr>
     <tr><td><code>.json(data) &rarr; Result_</code></td><td>Finish with JSON body</td></tr>
-    <tr><td><code>.body(data, content_type) &rarr; Result_</code></td><td>Finish with raw body</td></tr>
+    <tr><td><code>.body(data, content_type) &rarr; Result_</code></td><td>Finish with raw body and content type</td></tr>
 </table>
+<p>A convenience function <code>new_response(msg, status)</code> is also available as a shorthand for <code>ResponseBuilder::new(msg, status)</code>.</p>
 
 <h3>Router (Rust only)</h3>
 <p>Declarative routing within a block:</p>
@@ -223,7 +225,7 @@ END_EXTRA_STYLES_INLINE
 
 <!-- ============================================================ -->
 <h2>Guest SDK (WASM Blocks)</h2>
-<p>The SDK is available for Rust (<code>wafer-sdk</code>), Go (<code>wafer-sdk-go</code>), and AssemblyScript (<code>wafer-sdk-as</code>). WASM blocks implement the same Block interface and use typed service clients to access runtime services.</p>
+<p>The SDK is available for Rust (<code>wafer-sdk</code>), Go (<code>wafer-sdk-go</code>), and TypeScript (<code>wafer-sdk-ts</code>). WASM blocks implement the same Block interface and use typed service clients to access runtime services.</p>
 
 <h3>Block Trait (SDK)</h3>
 <p>Same interface as the runtime — implement these three methods:</p>
@@ -233,7 +235,7 @@ END_EXTRA_STYLES_INLINE
     <tr><td><code>handle(ctx, msg) &rarr; Result_</code></td><td>Process a message</td></tr>
     <tr><td><code>lifecycle(ctx, event) &rarr; Result</code></td><td>Handle lifecycle events (optional, default no-op)</td></tr>
 </table>
-<p>Export your block with <code>wafer_sdk::export!(MyBlock)</code> (Rust), <code>wafer.Export(&amp;MyBlock{})</code> (Go), or <code>export(new MyBlock())</code> (AssemblyScript).</p>
+<p>Export your block with <code>wafer_sdk::export!(MyBlock)</code> (Rust), <code>wafer.Export(&amp;MyBlock{})</code> (Go), or <code>register(new MyBlock())</code> (TypeScript).</p>
 
 <h3>DatabaseClient</h3>
 <table>
@@ -316,27 +318,39 @@ END_EXTRA_STYLES_INLINE
 <h3>RequestAction</h3>
 <table>
     <tr><th>Value</th><th>HTTP Method</th></tr>
-    <tr><td><code>Retrieve</code></td><td>GET</td></tr>
-    <tr><td><code>Create</code></td><td>POST</td></tr>
-    <tr><td><code>Update</code></td><td>PUT / PATCH</td></tr>
-    <tr><td><code>Delete</code></td><td>DELETE</td></tr>
-    <tr><td><code>Execute</code></td><td>Custom actions</td></tr>
+    <tr><td><code>retrieve</code></td><td>GET / HEAD</td></tr>
+    <tr><td><code>create</code></td><td>POST</td></tr>
+    <tr><td><code>update</code></td><td>PUT / PATCH</td></tr>
+    <tr><td><code>delete</code></td><td>DELETE</td></tr>
+    <tr><td><code>execute</code></td><td>Any other method</td></tr>
 </table>
 
 <h3>Meta Key Constants</h3>
+
+<h4>Request (set by bridge, read by blocks)</h4>
 <table>
-    <tr><th>Constant</th><th>Description</th></tr>
-    <tr><td><code>META_REQ_ACTION</code></td><td>Request action</td></tr>
-    <tr><td><code>META_REQ_RESOURCE</code></td><td>Request resource path</td></tr>
-    <tr><td><code>META_REQ_PARAM_PREFIX</code></td><td>Path parameter prefix (<code>req.param.</code>)</td></tr>
-    <tr><td><code>META_REQ_QUERY_PREFIX</code></td><td>Query parameter prefix (<code>req.query.</code>)</td></tr>
-    <tr><td><code>META_REQ_CLIENT_IP</code></td><td>Client IP address</td></tr>
-    <tr><td><code>META_REQ_CONTENT_TYPE</code></td><td>Request content type</td></tr>
-    <tr><td><code>META_AUTH_USER_ID</code></td><td>Authenticated user ID</td></tr>
-    <tr><td><code>META_AUTH_USER_EMAIL</code></td><td>Authenticated user email</td></tr>
-    <tr><td><code>META_AUTH_USER_ROLES</code></td><td>User roles (comma-separated)</td></tr>
-    <tr><td><code>META_RESP_STATUS</code></td><td>Response HTTP status</td></tr>
-    <tr><td><code>META_RESP_CONTENT_TYPE</code></td><td>Response content type</td></tr>
-    <tr><td><code>META_RESP_HEADER_PREFIX</code></td><td>Response header prefix</td></tr>
-    <tr><td><code>META_RESP_COOKIE_PREFIX</code></td><td>Set-Cookie header prefix</td></tr>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_REQ_ACTION</code></td><td><code>req.action</code></td><td>Semantic action (retrieve, create, update, delete, execute)</td></tr>
+    <tr><td><code>META_REQ_RESOURCE</code></td><td><code>req.resource</code></td><td>Request resource path</td></tr>
+    <tr><td><code>META_REQ_PARAM_PREFIX</code></td><td><code>req.param.</code></td><td>Path parameter prefix (e.g. <code>req.param.id</code>)</td></tr>
+    <tr><td><code>META_REQ_QUERY_PREFIX</code></td><td><code>req.query.</code></td><td>Query parameter prefix (e.g. <code>req.query.page</code>)</td></tr>
+    <tr><td><code>META_REQ_CLIENT_IP</code></td><td><code>req.client.ip</code></td><td>Client IP address</td></tr>
+    <tr><td><code>META_REQ_CONTENT_TYPE</code></td><td><code>req.content_type</code></td><td>Request content type</td></tr>
+</table>
+
+<h4>Auth (set by auth block, read by blocks)</h4>
+<table>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_AUTH_USER_ID</code></td><td><code>auth.user_id</code></td><td>Authenticated user ID</td></tr>
+    <tr><td><code>META_AUTH_USER_EMAIL</code></td><td><code>auth.user_email</code></td><td>Authenticated user email</td></tr>
+    <tr><td><code>META_AUTH_USER_ROLES</code></td><td><code>auth.user_roles</code></td><td>User roles (comma-separated)</td></tr>
+</table>
+
+<h4>Response (set by blocks, read by bridge)</h4>
+<table>
+    <tr><th>Constant</th><th>Value</th><th>Description</th></tr>
+    <tr><td><code>META_RESP_STATUS</code></td><td><code>resp.status</code></td><td>Response HTTP status code</td></tr>
+    <tr><td><code>META_RESP_CONTENT_TYPE</code></td><td><code>resp.content_type</code></td><td>Response content type</td></tr>
+    <tr><td><code>META_RESP_HEADER_PREFIX</code></td><td><code>resp.header.</code></td><td>Response header prefix (e.g. <code>resp.header.X-Custom</code>)</td></tr>
+    <tr><td><code>META_RESP_COOKIE_PREFIX</code></td><td><code>resp.set_cookie.</code></td><td>Set-Cookie header prefix</td></tr>
 </table>

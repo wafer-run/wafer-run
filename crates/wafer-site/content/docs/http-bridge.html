@@ -4,14 +4,16 @@ ACTIVE: http-bridge
 -->
 
 <h2>HTTP Bridge</h2>
-<p>The HTTP bridge converts incoming HTTP requests into wafer messages and routes them to chains.</p>
+<p>The HTTP bridge converts incoming HTTP requests into wafer messages and routes them to chains. It is built on <a href="https://docs.rs/axum">axum</a> and registered automatically via <code>bridge::auto_register()</code>.</p>
 
 <h3>Method to Action Mapping</h3>
+<p>Each HTTP method is mapped to a semantic action stored in <code>req.action</code>:</p>
 <ul>
-    <li><code>GET</code> → <code>read</code></li>
+    <li><code>GET</code> / <code>HEAD</code> → <code>retrieve</code></li>
     <li><code>POST</code> → <code>create</code></li>
-    <li><code>PUT</code> → <code>update</code></li>
+    <li><code>PUT</code> / <code>PATCH</code> → <code>update</code></li>
     <li><code>DELETE</code> → <code>delete</code></li>
+    <li>Any other method → <code>execute</code></li>
 </ul>
 
 <h3>Meta Keys</h3>
@@ -19,16 +21,29 @@ ACTIVE: http-bridge
 <ul>
     <li><code>http.method</code> — the HTTP method (GET, POST, etc.)</li>
     <li><code>http.path</code> — the request path</li>
-    <li><code>req.query.*</code> — query string parameters</li>
+    <li><code>http.raw_query</code> — the raw query string</li>
+    <li><code>http.remote_addr</code> — client IP (from <code>X-Forwarded-For</code> or socket)</li>
+    <li><code>http.content_type</code> — request content type</li>
+    <li><code>http.host</code> — the Host header</li>
+    <li><code>http.header.*</code> — all request headers (e.g. <code>http.header.authorization</code>)</li>
+    <li><code>http.query.*</code> — query parameters (e.g. <code>http.query.page</code>)</li>
+</ul>
+<p>The bridge also sets normalized meta keys used by blocks:</p>
+<ul>
+    <li><code>req.action</code> — semantic action (retrieve, create, update, delete)</li>
+    <li><code>req.resource</code> — the request path</li>
     <li><code>req.param.*</code> — path parameters from <code>{var}</code> captures</li>
+    <li><code>req.query.*</code> — query parameters (mirrors <code>http.query.*</code>)</li>
+    <li><code>req.client.ip</code> — client IP address</li>
+    <li><code>req.content_type</code> — request content type</li>
 </ul>
 
 <h3>Response Helpers</h3>
-<pre><code>// Simple text response
-respond(msg, 200, "OK")
+<pre><code>// Raw response with content type
+respond(msg, 200, data_bytes, "text/plain")
 
 // JSON response
-json_respond(msg, 200, &json!({"status": "ok"}))
+json_respond(msg, 200, &amp;json!({"status": "ok"}))
 
 // Error helpers
 err_bad_request(msg, "Invalid input")
@@ -37,9 +52,12 @@ err_unauthorized(msg, "Token expired")
 err_internal(msg, "Something went wrong")</code></pre>
 
 <h3>ResponseBuilder</h3>
-<p>For fine-grained control over the response:</p>
-<pre><code>ResponseBuilder::new(200)
-    .header("X-Custom", "value")
-    .content_type("application/json")
-    .body(json!({"ok": true}))
-    .build(msg)</code></pre>
+<p>For fine-grained control over the response (custom headers, cookies):</p>
+<pre><code>ResponseBuilder::new(msg, 200)
+    .set_header("X-Custom", "value")
+    .set_cookie("session=abc123; HttpOnly; Secure")
+    .json(&amp;json!({"ok": true}))</code></pre>
+<p>Or with a raw body:</p>
+<pre><code>ResponseBuilder::new(msg, 200)
+    .set_header("X-Custom", "value")
+    .body(data_bytes, "application/octet-stream")</code></pre>

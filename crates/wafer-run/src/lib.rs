@@ -5,6 +5,7 @@
 //! that determines the next step in the chain.
 
 pub mod block;
+pub mod blocks;
 pub mod bridge;
 pub mod common;
 pub mod config;
@@ -35,7 +36,7 @@ pub use context::{CapabilityInfo, Context, RuntimeContext};
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 pub use helpers::{
     err_bad_request, err_conflict, err_forbidden, err_internal, err_not_found, err_unauthorized,
-    err_validation, error, json_respond, new_response, respond, ResponseBuilder,
+    err_validation, error, json_respond, new_response, respond, sha256_hex, ResponseBuilder,
 };
 pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};

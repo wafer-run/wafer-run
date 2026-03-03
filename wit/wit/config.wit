@@ -1,9 +1,0 @@
-/// Host-imported key-value configuration service.
-
-interface config {
-    /// Retrieve a configuration value by key.
-    get: func(key: string) -> option<string>;
-
-    /// Store a configuration key-value pair.
-    set: func(key: string, value: string);
-}

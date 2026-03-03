@@ -4,37 +4,88 @@ ACTIVE: services
 -->
 
 <h2>Services</h2>
-<p>Blocks access built-in services through the <code>Context</code>:</p>
+<p>Services provide platform capabilities to blocks. Native blocks access services through <code>ctx.services()</code>. WASM blocks use typed clients from the SDK (e.g. <code>DatabaseClient::new(ctx)</code>). See the <a href="/docs/api-reference">API Reference</a> for the full method listing.</p>
 
 <h3>Database</h3>
-<p>CRUD operations with filtering and pagination:</p>
-<pre><code>let db = ctx.service("database");
+<p>CRUD operations on collections with filtering, pagination, and raw SQL:</p>
+<pre><code>let db = ctx.services().unwrap().database();
 
 // Create
-db.create("users", &json!({"name": "Alice", "role": "admin"}))?;
+let record = db.create("users", &amp;json!({"name": "Alice", "role": "admin"}))?;
 
 // Read
 let user = db.get("users", "user-id-123")?;
 
-// List with filtering
+// List with filtering and pagination
 let opts = ListOptions {
     filter: Some(json!({"role": "admin"})),
     page: 1,
     page_size: 20,
     sort_by: Some("name".into()),
 };
-let users = db.list("users", &opts)?;</code></pre>
+let users = db.list("users", &amp;opts)?;
+
+// Aggregation
+let count = db.count("users", &amp;json!({"role": "admin"}))?;
+
+// Raw SQL (for complex queries)
+let results = db.query_raw("SELECT * FROM users WHERE role = ?", &amp;["admin"])?;</code></pre>
 
 <h3>Storage</h3>
-<p>Binary object storage (files, images, etc.):</p>
-<pre><code>let store = ctx.service("storage");
-store.put("avatars/alice.png", &bytes)?;
-let data = store.get("avatars/alice.png")?;
-let files = store.list("avatars/")?;</code></pre>
+<p>Binary object storage organized into folders:</p>
+<pre><code>let store = ctx.services().unwrap().storage();
 
-<h3>Other Services</h3>
-<ul>
-    <li><code>Crypto</code> — hashing, token generation, encryption</li>
-    <li><code>Config</code> — read configuration values</li>
-    <li><code>Network</code> — make outbound HTTP requests</li>
-</ul>
+// Create a folder
+store.create_folder("avatars", true)?;  // true = public
+
+// Upload
+store.put("avatars", "alice.png", &amp;bytes, "image/png")?;
+
+// Download
+let (data, info) = store.get("avatars", "alice.png")?;
+
+// List objects in a folder
+let files = store.list("avatars", &amp;opts)?;
+
+// Manage folders
+let folders = store.list_folders()?;</code></pre>
+
+<h3>Crypto</h3>
+<p>Password hashing and JWT token management:</p>
+<pre><code>let crypto = ctx.services().unwrap().crypto();
+
+// Password hashing (bcrypt)
+let hash = crypto.hash("my-password")?;
+crypto.compare_hash("my-password", &amp;hash)?;
+
+// JWT tokens
+let token = crypto.sign(&amp;claims, 3600)?;  // 1 hour expiry
+let decoded = crypto.verify(&amp;token)?;
+
+// Random bytes
+let bytes = crypto.random_bytes(32)?;</code></pre>
+
+<h3>Network</h3>
+<p>Make outbound HTTP requests from blocks:</p>
+<pre><code>let net = ctx.services().unwrap().network();
+
+let response = net.do_request(HttpRequest {
+    method: "GET".into(),
+    url: "https://api.example.com/data".into(),
+    headers: vec![("Authorization".into(), "Bearer token".into())],
+    body: Vec::new(),
+})?;</code></pre>
+
+<h3>Logger</h3>
+<p>Structured logging with optional key-value fields:</p>
+<pre><code>let logger = ctx.services().unwrap().logger();
+
+logger.info("Request processed", &amp;[("user_id", "123"), ("duration_ms", "42")])?;
+logger.error("Failed to connect", &amp;[("service", "database")])?;</code></pre>
+
+<h3>Config</h3>
+<p>Read and write configuration key-value pairs:</p>
+<pre><code>let config = ctx.services().unwrap().config();
+
+let val = config.get("api_key")?;
+config.set("last_sync", "2025-01-01T00:00:00Z")?;</code></pre>

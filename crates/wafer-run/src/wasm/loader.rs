@@ -333,6 +333,18 @@ unsafe impl Send for ContextWrapper {}
 unsafe impl Sync for ContextWrapper {}
 
 impl Context for ContextWrapper {
+    fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+        unsafe { &*self.0 }.call_block(block_name, msg)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unsafe { &*self.0 }.is_cancelled()
+    }
+
+    fn config_get(&self, key: &str) -> Option<&str> {
+        unsafe { &*self.0 }.config_get(key)
+    }
+
     fn send(&self, msg: &Message) -> Result_ {
         unsafe { &*self.0 }.send(msg)
     }
@@ -341,20 +353,12 @@ impl Context for ContextWrapper {
         unsafe { &*self.0 }.capabilities()
     }
 
-    fn is_cancelled(&self) -> bool {
-        unsafe { &*self.0 }.is_cancelled()
-    }
-
     fn service(&self, name: &str) -> Option<&dyn std::any::Any> {
         unsafe { &*self.0 }.service(name)
     }
 
     fn services(&self) -> Option<&crate::services::Services> {
         unsafe { &*self.0 }.services()
-    }
-
-    fn config_get(&self, key: &str) -> Option<&str> {
-        unsafe { &*self.0 }.config_get(key)
     }
 }
 

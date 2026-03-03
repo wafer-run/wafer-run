@@ -8,23 +8,37 @@ ACTIVE: core-concepts
 <h3>Messages</h3>
 <p>Every request becomes a <code>Message</code> with three fields:</p>
 <ul>
-    <li><code>kind</code> — the message type (e.g. <code>"action"</code>, <code>"event"</code>)</li>
-    <li><code>data</code> — the payload (JSON value)</li>
-    <li><code>meta</code> — a key-value map of metadata (headers, path params, etc.)</li>
+    <li><code>kind</code> — the message type (e.g. <code>"GET:/api/users"</code>)</li>
+    <li><code>data</code> — the payload (raw bytes, typically JSON)</li>
+    <li><code>meta</code> — a key-value map of metadata (headers, path params, action, etc.)</li>
 </ul>
 <p>Helper methods on <code>Message</code>:</p>
 <ul>
-    <li><code>action(kind, data)</code> — create an action message</li>
-    <li><code>path()</code> — read <code>meta["http.path"]</code></li>
-    <li><code>cont(msg)</code> — continue with a modified message</li>
-    <li><code>respond(msg, status, body)</code> — send a response</li>
+    <li><code>path()</code> — read the request path from meta</li>
+    <li><code>action()</code> — read the semantic action (retrieve, create, update, delete)</li>
+    <li><code>var(name)</code> — read a path parameter (e.g. <code>{id}</code>)</li>
+    <li><code>query(name)</code> — read a query parameter</li>
+    <li><code>cont()</code> — continue to the next block</li>
+    <li><code>respond(response)</code> — short-circuit with a response</li>
 </ul>
 
 <h3>Blocks</h3>
-<p>A <strong>Block</strong> is any struct that implements the <code>Block</code> trait. Blocks are the fundamental unit of logic — they receive a message, do work, and return a result.</p>
+<p>A <strong>Block</strong> is any struct that implements the <code>Block</code> trait. Blocks are the fundamental unit of logic — they receive a message, do work, and return a result. Blocks can be native Rust code compiled into the binary, or WASM modules loaded at runtime.</p>
+
+<h3>Context</h3>
+<p>The <code>Context</code> is passed to every block's <code>handle()</code> method. It provides:</p>
+<ul>
+    <li><code>call_block(name, msg)</code> — call another block by name</li>
+    <li><code>config_get(key)</code> — read a configuration value</li>
+    <li><code>is_cancelled()</code> — check if the request has timed out or been cancelled</li>
+    <li><code>services()</code> — access platform services (database, storage, crypto, etc.)</li>
+</ul>
 
 <h3>Chains</h3>
 <p>Chains are trees of blocks. When a message arrives, it flows through the tree. Each node can match on the message (by HTTP method, path, etc.) and route to child blocks. Chains are defined in JSON and loaded at startup.</p>
+
+<h3>Interfaces</h3>
+<p>Interfaces are reusable JSON Schema type definitions that blocks can reference for their input/output contracts. Instead of repeating the same type definition across multiple blocks, define it once as an <code>.interface.json</code> package and reference it by name. Interfaces are opt-in — inline JSON Schema still works for simple cases. See <a href="/docs/registry">Publishing an Interface</a> and the <a href="/docs/cli">CLI docs</a> for <code>wafer types add</code>.</p>
 
 <h3>Actions</h3>
 <p>Each block returns one of four actions:</p>

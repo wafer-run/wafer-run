@@ -61,9 +61,9 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
 
 <div class="lang-tabs">
     <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('as')">
-            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
-            AssemblyScript
+        <button class="tab active" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
         </button>
         <button class="tab" onclick="switchTab('go')">
             <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
@@ -74,8 +74,8 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
             Rust
         </button>
     </div>
-    <div class="tab-panel" data-lang="as">
-<pre><code>wafer block greet --lang assemblyscript</code></pre>
+    <div class="tab-panel" data-lang="ts">
+<pre><code>wafer block greet --lang typescript</code></pre>
     </div>
     <div class="tab-panel" data-lang="go" style="display:none">
 <pre><code>wafer block greet --lang go</code></pre>
@@ -91,9 +91,9 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
 
 <div class="lang-tabs">
     <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('as')">
-            <svg viewBox="0 0 24 24" fill="#007AAC"><use href="#icon-as"/></svg>
-            AssemblyScript
+        <button class="tab active" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
         </button>
         <button class="tab" onclick="switchTab('go')">
             <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
@@ -104,13 +104,13 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
             Rust
         </button>
     </div>
-    <div class="tab-panel" data-lang="as">
+    <div class="tab-panel" data-lang="ts">
 <pre><code>// blocks/greet/index.ts
-import { Block, BlockInfo, Context, Message, Result, export } from "wafer-sdk-as/assembly";
+import { Block, BlockInfo, Context, Message, Result, register } from "wafer-sdk-ts";
 
 class GreetBlock extends Block {
     info(): BlockInfo {
-        return new BlockInfo("greet", "1.0.0", "handler@v1", "Returns a greeting");
+        return { name: "greet", version: "1.0.0", interface: "handler@v1", summary: "Returns a greeting" };
     }
 
     handle(ctx: Context, msg: Message): Result {
@@ -118,7 +118,7 @@ class GreetBlock extends Block {
     }
 }
 
-export(new GreetBlock());</code></pre>
+register(new GreetBlock());</code></pre>
     </div>
     <div class="tab-panel" data-lang="go" style="display:none">
 <pre><code>// blocks/greet/index.go
@@ -196,5 +196,17 @@ wafer_sdk::export!(GreetBlock);</code></pre>
     { "name": "main", "source": "chains/main.json" }
   ]
 }</code></pre>
+
+<h3>Interface References</h3>
+<p>A block's <code>input</code> and <code>output</code> fields in <code>block.json</code> accept either an inline JSON Schema object or a string reference to an <a href="/docs/registry">interface package</a>:</p>
+<pre><code>{
+  "actions": {
+    "POST:/api/data": {
+      "input": "github.com/wafer-run/interfaces/http-request@v1.0.0",
+      "output": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+    }
+  }
+}</code></pre>
+<p>Use <code>wafer types add</code> to fetch interface packages locally. See the <a href="/docs/cli">CLI docs</a> for details.</p>
 
 <p>See <a href="/docs/running-a-block">Running a Block</a> to load your <code>.wasm</code> into a runtime and serve it over HTTP.</p>

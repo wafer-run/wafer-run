@@ -1,7 +1,8 @@
-//! Service clients using WIT-generated imports.
+//! Service clients that call infrastructure blocks via `call-block`.
 //!
-//! Each module provides typed functions that call directly into the host via
-//! the WebAssembly Component Model — no manual serialization needed.
+//! Each module provides typed functions that build a message, call the
+//! corresponding infrastructure block (e.g. `wafer/database`), and parse
+//! the result back into ergonomic Rust types.
 
 pub mod config;
 pub mod crypto;

@@ -9,6 +9,16 @@ type Message struct {
 	Meta map[string]string
 }
 
+// NewMessage creates a new Message with the given kind and data payload.
+// Meta is initialized to an empty map.
+func NewMessage(kind string, data []byte) *Message {
+	return &Message{
+		Kind: kind,
+		Data: data,
+		Meta: make(map[string]string),
+	}
+}
+
 // GetMeta returns the metadata value for the given key, or "" if absent.
 func (m *Message) GetMeta(key string) string {
 	if m.Meta == nil {

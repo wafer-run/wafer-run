@@ -1,0 +1,82 @@
+<!--
+TITLE: Guest SDK API — wafer.run docs
+ACTIVE: api-sdk
+EXTRA_STYLES_INLINE:
+        .docs-content h4 { margin-top: 1rem; margin-bottom: 0.25rem; color: #4b5563; font-size: 1rem; }
+        .docs-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+        .docs-content th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); color: var(--text); font-weight: 600; }
+        .docs-content td { padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .docs-content td code { font-size: 0.85em; }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>Guest SDK</h2>
+<p>The SDK is available for Rust (<code>wafer-sdk</code>), Go (<code>wafer-sdk-go</code>), and TypeScript (<code>wafer-sdk-ts</code>). WASM blocks implement the same Block interface and use typed service clients to access <a href="/docs/api-services">platform services</a>.</p>
+
+<h3>Block Trait (SDK)</h3>
+<p>Same interface as the runtime — implement these three methods:</p>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>info() &rarr; BlockInfo</code></td><td>Return block metadata</td></tr>
+    <tr><td><code>handle(ctx, msg) &rarr; Result_</code></td><td>Process a message</td></tr>
+    <tr><td><code>lifecycle(ctx, event) &rarr; Result</code></td><td>Handle lifecycle events (optional, default no-op)</td></tr>
+</table>
+<p>Export your block with <code>wafer_sdk::export!(MyBlock)</code> (Rust), <code>wafer.Export(&amp;MyBlock{})</code> (Go), or <code>register(new MyBlock())</code> (TypeScript).</p>
+
+<h3>DatabaseClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>DatabaseClient::new(ctx)</code></td><td>Create a database client</td></tr>
+    <tr><td><code>get(collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
+    <tr><td><code>list(collection, opts) &rarr; RecordList</code></td><td>List records with filtering</td></tr>
+    <tr><td><code>create(collection, data) &rarr; Record</code></td><td>Create a record</td></tr>
+    <tr><td><code>update(collection, id, data) &rarr; Record</code></td><td>Update a record</td></tr>
+    <tr><td><code>delete(collection, id)</code></td><td>Delete a record</td></tr>
+</table>
+
+<h3>StorageClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>StorageClient::new(ctx)</code></td><td>Create a storage client</td></tr>
+    <tr><td><code>put(bucket, key, data, content_type)</code></td><td>Upload an object</td></tr>
+    <tr><td><code>get(bucket, key) &rarr; Object</code></td><td>Download an object</td></tr>
+    <tr><td><code>delete(bucket, key)</code></td><td>Delete an object</td></tr>
+</table>
+
+<h3>CryptoClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>CryptoClient::new(ctx)</code></td><td>Create a crypto client</td></tr>
+    <tr><td><code>hash(password) &rarr; String</code></td><td>Hash a password</td></tr>
+    <tr><td><code>compare_hash(password, hash)</code></td><td>Verify a password hash</td></tr>
+    <tr><td><code>sign(claims, expiry_secs) &rarr; String</code></td><td>Create a signed JWT</td></tr>
+    <tr><td><code>verify(token) &rarr; HashMap</code></td><td>Verify and decode a JWT</td></tr>
+</table>
+
+<h3>NetworkClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>NetworkClient::new(ctx)</code></td><td>Create a network client</td></tr>
+    <tr><td><code>do_request(req) &rarr; Response</code></td><td>Make an HTTP request</td></tr>
+    <tr><td><code>get(url) &rarr; Response</code></td><td>GET shorthand</td></tr>
+    <tr><td><code>post_json(url, body) &rarr; Response</code></td><td>POST JSON shorthand</td></tr>
+</table>
+
+<h3>LoggerClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>LoggerClient::new(ctx)</code></td><td>Create a logger client</td></tr>
+    <tr><td><code>debug(message) / debug_with(message, fields)</code></td><td>Log at debug level</td></tr>
+    <tr><td><code>info(message) / info_with(message, fields)</code></td><td>Log at info level</td></tr>
+    <tr><td><code>warn(message) / warn_with(message, fields)</code></td><td>Log at warn level</td></tr>
+    <tr><td><code>error(message) / error_with(message, fields)</code></td><td>Log at error level</td></tr>
+</table>
+
+<h3>ConfigClient</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>ConfigClient::new(ctx)</code></td><td>Create a config client</td></tr>
+    <tr><td><code>get(key) &rarr; Option&lt;String&gt;</code></td><td>Read a config value</td></tr>
+    <tr><td><code>get_default(key, default_value) &rarr; String</code></td><td>Read with a default fallback</td></tr>
+    <tr><td><code>set(key, value)</code></td><td>Write a config value</td></tr>
+</table>

@@ -33,10 +33,16 @@ export interface ChainEntry {
   source: string;
 }
 
+export interface InterfaceEntry {
+  ref: string;
+  local?: string;
+}
+
 export interface WaferConfig {
   name: string;
   version: string;
   blocks: BlockEntry[];
   chains: ChainEntry[];
+  interfaces?: InterfaceEntry[];
   publish?: PublishConfig;
 }

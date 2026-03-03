@@ -1,0 +1,72 @@
+<!--
+TITLE: Platform Services API — wafer.run docs
+ACTIVE: api-services
+EXTRA_STYLES_INLINE:
+        .docs-content h4 { margin-top: 1rem; margin-bottom: 0.25rem; color: #4b5563; font-size: 1rem; }
+        .docs-content table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; font-size: 0.9rem; }
+        .docs-content th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); color: var(--text); font-weight: 600; }
+        .docs-content td { padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .docs-content td code { font-size: 0.85em; }
+END_EXTRA_STYLES_INLINE
+-->
+
+<h2>Platform Services</h2>
+<p>Services available through <code>Context</code> in native blocks. WASM blocks access these via typed clients in the <a href="/docs/api-sdk">Guest SDK</a>.</p>
+
+<h3>DatabaseService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>get(collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
+    <tr><td><code>list(collection, opts) &rarr; RecordList</code></td><td>List records with filtering and pagination</td></tr>
+    <tr><td><code>create(collection, data) &rarr; Record</code></td><td>Create a new record</td></tr>
+    <tr><td><code>update(collection, id, data) &rarr; Record</code></td><td>Update an existing record</td></tr>
+    <tr><td><code>delete(collection, id)</code></td><td>Delete a record</td></tr>
+    <tr><td><code>count(collection, filters) &rarr; i64</code></td><td>Count matching records</td></tr>
+    <tr><td><code>sum(collection, field, filters) &rarr; f64</code></td><td>Sum a numeric field</td></tr>
+    <tr><td><code>query_raw(query, args) &rarr; Vec&lt;Record&gt;</code></td><td>Execute a raw SQL query</td></tr>
+    <tr><td><code>exec_raw(query, args) &rarr; i64</code></td><td>Execute a raw SQL statement</td></tr>
+</table>
+
+<h3>StorageService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>put(folder, key, data, content_type)</code></td><td>Upload an object</td></tr>
+    <tr><td><code>get(folder, key) &rarr; (bytes, ObjectInfo)</code></td><td>Download an object</td></tr>
+    <tr><td><code>delete(folder, key)</code></td><td>Delete an object</td></tr>
+    <tr><td><code>list(folder, opts) &rarr; ObjectList</code></td><td>List objects in a folder</td></tr>
+    <tr><td><code>create_folder(name, public)</code></td><td>Create a storage folder</td></tr>
+    <tr><td><code>delete_folder(name)</code></td><td>Delete a storage folder</td></tr>
+    <tr><td><code>list_folders() &rarr; Vec&lt;FolderInfo&gt;</code></td><td>List all folders</td></tr>
+</table>
+
+<h3>CryptoService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>hash(password) &rarr; String</code></td><td>Hash a password (bcrypt)</td></tr>
+    <tr><td><code>compare_hash(password, hash)</code></td><td>Verify a password against a hash</td></tr>
+    <tr><td><code>sign(claims, expiry) &rarr; String</code></td><td>Create a signed JWT token</td></tr>
+    <tr><td><code>verify(token) &rarr; HashMap</code></td><td>Verify and decode a JWT token</td></tr>
+    <tr><td><code>random_bytes(n) &rarr; Vec&lt;u8&gt;</code></td><td>Generate random bytes</td></tr>
+</table>
+
+<h3>NetworkService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>do_request(req) &rarr; Response</code></td><td>Make an outbound HTTP request</td></tr>
+</table>
+
+<h3>LoggerService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>debug(msg, fields)</code></td><td>Log at debug level</td></tr>
+    <tr><td><code>info(msg, fields)</code></td><td>Log at info level</td></tr>
+    <tr><td><code>warn(msg, fields)</code></td><td>Log at warn level</td></tr>
+    <tr><td><code>error(msg, fields)</code></td><td>Log at error level</td></tr>
+</table>
+
+<h3>ConfigService</h3>
+<table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>get(key) &rarr; Option&lt;String&gt;</code></td><td>Read a config value</td></tr>
+    <tr><td><code>set(key, value)</code></td><td>Write a config value</td></tr>
+</table>

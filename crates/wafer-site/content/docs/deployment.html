@@ -4,7 +4,13 @@ ACTIVE: deployment
 -->
 
 <h2>Deployment</h2>
-<p>wafer compiles to a single binary with all blocks, chains, and static assets embedded.</p>
+<p>wafer compiles to a single binary with all native blocks, chains, and static assets embedded. WASM blocks and interface definitions are loaded at startup from files or the registry.</p>
+
+<h3>Environment Variables</h3>
+<ul>
+    <li><code>PORT</code> — HTTP listen port (default: <code>8090</code>)</li>
+    <li><code>RUST_LOG</code> — log level filter (e.g. <code>wafer=info</code>, <code>wafer=debug</code>)</li>
+</ul>
 
 <h3>Local</h3>
 <pre><code>cargo build --release
@@ -24,3 +30,22 @@ CMD ["my-app"]</code></pre>
 
 <h3>Fly.io / Railway</h3>
 <p>Set the <code>PORT</code> environment variable (both platforms inject it automatically) and deploy the binary. No additional configuration needed — wafer reads <code>PORT</code> at startup and binds to <code>0.0.0.0:$PORT</code>.</p>
+
+<h3>Health Checks</h3>
+<p>Add a health check endpoint to your chain for load balancers and orchestrators:</p>
+<pre><code>w.register_block_func("health", |_ctx, msg| {
+    json_respond(msg.clone(), 200, &amp;serde_json::json!({"status": "ok"}))
+});</code></pre>
+<p>Or use the built-in monitoring block which exposes <code>/_stats</code> automatically.</p>
+
+<h3>Infrastructure Chains</h3>
+<p>For production deployments, use the <a href="/docs/built-in-blocks">pre-built chains</a> to add security headers, CORS, rate limiting, and monitoring in one line:</p>
+<pre><code>{
+    "id": "api",
+    "root": {
+        "chain": "auth-pipe",
+        "next": [
+            { "match": "*:/api/**", "block": "my-api" }
+        ]
+    }
+}</code></pre>

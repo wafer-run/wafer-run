@@ -2,18 +2,14 @@ use crate::schema::types::*;
 use super::types::*;
 
 /// Convert a block manifest's database collections to schema Table definitions.
+/// Reads from top-level `collections` first, falling back to legacy `services.database.collections`.
 pub fn to_schema_tables(m: &BlockManifest) -> Vec<Table> {
-    let services = match &m.services {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let database = match &services.database {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
+    let collections = m.all_collections();
+    if collections.is_empty() {
+        return Vec::new();
+    }
 
-    database
-        .collections
+    collections
         .iter()
         .map(|(name, coll)| collection_to_table(name, coll))
         .collect()
