@@ -1,5 +1,15 @@
+use std::collections::HashMap;
+
 use crate::schema::types::*;
 use super::types::*;
+
+/// Convert a map of collection definitions directly to schema Table definitions.
+pub fn collections_to_tables(collections: &HashMap<String, CollectionDef>) -> Vec<Table> {
+    collections
+        .iter()
+        .map(|(name, coll)| collection_to_table(name, coll))
+        .collect()
+}
 
 /// Convert a block manifest's database collections to schema Table definitions.
 /// Reads from top-level `collections` first, falling back to legacy `services.database.collections`.
@@ -9,10 +19,7 @@ pub fn to_schema_tables(m: &BlockManifest) -> Vec<Table> {
         return Vec::new();
     }
 
-    collections
-        .iter()
-        .map(|(name, coll)| collection_to_table(name, coll))
-        .collect()
+    collections_to_tables(&collections)
 }
 
 fn collection_to_table(name: &str, coll: &CollectionDef) -> Table {

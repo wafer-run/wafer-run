@@ -3,7 +3,6 @@ use wafer_run::*;
 
 mod playground;
 mod registry;
-mod services;
 
 #[tokio::main]
 async fn main() {
@@ -20,9 +19,10 @@ async fn main() {
     // Create WAFER runtime
     let mut w = Wafer::new();
 
-    // Register platform services (database + network)
-    let platform_services = services::build_platform_services();
-    w.register_platform_services(platform_services);
+    // Configure infrastructure blocks
+    w.add_block_config("wafer/database", serde_json::json!({"type": "sqlite", "path": "data/wafer-site.db"}));
+    w.add_block_config("wafer/network", serde_json::json!({}));
+    w.add_block_config("wafer/logger", serde_json::json!({}));
 
     // Register wafer-core blocks
     wafer_core::register_all(&mut w);

@@ -344,22 +344,6 @@ impl Context for ContextWrapper {
     fn config_get(&self, key: &str) -> Option<&str> {
         unsafe { &*self.0 }.config_get(key)
     }
-
-    fn send(&self, msg: &Message) -> Result_ {
-        unsafe { &*self.0 }.send(msg)
-    }
-
-    fn capabilities(&self) -> Vec<crate::context::CapabilityInfo> {
-        unsafe { &*self.0 }.capabilities()
-    }
-
-    fn service(&self, name: &str) -> Option<&dyn std::any::Any> {
-        unsafe { &*self.0 }.service(name)
-    }
-
-    fn services(&self) -> Option<&crate::services::Services> {
-        unsafe { &*self.0 }.services()
-    }
 }
 
 impl From<ContextWrapper> for Arc<dyn Context> {

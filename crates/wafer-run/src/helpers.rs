@@ -1,42 +1,7 @@
 use crate::common::ErrorCode;
-use crate::context::Context;
 use crate::meta::*;
 use crate::types::*;
 use std::collections::HashMap;
-
-/// Log sends a log message through the context.
-pub fn log(ctx: &dyn Context, level: &str, message: &str) {
-    let msg = Message {
-        kind: "log".to_string(),
-        meta: {
-            let mut m = HashMap::new();
-            m.insert("level".to_string(), level.to_string());
-            m
-        },
-        data: message.as_bytes().to_vec(),
-    };
-    ctx.send(&msg);
-}
-
-/// ConfigGet retrieves a configuration value through the context.
-pub fn config_get(ctx: &dyn Context, key: &str) -> Option<String> {
-    let msg = Message {
-        kind: "config.get".to_string(),
-        meta: {
-            let mut m = HashMap::new();
-            m.insert("key".to_string(), key.to_string());
-            m
-        },
-        data: Vec::new(),
-    };
-    let result = ctx.send(&msg);
-    if result.action == Action::Error || result.response.is_none() {
-        return None;
-    }
-    result
-        .response
-        .map(|r| String::from_utf8_lossy(&r.data).to_string())
-}
 
 /// Respond returns a Result with a response body and status code.
 pub fn respond(msg: Message, status: u16, data: Vec<u8>, content_type: &str) -> Result_ {
@@ -276,4 +241,49 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 /// Convenience function to create a new ResponseBuilder.
 pub fn new_response(msg: Message, status: u16) -> ResponseBuilder {
     ResponseBuilder::new(msg, status)
+}
+
+/// Expand environment variables in the format $VAR or ${VAR}.
+pub fn expand_env_vars(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            if chars.peek() == Some(&'{') {
+                chars.next(); // consume '{'
+                let mut var_name = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc == '}' {
+                        chars.next();
+                        break;
+                    }
+                    var_name.push(nc);
+                    chars.next();
+                }
+                if let Ok(val) = std::env::var(&var_name) {
+                    result.push_str(&val);
+                }
+            } else {
+                let mut var_name = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_alphanumeric() || nc == '_' {
+                        var_name.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if !var_name.is_empty() {
+                    if let Ok(val) = std::env::var(&var_name) {
+                        result.push_str(&val);
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }

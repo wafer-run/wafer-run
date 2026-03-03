@@ -8,9 +8,9 @@ use crate::block::Block;
 use crate::config::*;
 use crate::context::RuntimeContext;
 use crate::executor::{matches_pattern, extract_path_vars};
+use crate::helpers::expand_env_vars;
 use crate::observability::{ObservabilityBus, ObservabilityContext};
 use crate::registry::{Registry, StructBlockFactory};
-use crate::services::Services;
 use crate::types::*;
 
 /// A parsed reference to a remote block on GitHub, e.g.
@@ -95,8 +95,8 @@ pub struct Wafer {
     pub(crate) registry: Registry,
     pub(crate) chains: HashMap<String, Chain>,
     pub(crate) resolved: HashMap<String, Arc<dyn Block>>,
-    pub(crate) named_services: Arc<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>,
-    pub(crate) platform_services: Option<Arc<Services>>,
+    /// Block configurations loaded from blocks.json (name → config JSON).
+    pub(crate) block_configs: HashMap<String, serde_json::Value>,
     /// All registered blocks (infrastructure + application), shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
@@ -107,13 +107,18 @@ pub struct Wafer {
 
 impl Wafer {
     /// Create a new Wafer runtime.
+    ///
+    /// Block factories are no longer auto-registered here. Call
+    /// `wafer_core::register_all(&mut wafer)` to register infrastructure
+    /// and application blocks.
     pub fn new() -> Self {
+        let registry = Registry::new();
+
         Self {
-            registry: Registry::new(),
+            registry,
             chains: HashMap::new(),
             resolved: HashMap::new(),
-            named_services: Arc::new(HashMap::new()),
-            platform_services: None,
+            block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
             hooks: ObservabilityBus::new(),
             #[cfg(feature = "wasm")]
@@ -141,21 +146,38 @@ impl Wafer {
         &self.registry
     }
 
-    /// RegisterService registers a named service accessible to blocks.
-    pub fn register_service(&mut self, name: impl Into<String>, svc: Box<dyn std::any::Any + Send + Sync>) {
-        Arc::get_mut(&mut self.named_services)
-            .expect("cannot register service after cloning named_services")
-            .insert(name.into(), svc);
+    /// Load block configurations from a JSON file.
+    ///
+    /// The file should be a JSON object mapping block names to config objects.
+    /// Environment variables in `${VAR}` format are expanded before parsing.
+    ///
+    /// Example:
+    /// ```json
+    /// {
+    ///     "wafer/database": { "type": "sqlite", "path": "data/app.db" },
+    ///     "wafer/crypto": { "jwt_secret": "${JWT_SECRET}" },
+    ///     "wafer/logger": {}
+    /// }
+    /// ```
+    pub fn load_blocks_json(&mut self, path: &str) -> Result<(), String> {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("read blocks.json {}: {}", path, e))?;
+
+        let expanded = expand_env_vars(&data);
+
+        let map: HashMap<String, serde_json::Value> = serde_json::from_str(&expanded)
+            .map_err(|e| format!("parse blocks.json: {}", e))?;
+
+        for (name, config) in map {
+            self.block_configs.insert(name, config);
+        }
+
+        Ok(())
     }
 
-    /// Service returns a registered service by name.
-    pub fn service(&self, name: &str) -> Option<&(dyn std::any::Any + Send + Sync)> {
-        self.named_services.get(name).map(|s| s.as_ref())
-    }
-
-    /// RegisterPlatformServices sets the typed platform services.
-    pub fn register_platform_services(&mut self, svc: Services) {
-        self.platform_services = Some(Arc::new(svc));
+    /// Add a block configuration programmatically.
+    pub fn add_block_config(&mut self, name: impl Into<String>, config: serde_json::Value) {
+        self.block_configs.insert(name.into(), config);
     }
 
     /// HasBlock returns true if a block with the given type name is registered.
@@ -194,8 +216,94 @@ impl Wafer {
         self.add_chain(chain);
     }
 
+    /// Gather `"uses"` contributions from all block configs and deep-merge them
+    /// into the target infrastructure block configs.
+    ///
+    /// For each block config that has a `"uses"` key (a JSON object mapping
+    /// target block names to contribution objects), the contribution is
+    /// deep-merged into the target block's config. Deep-merge rules:
+    /// - For JSON objects, keys are combined recursively.
+    /// - For non-object values, the target block's own value wins (dependents
+    ///   can contribute new keys but not override the infra block's own config).
+    /// - If the target block has no config entry yet, one is created.
+    fn gather_uses_configs(&mut self) {
+        // Collect all (target, contribution) pairs first to avoid borrow conflicts.
+        let mut contributions: Vec<(String, serde_json::Value)> = Vec::new();
+
+        for config in self.block_configs.values() {
+            if let Some(uses) = config.get("uses").and_then(|v| v.as_object()) {
+                for (target, contrib) in uses {
+                    contributions.push((target.clone(), contrib.clone()));
+                }
+            }
+        }
+
+        for (target, contrib) in contributions {
+            let entry = self
+                .block_configs
+                .entry(target)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            deep_merge(entry, &contrib);
+        }
+
+        // Strip `uses` keys from all configs so downstream code doesn't see them.
+        for config in self.block_configs.values_mut() {
+            if let Some(obj) = config.as_object_mut() {
+                obj.remove("uses");
+            }
+        }
+    }
+
     /// Resolve walks all chain trees and resolves block references.
+    ///
+    /// Before resolving chains, creates block instances from `block_configs`
+    /// (loaded via `load_blocks_json` or `add_block_config`). Blocks that
+    /// are already in `resolved` (from explicit `register_block` calls) are
+    /// skipped.
     pub fn resolve(&mut self) -> Result<(), String> {
+        // Gather uses contributions before creating blocks
+        self.gather_uses_configs();
+
+        // Resolve blocks from block_configs
+        let configs: Vec<(String, serde_json::Value)> =
+            self.block_configs.drain().collect();
+
+        for (name, config) in configs {
+            if self.resolved.contains_key(&name) {
+                // Explicit register_block takes precedence
+                continue;
+            }
+            if let Some(factory) = self.registry.get(&name) {
+                let block = factory.create(Some(&config));
+
+                // Run lifecycle Init
+                let ctx = RuntimeContext {
+                    chain_id: String::new(),
+                    node_id: String::new(),
+                    config: HashMap::new(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    deadline: None,
+                    all_blocks: self.all_blocks_arc(),
+                    call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    max_call_depth: 16,
+                };
+
+                block
+                    .lifecycle(
+                        &ctx,
+                        LifecycleEvent {
+                            event_type: LifecycleType::Init,
+                            data: serde_json::to_vec(&config).unwrap_or_default(),
+                        },
+                    )
+                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+
+                self.resolved.insert(name.clone(), block);
+            } else {
+                tracing::warn!(block = %name, "block config present but no factory registered — skipping");
+            }
+        }
+
         let chain_ids: Vec<String> = self.chains.keys().cloned().collect();
         for chain_id in chain_ids {
             // Take chain out temporarily
@@ -225,8 +333,6 @@ impl Wafer {
                     config: node.config_map.clone(),
                     cancelled: Arc::new(AtomicBool::new(false)),
                     deadline: None,
-                    named_services: self.named_services.clone(),
-                    platform_services: self.platform_services.clone(),
                     all_blocks: self.all_blocks_arc(),
                     call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                     max_call_depth: 16,
@@ -266,8 +372,6 @@ impl Wafer {
                         config: node.config_map.clone(),
                         cancelled: Arc::new(AtomicBool::new(false)),
                         deadline: None,
-                        named_services: self.named_services.clone(),
-                        platform_services: self.platform_services.clone(),
                         all_blocks: self.all_blocks_arc(),
                         call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                         max_call_depth: 16,
@@ -307,48 +411,35 @@ impl Wafer {
     /// `https://github.com/{owner}/{repo}/releases/download/{version}/{repo}.wasm`
     #[cfg(feature = "wasm")]
     fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
-        use crate::services::network;
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
-
-        let services = self
-            .platform_services
-            .as_ref()
-            .ok_or("cannot download remote block: platform services not configured")?;
-        let net = services
-            .network
-            .as_ref()
-            .ok_or("cannot download remote block: network service not available")?;
 
         let url = format!(
             "https://github.com/{}/{}/releases/download/{}/{}.wasm",
             r.owner, r.repo, r.version, r.repo
         );
 
-        let req = network::Request {
-            method: "GET".to_string(),
-            url: url.clone(),
-            headers: std::collections::HashMap::new(),
-            body: None,
-        };
-
-        let resp = net
-            .do_request(&req)
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(&url)
+            .send()
             .map_err(|e| format!("failed to download {}: {}", url, e))?;
 
-        if resp.status_code != 200 {
-            return Err(format!(
-                "failed to download {}: HTTP {}",
-                url, resp.status_code
-            ));
+        let status = resp.status().as_u16();
+        if status != 200 {
+            return Err(format!("failed to download {}: HTTP {}", url, status));
         }
 
-        if resp.body.is_empty() {
+        let body = resp
+            .bytes()
+            .map_err(|e| format!("failed to read body from {}: {}", url, e))?;
+
+        if body.is_empty() {
             return Err(format!("failed to download {}: empty response body", url));
         }
 
         let engine = self.wasm_engine().clone();
-        let block = WASMBlock::load_with_engine(&engine, &resp.body, BlockCapabilities::none())
+        let block = WASMBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
             .map_err(|e| format!("failed to load remote block {}: {}", url, e))?;
 
         Ok(Arc::new(block))
@@ -361,20 +452,10 @@ impl Wafer {
         &mut self,
         r: &UnversionedRemoteBlockRef,
     ) -> Result<Arc<dyn Block>, String> {
-        use crate::services::network;
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
 
-        // Clone the Arc so we don't hold a borrow on `self` across
-        // the later `self.wasm_engine()` call.
-        let services = self
-            .platform_services
-            .clone()
-            .ok_or("cannot download remote block: platform services not configured")?;
-        let net = services
-            .network
-            .as_ref()
-            .ok_or("cannot download remote block: network service not available")?;
+        let client = reqwest::blocking::Client::new();
 
         // 1. Fetch recent releases from the GitHub API
         let api_url = format!(
@@ -382,30 +463,24 @@ impl Wafer {
             r.owner, r.repo
         );
 
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("User-Agent".to_string(), "wafer-run/0.1.0".to_string());
-        headers.insert(
-            "Accept".to_string(),
-            "application/vnd.github+json".to_string(),
-        );
-
-        let api_req = network::Request {
-            method: "GET".to_string(),
-            url: api_url.clone(),
-            headers,
-            body: None,
-        };
-
-        let api_resp = net
-            .do_request(&api_req)
+        let api_resp = client
+            .get(&api_url)
+            .header("User-Agent", "wafer-run/0.1.0")
+            .header("Accept", "application/vnd.github+json")
+            .send()
             .map_err(|e| format!("failed to fetch releases for {}/{}: {}", r.owner, r.repo, e))?;
 
-        if api_resp.status_code != 200 {
+        let api_status = api_resp.status().as_u16();
+        if api_status != 200 {
             return Err(format!(
                 "failed to fetch releases for {}/{}: HTTP {}",
-                r.owner, r.repo, api_resp.status_code
+                r.owner, r.repo, api_status
             ));
         }
+
+        let api_body = api_resp
+            .bytes()
+            .map_err(|e| format!("failed to read releases response: {}", e))?;
 
         // 2. Parse the JSON response
         #[derive(serde::Deserialize)]
@@ -419,7 +494,7 @@ impl Wafer {
             assets: Vec<GhAsset>,
         }
 
-        let releases: Vec<GhRelease> = serde_json::from_slice(&api_resp.body)
+        let releases: Vec<GhRelease> = serde_json::from_slice(&api_body)
             .map_err(|e| format!("failed to parse releases JSON for {}/{}: {}", r.owner, r.repo, e))?;
 
         // 3. Find first release with a .wasm asset
@@ -444,25 +519,24 @@ impl Wafer {
         })?;
 
         // 4. Download the .wasm asset
-        let dl_req = network::Request {
-            method: "GET".to_string(),
-            url: wasm_url.clone(),
-            headers: std::collections::HashMap::new(),
-            body: None,
-        };
-
-        let dl_resp = net
-            .do_request(&dl_req)
+        let dl_resp = client
+            .get(&wasm_url)
+            .send()
             .map_err(|e| format!("failed to download {}: {}", wasm_url, e))?;
 
-        if dl_resp.status_code != 200 {
+        let dl_status = dl_resp.status().as_u16();
+        if dl_status != 200 {
             return Err(format!(
                 "failed to download {}: HTTP {}",
-                wasm_url, dl_resp.status_code
+                wasm_url, dl_status
             ));
         }
 
-        if dl_resp.body.is_empty() {
+        let dl_body = dl_resp
+            .bytes()
+            .map_err(|e| format!("failed to read body from {}: {}", wasm_url, e))?;
+
+        if dl_body.is_empty() {
             return Err(format!(
                 "failed to download {}: empty response body",
                 wasm_url
@@ -472,7 +546,7 @@ impl Wafer {
         // 5. Load via WASM engine
         let engine = self.wasm_engine().clone();
         let block =
-            WASMBlock::load_with_engine(&engine, &dl_resp.body, BlockCapabilities::none())
+            WASMBlock::load_with_engine(&engine, &dl_body, BlockCapabilities::none())
                 .map_err(|e| {
                     format!(
                         "failed to load remote block {}/{}: {}",
@@ -528,8 +602,6 @@ impl Wafer {
             config: HashMap::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: None,
-            named_services: self.named_services.clone(),
-            platform_services: self.platform_services.clone(),
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_call_depth: 16,
@@ -639,8 +711,6 @@ impl Wafer {
             config: node.config_map.clone(),
             cancelled: cancelled.clone(),
             deadline,
-            named_services: self.named_services.clone(),
-            platform_services: self.platform_services.clone(),
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_call_depth: 16,
@@ -839,5 +909,24 @@ impl Wafer {
 impl Default for Wafer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Deep-merge `src` into `dst`. For objects, keys are combined recursively.
+/// For non-object values, `dst`'s existing value wins (contributors cannot
+/// override the target block's own scalar values).
+fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    match (dst, src) {
+        (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
+            for (key, src_val) in src_map {
+                if let Some(dst_val) = dst_map.get_mut(key) {
+                    deep_merge(dst_val, src_val);
+                } else {
+                    dst_map.insert(key.clone(), src_val.clone());
+                }
+            }
+        }
+        // Non-object: dst wins, do nothing
+        _ => {}
     }
 }

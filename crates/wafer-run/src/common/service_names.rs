@@ -25,10 +25,14 @@ impl ServiceOp {
     pub const DATABASE_COUNT: &str = "database.count";
     pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
     pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
+    pub const DATABASE_SUM: &str = "database.sum";
     pub const STORAGE_PUT: &str = "storage.put";
     pub const STORAGE_GET: &str = "storage.get";
     pub const STORAGE_DELETE: &str = "storage.delete";
     pub const STORAGE_LIST: &str = "storage.list";
+    pub const STORAGE_CREATE_FOLDER: &str = "storage.create_folder";
+    pub const STORAGE_DELETE_FOLDER: &str = "storage.delete_folder";
+    pub const STORAGE_LIST_FOLDERS: &str = "storage.list_folders";
     pub const CRYPTO_HASH: &str = "crypto.hash";
     pub const CRYPTO_COMPARE_HASH: &str = "crypto.compare_hash";
     pub const CRYPTO_SIGN: &str = "crypto.sign";

@@ -26,9 +26,6 @@ END_EXTRA_STYLES_INLINE
     <tr><td><code>add_chain(chain)</code></td><td>Add a programmatic chain</td></tr>
     <tr><td><code>add_chain_def(def)</code></td><td>Add a chain from a JSON <code>ChainDef</code></td></tr>
     <tr><td><code>resolve()</code></td><td>Resolve all chain block references</td></tr>
-    <tr><td><code>register_service(name, svc)</code></td><td>Register a named service</td></tr>
-    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service by name</td></tr>
-    <tr><td><code>register_platform_services(svc)</code></td><td>Set platform-level services (database, storage, etc.)</td></tr>
     <tr><td><code>has_block(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
     <tr><td><code>registry() &rarr; &amp;Registry</code></td><td>Access the block registry</td></tr>
 </table>
@@ -98,16 +95,12 @@ END_EXTRA_STYLES_INLINE
 </table>
 
 <h3>Context</h3>
-<p>Passed to <code>handle()</code> and <code>lifecycle()</code>. Provides access to services and runtime state.</p>
+<p>Passed to <code>handle()</code> and <code>lifecycle()</code>. Provides access to runtime capabilities. Use the <a href="/docs/api-services">clients module</a> for typed access to infrastructure services.</p>
 <table>
     <tr><th>Method</th><th>Description</th></tr>
     <tr><td><code>call_block(block_name, msg) &rarr; Result_</code></td><td>Call another block by name (with recursion depth protection)</td></tr>
     <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled (timeout or explicit)</td></tr>
     <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value from the block's node config</td></tr>
-    <tr><td><code>service(name) &rarr; Option</code></td><td>Get a registered service (runtime only)</td></tr>
-    <tr><td><code>services() &rarr; Option&lt;&amp;Services&gt;</code></td><td>Get platform services (runtime only)</td></tr>
-    <tr><td><code>capabilities() &rarr; Vec</code></td><td>List available capabilities</td></tr>
-    <tr><td><code>send(msg) &rarr; Result_</code></td><td><em>Deprecated</em> — use <code>call_block()</code> instead. Routes <code>svc.*</code> messages to infrastructure blocks.</td></tr>
 </table>
 
 <h3>Response Helpers</h3>
@@ -162,65 +155,69 @@ END_EXTRA_STYLES_INLINE
 </table>
 
 <!-- ============================================================ -->
-<h2>Platform Services (Runtime)</h2>
-<p>Services available through <code>Context</code> in native blocks. WASM blocks access these via typed clients in the SDK.</p>
+<h2>Clients API (Runtime)</h2>
+<p>Typed wrapper functions in <code>wafer_run::clients</code> for calling infrastructure blocks. All functions take <code>ctx: &amp;dyn Context</code> as their first argument and return <code>Result&lt;T, WaferError&gt;</code>. WASM blocks access the same services via typed clients in the <a href="#guest-sdk-wasm-blocks">Guest SDK</a>.</p>
 
-<h3>DatabaseService</h3>
+<h3>database (<code>wafer_run::clients::database</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>get(collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
-    <tr><td><code>list(collection, opts) &rarr; RecordList</code></td><td>List records with filtering and pagination</td></tr>
-    <tr><td><code>create(collection, data) &rarr; Record</code></td><td>Create a new record</td></tr>
-    <tr><td><code>update(collection, id, data) &rarr; Record</code></td><td>Update an existing record</td></tr>
-    <tr><td><code>delete(collection, id)</code></td><td>Delete a record</td></tr>
-    <tr><td><code>count(collection, filters) &rarr; i64</code></td><td>Count matching records</td></tr>
-    <tr><td><code>sum(collection, field, filters) &rarr; f64</code></td><td>Sum a numeric field</td></tr>
-    <tr><td><code>query_raw(query, args) &rarr; Vec&lt;Record&gt;</code></td><td>Execute a raw SQL query</td></tr>
-    <tr><td><code>exec_raw(query, args) &rarr; i64</code></td><td>Execute a raw SQL statement</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>get(ctx, collection, id) &rarr; Record</code></td><td>Get a record by ID</td></tr>
+    <tr><td><code>list(ctx, collection, opts) &rarr; RecordList</code></td><td>List records with filtering and pagination</td></tr>
+    <tr><td><code>create(ctx, collection, data) &rarr; Record</code></td><td>Create a new record</td></tr>
+    <tr><td><code>update(ctx, collection, id, data) &rarr; Record</code></td><td>Update an existing record</td></tr>
+    <tr><td><code>delete(ctx, collection, id)</code></td><td>Delete a record</td></tr>
+    <tr><td><code>count(ctx, collection, filters) &rarr; i64</code></td><td>Count matching records</td></tr>
+    <tr><td><code>sum(ctx, collection, field, filters) &rarr; f64</code></td><td>Sum a numeric field</td></tr>
+    <tr><td><code>query_raw(ctx, query, args) &rarr; Vec&lt;Record&gt;</code></td><td>Execute a raw SQL query</td></tr>
+    <tr><td><code>exec_raw(ctx, query, args) &rarr; i64</code></td><td>Execute a raw SQL statement</td></tr>
+    <tr><td><code>get_by_field(ctx, collection, field, value) &rarr; Record</code></td><td>Get first record matching a field value</td></tr>
+    <tr><td><code>upsert(ctx, collection, field, value, data) &rarr; Record</code></td><td>Create or update by field match</td></tr>
+    <tr><td><code>delete_by_field(ctx, collection, field, value)</code></td><td>Delete records matching a field value</td></tr>
 </table>
 
-<h3>StorageService</h3>
+<h3>storage (<code>wafer_run::clients::storage</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>put(folder, key, data, content_type)</code></td><td>Upload an object</td></tr>
-    <tr><td><code>get(folder, key) &rarr; (bytes, ObjectInfo)</code></td><td>Download an object</td></tr>
-    <tr><td><code>delete(folder, key)</code></td><td>Delete an object</td></tr>
-    <tr><td><code>list(folder, opts) &rarr; ObjectList</code></td><td>List objects in a folder</td></tr>
-    <tr><td><code>create_folder(name, public)</code></td><td>Create a storage folder</td></tr>
-    <tr><td><code>delete_folder(name)</code></td><td>Delete a storage folder</td></tr>
-    <tr><td><code>list_folders() &rarr; Vec&lt;FolderInfo&gt;</code></td><td>List all folders</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>put(ctx, folder, key, data, content_type)</code></td><td>Upload an object</td></tr>
+    <tr><td><code>get(ctx, folder, key) &rarr; (bytes, ObjectInfo)</code></td><td>Download an object</td></tr>
+    <tr><td><code>delete(ctx, folder, key)</code></td><td>Delete an object</td></tr>
+    <tr><td><code>list(ctx, folder, opts) &rarr; ObjectList</code></td><td>List objects in a folder</td></tr>
+    <tr><td><code>create_folder(ctx, name)</code></td><td>Create a storage folder</td></tr>
+    <tr><td><code>delete_folder(ctx, name)</code></td><td>Delete a storage folder</td></tr>
+    <tr><td><code>list_folders(ctx) &rarr; Vec&lt;FolderInfo&gt;</code></td><td>List all folders</td></tr>
 </table>
 
-<h3>CryptoService</h3>
+<h3>crypto (<code>wafer_run::clients::crypto</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>hash(password) &rarr; String</code></td><td>Hash a password (bcrypt)</td></tr>
-    <tr><td><code>compare_hash(password, hash)</code></td><td>Verify a password against a hash</td></tr>
-    <tr><td><code>sign(claims, expiry) &rarr; String</code></td><td>Create a signed JWT token</td></tr>
-    <tr><td><code>verify(token) &rarr; HashMap</code></td><td>Verify and decode a JWT token</td></tr>
-    <tr><td><code>random_bytes(n) &rarr; Vec&lt;u8&gt;</code></td><td>Generate random bytes</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>hash(ctx, password) &rarr; String</code></td><td>Hash a password (argon2)</td></tr>
+    <tr><td><code>compare_hash(ctx, password, hash)</code></td><td>Verify a password against a hash</td></tr>
+    <tr><td><code>sign(ctx, claims, expiry_secs) &rarr; String</code></td><td>Create a signed JWT token</td></tr>
+    <tr><td><code>verify(ctx, token) &rarr; HashMap</code></td><td>Verify and decode a JWT token</td></tr>
+    <tr><td><code>random_bytes(ctx, n) &rarr; Vec&lt;u8&gt;</code></td><td>Generate random bytes</td></tr>
 </table>
 
-<h3>NetworkService</h3>
+<h3>network (<code>wafer_run::clients::network</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>do_request(req) &rarr; Response</code></td><td>Make an outbound HTTP request</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>do_request(ctx, method, url, headers, body) &rarr; NetworkResponse</code></td><td>Make an outbound HTTP request</td></tr>
 </table>
 
-<h3>LoggerService</h3>
+<h3>logger (<code>wafer_run::clients::logger</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>debug(msg, fields)</code></td><td>Log at debug level</td></tr>
-    <tr><td><code>info(msg, fields)</code></td><td>Log at info level</td></tr>
-    <tr><td><code>warn(msg, fields)</code></td><td>Log at warn level</td></tr>
-    <tr><td><code>error(msg, fields)</code></td><td>Log at error level</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>debug(ctx, msg) / debug_with(ctx, msg, fields)</code></td><td>Log at debug level</td></tr>
+    <tr><td><code>info(ctx, msg) / info_with(ctx, msg, fields)</code></td><td>Log at info level</td></tr>
+    <tr><td><code>warn(ctx, msg) / warn_with(ctx, msg, fields)</code></td><td>Log at warn level</td></tr>
+    <tr><td><code>error(ctx, msg) / error_with(ctx, msg, fields)</code></td><td>Log at error level</td></tr>
 </table>
 
-<h3>ConfigService</h3>
+<h3>config (<code>wafer_run::clients::config</code>)</h3>
 <table>
-    <tr><th>Method</th><th>Description</th></tr>
-    <tr><td><code>get(key) &rarr; Option&lt;String&gt;</code></td><td>Read a config value</td></tr>
-    <tr><td><code>set(key, value)</code></td><td>Write a config value</td></tr>
+    <tr><th>Function</th><th>Description</th></tr>
+    <tr><td><code>get(ctx, key) &rarr; String</code></td><td>Read a config value</td></tr>
+    <tr><td><code>get_default(ctx, key, default) &rarr; String</code></td><td>Read with a default fallback</td></tr>
+    <tr><td><code>set(ctx, key, value)</code></td><td>Write a config value</td></tr>
 </table>
 
 <!-- ============================================================ -->

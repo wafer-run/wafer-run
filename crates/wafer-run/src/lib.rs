@@ -5,7 +5,6 @@
 //! that determines the next step in the chain.
 
 pub mod block;
-pub mod blocks;
 pub mod bridge;
 pub mod common;
 pub mod config;
@@ -14,16 +13,13 @@ pub mod executor;
 pub mod helpers;
 pub mod manifest;
 pub mod meta;
-pub mod migrate;
 pub mod observability;
 pub mod registry;
 pub mod router;
 pub mod runtime;
 pub mod schema;
 pub mod security;
-pub mod services;
 pub mod types;
-pub mod waferconfig;
 pub mod wasm;
 
 // Re-exports for convenience
@@ -32,11 +28,12 @@ pub use config::{
     Chain, ChainConfig, ChainConfigDef, ChainDef, ChainInfo, HTTPRoute, HTTPRouteDef, Node,
     NodeDef,
 };
-pub use context::{CapabilityInfo, Context, RuntimeContext};
+pub use context::{Context, RuntimeContext};
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 pub use helpers::{
     err_bad_request, err_conflict, err_forbidden, err_internal, err_not_found, err_unauthorized,
-    err_validation, error, json_respond, new_response, respond, sha256_hex, ResponseBuilder,
+    err_validation, error, expand_env_vars, json_respond, new_response, respond, sha256_hex,
+    ResponseBuilder,
 };
 pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};

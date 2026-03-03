@@ -13,8 +13,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use wafer_run::services::database::{self, DatabaseError, Filter, FilterOp, ListOptions};
-use wafer_run::services::network::{NetworkService, Request as NetRequest};
+use wafer_core::clients::database as db;
+use wafer_core::clients::database::{Filter, FilterOp, ListOptions, Record, SortField};
+use wafer_core::clients::network;
 use wafer_run::*;
 
 /// Cache TTL in seconds (default 5 minutes).
@@ -84,13 +85,6 @@ impl RegistryBlock {
         let query = msg.query("q").to_string();
         let type_filter = msg.query("type").to_string();
 
-        let db = match Self::get_db(ctx) {
-            Some(db) => db,
-            None => {
-                return json_respond(msg.clone(), 200, &serde_json::json!({"packages": []}))
-            }
-        };
-
         let (page, page_size, _) = msg.pagination_params(20);
 
         let mut filters = Vec::new();
@@ -105,7 +99,7 @@ impl RegistryBlock {
 
         let opts = ListOptions {
             filters,
-            sort: vec![database::SortField {
+            sort: vec![SortField {
                 field: "download_count".to_string(),
                 desc: true,
             }],
@@ -113,7 +107,7 @@ impl RegistryBlock {
             offset: ((page - 1) * page_size) as i64,
         };
 
-        match db.list("packages", &opts) {
+        match db::list(ctx, "packages", &opts) {
             Ok(result) => {
                 // Filter out blocked packages and apply type filter
                 let blocked = Self::get_blocked_patterns(ctx);
@@ -162,7 +156,9 @@ impl RegistryBlock {
                     }),
                 )
             }
-            Err(e) => err_internal(msg.clone(), &format!("Search failed: {}", e)),
+            Err(_) => {
+                json_respond(msg.clone(), 200, &serde_json::json!({"packages": []}))
+            }
         }
     }
 
@@ -173,17 +169,15 @@ impl RegistryBlock {
     fn ensure_package(
         ctx: &dyn Context,
         name: &str,
-    ) -> std::result::Result<database::Record, String> {
+    ) -> std::result::Result<Record, String> {
         // Blocklist check — reject before hitting GitHub or DB
         if Self::is_blocked(ctx, name) {
             return Err(format!("Package '{}' is blocked", name));
         }
 
-        let db = Self::get_db(ctx).ok_or_else(|| "Registry not configured".to_string())?;
-
         // Already indexed? Return it (backfilling package_type if missing).
-        if let Ok(record) = database::get_by_field(
-            db.as_ref(),
+        if let Ok(record) = db::get_by_field(
+            ctx,
             "packages",
             "name",
             serde_json::Value::String(name.to_string()),
@@ -196,7 +190,7 @@ impl RegistryBlock {
                     "package_type".to_string(),
                     serde_json::Value::String(pkg_type.to_string()),
                 );
-                let _ = db.update("packages", &record.id, update);
+                let _ = db::update(ctx, "packages", &record.id, update);
             }
             return Ok(record);
         }
@@ -242,7 +236,7 @@ impl RegistryBlock {
             serde_json::Value::String(pkg_type.to_string()),
         );
 
-        db.create("packages", record)
+        db::create(ctx, "packages", record)
             .map_err(|e| format!("Failed to index package: {}", e))
     }
 
@@ -250,7 +244,6 @@ impl RegistryBlock {
     // Fetch repo description from GitHub API
     // -----------------------------------------------------------------------
     fn fetch_repo_description(ctx: &dyn Context, name: &str) -> Option<String> {
-        let network = Self::get_network(ctx)?;
         let (owner, repo) = Self::parse_owner_repo(name)?;
 
         let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
@@ -264,14 +257,7 @@ impl RegistryBlock {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
 
-        let request = NetRequest {
-            method: "GET".to_string(),
-            url,
-            headers,
-            body: None,
-        };
-
-        let response = network.do_request(&request).ok()?;
+        let response = network::do_request(ctx, "GET", &url, &headers, None).ok()?;
         if response.status_code != 200 {
             return None;
         }
@@ -340,11 +326,6 @@ impl RegistryBlock {
             return err_not_found(msg.clone(), &e);
         }
 
-        let db = match Self::get_db(ctx) {
-            Some(db) => db,
-            None => return err_internal(msg.clone(), "Registry not configured"),
-        };
-
         // Parse owner/repo from name (github.com/owner/repo)
         let (owner, repo) = match Self::parse_owner_repo(name) {
             Some(pair) => pair,
@@ -393,7 +374,8 @@ impl RegistryBlock {
         };
 
         // Increment download count atomically
-        let _ = db.exec_raw(
+        let _ = db::exec_raw(
+            ctx,
             "UPDATE packages SET download_count = CAST(download_count AS INTEGER) + 1 WHERE name = ?",
             &[serde_json::Value::String(name.to_string())],
         );
@@ -408,15 +390,6 @@ impl RegistryBlock {
     // GitHub API: fetch versions
     // -----------------------------------------------------------------------
     fn fetch_versions_cached(ctx: &dyn Context, name: &str) -> Vec<GitHubRelease> {
-        let db = match Self::get_db(ctx) {
-            Some(db) => db,
-            None => return Vec::new(),
-        };
-        let network = match Self::get_network(ctx) {
-            Some(n) => n,
-            None => return Vec::new(),
-        };
-
         let (owner, repo) = match Self::parse_owner_repo(name) {
             Some(pair) => pair,
             None => return Vec::new(),
@@ -425,8 +398,8 @@ impl RegistryBlock {
         let ttl = cache_ttl_secs();
 
         // Check cache
-        let cached = database::get_by_field(
-            db.as_ref(),
+        let cached = db::get_by_field(
+            ctx,
             "github_tag_cache",
             "package_name",
             serde_json::Value::String(name.to_string()),
@@ -477,14 +450,7 @@ impl RegistryBlock {
             headers.insert("If-None-Match".to_string(), etag.clone());
         }
 
-        let request = NetRequest {
-            method: "GET".to_string(),
-            url,
-            headers,
-            body: None,
-        };
-
-        match network.do_request(&request) {
+        match network::do_request(ctx, "GET", &url, &headers, None) {
             Ok(response) => {
                 if response.status_code == 304 {
                     // Not modified — refresh timestamp, return cached
@@ -494,7 +460,7 @@ impl RegistryBlock {
                             "fetched_at".to_string(),
                             serde_json::Value::String(Self::now_timestamp()),
                         );
-                        let _ = db.update("github_tag_cache", &cache_record.id, update);
+                        let _ = db::update(ctx, "github_tag_cache", &cache_record.id, update);
 
                         if let Some(tags_json) =
                             cache_record.data.get("tags_json").and_then(|v| v.as_str())
@@ -545,8 +511,8 @@ impl RegistryBlock {
                     serde_json::Value::String(new_etag),
                 );
 
-                let _ = database::upsert(
-                    db.as_ref(),
+                let _ = db::upsert(
+                    ctx,
                     "github_tag_cache",
                     "package_name",
                     serde_json::Value::String(name.to_string()),
@@ -667,7 +633,7 @@ impl RegistryBlock {
     }
 
     fn return_stale_cache(
-        cached: &Option<database::Record>,
+        cached: &Option<Record>,
     ) -> Vec<GitHubRelease> {
         if let Some(ref cache_record) = cached {
             if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
@@ -686,11 +652,6 @@ impl RegistryBlock {
     /// Load all `name_pattern` values from the `blocked_packages` table.
     /// Returns an empty vec if the table doesn't exist yet.
     fn get_blocked_patterns(ctx: &dyn Context) -> Vec<String> {
-        let db = match Self::get_db(ctx) {
-            Some(db) => db,
-            None => return Vec::new(),
-        };
-
         let opts = ListOptions {
             filters: Vec::new(),
             sort: Vec::new(),
@@ -698,7 +659,7 @@ impl RegistryBlock {
             offset: 0,
         };
 
-        match db.list("blocked_packages", &opts) {
+        match db::list(ctx, "blocked_packages", &opts) {
             Ok(result) => result
                 .records
                 .iter()
@@ -738,14 +699,6 @@ impl RegistryBlock {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
-
-    fn get_db(ctx: &dyn Context) -> Option<Arc<dyn database::DatabaseService>> {
-        ctx.services()?.database.clone()
-    }
-
-    fn get_network(ctx: &dyn Context) -> Option<Arc<dyn NetworkService>> {
-        ctx.services()?.network.clone()
-    }
 
     /// Validate that name matches `github.com/{owner}/{repo}`.
     fn validate_package_name(name: &str) -> bool {
@@ -858,13 +811,12 @@ impl Block for RegistryBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            if let Some(db) = Self::get_db(ctx) {
-                // Backfill: set package_type = 'block' for any rows missing it
-                let _ = db.exec_raw(
-                    "UPDATE packages SET package_type = 'block' WHERE package_type IS NULL",
-                    &[],
-                );
-            }
+            // Backfill: set package_type = 'block' for any rows missing it
+            let _ = db::exec_raw(
+                ctx,
+                "UPDATE packages SET package_type = 'block' WHERE package_type IS NULL",
+                &[],
+            );
         }
         Ok(())
     }

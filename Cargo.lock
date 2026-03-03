@@ -4246,11 +4246,24 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 name = "wafer-core"
 version = "0.1.0"
 dependencies = [
+ "argon2",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "bytes",
  "chrono",
+ "jsonwebtoken",
  "parking_lot",
+ "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
  "tracing",
+ "uuid",
  "wafer-run",
 ]
 
@@ -4266,25 +4279,18 @@ dependencies = [
 name = "wafer-run"
 version = "0.1.0"
 dependencies = [
- "argon2",
  "async-trait",
- "aws-config",
- "aws-sdk-s3",
  "axum",
  "bytes",
  "chrono",
  "hyper 1.8.1",
- "jsonwebtoken",
  "parking_lot",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
- "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml",
  "tower",
  "tower-http",
  "tracing",
