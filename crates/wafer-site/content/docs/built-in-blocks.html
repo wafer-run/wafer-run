@@ -6,8 +6,20 @@ ACTIVE: built-in-blocks
 <h2>Built-in Blocks</h2>
 <p>wafer ships with ready-to-use infrastructure blocks in the <code>@wafer</code> namespace. All are registered automatically when you call <code>wafer_core::register_all()</code>.</p>
 
-<h3>@wafer/http-router</h3>
-<p>Config-driven HTTP router that matches incoming requests by method and path, then dispatches to handler blocks via <code>ctx.call_block()</code>. Returns <code>404 Not Found</code> when no route matches.</p>
+<h3>@wafer/http-listener</h3>
+<p>HTTP transport block that listens for HTTP requests, converts them to standard WAFER messages, and converts results back to HTTP responses. Configured as a block config (not a flow node) — it spawns its own TCP listener on startup.</p>
+<p>Config:</p>
+<ul>
+    <li><code>flow</code> — the flow ID to execute for each request</li>
+    <li><code>listen</code> — the address to listen on (e.g. <code>"0.0.0.0:8090"</code>)</li>
+</ul>
+<pre><code>w.add_block_config("@wafer/http-listener", json!({
+    "flow": "my-flow",
+    "listen": "0.0.0.0:8090"
+}));</code></pre>
+
+<h3>@wafer/router</h3>
+<p>Config-driven router that matches incoming messages by action and path, then dispatches to handler blocks via <code>ctx.call_block()</code>. Returns <code>404 Not Found</code> when no route matches. Transport-agnostic — works with any message that has standard meta properties.</p>
 <p>Config:</p>
 <ul>
     <li><code>routes</code> — array of route objects, each with:
@@ -20,7 +32,7 @@ ACTIVE: built-in-blocks
 </ul>
 <p>Path variables captured by <code>{var}</code> patterns are set as <code>req.param.var</code> in the message meta. Routes are evaluated in order — the first match wins.</p>
 <pre><code>{
-    "block": "@wafer/http-router",
+    "block": "@wafer/router",
     "config": {
         "routes": [
             { "path": "/users", "methods": ["GET"], "block": "my-app/list-users" },
@@ -88,17 +100,17 @@ ACTIVE: built-in-blocks
 <h2>Pre-built Flows</h2>
 <p>wafer-core also registers three flow templates you can reference by ID:</p>
 <ul>
-    <li><code>http-infra</code> — security-headers &rarr; cors &rarr; readonly-guard &rarr; rate-limit &rarr; monitoring</li>
-    <li><code>auth-pipe</code> — http-infra &rarr; auth (requires authentication)</li>
-    <li><code>admin-pipe</code> — http-infra &rarr; auth &rarr; iam[role=admin] (requires admin role)</li>
+    <li><code>@wafer/infra</code> — security-headers &rarr; cors &rarr; readonly-guard &rarr; rate-limit &rarr; monitoring</li>
+    <li><code>@wafer/auth-pipe</code> — infra &rarr; auth (requires authentication)</li>
+    <li><code>@wafer/admin-pipe</code> — infra &rarr; auth &rarr; iam[role=admin] (requires admin role)</li>
 </ul>
-<p>Reference them in your flow config with <code>"flow": "http-infra"</code>:</p>
+<p>Reference them in your flow config with <code>"flow": "@wafer/infra"</code>:</p>
 <pre><code>{
     "id": "api",
     "root": {
-        "flow": "http-infra",
+        "flow": "@wafer/infra",
         "next": [{
-            "block": "@wafer/http-router",
+            "block": "@wafer/router",
             "config": {
                 "routes": [
                     { "path": "/api/hello", "methods": ["GET"], "block": "hello" }

@@ -38,7 +38,7 @@ pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};
 pub use registry::{BlockFactory, FuncBlock, Registry};
 pub use router::Router;
-pub use runtime::Wafer;
+pub use runtime::{RuntimeHandle, Wafer};
 #[cfg(feature = "wasm")]
 pub use runtime::{
     parse_unversioned_block, parse_versioned_block, RemoteBlockRef, UnversionedRemoteBlockRef,

@@ -10,19 +10,23 @@ struct Route {
     block: String,
 }
 
-/// HttpRouterBlock matches incoming HTTP method/path against configured routes
-/// and dispatches to the appropriate handler block via `ctx.call_block()`.
-pub struct HttpRouterBlock {
+/// `@wafer/router` matches incoming messages against configured routes
+/// using standard message properties (action, path) and dispatches to
+/// the appropriate handler block via `ctx.call_block()`.
+///
+/// Transport-agnostic — works with any message that has `req.resource`
+/// and optionally `http.method` in its meta.
+pub struct RouterBlock {
     routes: Vec<Route>,
 }
 
-impl Block for HttpRouterBlock {
+impl Block for RouterBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer/http-router".to_string(),
+            name: "@wafer/router".to_string(),
             version: "0.1.0".to_string(),
             interface: "router@v1".to_string(),
-            summary: "Config-driven HTTP router that dispatches to handler blocks".to_string(),
+            summary: "Config-driven router that dispatches to handler blocks".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
@@ -66,10 +70,10 @@ impl Block for HttpRouterBlock {
     }
 }
 
-/// Factory that parses the routes config array and creates an HttpRouterBlock.
-pub struct HttpRouterBlockFactory;
+/// Factory that parses the routes config array and creates a RouterBlock.
+pub struct RouterBlockFactory;
 
-impl BlockFactory for HttpRouterBlockFactory {
+impl BlockFactory for RouterBlockFactory {
     fn create(&self, config: Option<&serde_json::Value>) -> Arc<dyn Block> {
         let routes: Vec<Route> = config
             .and_then(|c| c.get("routes"))
@@ -99,18 +103,18 @@ impl BlockFactory for HttpRouterBlockFactory {
             .unwrap_or_default();
 
         if routes.is_empty() {
-            tracing::warn!("@wafer/http-router created with no routes");
+            tracing::warn!("@wafer/router created with no routes");
         }
 
-        Arc::new(HttpRouterBlock { routes })
+        Arc::new(RouterBlock { routes })
     }
 
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer/http-router".to_string(),
+            name: "@wafer/router".to_string(),
             version: "0.1.0".to_string(),
             interface: "router@v1".to_string(),
-            summary: "Config-driven HTTP router that dispatches to handler blocks".to_string(),
+            summary: "Config-driven router that dispatches to handler blocks".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
@@ -120,6 +124,6 @@ impl BlockFactory for HttpRouterBlockFactory {
 
 pub fn register(w: &mut Wafer) {
     w.registry()
-        .register("@wafer/http-router", Arc::new(HttpRouterBlockFactory))
+        .register("@wafer/router", Arc::new(RouterBlockFactory))
         .ok();
 }

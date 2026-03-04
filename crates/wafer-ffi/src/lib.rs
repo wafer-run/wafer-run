@@ -108,7 +108,7 @@ pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
     result.unwrap_or_else(|_| error_json("panic in wafer_resolve"))
 }
 
-/// Start the runtime.
+/// Start the runtime (without spawning block listeners).
 /// Returns NULL on success, or a JSON error string on failure.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
             Some(r) => r,
             None => return error_json("null runtime pointer"),
         };
-        match rt.inner.start() {
+        match rt.inner.start_without_bind() {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => error_json(&e),
         }

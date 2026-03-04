@@ -1,15 +1,21 @@
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderMap, Method, StatusCode};
-use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{HeaderMap, Method, StatusCode};
+use parking_lot::Mutex;
+
+use wafer_run::block::{Block, BlockInfo};
 use wafer_run::meta::*;
-use wafer_run::runtime::Wafer;
+use wafer_run::registry::BlockFactory;
+use wafer_run::runtime::RuntimeHandle;
 use wafer_run::types::*;
 
-/// Convert an HTTP method to a semantic request action.
+// ---------------------------------------------------------------------------
+// HTTP ↔ Message conversion
+// ---------------------------------------------------------------------------
+
 fn http_method_to_action(method: &Method) -> &'static str {
     match *method {
         Method::GET | Method::HEAD => "retrieve",
@@ -114,7 +120,6 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
-/// Apply response meta keys as HTTP response headers.
 fn apply_response_meta(
     builder: axum::http::response::Builder,
     meta: &HashMap<String, String>,
@@ -145,7 +150,6 @@ fn apply_response_meta(
     builder
 }
 
-/// Extract status code from meta.
 fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
     if let Some(code) = meta.get(META_RESP_STATUS) {
         if let Ok(n) = code.parse::<u16>() {
@@ -181,17 +185,13 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 builder = apply_response_meta(builder, &msg.meta);
             }
 
-            // Set default content type
             let has_ct = resp_meta.contains_key(META_RESP_CONTENT_TYPE)
                 || resp_meta.contains_key("Content-Type");
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
 
-            let body = result
-                .response
-                .map(|r| r.data)
-                .unwrap_or_default();
+            let body = result.response.map(|r| r.data).unwrap_or_default();
 
             builder.body(Body::from(body)).unwrap_or_else(|_| {
                 axum::http::Response::builder()
@@ -210,8 +210,9 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .unwrap_or(&empty_meta);
 
             let status_code = get_status_code(err_meta, 500);
-            let mut builder = axum::http::Response::builder()
-                .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+            let mut builder = axum::http::Response::builder().status(
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
 
             builder = apply_response_meta(builder, err_meta);
 
@@ -264,10 +265,7 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
 
             builder = builder.header("Content-Type", "application/json");
 
-            let body = result
-                .message
-                .map(|m| m.data)
-                .unwrap_or_default();
+            let body = result.message.map(|m| m.data).unwrap_or_default();
 
             builder.body(Body::from(body)).unwrap_or_else(|_| {
                 axum::http::Response::builder()
@@ -279,57 +277,185 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
     }
 }
 
-/// Create an axum handler that converts HTTP requests to WAFER messages
-/// and dispatches them to a specific flow.
-pub fn wafer_handler(
-    wafer: Arc<Wafer>,
-    flow_id: String,
-) -> axum::routing::MethodRouter {
-    let w = wafer.clone();
-    let cid = flow_id.clone();
+// ---------------------------------------------------------------------------
+// @wafer/http-listener block
+// ---------------------------------------------------------------------------
 
-    axum::routing::any(move |req: Request| {
-        let w = w.clone();
-        let cid = cid.clone();
-        async move {
-            let (parts, body) = req.into_parts();
-            const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-            let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
-                .await
-                .unwrap_or_default()
-                .to_vec();
-
-            let uri = &parts.uri;
-            let path = uri.path();
-            let query = uri.query().unwrap_or("");
-            // Use the rightmost X-Forwarded-For value (set by the closest trusted
-            // proxy) rather than the leftmost (easily spoofed by the client).
-            // Falls back to the connection peer address if available.
-            let remote_addr = parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit(',').next())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| {
-                    parts.extensions.get::<std::net::SocketAddr>()
-                        .map(|a| a.ip().to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                });
-
-            let mut msg =
-                http_to_message(parts.method, path, query, &parts.headers, &remote_addr, body_bytes);
-
-            let result = w.execute(&cid, &mut msg);
-            wafer_result_to_response(result)
-        }
-    })
+/// `@wafer/http-listener` handles only the HTTP transport layer: TCP
+/// listening, HTTP→Message conversion, and Result→Response conversion.
+/// It never appears as a node in a flow.
+///
+/// **Config:**
+/// ```json
+/// {
+///   "flow": "site-main",
+///   "listen": "0.0.0.0:8090"
+/// }
+/// ```
+pub struct HttpListenerBlock {
+    flow: String,
+    listen: String,
+    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
-/// Create a catch-all axum Router that dispatches all requests to a single flow.
-pub fn create_router(wafer: Arc<Wafer>, flow_id: &str) -> Router {
-    let handler = wafer_handler(wafer, flow_id.to_string());
-    Router::new()
-        .route("/{*rest}", handler.clone())
-        .route("/", handler)
+impl Block for HttpListenerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo {
+            name: "@wafer/http-listener".to_string(),
+            version: "0.1.0".to_string(),
+            interface: "http-listener@v1".to_string(),
+            summary: "HTTP transport — listens for HTTP requests and converts to messages"
+                .to_string(),
+            instance_mode: InstanceMode::Singleton,
+            allowed_modes: Vec::new(),
+            admin_ui: None,
+        }
+    }
+
+    fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
+        msg.clone().cont()
+    }
+
+    fn lifecycle(
+        &self,
+        _ctx: &dyn wafer_run::context::Context,
+        event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        if event.event_type == LifecycleType::Stop {
+            if let Some(tx) = self.shutdown_tx.lock().take() {
+                let _ = tx.send(());
+            }
+        }
+        Ok(())
+    }
+
+    fn bind(&self, handle: RuntimeHandle) {
+        if self.flow.is_empty() || self.listen.is_empty() {
+            return;
+        }
+
+        let flow = self.flow.clone();
+        let listen = self.listen.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.shutdown_tx.lock() = Some(tx);
+
+        tokio::spawn(async move {
+            let handler = {
+                let h = handle.clone();
+                let fid = flow.clone();
+                axum::routing::any(move |req: Request| {
+                    let h = h.clone();
+                    let fid = fid.clone();
+                    async move {
+                        let (parts, body) = req.into_parts();
+                        const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+                        let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
+                            .await
+                            .unwrap_or_default()
+                            .to_vec();
+
+                        let uri = &parts.uri;
+                        let path = uri.path();
+                        let query = uri.query().unwrap_or("");
+                        let remote_addr = parts
+                            .headers
+                            .get("x-forwarded-for")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.rsplit(',').next())
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_else(|| {
+                                parts
+                                    .extensions
+                                    .get::<std::net::SocketAddr>()
+                                    .map(|a| a.ip().to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            });
+
+                        let mut msg = http_to_message(
+                            parts.method,
+                            path,
+                            query,
+                            &parts.headers,
+                            &remote_addr,
+                            body_bytes,
+                        );
+
+                        let result = h.execute(&fid, &mut msg);
+                        wafer_result_to_response(result)
+                    }
+                })
+            };
+
+            let app = axum::Router::new()
+                .route("/{*rest}", handler.clone())
+                .route("/", handler);
+
+            let listener = match tokio::net::TcpListener::bind(&listen).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("@wafer/http-listener failed to bind {}: {}", listen, e);
+                    return;
+                }
+            };
+
+            tracing::info!("@wafer/http-listener listening on {}", listen);
+
+            let serve = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                });
+
+            if let Err(e) = serve.await {
+                tracing::error!("@wafer/http-listener server error: {}", e);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory + registration
+// ---------------------------------------------------------------------------
+
+pub struct HttpListenerBlockFactory;
+
+impl BlockFactory for HttpListenerBlockFactory {
+    fn create(&self, config: Option<&serde_json::Value>) -> Arc<dyn Block> {
+        let flow = config
+            .and_then(|c| c.get("flow"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let listen = config
+            .and_then(|c| c.get("listen"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Arc::new(HttpListenerBlock {
+            flow,
+            listen,
+            shutdown_tx: Mutex::new(None),
+        })
+    }
+
+    fn info(&self) -> BlockInfo {
+        BlockInfo {
+            name: "@wafer/http-listener".to_string(),
+            version: "0.1.0".to_string(),
+            interface: "http-listener@v1".to_string(),
+            summary: "HTTP transport — listens for HTTP requests and converts to messages"
+                .to_string(),
+            instance_mode: InstanceMode::Singleton,
+            allowed_modes: Vec::new(),
+            admin_ui: None,
+        }
+    }
+}
+
+pub fn register(w: &mut wafer_run::Wafer) {
+    w.registry()
+        .register("@wafer/http-listener", Arc::new(HttpListenerBlockFactory))
+        .ok();
 }

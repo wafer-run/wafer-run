@@ -71,10 +71,13 @@ impl WaferRuntime {
     }
 
     /// Start the runtime. Calls resolve() if not already resolved.
+    ///
+    /// Uses `start_without_bind()` because the Node.js dev server has its
+    /// own HTTP handling — blocks that spawn listeners are not needed here.
     #[napi]
     pub fn start(&mut self) -> Result<()> {
         self.inner
-            .start()
+            .start_without_bind()
             .map_err(|e| Error::from_reason(e))
     }
 

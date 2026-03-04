@@ -16,12 +16,14 @@ pub use storage::StorageBlock;
 // Application blocks
 pub mod auth;
 pub mod cors;
-pub mod http_router;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod iam;
 pub mod inspector;
 pub mod monitoring;
 pub mod rate_limit;
 pub mod readonly_guard;
+pub mod router;
 pub mod security_headers;
 pub mod web;
 

@@ -1047,7 +1047,7 @@ fn test_start_and_stop() {
     w.add_flow(make_flow("lifecycle-test", root));
 
     // Start implicitly resolves if not already resolved
-    w.start().expect("start failed");
+    w.start_without_bind().expect("start failed");
 
     let mut msg = Message::new("test", "");
     let result = w.execute("lifecycle-test", &mut msg);

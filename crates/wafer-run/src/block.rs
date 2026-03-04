@@ -10,6 +10,11 @@ pub trait Block: Send + Sync {
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
     fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError>;
 
+    /// Called after the runtime is wrapped in Arc, giving blocks a clonable
+    /// handle to execute flows. Only blocks that spawn async tasks (like the
+    /// HTTP listener) need to override this.
+    fn bind(&self, _handle: crate::runtime::RuntimeHandle) {}
+
     /// Return the capability restrictions for this block, if any.
     /// None means unrestricted (native blocks). WASM blocks return Some(&caps).
     fn block_capabilities(&self) -> Option<&BlockCapabilities> {

@@ -10,9 +10,9 @@ ACTIVE: flow-configuration
     "summary": "API flow",
     "config": { "on_error": "stop" },
     "root": {
-        "flow": "http-infra",
+        "flow": "@wafer/infra",
         "next": [{
-            "block": "@wafer/http-router",
+            "block": "@wafer/router",
             "config": {
                 "routes": [
                     { "path": "/api/hello", "methods": ["GET"], "block": "hello" },
@@ -24,7 +24,7 @@ ACTIVE: flow-configuration
         }]
     }
 }</code></pre>
-<p>The <code>@wafer/http-router</code> block is the recommended way to route HTTP requests to handler blocks. Routes are evaluated in order — the first match wins. See <a href="/docs/built-in-blocks">Built-in Blocks</a> for full config details.</p>
+<p>The <code>@wafer/router</code> block is the recommended way to route requests to handler blocks. Routes are evaluated in order — the first match wins. See <a href="/docs/built-in-blocks">Built-in Blocks</a> for full config details.</p>
 
 <h3>Match Patterns</h3>
 <p>Flows also support inline <code>match</code> patterns on nodes for lightweight routing without the router block:</p>
@@ -54,7 +54,7 @@ ACTIVE: flow-configuration
 <p>Each node in the flow tree has:</p>
 <ul>
     <li><code>block</code> — the block to execute at this node</li>
-    <li><code>flow</code> — reference to a pre-built flow (e.g. <code>"http-infra"</code>, <code>"auth-pipe"</code>)</li>
+    <li><code>flow</code> — reference to a pre-built flow (e.g. <code>"@wafer/infra"</code>, <code>"@wafer/auth-pipe"</code>)</li>
     <li><code>match</code> — the pattern to match against</li>
     <li><code>next</code> — an array of child nodes</li>
     <li><code>config</code> — key-value config passed to the block via <code>ctx.config_get()</code></li>

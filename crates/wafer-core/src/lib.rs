@@ -5,8 +5,6 @@
 //! wafer-core owns the block library.
 
 pub mod blocks;
-#[cfg(feature = "http")]
-pub mod bridge;
 pub mod flows;
 pub mod clients;
 
@@ -39,7 +37,9 @@ pub fn register_all(w: &mut wafer_run::Wafer) {
     register_factory!(w, "wafer/config", blocks::config::factory::ConfigBlockFactory);
 
     // Application blocks
-    blocks::http_router::register(w);
+    #[cfg(feature = "http")]
+    blocks::http::register(w);
+    blocks::router::register(w);
     blocks::security_headers::register(w);
     blocks::cors::register(w);
     blocks::rate_limit::register(w);

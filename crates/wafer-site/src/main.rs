@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use wafer_run::*;
 
 mod playground;
@@ -24,6 +23,13 @@ async fn main() {
     w.add_block_config("wafer/network", serde_json::json!({}));
     w.add_block_config("wafer/logger", serde_json::json!({}));
 
+    // Configure the HTTP listener — owns TCP listen + HTTP↔Message conversion
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
+    w.add_block_config("@wafer/http-listener", serde_json::json!({
+        "flow": "site-main",
+        "listen": format!("0.0.0.0:{}", port),
+    }));
+
     // Register wafer-core blocks
     wafer_core::register_all(&mut w);
 
@@ -32,15 +38,15 @@ async fn main() {
     playground::register(&mut w);
     registry::register(&mut w);
 
-    // Add flows
+    // Add flows — infra → @wafer/router (route matching)
     let site_flow: FlowDef = serde_json::from_str(r#"{
         "id": "site-main",
         "summary": "Website main flow",
         "config": { "on_error": "stop", "timeout": "30s" },
         "root": {
-            "flow": "http-infra",
+            "flow": "@wafer/infra",
             "next": [{
-                "block": "@wafer/http-router",
+                "block": "@wafer/router",
                 "config": {
                     "routes": [
                         { "path": "/_inspector/**", "block": "@wafer/inspector" },
@@ -62,31 +68,18 @@ async fn main() {
     let _ = wafer_core::flows::register_flows(&mut w);
     w.add_flow_def(&site_flow);
 
-    // Resolve and start (start populates introspection snapshots)
-    if let Err(e) = w.resolve() {
-        tracing::error!("Failed to resolve: {}", e);
-        std::process::exit(1);
-    }
-    if let Err(e) = w.start() {
+    // Start — the @wafer/http-listener block spawns the Axum listener internally
+    let w = w.start().unwrap_or_else(|e| {
         tracing::error!("Failed to start: {}", e);
         std::process::exit(1);
-    }
+    });
 
-    let w = Arc::new(w);
+    tracing::info!("Listening on 0.0.0.0:{}", port);
 
-    // Build axum router
-    let app = wafer_core::bridge::create_router(w.clone(), "site-main");
-
-    // Start server
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
-    let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("Listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("bind failed");
-
-    axum::serve(listener, app).await.expect("server failed");
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await.expect("failed to listen for ctrl+c");
+    tracing::info!("Shutting down...");
+    w.shutdown();
 }
 
 fn register_site_blocks(w: &mut Wafer) {
@@ -157,7 +150,8 @@ fn register_site_blocks(w: &mut Wafer) {
                 200,
                 &serde_json::json!({
                     "blocks": [
-                        {"name": "@wafer/http-router", "version": "0.1.0"},
+                        {"name": "@wafer/http-listener", "version": "0.1.0"},
+                        {"name": "@wafer/router", "version": "0.1.0"},
                         {"name": "@wafer/security-headers", "version": "0.1.0"},
                         {"name": "@wafer/cors", "version": "0.1.0"},
                         {"name": "@wafer/rate-limit", "version": "0.1.0"},

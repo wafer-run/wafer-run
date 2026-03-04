@@ -89,6 +89,19 @@ pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> 
     })
 }
 
+/// Thin, clonable handle that blocks can store to call flows from async tasks.
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    inner: Arc<Wafer>,
+}
+
+impl RuntimeHandle {
+    /// Execute a flow by ID.
+    pub fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+        self.inner.execute(flow_id, msg)
+    }
+}
+
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {
@@ -619,8 +632,11 @@ impl Wafer {
         self.wasm_engine.as_ref().expect("BUG: wasm engine not initialized")
     }
 
-    /// Start initializes the runtime.
-    pub fn start(&mut self) -> Result<(), String> {
+    /// Initialize the runtime without calling `bind()` on blocks.
+    ///
+    /// Use this when you don't need the HTTP listener (e.g. wafer-run-node,
+    /// wafer-ffi, or integration tests that manage their own serving).
+    pub fn start_without_bind(&mut self) -> Result<(), String> {
         if self.resolved.is_empty() {
             self.resolve()?;
         }
@@ -649,7 +665,75 @@ impl Wafer {
         Ok(())
     }
 
-    /// Stop shuts down all resolved block instances.
+    /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
+    ///
+    /// This is the primary entry point for applications that want blocks
+    /// (like `@wafer/http`) to spawn their own async tasks.
+    pub fn start(mut self) -> Result<Arc<Self>, String> {
+        // 1. All mutable work
+        self.start_without_bind()?;
+
+        // 2. Call lifecycle(Start) on all blocks
+        let ctx = self.make_context(
+            "startup",
+            "startup",
+            HashMap::new(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        for block in self.resolved.values() {
+            let _ = block.lifecycle(
+                &ctx,
+                LifecycleEvent {
+                    event_type: LifecycleType::Start,
+                    data: Vec::new(),
+                },
+            );
+        }
+
+        // 3. Wrap in Arc
+        let arc_self = Arc::new(self);
+
+        // 4. Call bind(RuntimeHandle) on all blocks
+        let handle = RuntimeHandle {
+            inner: arc_self.clone(),
+        };
+        for block in arc_self.resolved.values() {
+            block.bind(handle.clone());
+        }
+
+        // 5. Return Arc
+        Ok(arc_self)
+    }
+
+    /// Shut down all resolved block instances (works through `Arc`).
+    pub fn shutdown(&self) {
+        #[cfg(feature = "wasm")]
+        {
+            self.epoch_ticker_stop.store(true, Ordering::Relaxed);
+        }
+
+        let ctx = self.make_context(
+            "shutdown",
+            "shutdown",
+            HashMap::new(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        for block in self.resolved.values() {
+            let _ = block.lifecycle(
+                &ctx,
+                LifecycleEvent {
+                    event_type: LifecycleType::Stop,
+                    data: Vec::new(),
+                },
+            );
+        }
+    }
+
+    /// Stop shuts down all resolved block instances (requires `&mut self`).
+    ///
+    /// Prefer `shutdown()` when the runtime is behind an `Arc`.
     pub fn stop(&mut self) {
         #[cfg(feature = "wasm")]
         {
