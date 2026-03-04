@@ -8,37 +8,40 @@
  *
  * Usage from Node.js / TypeScript:
  * ```js
- * const { WaferRuntime } = require('@anthropics/wafer-run-node');
+ * const { WaferRuntime } = require('wafer-run');
  * const w = new WaferRuntime();
- * w.registerWasmBlock('my-block', './block.wasm');
- * w.addChainDef(JSON.stringify({ id: 'main', root: { block: 'my-block' } }));
+ * w.register('my-block', './block.wasm');
+ * w.register('main', './main-flow.json');
  * w.resolve();
  * w.start();
- * const result = JSON.parse(w.execute('main', JSON.stringify({ kind: 'test', data: '', meta: {} })));
+ * const result = JSON.parse(w.run('main', JSON.stringify({ kind: 'test', data: '', meta: {} })));
  * ```
  */
 export declare class WaferRuntime {
   /** Create a new WAFER runtime instance. */
   constructor()
-  /** Register a WASM block from a file path. */
-  registerWasmBlock(typeName: string, wasmPath: string): void
-  /** Add a chain definition from a JSON string. */
-  addChainDef(chainDefJson: string): void
-  /** Resolve all block references in registered chains. */
+  /**
+   * Register a block or flow definition from a file path.
+   *
+   * If `path` ends with `.wasm`, registers a WASM block with the given name.
+   * Otherwise, reads the file as a JSON flow definition.
+   */
+  register(name: string, path: string): void
+  /** Resolve all block references in registered flows. */
   resolve(): void
   /** Start the runtime. Calls resolve() if not already resolved. */
   start(): void
   /** Stop the runtime and shut down all block instances. */
   stop(): void
   /**
-   * Execute a chain with the given message.
+   * Run a flow with the given message.
    *
-   * Takes the chain ID and a JSON message string. Returns a JSON result string:
+   * Takes the flow ID and a JSON message string. Returns a JSON result string:
    * `{"action":"continue|respond|drop|error","response":{...},"error":{...}}`
    */
-  execute(chainId: string, messageJson: string): string
-  /** Get info about all registered chains as a JSON array. */
-  chainsInfo(): string
+  run(flowId: string, messageJson: string): string
+  /** Get info about all registered flows as a JSON array. */
+  flowsInfo(): string
   /** Check whether a block type is registered. */
   hasBlock(typeName: string): boolean
 }

@@ -89,11 +89,11 @@ pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> 
     })
 }
 
-/// Wafer is the WAFER runtime. It manages block registration, chain storage,
+/// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {
     pub(crate) registry: Registry,
-    pub(crate) chains: HashMap<String, Chain>,
+    pub(crate) flows: HashMap<String, Flow>,
     pub(crate) resolved: HashMap<String, Arc<dyn Block>>,
     /// Block configurations loaded from blocks.json (name → config JSON).
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
@@ -102,13 +102,19 @@ pub struct Wafer {
     pub hooks: ObservabilityBus,
     /// Snapshot of registered block info (populated at start time).
     pub(crate) blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
-    /// Snapshot of chain info (populated at start time).
-    pub(crate) chain_infos_snapshot: Arc<Vec<crate::config::ChainInfo>>,
-    /// Snapshot of chain definitions (populated at start time).
-    pub(crate) chain_defs_snapshot: Arc<Vec<crate::config::ChainDef>>,
+    /// Snapshot of flow info (populated at start time).
+    pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
+    /// Snapshot of flow definitions (populated at start time).
+    pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
     /// Shared WASM engine for all WASM blocks (enables epoch-based interruption).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
+    /// Stop flag for the epoch ticker thread.
+    #[cfg(feature = "wasm")]
+    epoch_ticker_stop: Arc<AtomicBool>,
+    /// Handle for the epoch ticker thread so it can be joined on shutdown.
+    #[cfg(feature = "wasm")]
+    epoch_ticker_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Wafer {
@@ -122,22 +128,50 @@ impl Wafer {
 
         Self {
             registry,
-            chains: HashMap::new(),
+            flows: HashMap::new(),
             resolved: HashMap::new(),
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
             hooks: ObservabilityBus::new(),
             blocks_snapshot: Arc::new(Vec::new()),
-            chain_infos_snapshot: Arc::new(Vec::new()),
-            chain_defs_snapshot: Arc::new(Vec::new()),
+            flow_infos_snapshot: Arc::new(Vec::new()),
+            flow_defs_snapshot: Arc::new(Vec::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
+            #[cfg(feature = "wasm")]
+            epoch_ticker_stop: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "wasm")]
+            epoch_ticker_handle: None,
         }
     }
 
     /// Returns all blocks (resolved + infrastructure) as an Arc for use in contexts.
     fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
         self.all_blocks.clone()
+    }
+
+    /// Build a RuntimeContext with shared fields pre-filled.
+    fn make_context(
+        &self,
+        flow_id: impl Into<String>,
+        node_id: impl Into<String>,
+        config: HashMap<String, String>,
+        cancelled: Arc<AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> RuntimeContext {
+        RuntimeContext {
+            flow_id: flow_id.into(),
+            node_id: node_id.into(),
+            config,
+            cancelled,
+            deadline,
+            all_blocks: self.all_blocks_arc(),
+            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            max_call_depth: 16,
+            registered_blocks_snapshot: self.blocks_snapshot.clone(),
+            flow_infos_snapshot: self.flow_infos_snapshot.clone(),
+            flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+        }
     }
 
     /// Rebuild the all_blocks map from the resolved blocks.
@@ -196,17 +230,19 @@ impl Wafer {
 
     /// RegisterBlock registers a block instance under the given type name.
     /// The instance is also pre-resolved so it is available via `call_block()`
-    /// even when it is not referenced as a chain node.
+    /// even when it is not referenced as a flow node.
     pub fn register_block(&mut self, type_name: impl Into<String>, block: Arc<dyn Block>) {
         let name = type_name.into();
         let block_clone = block.clone();
         let name_clone = name.clone();
-        let _ = self.registry.register(
+        if let Err(e) = self.registry.register(
             name_clone,
             Arc::new(StructBlockFactory {
                 new_func: move || block_clone.clone(),
             }),
-        );
+        ) {
+            tracing::warn!(block = %name, error = %e, "registry registration failed for block");
+        }
         self.resolved.insert(name, block);
     }
 
@@ -216,18 +252,20 @@ impl Wafer {
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
     ) {
-        let _ = self.registry.register_func(type_name, handler);
+        if let Err(e) = self.registry.register_func(type_name, handler) {
+            tracing::warn!(error = %e, "registry registration failed for block func");
+        }
     }
 
-    /// AddChain adds a programmatically-built chain to the runtime.
-    pub fn add_chain(&mut self, chain: Chain) {
-        self.chains.insert(chain.id.clone(), chain);
+    /// AddFlow adds a programmatically-built flow to the runtime.
+    pub fn add_flow(&mut self, flow: Flow) {
+        self.flows.insert(flow.id.clone(), flow);
     }
 
-    /// AddChainDef adds a chain from a JSON definition.
-    pub fn add_chain_def(&mut self, def: &ChainDef) {
-        let chain = chain_def_to_chain(def);
-        self.add_chain(chain);
+    /// AddFlowDef adds a flow from a JSON definition.
+    pub fn add_flow_def(&mut self, def: &FlowDef) {
+        let flow = flow_def_to_flow(def);
+        self.add_flow(flow);
     }
 
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -268,9 +306,9 @@ impl Wafer {
         }
     }
 
-    /// Resolve walks all chain trees and resolves block references.
+    /// Resolve walks all flow trees and resolves block references.
     ///
-    /// Before resolving chains, creates block instances from `block_configs`
+    /// Before resolving flows, creates block instances from `block_configs`
     /// (loaded via `load_blocks_json` or `add_block_config`). Blocks that
     /// are already in `resolved` (from explicit `register_block` calls) are
     /// skipped.
@@ -291,19 +329,13 @@ impl Wafer {
                 let block = factory.create(Some(&config));
 
                 // Run lifecycle Init
-                let ctx = RuntimeContext {
-                    chain_id: String::new(),
-                    node_id: String::new(),
-                    config: HashMap::new(),
-                    cancelled: Arc::new(AtomicBool::new(false)),
-                    deadline: None,
-                    all_blocks: self.all_blocks_arc(),
-                    call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                    max_call_depth: 16,
-                    registered_blocks_snapshot: self.blocks_snapshot.clone(),
-                    chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-                    chain_defs_snapshot: self.chain_defs_snapshot.clone(),
-                };
+                let ctx = self.make_context(
+                    String::new(),
+                    String::new(),
+                    HashMap::new(),
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                );
 
                 block
                     .lifecycle(
@@ -321,12 +353,12 @@ impl Wafer {
             }
         }
 
-        let chain_ids: Vec<String> = self.chains.keys().cloned().collect();
-        for chain_id in chain_ids {
-            // Take chain out temporarily
-            let mut chain = self.chains.remove(&chain_id).expect("BUG: chain disappeared during iteration");
-            self.resolve_node(&mut chain.root)?;
-            self.chains.insert(chain_id.clone(), chain);
+        let flow_ids: Vec<String> = self.flows.keys().cloned().collect();
+        for flow_id in flow_ids {
+            // Take flow out temporarily
+            let mut flow = self.flows.remove(&flow_id).expect("BUG: flow disappeared during iteration");
+            self.resolve_node(&mut flow.root)?;
+            self.flows.insert(flow_id.clone(), flow);
         }
         Ok(())
     }
@@ -344,19 +376,13 @@ impl Wafer {
                 let block = factory.create(node.config.as_ref());
 
                 // Initialize block
-                let ctx = RuntimeContext {
-                    chain_id: String::new(),
-                    node_id: String::new(),
-                    config: node.config_map.clone(),
-                    cancelled: Arc::new(AtomicBool::new(false)),
-                    deadline: None,
-                    all_blocks: self.all_blocks_arc(),
-                    call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                    max_call_depth: 16,
-                    registered_blocks_snapshot: self.blocks_snapshot.clone(),
-                    chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-                    chain_defs_snapshot: self.chain_defs_snapshot.clone(),
-                };
+                let ctx = self.make_context(
+                    String::new(),
+                    String::new(),
+                    node.config_map.clone(),
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                );
 
                 block
                     .lifecycle(
@@ -386,19 +412,13 @@ impl Wafer {
                         return Err(format!("block type not found: {}", node.block));
                     };
 
-                    let ctx = RuntimeContext {
-                        chain_id: String::new(),
-                        node_id: String::new(),
-                        config: node.config_map.clone(),
-                        cancelled: Arc::new(AtomicBool::new(false)),
-                        deadline: None,
-                        all_blocks: self.all_blocks_arc(),
-                        call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                        max_call_depth: 16,
-                        registered_blocks_snapshot: self.blocks_snapshot.clone(),
-                        chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-                        chain_defs_snapshot: self.chain_defs_snapshot.clone(),
-                    };
+                    let ctx = self.make_context(
+                        String::new(),
+                        String::new(),
+                        node.config_map.clone(),
+                        Arc::new(AtomicBool::new(false)),
+                        None,
+                    );
 
                     block
                         .lifecycle(
@@ -442,7 +462,10 @@ impl Wafer {
             r.owner, r.repo, r.version, r.repo
         );
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
         let resp = client
             .get(&url)
             .send()
@@ -478,7 +501,10 @@ impl Wafer {
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
 
         // 1. Fetch recent releases from the GitHub API
         let api_url = format!(
@@ -604,39 +630,42 @@ impl Wafer {
 
         // Snapshot introspection data for contexts
         self.blocks_snapshot = Arc::new(self.registry.list());
-        self.chain_infos_snapshot = Arc::new(self.chains_info());
-        self.chain_defs_snapshot = Arc::new(self.chain_defs());
+        self.flow_infos_snapshot = Arc::new(self.flows_info());
+        self.flow_defs_snapshot = Arc::new(self.flow_defs());
 
         // Spawn epoch ticker for WASM engine interrupt support
         #[cfg(feature = "wasm")]
         if let Some(ref engine) = self.wasm_engine {
             let engine = engine.clone();
-            std::thread::spawn(move || {
-                loop {
+            let stop = self.epoch_ticker_stop.clone();
+            self.epoch_ticker_handle = Some(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     engine.increment_epoch();
                 }
-            });
+            }));
         }
 
         Ok(())
     }
 
     /// Stop shuts down all resolved block instances.
-    pub fn stop(&self) {
-        let ctx = RuntimeContext {
-            chain_id: "shutdown".to_string(),
-            node_id: "shutdown".to_string(),
-            config: HashMap::new(),
-            cancelled: Arc::new(AtomicBool::new(false)),
-            deadline: None,
-            all_blocks: self.all_blocks_arc(),
-            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_call_depth: 16,
-            registered_blocks_snapshot: self.blocks_snapshot.clone(),
-            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
-        };
+    pub fn stop(&mut self) {
+        #[cfg(feature = "wasm")]
+        {
+            self.epoch_ticker_stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.epoch_ticker_handle.take() {
+                let _ = handle.join();
+            }
+        }
+
+        let ctx = self.make_context(
+            "shutdown",
+            "shutdown",
+            HashMap::new(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
         for block in self.resolved.values() {
             let _ = block.lifecycle(
                 &ctx,
@@ -648,16 +677,16 @@ impl Wafer {
         }
     }
 
-    /// Execute runs a chain by ID with the given message.
-    pub fn execute(&self, chain_id: &str, msg: &mut Message) -> Result_ {
-        let chain = match self.chains.get(chain_id) {
+    /// Execute runs a flow by ID with the given message.
+    pub fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+        let flow = match self.flows.get(flow_id) {
             Some(c) => c,
             None => {
                 return Result_ {
                     action: Action::Error,
                     error: Some(WaferError::new(
-                        "chain_not_found",
-                        format!("chain not found: {}", chain_id),
+                        "flow_not_found",
+                        format!("flow not found: {}", flow_id),
                     )),
                     response: None,
                     message: None,
@@ -665,23 +694,23 @@ impl Wafer {
             }
         };
 
-        // Observability: chain start
-        self.hooks.fire_chain_start(chain_id, msg);
+        // Observability: flow start
+        self.hooks.fire_flow_start(flow_id, msg);
         let start = Instant::now();
 
-        // Set up chain-level timeout via deadline
+        // Set up flow-level timeout via deadline
         let cancelled = Arc::new(AtomicBool::new(false));
-        let timeout = chain.config.timeout;
+        let timeout = flow.config.timeout;
         let deadline = if !timeout.is_zero() {
             Some(Instant::now() + timeout)
         } else {
             None
         };
 
-        let mut visited_chains = HashSet::new();
-        visited_chains.insert(chain_id.to_string());
+        let mut visited_flows = HashSet::new();
+        visited_flows.insert(flow_id.to_string());
 
-        let result = self.execute_node(&chain.root, msg, chain_id, &chain.config.on_error, &cancelled, deadline, &mut visited_chains, "root");
+        let result = self.execute_node(&flow.root, msg, flow_id, &flow.config.on_error, &cancelled, deadline, &mut visited_flows, "root");
 
         // Check timeout
         let result = if deadline.is_some() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
@@ -689,7 +718,7 @@ impl Wafer {
                 action: Action::Error,
                 error: Some(WaferError::new(
                     "deadline_exceeded",
-                    format!("chain {:?} timed out after {:?}", chain_id, timeout),
+                    format!("flow {:?} timed out after {:?}", flow_id, timeout),
                 )),
                 response: None,
                 message: result.message,
@@ -698,8 +727,8 @@ impl Wafer {
             result
         };
 
-        // Observability: chain end
-        self.hooks.fire_chain_end(chain_id, &result, start.elapsed());
+        // Observability: flow end
+        self.hooks.fire_flow_end(flow_id, &result, start.elapsed());
 
         result
     }
@@ -708,16 +737,16 @@ impl Wafer {
         &self,
         node: &Node,
         msg: &mut Message,
-        chain_id: &str,
+        flow_id: &str,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
         deadline: Option<Instant>,
-        visited_chains: &mut HashSet<String>,
+        visited_flows: &mut HashSet<String>,
         node_path: &str,
     ) -> Result_ {
-        // Handle chain references
-        if !node.chain.is_empty() {
-            return self.execute_chain_ref(node, msg, on_error, cancelled, deadline, visited_chains);
+        // Handle flow references
+        if !node.flow.is_empty() {
+            return self.execute_flow_ref(node, msg, on_error, cancelled, deadline, visited_flows);
         }
 
         let block = match &node.resolved_block {
@@ -736,23 +765,17 @@ impl Wafer {
         };
 
         // Build context for this node
-        let ctx = RuntimeContext {
-            chain_id: chain_id.to_string(),
-            node_id: node_path.to_string(),
-            config: node.config_map.clone(),
-            cancelled: cancelled.clone(),
+        let ctx = self.make_context(
+            flow_id,
+            node_path,
+            node.config_map.clone(),
+            cancelled.clone(),
             deadline,
-            all_blocks: self.all_blocks_arc(),
-            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_call_depth: 16,
-            registered_blocks_snapshot: self.blocks_snapshot.clone(),
-            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
-        };
+        );
 
         // Observability: block start
         let obs_ctx = ObservabilityContext {
-            chain_id: chain_id.to_string(),
+            flow_id: flow_id.to_string(),
             node_path: node_path.to_string(),
             block_name: node.block.clone(),
             trace_id: msg.get_meta("trace_id").to_string(),
@@ -813,39 +836,39 @@ impl Wafer {
             return result;
         }
 
-        self.execute_first_match(&node.next, msg, chain_id, on_error, cancelled, deadline, visited_chains, node_path)
+        self.execute_first_match(&node.next, msg, flow_id, on_error, cancelled, deadline, visited_flows, node_path)
     }
 
-    fn execute_chain_ref(
+    fn execute_flow_ref(
         &self,
         node: &Node,
         msg: &mut Message,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
         deadline: Option<Instant>,
-        visited_chains: &mut HashSet<String>,
+        visited_flows: &mut HashSet<String>,
     ) -> Result_ {
-        // Circular chain reference detection
-        if visited_chains.contains(&node.chain) {
+        // Circular flow reference detection
+        if visited_flows.contains(&node.flow) {
             return Result_ {
                 action: Action::Error,
                 error: Some(WaferError::new(
-                    "circular_chain",
-                    format!("circular chain reference detected: {}", node.chain),
+                    "circular_flow",
+                    format!("circular flow reference detected: {}", node.flow),
                 )),
                 response: None,
                 message: None,
             };
         }
 
-        let chain = match self.chains.get(&node.chain) {
+        let target = match self.flows.get(&node.flow) {
             Some(c) => c,
             None => {
                 return Result_ {
                     action: Action::Error,
                     error: Some(WaferError::new(
                         "not_found",
-                        format!("referenced chain not found: {}", node.chain),
+                        format!("referenced flow not found: {}", node.flow),
                     )),
                     response: None,
                     message: None,
@@ -853,20 +876,20 @@ impl Wafer {
             }
         };
 
-        visited_chains.insert(node.chain.clone());
-        let result = self.execute_node(&chain.root, msg, &chain.id, &chain.config.on_error, cancelled, deadline, visited_chains, "root");
-        visited_chains.remove(&node.chain);
+        visited_flows.insert(node.flow.clone());
+        let result = self.execute_node(&target.root, msg, &target.id, &target.config.on_error, cancelled, deadline, visited_flows, "root");
+        visited_flows.remove(&node.flow);
 
         if result.action == Action::Continue && !node.next.is_empty() {
             return self.execute_first_match(
                 &node.next,
                 msg,
-                &chain.id,
+                &target.id,
                 on_error,
                 cancelled,
                 deadline,
-                visited_chains,
-                &format!("ref:{}", node.chain),
+                visited_flows,
+                &format!("ref:{}", node.flow),
             );
         }
 
@@ -877,11 +900,11 @@ impl Wafer {
         &self,
         nodes: &[Box<Node>],
         msg: &mut Message,
-        chain_id: &str,
+        flow_id: &str,
         on_error: &str,
         cancelled: &Arc<AtomicBool>,
         deadline: Option<Instant>,
-        visited_chains: &mut HashSet<String>,
+        visited_flows: &mut HashSet<String>,
         parent_path: &str,
     ) -> Result_ {
         for (i, child) in nodes.iter().enumerate() {
@@ -899,21 +922,21 @@ impl Wafer {
                 }
             }
             let child_path = format!("{}.{}", parent_path, i);
-            return self.execute_node(child, msg, chain_id, on_error, cancelled, deadline, visited_chains, &child_path);
+            return self.execute_node(child, msg, flow_id, on_error, cancelled, deadline, visited_flows, &child_path);
         }
         Result_::continue_with(msg.clone())
     }
 
-    /// GetChain returns a chain by ID.
-    pub fn get_chain(&self, id: &str) -> Option<&Chain> {
-        self.chains.get(id)
+    /// GetFlow returns a flow by ID.
+    pub fn get_flow(&self, id: &str) -> Option<&Flow> {
+        self.flows.get(id)
     }
 
-    /// Chains returns info about all loaded chains.
-    pub fn chains_info(&self) -> Vec<ChainInfo> {
-        self.chains
+    /// Flows returns info about all loaded flows.
+    pub fn flows_info(&self) -> Vec<FlowInfo> {
+        self.flows
             .values()
-            .map(|c| ChainInfo {
+            .map(|c| FlowInfo {
                 id: c.id.clone(),
                 summary: c.summary.clone(),
                 on_error: c.config.on_error.clone(),
@@ -926,9 +949,9 @@ impl Wafer {
             .collect()
     }
 
-    /// ChainDefs serializes all runtime chains back to ChainDef format.
-    pub fn chain_defs(&self) -> Vec<ChainDef> {
-        self.chains.values().map(chain_to_chain_def).collect()
+    /// FlowDefs serializes all runtime flows back to FlowDef format.
+    pub fn flow_defs(&self) -> Vec<FlowDef> {
+        self.flows.values().map(flow_to_flow_def).collect()
     }
 }
 

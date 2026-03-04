@@ -3,5 +3,5 @@
 [actions]
 continue = { value = "continue", description = "Pass message to the next block" }
 respond  = { value = "respond",  description = "Short-circuit with a response" }
-drop     = { value = "drop",     description = "End the chain silently" }
+drop     = { value = "drop",     description = "End the flow silently" }
 error    = { value = "error",    description = "Short-circuit with an error" }

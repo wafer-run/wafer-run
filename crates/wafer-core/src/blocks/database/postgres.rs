@@ -158,7 +158,7 @@ impl PostgresDatabaseService {
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
         let values: Vec<&serde_json::Value> = columns.iter().map(|k| &data[k]).collect();
 
-        let col_names: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
+        let col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             table,
@@ -207,7 +207,7 @@ impl PostgresDatabaseService {
         let set_clauses: Vec<String> = keys
             .iter()
             .enumerate()
-            .map(|(i, k)| format!("{} = ${}", k, i + 1))
+            .map(|(i, k)| format!("{} = ${}", sanitize_ident(k), i + 1))
             .collect();
 
         let id_param = keys.len() + 1;
@@ -371,7 +371,7 @@ impl PostgresDatabaseService {
     }
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
-        let sql = format!("DROP TABLE IF EXISTS {}", name);
+        let sql = format!("DROP TABLE IF EXISTS {}", sanitize_ident(name));
         sqlx::query(&sql)
             .execute(&self.pool)
             .await
@@ -448,7 +448,7 @@ impl PostgresDatabaseService {
                 let pg_type = pg_type_for_json_value(value);
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
-                    table, key, pg_type
+                    table, sanitize_ident(key), pg_type
                 );
                 sqlx::query(&alter)
                     .execute(&self.pool)
@@ -474,7 +474,7 @@ impl PostgresDatabaseService {
             if !existing.contains(&f.field.to_lowercase()) {
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table, f.field
+                    table, sanitize_ident(&f.field)
                 );
                 sqlx::query(&alter)
                     .execute(&self.pool)
@@ -488,7 +488,7 @@ impl PostgresDatabaseService {
             if !existing.contains(&s.field.to_lowercase()) {
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table, s.field
+                    table, sanitize_ident(&s.field)
                 );
                 sqlx::query(&alter)
                     .execute(&self.pool)
@@ -539,14 +539,15 @@ fn schema_default_to_sql(d: &DefaultValue) -> String {
 }
 
 fn schema_column_to_sql(col: &Column) -> String {
-    let mut sql = format!("{} {}", col.name, schema_data_type_to_sql(col.data_type));
+    let qname = quote_ident(&col.name);
+    let mut sql = format!("{} {}", qname, schema_data_type_to_sql(col.data_type));
 
     if col.primary_key && !col.auto_increment {
         sql.push_str(" PRIMARY KEY");
     }
 
     if col.auto_increment {
-        sql = format!("{} SERIAL PRIMARY KEY", col.name);
+        sql = format!("{} SERIAL PRIMARY KEY", qname);
         if let Some(ref default) = col.default {
             sql.push_str(" DEFAULT ");
             sql.push_str(&schema_default_to_sql(default));
@@ -571,7 +572,8 @@ fn schema_column_to_sql(col: &Column) -> String {
 }
 
 fn schema_generate_create_table(table: &Table) -> String {
-    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", table.name);
+    let qtable = quote_ident(&table.name);
+    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", qtable);
 
     for (i, col) in table.columns.iter().enumerate() {
         if i > 0 {
@@ -583,15 +585,17 @@ fn schema_generate_create_table(table: &Table) -> String {
 
     // Composite primary key
     if !table.primary_key.is_empty() {
+        let quoted: Vec<String> = table.primary_key.iter().map(|k| quote_ident(k)).collect();
         sql.push_str(",\n    PRIMARY KEY(");
-        sql.push_str(&table.primary_key.join(", "));
+        sql.push_str(&quoted.join(", "));
         sql.push(')');
     }
 
     // Composite unique constraints
     for uk in &table.unique_keys {
+        let quoted: Vec<String> = uk.iter().map(|k| quote_ident(k)).collect();
         sql.push_str(",\n    UNIQUE(");
-        sql.push_str(&uk.join(", "));
+        sql.push_str(&quoted.join(", "));
         sql.push(')');
     }
 
@@ -599,19 +603,19 @@ fn schema_generate_create_table(table: &Table) -> String {
     for col in &table.columns {
         if let Some(ref refs) = col.references {
             sql.push_str(",\n    FOREIGN KEY (");
-            sql.push_str(&col.name);
+            sql.push_str(&quote_ident(&col.name));
             sql.push_str(") REFERENCES ");
-            sql.push_str(&refs.table);
+            sql.push_str(&quote_ident(&refs.table));
             sql.push('(');
-            sql.push_str(&refs.column);
+            sql.push_str(&quote_ident(&refs.column));
             sql.push(')');
             if !refs.on_delete.is_empty() {
                 sql.push_str(" ON DELETE ");
-                sql.push_str(&refs.on_delete);
+                sql.push_str(&sanitize_ident(&refs.on_delete));
             }
             if !refs.on_update.is_empty() {
                 sql.push_str(" ON UPDATE ");
-                sql.push_str(&refs.on_update);
+                sql.push_str(&sanitize_ident(&refs.on_update));
             }
         }
     }
@@ -628,15 +632,16 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
     sql.push_str("INDEX IF NOT EXISTS ");
 
     let name = if idx.name.is_empty() {
-        format!("idx_{}_{}", table_name, idx.columns.join("_"))
+        format!("idx_{}_{}", sanitize_ident(table_name), idx.columns.iter().map(|c| sanitize_ident(c)).collect::<Vec<_>>().join("_"))
     } else {
-        idx.name.clone()
+        sanitize_ident(&idx.name)
     };
     sql.push_str(&name);
     sql.push_str(" ON ");
-    sql.push_str(table_name);
+    sql.push_str(&quote_ident(table_name));
     sql.push('(');
-    sql.push_str(&idx.columns.join(", "));
+    let quoted_cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c)).collect();
+    sql.push_str(&quoted_cols.join(", "));
     sql.push(')');
 
     sql
@@ -749,6 +754,11 @@ fn sanitize_ident(name: &str) -> String {
         .collect()
 }
 
+/// Quote an identifier for use in DDL (double-quote escaping).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// Map a `serde_json::Value` to the appropriate PostgreSQL column type name.
 fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
     match v {
@@ -780,10 +790,10 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<serde_json::Value>) {
     for filter in filters {
         match filter.operator {
             FilterOp::IsNull => {
-                clauses.push(format!("{} IS NULL", filter.field));
+                clauses.push(format!("{} IS NULL", sanitize_ident(&filter.field)));
             }
             FilterOp::IsNotNull => {
-                clauses.push(format!("{} IS NOT NULL", filter.field));
+                clauses.push(format!("{} IS NOT NULL", sanitize_ident(&filter.field)));
             }
             FilterOp::In => {
                 if let serde_json::Value::Array(arr) = &filter.value {
@@ -796,7 +806,7 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<serde_json::Value>) {
                         .collect();
                     clauses.push(format!(
                         "{} IN ({})",
-                        filter.field,
+                        sanitize_ident(&filter.field),
                         placeholders.join(", ")
                     ));
                 }
@@ -805,7 +815,7 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<serde_json::Value>) {
                 values.push(filter.value.clone());
                 clauses.push(format!(
                     "{} {} ${}",
-                    filter.field,
+                    sanitize_ident(&filter.field),
                     filter.operator.as_sql(),
                     values.len()
                 ));
@@ -826,9 +836,9 @@ fn build_order_clause(sort: &[SortField]) -> String {
         .iter()
         .map(|s| {
             if s.desc {
-                format!("{} DESC", s.field)
+                format!("{} DESC", sanitize_ident(&s.field))
             } else {
-                format!("{} ASC", s.field)
+                format!("{} ASC", sanitize_ident(&s.field))
             }
         })
         .collect();

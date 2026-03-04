@@ -4,40 +4,72 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let out_dir = env::var("OUT_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set (this should only happen outside cargo)");
+    let out_dir = env::var("OUT_DIR")
+        .expect("OUT_DIR not set (this should only happen outside cargo)");
 
     let content_dir = Path::new(&manifest_dir).join("content");
     let partials_dir = content_dir.join("_partials");
     let out_content_dir = Path::new(&out_dir).join("content");
 
     // Create output directories
-    fs::create_dir_all(out_content_dir.join("docs")).unwrap();
+    if let Err(e) = fs::create_dir_all(out_content_dir.join("docs")) {
+        eprintln!("cargo:warning=failed to create output directory: {}", e);
+        return;
+    }
 
     // Load all partials into a HashMap
     let mut partials: HashMap<String, String> = HashMap::new();
     if partials_dir.exists() {
-        for entry in fs::read_dir(&partials_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let contents = fs::read_to_string(entry.path()).unwrap();
-                partials.insert(name, contents);
+        if let Ok(entries) = fs::read_dir(&partials_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if let Ok(contents) = fs::read_to_string(entry.path()) {
+                        partials.insert(name, contents);
+                    } else {
+                        eprintln!("cargo:warning=failed to read partial: {:?}", entry.path());
+                    }
+                }
             }
         }
     }
 
-    let doc_head = partials.get("doc_head.html").expect("missing doc_head.html partial");
-    let doc_foot = partials.get("doc_foot.html").expect("missing doc_foot.html partial");
+    let doc_head = match partials.get("doc_head.html") {
+        Some(h) => h.clone(),
+        None => {
+            eprintln!("cargo:warning=missing doc_head.html partial — skipping doc page assembly");
+            return;
+        }
+    };
+    let doc_foot = match partials.get("doc_foot.html") {
+        Some(f) => f.clone(),
+        None => {
+            eprintln!("cargo:warning=missing doc_foot.html partial — skipping doc page assembly");
+            return;
+        }
+    };
 
     // Process doc pages (content/docs.html + content/docs/*.html)
     for page_path in collect_doc_pages(&content_dir) {
-        let raw = fs::read_to_string(&page_path).unwrap();
-        let assembled = assemble_doc_page(&raw, doc_head, doc_foot, &partials);
-        let rel = page_path.strip_prefix(&content_dir).unwrap();
-        let out_path = out_content_dir.join(rel);
-        fs::create_dir_all(out_path.parent().unwrap()).unwrap();
-        fs::write(&out_path, assembled).unwrap();
+        let raw = match fs::read_to_string(&page_path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("cargo:warning=failed to read {:?}: {}", page_path, e);
+                continue;
+            }
+        };
+        let assembled = assemble_doc_page(&raw, &doc_head, &doc_foot, &partials);
+        if let Ok(rel) = page_path.strip_prefix(&content_dir) {
+            let out_path = out_content_dir.join(rel);
+            if let Some(parent) = out_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(&out_path, assembled) {
+                eprintln!("cargo:warning=failed to write {:?}: {}", out_path, e);
+            }
+        }
     }
 
     // Copy non-doc pages verbatim
@@ -45,7 +77,9 @@ fn main() {
         let src = content_dir.join(name);
         let dst = out_content_dir.join(name);
         if src.exists() {
-            fs::copy(&src, &dst).unwrap();
+            if let Err(e) = fs::copy(&src, &dst) {
+                eprintln!("cargo:warning=failed to copy {}: {}", name, e);
+            }
         }
     }
 
@@ -63,14 +97,15 @@ fn collect_doc_pages(content_dir: &Path) -> Vec<PathBuf> {
 
     let docs_dir = content_dir.join("docs");
     if docs_dir.exists() {
-        let mut entries: Vec<_> = fs::read_dir(&docs_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "html"))
-            .collect();
-        entries.sort();
-        pages.extend(entries);
+        if let Ok(entries) = fs::read_dir(&docs_dir) {
+            let mut entries: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map_or(false, |ext| ext == "html"))
+                .collect();
+            entries.sort();
+            pages.extend(entries);
+        }
     }
 
     pages
@@ -152,7 +187,7 @@ fn assemble_doc_page(
         "running-a-block",
         "wasm-blocks",
         "cli",
-        "chain-configuration",
+        "flow-configuration",
         "built-in-blocks",
         "services",
         "http-bridge",

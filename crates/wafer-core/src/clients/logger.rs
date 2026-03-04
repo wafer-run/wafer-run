@@ -21,7 +21,14 @@ struct LogReq<'a> {
 // --- Public API ---
 
 fn log(ctx: &dyn Context, kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    let _ = call_service(ctx, BLOCK, kind, &LogReq { message, fields });
+    if let Err(e) = call_service(ctx, BLOCK, kind, &LogReq { message, fields }) {
+        // Fall back to tracing if the logger block is unavailable.
+        tracing::warn!(
+            logger_error = %e,
+            original_message = message,
+            "logger block call failed — message may be lost"
+        );
+    }
 }
 
 pub fn debug(ctx: &dyn Context, message: &str) {

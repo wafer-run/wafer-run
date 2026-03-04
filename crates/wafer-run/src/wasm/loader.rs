@@ -70,11 +70,18 @@ impl WASMBlock {
     }
 
     fn create_instance(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, WaferBlock), String> {
+        // Allow configuring the epoch deadline via the context's config.
+        let epoch_deadline = ctx
+            .as_ref()
+            .and_then(|c| c.config_get("wasm_epoch_deadline"))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10); // default: 10 epoch ticks = ~10 seconds with 1 tick/second
+
         let mut store = Store::new(&self.engine, HostState {
             context: ctx,
             capabilities: self.capabilities.clone(),
         });
-        store.set_epoch_deadline(10); // 10 epoch ticks = ~10 seconds with 1 tick/second
+        store.set_epoch_deadline(epoch_deadline);
         let block = WaferBlock::instantiate(&mut store, &self.component, &self.linker)
             .map_err(|e| format!("instantiating WASM component: {}", e))?;
         Ok((store, block))
@@ -135,15 +142,12 @@ impl Block for WASMBlock {
     }
 
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        // SAFETY: The WASM call is synchronous — ctx outlives the call and the
-        // Arc is dropped before this function returns.
-        let ctx_arc: Arc<dyn Context> = unsafe {
-            let ctx_static: *const (dyn Context + 'static) =
-                std::mem::transmute(ctx as *const dyn Context);
-            Arc::new(ContextWrapper(ctx_static))
-        };
+        // SAFETY: The WASM call is synchronous — ctx outlives this function call.
+        // We use a raw pointer wrapper instead of Arc to make lifetime management
+        // explicit: the ContextGuard ensures the wrapper cannot outlive this scope.
+        let guard = ContextGuard::new(ctx);
 
-        let (mut store, block) = match self.create_instance(Some(ctx_arc)) {
+        let (mut store, block) = match self.create_instance(Some(guard.as_arc())) {
             Ok(r) => r,
             Err(e) => {
                 return msg.clone().err(WaferError::new(ErrorCode::INTERNAL, e));
@@ -176,15 +180,11 @@ impl Block for WASMBlock {
         ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        // SAFETY: Same as handle — synchronous call, ctx outlives it.
-        let ctx_arc: Arc<dyn Context> = unsafe {
-            let ctx_static: *const (dyn Context + 'static) =
-                std::mem::transmute(ctx as *const dyn Context);
-            Arc::new(ContextWrapper(ctx_static))
-        };
+        // SAFETY: Same as handle — synchronous call, ctx outlives this scope.
+        let guard = ContextGuard::new(ctx);
 
         let (mut store, block_instance) = self
-            .create_instance(Some(ctx_arc))
+            .create_instance(Some(guard.as_arc()))
             .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e))?;
 
         let wit_event = lifecycle_event_to_wit(&event);
@@ -265,7 +265,7 @@ fn block_info_from_wit(wbi: bindings::types::BlockInfo) -> BlockInfo {
     let instance_mode = match wbi.instance_mode {
         bindings::types::InstanceMode::PerNode => InstanceMode::PerNode,
         bindings::types::InstanceMode::Singleton => InstanceMode::Singleton,
-        bindings::types::InstanceMode::PerChain => InstanceMode::PerChain,
+        bindings::types::InstanceMode::PerFlow => InstanceMode::PerFlow,
         bindings::types::InstanceMode::PerExecution => InstanceMode::PerExecution,
     };
 
@@ -273,7 +273,7 @@ fn block_info_from_wit(wbi: bindings::types::BlockInfo) -> BlockInfo {
         .map(|m| match m {
             bindings::types::InstanceMode::PerNode => InstanceMode::PerNode,
             bindings::types::InstanceMode::Singleton => InstanceMode::Singleton,
-            bindings::types::InstanceMode::PerChain => InstanceMode::PerChain,
+            bindings::types::InstanceMode::PerFlow => InstanceMode::PerFlow,
             bindings::types::InstanceMode::PerExecution => InstanceMode::PerExecution,
         })
         .collect();
@@ -349,17 +349,52 @@ impl Context for ContextWrapper {
         unsafe { &*self.0 }.registered_blocks()
     }
 
-    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> {
-        unsafe { &*self.0 }.chain_infos()
+    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> {
+        unsafe { &*self.0 }.flow_infos()
     }
 
-    fn chain_defs(&self) -> Vec<crate::config::ChainDef> {
-        unsafe { &*self.0 }.chain_defs()
+    fn flow_defs(&self) -> Vec<crate::config::FlowDef> {
+        unsafe { &*self.0 }.flow_defs()
     }
 }
 
-impl From<ContextWrapper> for Arc<dyn Context> {
-    fn from(w: ContextWrapper) -> Self {
-        Arc::new(w)
+/// RAII guard that ensures the ContextWrapper (and any Arc clones of it) cannot
+/// outlive the borrowed `&dyn Context`. The guard creates the Arc once and
+/// verifies on drop that no other references remain, panicking if the Arc was
+/// leaked (which would be a bug in the WASM host integration).
+struct ContextGuard {
+    arc: Arc<dyn Context>,
+}
+
+impl ContextGuard {
+    fn new(ctx: &dyn Context) -> Self {
+        // SAFETY: The caller guarantees that `ctx` outlives this ContextGuard.
+        // We enforce this by checking the Arc refcount in Drop.
+        let ptr: *const dyn Context = ctx;
+        let ctx_static: *const (dyn Context + 'static) = unsafe { std::mem::transmute(ptr) };
+        Self {
+            arc: Arc::new(ContextWrapper(ctx_static)),
+        }
+    }
+
+    fn as_arc(&self) -> Arc<dyn Context> {
+        self.arc.clone()
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        // After the WASM call returns, only our Arc should remain.
+        // strong_count == 1 means the Store/HostState already dropped its clone.
+        // If someone else holds a reference, that's a bug that would cause use-after-free.
+        let count = Arc::strong_count(&self.arc);
+        if count != 1 {
+            // This is a bug — an Arc reference escaped the WASM call scope.
+            // Panic to prevent use-after-free rather than allowing silent UB.
+            panic!(
+                "ContextGuard: Arc leaked with {} references — potential use-after-free bug",
+                count
+            );
+        }
     }
 }

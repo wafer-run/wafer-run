@@ -82,9 +82,21 @@ impl BlockCapabilities {
         if self.network_allow.is_empty() {
             return true; // any URL if network=true and no allowlist
         }
-        self.network_allow
-            .iter()
-            .any(|prefix| url.starts_with(prefix))
+        // Use proper origin+path matching to prevent prefix bypass attacks.
+        // e.g., allowlist "https://api.example.com/" must NOT match
+        // "https://api.example.com.evil.com/".
+        self.network_allow.iter().any(|allowed| {
+            if url.starts_with(allowed) {
+                return true;
+            }
+            // Check if the allowed entry is an origin (no trailing slash path).
+            // Ensure the URL matches the origin exactly up to a path separator.
+            if let Some(stripped) = allowed.strip_suffix('/') {
+                url.starts_with(stripped) && url.as_bytes().get(stripped.len()) == Some(&b'/')
+            } else {
+                false
+            }
+        })
     }
 
     pub fn allows_config_key(&self, key: &str) -> bool {
@@ -170,6 +182,8 @@ mod tests {
         assert!(caps.allows_network_url("https://cdn.example.com/images/logo.png"));
         assert!(!caps.allows_network_url("https://evil.com/steal"));
         assert!(!caps.allows_network_url("https://api.example.org/v1"));
+        // Ensure prefix bypass is blocked
+        assert!(!caps.allows_network_url("https://api.example.com.evil.com/steal"));
     }
 
     #[test]

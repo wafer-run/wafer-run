@@ -17,7 +17,7 @@ func RespondResult(resp *Response) *BlockResult {
 	return &BlockResult{Action: ActionRespond, Response: resp}
 }
 
-// DropResult returns a BlockResult that ends the chain silently.
+// DropResult returns a BlockResult that ends the flow silently.
 func DropResult() *BlockResult {
 	return &BlockResult{Action: ActionDrop}
 }

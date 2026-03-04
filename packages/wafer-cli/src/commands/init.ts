@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { log } from "../util/logger.js";
 import {
   waferJsonTemplate,
-  mainChainTemplate,
+  mainFlowTemplate,
   packageJsonTemplate,
   helloBlockTemplate,
   tsconfigTemplate,
@@ -16,14 +16,14 @@ export async function initCommand(name: string): Promise<void> {
   log.step(`Creating project ${name}...`);
 
   await mkdir(join(dir, "blocks", "hello"), { recursive: true });
-  await mkdir(join(dir, "chains"), { recursive: true });
+  await mkdir(join(dir, "flows"), { recursive: true });
   await mkdir(join(dir, "dist"), { recursive: true });
 
   await Promise.all([
     writeFile(join(dir, "wafer.json"), JSON.stringify(waferJsonTemplate(name), null, 2) + "\n"),
     writeFile(join(dir, "package.json"), JSON.stringify(packageJsonTemplate(name), null, 2) + "\n"),
     writeFile(join(dir, "blocks", "hello", "index.ts"), helloBlockTemplate()),
-    writeFile(join(dir, "chains", "main.json"), JSON.stringify(mainChainTemplate(), null, 2) + "\n"),
+    writeFile(join(dir, "flows", "main.json"), JSON.stringify(mainFlowTemplate(), null, 2) + "\n"),
     writeFile(join(dir, "tsconfig.json"), JSON.stringify(tsconfigTemplate(), null, 2) + "\n"),
     writeFile(join(dir, ".gitignore"), gitignoreTemplate()),
   ]);

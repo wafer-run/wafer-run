@@ -28,26 +28,26 @@ fn match_node(block: &str, pattern: &str) -> Box<Node> {
     Box::new(n)
 }
 
-fn chain_ref_node(chain_id: &str) -> Box<Node> {
+fn flow_ref_node(flow_id: &str) -> Box<Node> {
     let mut n = Node::new();
-    n.chain = chain_id.to_string();
+    n.flow = flow_id.to_string();
     Box::new(n)
 }
 
-fn make_chain(id: &str, root: Box<Node>) -> Chain {
-    Chain {
+fn make_flow(id: &str, root: Box<Node>) -> Flow {
+    Flow {
         id: id.to_string(),
-        summary: format!("Test chain: {}", id),
-        config: ChainConfig::default(),
+        summary: format!("Test flow: {}", id),
+        config: FlowConfig::default(),
         root,
     }
 }
 
-fn make_chain_with_on_error(id: &str, root: Box<Node>, on_error: &str) -> Chain {
-    Chain {
+fn make_flow_with_on_error(id: &str, root: Box<Node>, on_error: &str) -> Flow {
+    Flow {
         id: id.to_string(),
-        summary: format!("Test chain: {}", id),
-        config: ChainConfig {
+        summary: format!("Test flow: {}", id),
+        config: FlowConfig {
             on_error: on_error.to_string(),
             timeout: Duration::ZERO,
         },
@@ -62,7 +62,7 @@ fn make_chain_with_on_error(id: &str, root: Box<Node>, on_error: &str) -> Chain 
 #[test]
 fn test_create_runtime() {
     let w = Wafer::new();
-    assert!(w.chains_info().is_empty());
+    assert!(w.flows_info().is_empty());
 }
 
 #[test]
@@ -74,11 +74,11 @@ fn test_register_inline_block() {
 }
 
 // ===========================================================================
-// 2. Build and execute a single-node chain
+// 2. Build and execute a single-node flow
 // ===========================================================================
 
 #[test]
-fn test_single_block_chain() {
+fn test_single_block_flow() {
     let mut w = Wafer::new();
 
     w.register_block_func("upper", |_ctx, msg| {
@@ -89,7 +89,7 @@ fn test_single_block_chain() {
     });
 
     let root = block_node("upper");
-    w.add_chain(make_chain("to-upper", root));
+    w.add_flow(make_flow("to-upper", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("text", "hello world");
@@ -103,11 +103,11 @@ fn test_single_block_chain() {
 }
 
 // ===========================================================================
-// 3. Multi-block sequential chain (a -> b -> c)
+// 3. Multi-block sequential flow (a -> b -> c)
 // ===========================================================================
 
 #[test]
-fn test_sequential_chain() {
+fn test_sequential_flow() {
     let mut w = Wafer::new();
 
     // Block A: append "-A"
@@ -137,14 +137,14 @@ fn test_sequential_chain() {
         out.cont()
     });
 
-    // Build chain: A -> B -> C
+    // Build flow: A -> B -> C
     let mut root = block_node("append-a");
     let mut node_b = block_node("append-b");
     let node_c = block_node("append-c");
     node_b.next.push(node_c);
     root.next.push(node_b);
 
-    w.add_chain(make_chain("abc", root));
+    w.add_flow(make_flow("abc", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "start");
@@ -181,7 +181,7 @@ fn test_pattern_matching_exact() {
     root.next.push(match_node("create-handler", "user.create"));
     root.next.push(match_node("delete-handler", "user.delete"));
 
-    w.add_chain(make_chain("dispatch", root));
+    w.add_flow(make_flow("dispatch", root));
     w.resolve().expect("resolve failed");
 
     // Test user.create
@@ -219,7 +219,7 @@ fn test_pattern_matching_wildcard() {
     root.next.push(match_node("user-handler", "user.*"));
     root.next.push(match_node("fallback", "")); // empty = always matches
 
-    w.add_chain(make_chain("wildcard", root));
+    w.add_flow(make_flow("wildcard", root));
     w.resolve().expect("resolve failed");
 
     // "user.update" matches "user.*"
@@ -250,7 +250,7 @@ fn test_pattern_matching_double_wildcard() {
     let mut root = block_node("noop");
     root.next.push(match_node("deep-handler", "event.**"));
 
-    w.add_chain(make_chain("deep-match", root));
+    w.add_flow(make_flow("deep-match", root));
     w.resolve().expect("resolve failed");
 
     // "event.user.created" matches "event.**"
@@ -515,37 +515,37 @@ fn test_response_builder_body() {
 // ===========================================================================
 
 #[test]
-fn test_observability_chain_hooks() {
+fn test_observability_flow_hooks() {
     let mut w = Wafer::new();
 
-    let chain_start_count = Arc::new(AtomicUsize::new(0));
-    let chain_end_count = Arc::new(AtomicUsize::new(0));
-    let cs = chain_start_count.clone();
-    let ce = chain_end_count.clone();
+    let flow_start_count = Arc::new(AtomicUsize::new(0));
+    let flow_end_count = Arc::new(AtomicUsize::new(0));
+    let cs = flow_start_count.clone();
+    let ce = flow_end_count.clone();
 
-    w.hooks.on_chain_start(move |_chain_id, _msg| {
+    w.hooks.on_flow_start(move |_flow_id, _msg| {
         cs.fetch_add(1, Ordering::SeqCst);
     });
-    w.hooks.on_chain_end(move |_chain_id, _result, _dur| {
+    w.hooks.on_flow_end(move |_flow_id, _result, _dur| {
         ce.fetch_add(1, Ordering::SeqCst);
     });
 
     w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
 
     let root = block_node("noop");
-    w.add_chain(make_chain("observed", root));
+    w.add_flow(make_flow("observed", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
     w.execute("observed", &mut msg);
 
-    assert_eq!(chain_start_count.load(Ordering::SeqCst), 1);
-    assert_eq!(chain_end_count.load(Ordering::SeqCst), 1);
+    assert_eq!(flow_start_count.load(Ordering::SeqCst), 1);
+    assert_eq!(flow_end_count.load(Ordering::SeqCst), 1);
 
     // Execute again
     w.execute("observed", &mut msg);
-    assert_eq!(chain_start_count.load(Ordering::SeqCst), 2);
-    assert_eq!(chain_end_count.load(Ordering::SeqCst), 2);
+    assert_eq!(flow_start_count.load(Ordering::SeqCst), 2);
+    assert_eq!(flow_end_count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -573,7 +573,7 @@ fn test_observability_block_hooks() {
     let mut root = block_node("step-1");
     root.next.push(block_node("step-2"));
 
-    w.add_chain(make_chain("two-steps", root));
+    w.add_flow(make_flow("two-steps", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -589,11 +589,11 @@ fn test_observability_block_hooks() {
 }
 
 // ===========================================================================
-// 8. Chain references
+// 8. Flow references
 // ===========================================================================
 
 #[test]
-fn test_chain_reference() {
+fn test_flow_reference() {
     let mut w = Wafer::new();
 
     w.register_block_func("validate", |_ctx, msg| {
@@ -608,19 +608,19 @@ fn test_chain_reference() {
         out.cont()
     });
 
-    // Inner chain: validate
+    // Inner flow: validate
     let validate_root = block_node("validate");
-    w.add_chain(make_chain("validation-chain", validate_root));
+    w.add_flow(make_flow("validation-flow", validate_root));
 
-    // Outer chain: ref to validation-chain -> store
-    let mut ref_node = chain_ref_node("validation-chain");
+    // Outer flow: ref to validation-flow -> store
+    let mut ref_node = flow_ref_node("validation-flow");
     ref_node.next.push(block_node("store"));
 
-    w.add_chain(make_chain("main-chain", ref_node));
+    w.add_flow(make_flow("main-flow", ref_node));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("user.create", "data");
-    let result = w.execute("main-chain", &mut msg);
+    let result = w.execute("main-flow", &mut msg);
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(msg.get_meta("validated"), "true");
@@ -628,10 +628,10 @@ fn test_chain_reference() {
 }
 
 #[test]
-fn test_chain_reference_short_circuit() {
+fn test_flow_reference_short_circuit() {
     let mut w = Wafer::new();
 
-    // The inner chain responds immediately (short-circuits)
+    // The inner flow responds immediately (short-circuits)
     w.register_block_func("responder", |_ctx, msg| {
         respond(msg.clone(), 200, b"early-response".to_vec(), "text/plain")
     });
@@ -643,12 +643,12 @@ fn test_chain_reference_short_circuit() {
     });
 
     let responder_root = block_node("responder");
-    w.add_chain(make_chain("early-exit", responder_root));
+    w.add_flow(make_flow("early-exit", responder_root));
 
-    let mut ref_node = chain_ref_node("early-exit");
+    let mut ref_node = flow_ref_node("early-exit");
     ref_node.next.push(block_node("should-not-run"));
 
-    w.add_chain(make_chain("outer", ref_node));
+    w.add_flow(make_flow("outer", ref_node));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -660,16 +660,16 @@ fn test_chain_reference_short_circuit() {
 }
 
 #[test]
-fn test_chain_reference_not_found() {
+fn test_flow_reference_not_found() {
     let mut w = Wafer::new();
 
     w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
 
-    // Create a chain that references a non-existent chain
-    let mut ref_node = chain_ref_node("does-not-exist");
+    // Create a flow that references a non-existent flow
+    let mut ref_node = flow_ref_node("does-not-exist");
     ref_node.next.push(block_node("noop"));
 
-    w.add_chain(make_chain("bad-ref", ref_node));
+    w.add_flow(make_flow("bad-ref", ref_node));
     // We register noop so the outer node resolves fine
     w.resolve().expect("resolve failed");
 
@@ -707,11 +707,11 @@ fn test_on_error_stop() {
     let mut root = block_node("fail");
     root.next.push(block_node("after-fail"));
 
-    w.add_chain(make_chain_with_on_error("stop-chain", root, "stop"));
+    w.add_flow(make_flow_with_on_error("stop-flow", root, "stop"));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("stop-chain", &mut msg);
+    let result = w.execute("stop-flow", &mut msg);
 
     assert_eq!(result.action, Action::Error);
     assert_eq!(result.error.as_ref().unwrap().code, "test_error");
@@ -741,13 +741,13 @@ fn test_on_error_continue() {
     let mut root = block_node("fail");
     root.next.push(block_node("after-fail"));
 
-    w.add_chain(make_chain_with_on_error("cont-chain", root, "continue"));
+    w.add_flow(make_flow_with_on_error("cont-flow", root, "continue"));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("cont-chain", &mut msg);
+    let result = w.execute("cont-flow", &mut msg);
 
-    // With on_error=continue, the chain proceeds past the error
+    // With on_error=continue, the flow proceeds past the error
     assert_eq!(fail_count.load(Ordering::SeqCst), 1);
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "recovered");
@@ -763,7 +763,7 @@ fn test_on_error_continue_no_more_nodes() {
     });
 
     let root = block_node("fail-at-end");
-    w.add_chain(make_chain_with_on_error("cont-end", root, "continue"));
+    w.add_flow(make_flow_with_on_error("cont-end", root, "continue"));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -775,7 +775,7 @@ fn test_on_error_continue_no_more_nodes() {
 }
 
 // ===========================================================================
-// 10. Respond short-circuits the chain
+// 10. Respond short-circuits the flow
 // ===========================================================================
 
 #[test]
@@ -795,7 +795,7 @@ fn test_respond_short_circuits() {
     let mut root = block_node("early-respond");
     root.next.push(block_node("unreachable"));
 
-    w.add_chain(make_chain("short-circuit", root));
+    w.add_flow(make_flow("short-circuit", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -824,28 +824,28 @@ fn test_drop_action() {
     let mut root = block_node("dropper");
     root.next.push(block_node("unreachable"));
 
-    w.add_chain(make_chain("drop-chain", root));
+    w.add_flow(make_flow("drop-flow", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
-    let result = w.execute("drop-chain", &mut msg);
+    let result = w.execute("drop-flow", &mut msg);
 
     assert_eq!(result.action, Action::Drop);
 }
 
 // ===========================================================================
-// 12. Chain not found
+// 12. Flow not found
 // ===========================================================================
 
 #[test]
-fn test_execute_nonexistent_chain() {
+fn test_execute_nonexistent_flow() {
     let w = Wafer::new();
 
     let mut msg = Message::new("test", "data");
     let result = w.execute("nonexistent", &mut msg);
 
     assert_eq!(result.action, Action::Error);
-    assert_eq!(result.error.as_ref().unwrap().code, "chain_not_found");
+    assert_eq!(result.error.as_ref().unwrap().code, "flow_not_found");
 }
 
 // ===========================================================================
@@ -869,11 +869,11 @@ fn test_block_with_config() {
         serde_json::json!({"prefix": "hello"}),
     );
 
-    w.add_chain(make_chain("config-chain", root));
+    w.add_flow(make_flow("config-flow", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "world");
-    let result = w.execute("config-chain", &mut msg);
+    let result = w.execute("config-flow", &mut msg);
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "hello-world");
@@ -946,32 +946,32 @@ fn test_resolve_missing_block() {
     let mut w = Wafer::new();
 
     let root = block_node("unregistered-block");
-    w.add_chain(make_chain("broken", root));
+    w.add_flow(make_flow("broken", root));
 
     let err = w.resolve().unwrap_err();
     assert!(err.contains("unregistered-block"), "Error: {}", err);
 }
 
 // ===========================================================================
-// 16. ChainDef (JSON-based chain definition)
+// 16. FlowDef (JSON-based flow definition)
 // ===========================================================================
 
 #[test]
-fn test_add_chain_def() {
+fn test_add_flow_def() {
     let mut w = Wafer::new();
 
     w.register_block_func("echo", |_ctx, msg| msg.clone().cont());
 
-    let def = ChainDef {
+    let def = FlowDef {
         id: "from-def".to_string(),
         summary: "Defined from JSON".to_string(),
-        config: ChainConfigDef {
+        config: FlowConfigDef {
             on_error: "stop".to_string(),
             timeout: "30s".to_string(),
         },
         root: NodeDef {
             block: "echo".to_string(),
-            chain: String::new(),
+            flow: String::new(),
             r#match: String::new(),
             config: None,
             instance: String::new(),
@@ -979,7 +979,7 @@ fn test_add_chain_def() {
         },
     };
 
-    w.add_chain_def(&def);
+    w.add_flow_def(&def);
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "hello");
@@ -1000,11 +1000,11 @@ fn test_panic_recovery() {
     });
 
     let root = block_node("panicker");
-    w.add_chain(make_chain("panic-chain", root));
+    w.add_flow(make_flow("panic-flow", root));
     w.resolve().expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("panic-chain", &mut msg);
+    let result = w.execute("panic-flow", &mut msg);
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
@@ -1013,24 +1013,24 @@ fn test_panic_recovery() {
 }
 
 // ===========================================================================
-// 18. Multiple chains info
+// 18. Multiple flows info
 // ===========================================================================
 
 #[test]
-fn test_chains_info() {
+fn test_flows_info() {
     let mut w = Wafer::new();
 
     w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
 
-    w.add_chain(make_chain("chain-a", block_node("noop")));
-    w.add_chain(make_chain("chain-b", block_node("noop")));
+    w.add_flow(make_flow("flow-a", block_node("noop")));
+    w.add_flow(make_flow("flow-b", block_node("noop")));
 
-    let info = w.chains_info();
+    let info = w.flows_info();
     assert_eq!(info.len(), 2);
 
     let ids: Vec<&str> = info.iter().map(|c| c.id.as_str()).collect();
-    assert!(ids.contains(&"chain-a"));
-    assert!(ids.contains(&"chain-b"));
+    assert!(ids.contains(&"flow-a"));
+    assert!(ids.contains(&"flow-b"));
 }
 
 // ===========================================================================
@@ -1044,7 +1044,7 @@ fn test_start_and_stop() {
     w.register_block_func("lifecycle-block", |_ctx, msg| msg.clone().cont());
 
     let root = block_node("lifecycle-block");
-    w.add_chain(make_chain("lifecycle-test", root));
+    w.add_flow(make_flow("lifecycle-test", root));
 
     // Start implicitly resolves if not already resolved
     w.start().expect("start failed");
@@ -1230,13 +1230,13 @@ fn test_resolve_versioned_block_download_error() {
     // Use a nonexistent repo to trigger a download error
     root.block = "github.com/acme/nonexistent-block@v1.0.0".to_string();
 
-    let chain = Chain {
+    let flow = Flow {
         id: "remote-test".to_string(),
         summary: "test".to_string(),
-        config: ChainConfig::default(),
+        config: FlowConfig::default(),
         root: Box::new(root),
     };
-    w.add_chain(chain);
+    w.add_flow(flow);
 
     let err = w.resolve().unwrap_err();
     assert!(
@@ -1261,13 +1261,13 @@ fn test_resolve_unversioned_block_download_error() {
     // Use a nonexistent repo to trigger a download error
     root.block = "github.com/acme/nonexistent-block".to_string();
 
-    let chain = Chain {
+    let flow = Flow {
         id: "unversioned-test".to_string(),
         summary: "test".to_string(),
-        config: ChainConfig::default(),
+        config: FlowConfig::default(),
         root: Box::new(root),
     };
-    w.add_chain(chain);
+    w.add_flow(flow);
 
     let err = w.resolve().unwrap_err();
     assert!(

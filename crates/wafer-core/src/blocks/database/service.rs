@@ -72,6 +72,57 @@ pub trait DatabaseService: Send + Sync {
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError>;
 
+    /// Bulk-delete all records matching filters in a single query.
+    fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
+        // Default implementation falls back to record-by-record deletion.
+        // Loops until all matching records are deleted.
+        loop {
+            let records = self.list(
+                collection,
+                &ListOptions {
+                    filters: filters.to_vec(),
+                    limit: 10000,
+                    ..Default::default()
+                },
+            )?;
+            if records.records.is_empty() {
+                break;
+            }
+            for r in records.records {
+                self.delete(collection, &r.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bulk-update all records matching filters in a single query.
+    fn update_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        // Default implementation falls back to record-by-record updates.
+        // Loops until all matching records are updated.
+        loop {
+            let records = self.list(
+                collection,
+                &ListOptions {
+                    filters: filters.to_vec(),
+                    limit: 10000,
+                    ..Default::default()
+                },
+            )?;
+            if records.records.is_empty() {
+                break;
+            }
+            for r in records.records {
+                self.update(collection, &r.id, data.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     // --- Schema management methods ---
 
     /// Ensure a table exists matching the given schema definition.
@@ -212,6 +263,8 @@ pub fn upsert(
 }
 
 /// ListAll retrieves all records from a collection with optional filters.
+/// Note: capped at 100,000 records to prevent OOM. For larger datasets, use
+/// paginated_list() with explicit pagination.
 pub fn list_all(
     db: &dyn DatabaseService,
     collection: &str,
@@ -221,7 +274,7 @@ pub fn list_all(
         collection,
         &ListOptions {
             filters,
-            limit: 10000,
+            limit: 100_000,
             ..Default::default()
         },
     )?;
@@ -250,7 +303,7 @@ pub fn paginated_list(
     )
 }
 
-/// SoftDelete sets deleted_at on a record.
+/// SoftDelete sets deleted_at on a record using the current UTC timestamp.
 pub fn soft_delete(
     db: &dyn DatabaseService,
     collection: &str,
@@ -259,7 +312,7 @@ pub fn soft_delete(
     let mut data = HashMap::new();
     data.insert(
         "deleted_at".to_string(),
-        serde_json::Value::String("CURRENT_TIMESTAMP".to_string()),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
     );
     db.update(collection, id, data)
 }
@@ -271,7 +324,7 @@ pub fn delete_by_field(
     field: &str,
     value: serde_json::Value,
 ) -> Result<(), DatabaseError> {
-    let records = list_all(
+    delete_by_filters(
         db,
         collection,
         vec![Filter {
@@ -279,11 +332,7 @@ pub fn delete_by_field(
             operator: FilterOp::Equal,
             value,
         }],
-    )?;
-    for r in records {
-        db.delete(collection, &r.id)?;
-    }
-    Ok(())
+    )
 }
 
 /// CountByField counts records where field equals value.
@@ -303,29 +352,21 @@ pub fn count_by_field(
     )
 }
 
-/// DeleteByFilters deletes all records matching filters.
+/// DeleteByFilters deletes all records matching filters using a single bulk query.
 pub fn delete_by_filters(
     db: &dyn DatabaseService,
     collection: &str,
     filters: Vec<Filter>,
 ) -> Result<(), DatabaseError> {
-    let records = list_all(db, collection, filters)?;
-    for r in records {
-        db.delete(collection, &r.id)?;
-    }
-    Ok(())
+    db.delete_where(collection, &filters)
 }
 
-/// UpdateByFilters updates all records matching filters.
+/// UpdateByFilters updates all records matching filters using a single bulk query.
 pub fn update_by_filters(
     db: &dyn DatabaseService,
     collection: &str,
     filters: Vec<Filter>,
     data: HashMap<String, serde_json::Value>,
 ) -> Result<(), DatabaseError> {
-    let records = list_all(db, collection, filters)?;
-    for r in records {
-        db.update(collection, &r.id, data.clone())?;
-    }
-    Ok(())
+    db.update_where(collection, &filters, data)
 }

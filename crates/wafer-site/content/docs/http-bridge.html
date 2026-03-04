@@ -4,14 +4,14 @@ ACTIVE: http-bridge
 -->
 
 <h2>HTTP Bridge</h2>
-<p>The HTTP bridge converts incoming HTTP requests into wafer messages and dispatches them to chains. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). Use <code>wafer_core::bridge::create_router(wafer, "chain-id")</code> to create an axum Router for a chain.</p>
+<p>The HTTP bridge converts incoming HTTP requests into wafer messages and dispatches them to flows. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). Use <code>wafer_core::bridge::create_router(wafer, "flow-id")</code> to create an axum Router for a flow.</p>
 
 <h3>Setup</h3>
 <p>Enable the <code>http</code> feature in your <code>Cargo.toml</code>:</p>
 <pre><code>[dependencies]
 wafer-core = { version = "0.1", features = ["http"] }</code></pre>
-<p>Create a router for a chain and serve it with axum:</p>
-<pre><code>let app = wafer_core::bridge::create_router(wafer.clone(), "my-chain");
+<p>Create a router for a flow and serve it with axum:</p>
+<pre><code>let app = wafer_core::bridge::create_router(wafer.clone(), "my-flow");
 let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
 axum::serve(listener, app).await.unwrap();</code></pre>
 <p>For more control, use <code>wafer_handler()</code> to get an axum <code>MethodRouter</code> you can mount on specific paths, or call <code>http_to_message()</code> and <code>wafer_result_to_response()</code> directly for custom integrations.</p>

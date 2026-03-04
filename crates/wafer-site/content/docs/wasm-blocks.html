@@ -194,9 +194,9 @@ wafer_sdk::export!(MyBlock);</code></pre>
 <h3>Instance Modes</h3>
 <p>Control how many WASM instances the runtime creates:</p>
 <ul>
-    <li><code>Singleton</code> — one instance shared across all chains (default)</li>
-    <li><code>PerChain</code> — one instance per chain (isolated state per chain)</li>
-    <li><code>PerNode</code> — one instance per node in a chain tree</li>
+    <li><code>Singleton</code> — one instance shared across all flows (default)</li>
+    <li><code>PerFlow</code> — one instance per flow (isolated state per flow)</li>
+    <li><code>PerNode</code> — one instance per node in a flow tree</li>
     <li><code>PerExecution</code> — a fresh instance for every message (full isolation, higher cost)</li>
 </ul>
 

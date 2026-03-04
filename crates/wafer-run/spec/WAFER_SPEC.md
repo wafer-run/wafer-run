@@ -16,12 +16,12 @@ Version: 0.0.1-draft
 
 ## Overview
 
-WAFER is a language-agnostic specification for building block-based processing pipelines. Chains can be standalone applications or embedded as logic components within existing programs. Blocks are pure processors that don't know about each other; the runtime handles all wiring.
+WAFER is a language-agnostic specification for building block-based processing pipelines. Flows can be standalone applications or embedded as logic components within existing programs. Blocks are pure processors that don't know about each other; the runtime handles all wiring.
 
 This specification defines:
 - Block interface contract
 - Message and result types
-- Chain configuration schema
+- Flow configuration schema
 - Execution semantics
 
 ```
@@ -29,18 +29,18 @@ This specification defines:
 │                           WAFER RUNTIME                                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│   CHAINS (nested tree structure defines message flow)                    │
+│   FLOWS (nested tree structure defines message flow)                     │
 │                                                                          │
-│   chain-a ──→ validate ──→ process ──→ store  (sequential: nested)      │
+│   flow-a ──→ validate ──→ process ──→ store  (sequential: nested)       │
 │                                                                          │
-│   chain-b ──→ route ─┬─→ handler-a           (first-match: siblings)   │
+│   flow-b ──→ route ─┬─→ handler-a           (first-match: siblings)    │
 │                      ├─→ handler-b                                      │
 │                      └─→ fallback                                       │
 │                                                                          │
 │   Each block can:                                                        │
 │   • Continue  - pass message to next block                              │
 │   • Respond   - short-circuit, return response                          │
-│   • Drop      - end chain silently, no response                         │
+│   • Drop      - end flow silently, no response                          │
 │   • Error     - short-circuit with error                                │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -50,22 +50,22 @@ This specification defines:
 
 ## Usage Modes
 
-WAFER chains are flexible - use them however fits your architecture:
+WAFER flows are flexible - use them however fits your architecture:
 
 ### Embedded Library
 
-Use chains as composable logic within existing applications:
+Use flows as composable logic within existing applications:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      YOUR APPLICATION                            │
 │                                                                  │
 │   ┌──────────┐    ┌─────────────────────┐    ┌──────────┐      │
-│   │  HTTP    │───→│   WAFER CHAIN      │───→│  Your    │      │
+│   │  HTTP    │───→│   WAFER FLOW       │───→│  Your    │      │
 │   │  Handler │    │  (validation/auth)  │    │  Logic   │      │
 │   └──────────┘    └─────────────────────┘    └──────────┘      │
 │                                                                  │
-│   Your code calls runtime.Execute(chainID, msg)                 │
+│   Your code calls runtime.Execute(flowID, msg)                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,7 +78,7 @@ Use cases:
 
 ### Standalone Application
 
-Build entire applications from chains with connection blocks (implementation-specific):
+Build entire applications from flows with connection blocks (implementation-specific):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -102,7 +102,7 @@ Mix both - use WAFER for specific subsystems within a larger application.
 
 ### Message
 
-Messages flow through the chain. A message contains a kind identifier, payload data, and metadata.
+Messages flow through the flow. A message contains a kind identifier, payload data, and metadata.
 
 ```
 Message {
@@ -112,7 +112,7 @@ Message {
 }
 ```
 
-The `kind` field identifies what kind of message this is. It's used for conditional routing via `match` patterns in chain configuration.
+The `kind` field identifies what kind of message this is. It's used for conditional routing via `match` patterns in flow configuration.
 
 The `meta` field uses `map<string, string>` intentionally. String-only values keep metadata simple, serialization-safe, and compatible across language boundaries (especially WASM). For structured data, use `data` (the payload). For metadata that needs structure (e.g., a list of scopes), serialize to a string representation (e.g., comma-separated or JSON).
 
@@ -124,10 +124,10 @@ Every block returns a Result that tells the runtime what to do next:
 
 ```
 Action enum {
-    Continue   // Pass message to next block in chain
-    Respond    // Short-circuit chain, return response to caller
-    Drop       // End chain silently, no response
-    Error      // Short-circuit chain with error
+    Continue   // Pass message to next block in flow
+    Respond    // Short-circuit flow, return response to caller
+    Drop       // End flow silently, no response
+    Error      // Short-circuit flow with error
 }
 
 Result {
@@ -267,8 +267,8 @@ Interfaces are stored in separate files (e.g., `interfaces/database@v1.json`) an
 ```
 LifecycleType enum {
     Init   // Block is being initialized, data = config JSON
-    Start  // Chain is starting
-    Stop   // Chain is stopping
+    Start  // Flow is starting
+    Stop   // Flow is stopping
 }
 
 LifecycleEvent {
@@ -316,9 +316,9 @@ Blocks can declare their instance lifecycle requirements. This controls how many
 
 ```
 InstanceMode enum {
-    PerNode       // One instance per chain node (default)
-    Singleton     // One instance shared across all chains
-    PerChain      // One instance per chain, shared across nodes
+    PerNode       // One instance per flow node (default)
+    Singleton     // One instance shared across all flows
+    PerFlow       // One instance per flow, shared across nodes
     PerExecution  // New instance for every message
 }
 ```
@@ -327,10 +327,10 @@ InstanceMode enum {
 |------|----------|
 | `PerNode` | Node-specific config, isolated state per usage |
 | `Singleton` | Connection pools, rate limiters, global caches |
-| `PerChain` | Chain-level transaction context |
+| `PerFlow` | Flow-level transaction context |
 | `PerExecution` | Complete isolation, stateless processing |
 
-Blocks declare their default mode and allowed modes. Chain configuration can override within allowed modes.
+Blocks declare their default mode and allowed modes. Flow configuration can override within allowed modes.
 
 ---
 
@@ -352,19 +352,19 @@ Blocks are pure processors. They receive messages and return results. All extern
 
 ---
 
-## Chain Configuration
+## Flow Configuration
 
-Chains define message flow through a nested tree structure.
+Flows define message flow through a nested tree structure.
 
 ### Schema
 
 ```json
 {
   "version": "0.0.1-draft",
-  "chains": [
+  "flows": [
     {
       "id": "string (required, unique identifier)",
-      "summary": "string (brief description of what this chain does)",
+      "summary": "string (brief description of what this flow does)",
       "config": {
         "on_error": "stop | continue",
         "timeout": "30s"
@@ -384,30 +384,30 @@ Chains define message flow through a nested tree structure.
 | Field | Description | Default |
 |-------|-------------|---------|
 | `version` | WAFER spec version this config targets (e.g., `"0.0.1-draft"`) | required |
-| `chains` | Array of chain definitions | required |
+| `flows` | Array of flow definitions | required |
 
-### Chain Fields
+### Flow Fields
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `id` | Unique chain identifier | required |
-| `summary` | Brief description of what this chain accomplishes | required |
-| `config` | Chain-level configuration (see below) | `{}` |
-| `root` | Root node of the chain | required |
+| `id` | Unique flow identifier | required |
+| `summary` | Brief description of what this flow accomplishes | required |
+| `config` | Flow-level configuration (see below) | `{}` |
+| `root` | Root node of the flow | required |
 
-### Chain Config Fields
+### Flow Config Fields
 
 | Field | Description | Default |
 |-------|-------------|---------|
 | `on_error` | `"stop"` or `"continue"` | `"stop"` |
-| `timeout` | Maximum duration for the entire chain execution (e.g., `"30s"`, `"5m"`) | none (no timeout) |
+| `timeout` | Maximum duration for the entire flow execution (e.g., `"30s"`, `"5m"`) | none (no timeout) |
 
 **on_error behavior:**
-- `"stop"` - If any block returns Error, stop chain and return error
+- `"stop"` - If any block returns Error, stop flow and return error
 - `"continue"` - Log error, continue to next block
 
 **timeout behavior:**
-- When a chain exceeds its timeout, the runtime cancels the context (signals `Done()`) and returns an Error result with code `deadline_exceeded`
+- When a flow exceeds its timeout, the runtime cancels the context (signals `Done()`) and returns an Error result with code `deadline_exceeded`
 - Blocks SHOULD check `ctx.Done()` during long-running operations and return early when cancelled
 
 ### Node Fields
@@ -415,7 +415,7 @@ Chains define message flow through a nested tree structure.
 | Field | Description |
 |-------|-------------|
 | `block` | Block type identifier |
-| `chain` | Reference another chain by ID (alternative to `block`) |
+| `flow` | Reference another flow by ID (alternative to `block`) |
 | `match` | Pattern to match against `message.kind` (optional) |
 | `config` | Per-instance configuration (see below) |
 | `instance` | Instance mode override (see [Instance Modes](#instance-modes)) |
@@ -442,7 +442,7 @@ The `config` object is passed to the block's `Lifecycle(Init)`. It also supports
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `timeout` | Maximum duration for this node's execution (e.g., `"5s"`) | inherited from chain |
+| `timeout` | Maximum duration for this node's execution (e.g., `"5s"`) | inherited from flow |
 | `*` | All other fields passed to block | - |
 
 Blocks receive the full config object, including reserved fields (they can ignore them).
@@ -453,7 +453,7 @@ Blocks receive the full config object, including reserved fields (they can ignor
 
 ```json
 {
-  "chains": [
+  "flows": [
     {
       "id": "user-operations",
       "summary": "Handles all user CRUD operations with authentication and validation",
@@ -533,13 +533,13 @@ Multiple items in the same `next` array are evaluated in order. The first matchi
 
 A node with no `match` field always matches, making it useful as a fallback at the end of a `next` array. The message is passed by reference to the matched node (no copying).
 
-### Chain References
+### Flow References
 
-A node can reference another chain instead of a block:
+A node can reference another flow instead of a block:
 
 ```json
 {
-  "chains": [
+  "flows": [
     {
       "id": "auth-flow",
       "summary": "Validates input and verifies JWT token",
@@ -554,7 +554,7 @@ A node can reference another chain instead of a block:
       "summary": "Creates a user after authentication",
       "config": { "on_error": "stop" },
       "root": {
-        "chain": "auth-flow",
+        "flow": "auth-flow",
         "next": [{ "block": "db" }]
       }
     }
@@ -562,43 +562,43 @@ A node can reference another chain instead of a block:
 }
 ```
 
-The referenced chain executes as if inlined. If it returns `Respond`, `Drop`, or `Error`, the parent chain short-circuits.
+The referenced flow executes as if inlined. If it returns `Respond`, `Drop`, or `Error`, the parent flow short-circuits.
 
-The `match` field on the reference node is evaluated before the referenced chain executes. The `next` field on the reference node defines what happens after the referenced chain completes with `Continue`.
+The `match` field on the reference node is evaluated before the referenced flow executes. The `next` field on the reference node defines what happens after the referenced flow completes with `Continue`.
 
 ### Message Handling
 
 - Messages are **passed by reference** in sequential flow (modifications carry forward)
 
-### End-of-Chain Behavior
+### End-of-Flow Behavior
 
-When a block returns `Continue` but there are no more blocks in the chain:
+When a block returns `Continue` but there are no more blocks in the flow:
 
 1. The runtime returns the `Continue` result to the caller
 2. The message (with any modifications made by blocks) is available in the result
-3. This is the expected "success" path for chains that process and transform data
+3. This is the expected "success" path for flows that process and transform data
 
 **Caller responsibilities:**
-- The caller interprets what `Continue` at end-of-chain means for their use case
+- The caller interprets what `Continue` at end-of-flow means for their use case
 - For embedded use: the caller proceeds with application logic
 - For connection blocks: the connection block decides the appropriate response (e.g., HTTP 200)
 
 ```
-Execute("my-chain", msg) -> Result{Action: Continue}
+Execute("my-flow", msg) -> Result{Action: Continue}
 
 if result.Action == Continue {
-    // Chain completed successfully
+    // Flow completed successfully
     // Use msg.Data for further processing
 }
 ```
 
 ### Lifecycle Handling
 
-1. `Init` is called when the chain loads, with the node's `config` as data
+1. `Init` is called when the flow loads, with the node's `config` as data
 2. `Start` is called before the first message
-3. `Stop` is called when the chain is shutting down
+3. `Stop` is called when the flow is shutting down
 
-If `Lifecycle(Init)` returns an error, the chain MUST NOT start.
+If `Lifecycle(Init)` returns an error, the flow MUST NOT start.
 
 ---
 
@@ -609,14 +609,14 @@ If `Lifecycle(Init)` returns an error, the chain MUST NOT start.
 A WAFER-compliant runtime MUST:
 
 1. Load and instantiate blocks according to their `instance_mode`
-2. Parse chain configurations
-3. Execute chains by ID: `Execute(chainID, message) -> Result`
+2. Parse flow configurations
+3. Execute flows by ID: `Execute(flowID, message) -> Result`
 4. Provide Context to blocks with at least `log` and `config.get` capabilities
 5. Support all four actions: Continue, Respond, Drop, Error
 6. Support sequential (nested) and first-match (sibling) execution
 7. Call Lifecycle events in order: Init → Start → (handle messages) → Stop
 8. Respect `on_error` configuration
-9. Enforce `timeout` on chains and nodes, cancelling context and returning `deadline_exceeded` error when exceeded
+9. Enforce `timeout` on flows and nodes, cancelling context and returning `deadline_exceeded` error when exceeded
 
 ### Block Requirements
 
@@ -625,7 +625,7 @@ A WAFER-compliant block MUST:
 1. Implement `Info()` returning valid BlockInfo
 2. Implement `Handle(ctx, msg)` returning valid Result
 3. Optionally implement `Lifecycle(ctx, event)`
-4. Be thread-safe if `allowed_modes` includes `Singleton` or `PerChain`
+4. Be thread-safe if `allowed_modes` includes `Singleton` or `PerFlow`
 
 ---
 

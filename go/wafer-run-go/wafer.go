@@ -40,32 +40,20 @@ func (w *Wafer) Close() {
 	}
 }
 
-// RegisterWASMBlock registers a WASM block from a file path.
-func (w *Wafer) RegisterWASMBlock(typeName, wasmPath string) error {
-	cTypeName := C.CString(typeName)
-	cWasmPath := C.CString(wasmPath)
-	defer C.free(unsafe.Pointer(cTypeName))
-	defer C.free(unsafe.Pointer(cWasmPath))
+// Register registers a block or flow definition from a file path.
+// If path ends with .wasm, registers a WASM block with the given name.
+// Otherwise, reads the file as a JSON flow definition.
+func (w *Wafer) Register(name, path string) error {
+	cName := C.CString(name)
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cPath))
 
-	cResult := C.wafer_register_wasm_block(w.ptr, cTypeName, cWasmPath)
+	cResult := C.wafer_register(w.ptr, cName, cPath)
 	return parseFFIError(cResult)
 }
 
-// AddChain adds a chain definition to the runtime.
-func (w *Wafer) AddChain(def ChainDef) error {
-	data, err := json.Marshal(def)
-	if err != nil {
-		return fmt.Errorf("wafer: marshal ChainDef: %w", err)
-	}
-
-	cJSON := C.CString(string(data))
-	defer C.free(unsafe.Pointer(cJSON))
-
-	cResult := C.wafer_add_chain_def(w.ptr, cJSON)
-	return parseFFIError(cResult)
-}
-
-// Resolve walks all chain trees and resolves block references.
+// Resolve walks all flow trees and resolves block references.
 func (w *Wafer) Resolve() error {
 	cResult := C.wafer_resolve(w.ptr)
 	return parseFFIError(cResult)
@@ -82,19 +70,19 @@ func (w *Wafer) Stop() {
 	C.wafer_stop(w.ptr)
 }
 
-// Execute runs a chain by ID with the given message.
-func (w *Wafer) Execute(chainID string, msg *Message) *Result {
+// Run runs a flow by ID with the given message.
+func (w *Wafer) Run(flowID string, msg *Message) *Result {
 	msgJSON, err := json.Marshal(msg)
 	if err != nil {
 		return ErrorResult("marshal_error", fmt.Sprintf("failed to marshal message: %v", err))
 	}
 
-	cChainID := C.CString(chainID)
+	cFlowID := C.CString(flowID)
 	cMsg := C.CString(string(msgJSON))
-	defer C.free(unsafe.Pointer(cChainID))
+	defer C.free(unsafe.Pointer(cFlowID))
 	defer C.free(unsafe.Pointer(cMsg))
 
-	cResult := C.wafer_execute(w.ptr, cChainID, cMsg)
+	cResult := C.wafer_run(w.ptr, cFlowID, cMsg)
 	defer C.wafer_free_string(cResult)
 
 	resultStr := C.GoString(cResult)
@@ -106,14 +94,14 @@ func (w *Wafer) Execute(chainID string, msg *Message) *Result {
 	return &result
 }
 
-// ChainsInfo returns info about all registered chains.
-func (w *Wafer) ChainsInfo() []ChainInfo {
-	cResult := C.wafer_chains_info(w.ptr)
+// FlowsInfo returns info about all registered flows.
+func (w *Wafer) FlowsInfo() []FlowInfo {
+	cResult := C.wafer_flows_info(w.ptr)
 	defer C.wafer_free_string(cResult)
 
 	resultStr := C.GoString(cResult)
 
-	var info []ChainInfo
+	var info []FlowInfo
 	if err := json.Unmarshal([]byte(resultStr), &info); err != nil {
 		return nil
 	}

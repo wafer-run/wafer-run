@@ -3,7 +3,7 @@ export interface NodeDef {
   next?: string[];
 }
 
-export interface ChainDef {
+export interface FlowDef {
   id: string;
   root: NodeDef;
   nodes?: Record<string, NodeDef>;
@@ -19,7 +19,7 @@ export interface PublishConfig {
   blocks: string[];
 }
 
-export interface ChainEntry {
+export interface FlowEntry {
   name: string;
   source: string;
 }
@@ -33,7 +33,7 @@ export interface WaferConfig {
   name: string;
   version: string;
   blocks: BlockEntry[];
-  chains: ChainEntry[];
+  flows: FlowEntry[];
   interfaces?: InterfaceEntry[];
   publish?: PublishConfig;
 }

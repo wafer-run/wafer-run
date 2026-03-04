@@ -12,9 +12,26 @@ pub struct MonitoringBlock {
 
 struct MonitoringStats {
     total_requests: u64,
+    // NOTE: error_count is not automatically incremented because this middleware
+    // runs before downstream handlers. Call `increment_error()` externally or
+    // check response status in a post-processing step.
     error_count: u64,
     status_counts: HashMap<String, u64>,
     path_counts: HashMap<String, u64>,
+}
+
+impl MonitoringBlock {
+    /// Increment the error count. Call from post-processing when a response
+    /// indicates an error (e.g., HTTP 5xx status).
+    pub fn record_error(&self) {
+        self.stats.lock().error_count += 1;
+    }
+
+    /// Record a response status code for metrics tracking.
+    pub fn record_status(&self, status: &str) {
+        let mut stats = self.stats.lock();
+        *stats.status_counts.entry(status.to_string()).or_insert(0) += 1;
+    }
 }
 
 impl MonitoringBlock {
@@ -47,8 +64,17 @@ impl Block for MonitoringBlock {
     fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let path = msg.path().to_string();
 
-        // If this is a stats request, return the stats
+        // Stats endpoint — only accessible from loopback addresses.
+        // Use an auth middleware in front if broader access control is needed.
         if path == "/_stats" || path == "/_monitoring" {
+            let remote = msg.remote_addr();
+            let is_local = remote.is_empty()
+                || remote == "127.0.0.1"
+                || remote == "::1"
+                || remote.starts_with("127.");
+            if !is_local {
+                return error(msg.clone(), 403, "forbidden", "stats endpoint is restricted to localhost");
+            }
             let stats = self.stats.lock();
             let uptime = self.start_time.elapsed().as_secs();
             return json_respond(
@@ -68,7 +94,10 @@ impl Block for MonitoringBlock {
         {
             let mut stats = self.stats.lock();
             stats.total_requests += 1;
-            *stats.path_counts.entry(path).or_insert(0) += 1;
+            // Cap path_counts to prevent unbounded memory growth from path-scanning attacks
+            if stats.path_counts.len() < 10_000 || stats.path_counts.contains_key(&path) {
+                *stats.path_counts.entry(path).or_insert(0) += 1;
+            }
         }
 
         msg.clone().cont()

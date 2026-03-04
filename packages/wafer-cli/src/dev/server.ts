@@ -1,15 +1,14 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { WaferConfig, ChainDef, ChainEntry } from "../config/types.js";
+import type { WaferConfig, FlowDef, FlowEntry } from "../config/types.js";
 import { log } from "../util/logger.js";
 
 interface WaferRuntimeLike {
-  registerWasmBlock(typeName: string, wasmPath: string): void;
-  addChainDef(chainDefJson: string): void;
+  register(name: string, path: string): void;
   resolve(): void;
   start(): void;
-  execute(chainId: string, messageJson: string): string;
+  run(flowId: string, messageJson: string): string;
 }
 
 const RUNTIME_PKG = "wafer-run";
@@ -26,15 +25,6 @@ async function createRuntime(): Promise<WaferRuntimeLike> {
   }
 }
 
-async function loadChains(entries: ChainEntry[], cwd: string): Promise<ChainDef[]> {
-  const chains: ChainDef[] = [];
-  for (const entry of entries) {
-    const raw = await readFile(join(cwd, entry.source), "utf-8");
-    chains.push(JSON.parse(raw) as ChainDef);
-  }
-  return chains;
-}
-
 export interface DevServer {
   server: Server;
   close(): Promise<void>;
@@ -45,18 +35,27 @@ export async function startDevServer(config: WaferConfig, port: number, cwd: str
 
   for (const block of config.blocks) {
     const wasmPath = join(cwd, "dist", `${block.name}.wasm`);
-    runtime.registerWasmBlock(block.name, wasmPath);
+    runtime.register(block.name, wasmPath);
   }
 
-  const chains = await loadChains(config.chains, cwd);
-  for (const chain of chains) {
-    runtime.addChainDef(JSON.stringify(chain));
+  for (const entry of config.flows) {
+    const flowPath = join(cwd, entry.source);
+    runtime.register(entry.source, flowPath);
   }
 
   runtime.resolve();
   runtime.start();
 
-  const defaultChainId = chains[0]?.id ?? "main";
+  // Read the first flow file to get its id for the default
+  let defaultFlowId = "main";
+  if (config.flows.length > 0) {
+    try {
+      const firstFlowRaw = await readFile(join(cwd, config.flows[0].source), "utf-8");
+      defaultFlowId = (JSON.parse(firstFlowRaw) as FlowDef).id ?? "main";
+    } catch {
+      log.warn("Could not read first flow file, using default flow id 'main'");
+    }
+  }
 
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -70,7 +69,7 @@ export async function startDevServer(config: WaferConfig, port: number, cwd: str
       });
 
       try {
-        const result = JSON.parse(runtime.execute(defaultChainId, msg));
+        const result = JSON.parse(runtime.run(defaultFlowId, msg));
         const status = result.action === "error" ? 500 : 200;
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(result.response?.data ?? "{}");

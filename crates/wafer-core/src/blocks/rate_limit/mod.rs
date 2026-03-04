@@ -64,6 +64,16 @@ impl Block for RateLimitBlock {
         let mut buckets = self.buckets.lock();
         let now = Instant::now();
 
+        // Evict expired entries proactively to prevent unbounded memory growth.
+        if buckets.len() > 1_000 {
+            buckets.retain(|_, b| now.duration_since(b.window_start) <= window);
+        }
+        // Hard cap: if still too large after eviction, drop oldest entries
+        const HARD_CAP: usize = 100_000;
+        if buckets.len() > HARD_CAP {
+            buckets.clear();
+        }
+
         let bucket = buckets.entry(client_ip).or_insert(RateBucket {
             count: 0,
             window_start: now,

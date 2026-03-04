@@ -11,7 +11,7 @@ END_EXTRA_STYLES_INLINE
 -->
 
 <h2>Package Registry</h2>
-<p>The <a href="/registry">package registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks, chains, and interfaces. Like Go modules, there is no registration step — just push your code to GitHub, tag a release, and the registry indexes it automatically the first time someone looks it up.</p>
+<p>The <a href="/registry">package registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks, flows, and interfaces. Like Go modules, there is no registration step — just push your code to GitHub, tag a release, and the registry indexes it automatically the first time someone looks it up.</p>
 
 <h3>Publishing a Block</h3>
 <p>Publishing is three steps — all on GitHub, nothing to do on wafer.run:</p>
@@ -68,14 +68,14 @@ git push origin v0.1.0
 </div>
 <p>That's it. The registry will auto-index your package (name, description, versions) from GitHub the first time anyone requests it. Download counts are tracked automatically.</p>
 
-<h3>Publishing a Chain</h3>
-<p>Publishing a chain follows the same workflow — no registration, just GitHub:</p>
+<h3>Publishing a Flow</h3>
+<p>Publishing a flow follows the same workflow — no registration, just GitHub:</p>
 <ol>
-    <li><strong>Push your chain definition</strong> to a public GitHub repository</li>
-    <li><strong>Write a <code>.chain.json</code> file</strong> describing your chain</li>
-    <li><strong>Create a GitHub Release</strong> and attach the <code>.chain.json</code> as a release asset</li>
+    <li><strong>Push your flow definition</strong> to a public GitHub repository</li>
+    <li><strong>Write a <code>.flow.json</code> file</strong> describing your flow</li>
+    <li><strong>Create a GitHub Release</strong> and attach the <code>.flow.json</code> as a release asset</li>
 </ol>
-<p>A chain definition is a JSON file that wires blocks together. For example:</p>
+<p>A flow definition is a JSON file that wires blocks together. For example:</p>
 <pre><code>{
     "root": {
         "block": "github.com/acme/auth-block@v1.0.0",
@@ -85,7 +85,7 @@ git push origin v0.1.0
         ]
     }
 }</code></pre>
-<p>Name the file <code>{repo}.chain.json</code> (e.g. <code>my-chain.chain.json</code>) and attach it to your GitHub Release. The registry detects it automatically and indexes the package with type "chain".</p>
+<p>Name the file <code>{repo}.flow.json</code> (e.g. <code>my-flow.flow.json</code>) and attach it to your GitHub Release. The registry detects it automatically and indexes the package with type "flow".</p>
 
 <h3>Publishing an Interface</h3>
 <p>Interface packages are reusable JSON Schema type definitions that blocks can reference for their input/output contracts. Publishing follows the same GitHub workflow:</p>
@@ -128,7 +128,7 @@ git push origin v0.1.0
 <p>When the <code>input</code> or <code>output</code> field is a string, it is treated as an interface reference. When it is an object, it is inline JSON Schema. Both coexist naturally — no migration needed.</p>
 
 <h3>Installing a Block</h3>
-<p>Reference a published block by name in your chain configuration with <code>@version</code> — the runtime will automatically download the <code>.wasm</code> file from the corresponding GitHub Release during startup:</p>
+<p>Reference a published block by name in your flow configuration with <code>@version</code> — the runtime will automatically download the <code>.wasm</code> file from the corresponding GitHub Release during startup:</p>
 <pre><code>{
     "root": {
         "block": "github.com/acme/auth-block@v1.0.0",
@@ -143,10 +143,10 @@ git push origin v0.1.0
 <pre><code>{ "block": "github.com/acme/auth-block" }</code></pre>
 <p>The runtime queries the GitHub Releases API and picks the first release with a <code>.wasm</code> file attached. This is convenient for development, but pinning a version is recommended for production.</p>
 
-<h3>Installing a Chain</h3>
-<p>Reference a published chain the same way as a block, using <code>@version</code>. To download a chain definition instead of a <code>.wasm</code> file, use the <code>?type=chain</code> query parameter on the download endpoint:</p>
-<pre><code>GET /registry/packages/github.com/acme/my-chain/download/v1.0.0?type=chain</code></pre>
-<p>This redirects to the <code>.chain.json</code> asset from the corresponding GitHub Release.</p>
+<h3>Installing a Flow</h3>
+<p>Reference a published flow the same way as a block, using <code>@version</code>. To download a flow definition instead of a <code>.wasm</code> file, use the <code>?type=flow</code> query parameter on the download endpoint:</p>
+<pre><code>GET /registry/packages/github.com/acme/my-flow/download/v1.0.0?type=flow</code></pre>
+<p>This redirects to the <code>.flow.json</code> asset from the corresponding GitHub Release.</p>
 
 <h3>Installing an Interface</h3>
 <p>Download an interface definition using the <code>?type=interface</code> query parameter:</p>
@@ -163,10 +163,10 @@ git push origin v0.1.0
 <h3>Registry API</h3>
 <p>All endpoints are at <code>https://wafer.run</code>:</p>
 <ul>
-    <li><code>GET /registry/search?q=term&amp;type=block|chain|interface</code> — search indexed packages. The optional <code>type</code> parameter filters results by checking if the type appears in the package's comma-separated type list. Omit to return all types.</li>
-    <li><code>GET /registry/packages/{owner}/{repo}</code> — package details + versions (auto-indexes on first request). Response includes <code>package_type</code> field (comma-separated, e.g. <code>"block"</code>, <code>"chain"</code>, <code>"interface"</code>, <code>"block,interface"</code>).</li>
+    <li><code>GET /registry/search?q=term&amp;type=block|flow|interface</code> — search indexed packages. The optional <code>type</code> parameter filters results by checking if the type appears in the package's comma-separated type list. Omit to return all types.</li>
+    <li><code>GET /registry/packages/{owner}/{repo}</code> — package details + versions (auto-indexes on first request). Response includes <code>package_type</code> field (comma-separated, e.g. <code>"block"</code>, <code>"flow"</code>, <code>"interface"</code>, <code>"block,interface"</code>).</li>
     <li><code>GET /registry/packages/{owner}/{repo}/versions</code> — version list from GitHub releases</li>
-    <li><code>GET /registry/packages/{owner}/{repo}/download/{version}?type=block|chain|interface</code> — redirects to the GitHub release asset. Use <code>type=chain</code> for <code>.chain.json</code>, <code>type=interface</code> for <code>.interface.json</code>; defaults to <code>block</code> (<code>.wasm</code>).</li>
+    <li><code>GET /registry/packages/{owner}/{repo}/download/{version}?type=block|flow|interface</code> — redirects to the GitHub release asset. Use <code>type=flow</code> for <code>.flow.json</code>, <code>type=interface</code> for <code>.interface.json</code>; defaults to <code>block</code> (<code>.wasm</code>).</li>
 </ul>
 
 <h3>Removing a Package</h3>

@@ -34,8 +34,8 @@ ACTIVE: core-concepts
 </ul>
 <p>Use the <code>wafer_run::clients</code> module (or the Guest SDK typed clients for WASM blocks) for convenient typed access to infrastructure services like database, storage, crypto, etc.</p>
 
-<h3>Chains</h3>
-<p>Chains are trees of blocks. When a message arrives, it flows through the tree. Each node can match on the message (by HTTP method, path, etc.) and route to child blocks. Chains are defined in JSON and loaded at startup.</p>
+<h3>Flows</h3>
+<p>Flows are trees of blocks. When a message arrives, it flows through the tree. Each node can match on the message (by HTTP method, path, etc.) and route to child blocks. Flows are defined in JSON and loaded at startup.</p>
 
 <h3>Interfaces</h3>
 <p>Interfaces are reusable JSON Schema type definitions that blocks can reference for their input/output contracts. Instead of repeating the same type definition across multiple blocks, define it once as an <code>.interface.json</code> package and reference it by name. Interfaces are opt-in — inline JSON Schema still works for simple cases. See <a href="/docs/registry">Publishing an Interface</a> and the <a href="/docs/cli">CLI docs</a> for <code>wafer types add</code>.</p>
@@ -43,8 +43,8 @@ ACTIVE: core-concepts
 <h3>Actions</h3>
 <p>Each block returns one of four actions:</p>
 <ul>
-    <li><code>Continue</code> — pass the message to the next block in the chain</li>
+    <li><code>Continue</code> — pass the message to the next block in the flow</li>
     <li><code>Respond</code> — send a response back to the caller immediately</li>
     <li><code>Drop</code> — silently discard the message</li>
-    <li><code>Error</code> — signal an error (the chain's <code>on_error</code> policy decides what happens)</li>
+    <li><code>Error</code> — signal an error (the flow's <code>on_error</code> policy decides what happens)</li>
 </ul>

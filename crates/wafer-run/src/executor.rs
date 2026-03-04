@@ -1,4 +1,3 @@
-use crate::config::Node;
 use crate::meta::META_REQ_PARAM_PREFIX;
 use crate::types::*;
 
@@ -41,11 +40,16 @@ pub fn matches_pattern(pattern: &str, message_kind: &str) -> bool {
     }
 
     if let Some(prefix) = pattern.strip_suffix(".**") {
-        return message_kind.starts_with(&format!("{}.", prefix));
+        return message_kind.len() > prefix.len()
+            && message_kind.starts_with(prefix)
+            && message_kind.as_bytes()[prefix.len()] == b'.';
     }
 
     if let Some(prefix) = pattern.strip_suffix(".*") {
-        if !message_kind.starts_with(&format!("{}.", prefix)) {
+        if !(message_kind.len() > prefix.len()
+            && message_kind.starts_with(prefix)
+            && message_kind.as_bytes()[prefix.len()] == b'.')
+        {
             return false;
         }
         let rest = &message_kind[prefix.len() + 1..];
@@ -85,7 +89,10 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
 
     // ** suffix: match any sub-path
     if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path == prefix || path.starts_with(&format!("{}/", prefix));
+        return path == prefix
+            || (path.len() > prefix.len()
+                && path.starts_with(prefix)
+                && path.as_bytes()[prefix.len()] == b'/');
     }
 
     // Segment-by-segment matching with {var} support
@@ -108,29 +115,8 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
     true
 }
 
-/// Execute the first child node whose Match pattern matches msg.Kind.
-pub(crate) fn execute_first_match_children(
-    nodes: &[Box<Node>],
-    msg: &mut Message,
-) -> Option<(usize, bool)> {
-    for (i, child) in nodes.iter().enumerate() {
-        if !matches_pattern(&child.match_pattern, &msg.kind) {
-            continue;
-        }
-        // Extract path variables from HTTP route patterns
-        if !child.match_pattern.is_empty() {
-            if let Some(idx) = child.match_pattern.find(":/") {
-                let pattern_path = &child.match_pattern[idx + 1..];
-                if let Some(msg_idx) = msg.kind.find(":/") {
-                    let msg_path = msg.kind[msg_idx + 1..].to_string();
-                    extract_path_vars(pattern_path, &msg_path, msg);
-                }
-            }
-        }
-        return Some((i, true));
-    }
-    None
-}
+// Note: execute_first_match_children was removed — matching logic lives in
+// runtime.rs execute_first_match() which handles the full execution context.
 
 #[cfg(test)]
 mod tests {

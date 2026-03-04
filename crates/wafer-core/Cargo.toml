@@ -3,7 +3,7 @@ name = "wafer-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared reusable WAFER blocks and chain templates"
+description = "Shared reusable WAFER blocks and flow templates"
 
 [features]
 default = ["sqlite"]

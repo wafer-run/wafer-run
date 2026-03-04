@@ -3,33 +3,33 @@ use std::time::Duration;
 
 use crate::types::InstanceMode;
 
-/// ChainDef defines a chain in JSON configuration.
+/// FlowDef defines a flow in JSON configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainDef {
+pub struct FlowDef {
     pub id: String,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
-    pub config: ChainConfigDef,
+    pub config: FlowConfigDef,
     pub root: NodeDef,
 }
 
-/// ChainConfigDef holds chain-level configuration.
+/// FlowConfigDef holds flow-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ChainConfigDef {
+pub struct FlowConfigDef {
     #[serde(default)]
     pub on_error: String,
     #[serde(default)]
     pub timeout: String,
 }
 
-/// NodeDef defines a node in the chain tree (JSON serialization).
+/// NodeDef defines a node in the flow tree (JSON serialization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub block: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub chain: String,
+    pub flow: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub r#match: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,22 +40,22 @@ pub struct NodeDef {
     pub next: Vec<NodeDef>,
 }
 
-/// Chain is the runtime representation of a chain.
-pub struct Chain {
+/// Flow is the runtime representation of a flow.
+pub struct Flow {
     pub id: String,
     pub summary: String,
-    pub config: ChainConfig,
+    pub config: FlowConfig,
     pub root: Box<Node>,
 }
 
-/// ChainConfig holds runtime chain configuration.
+/// FlowConfig holds runtime flow configuration.
 #[derive(Debug, Clone)]
-pub struct ChainConfig {
+pub struct FlowConfig {
     pub on_error: String,
     pub timeout: Duration,
 }
 
-impl Default for ChainConfig {
+impl Default for FlowConfig {
     fn default() -> Self {
         Self {
             on_error: "stop".to_string(),
@@ -64,10 +64,10 @@ impl Default for ChainConfig {
     }
 }
 
-/// Node is the runtime representation of a chain node.
+/// Node is the runtime representation of a flow node.
 pub struct Node {
     pub block: String,
-    pub chain: String,
+    pub flow: String,
     pub match_pattern: String,
     pub config: Option<serde_json::Value>,
     pub instance: Option<InstanceMode>,
@@ -82,7 +82,7 @@ impl Node {
     pub fn new() -> Self {
         Self {
             block: String::new(),
-            chain: String::new(),
+            flow: String::new(),
             match_pattern: String::new(),
             config: None,
             instance: None,
@@ -94,12 +94,23 @@ impl Node {
 }
 
 /// Parse config JSON into a map of string key-value pairs.
+/// String values are used as-is. Numbers and booleans are converted to their
+/// string representation. Objects and arrays are skipped.
 pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap<String, String> {
     let mut cfg = std::collections::HashMap::new();
     if let Some(obj) = config.as_object() {
         for (k, v) in obj {
-            if let Some(s) = v.as_str() {
-                cfg.insert(k.clone(), s.to_string());
+            match v {
+                serde_json::Value::String(s) => {
+                    cfg.insert(k.clone(), s.clone());
+                }
+                serde_json::Value::Number(n) => {
+                    cfg.insert(k.clone(), n.to_string());
+                }
+                serde_json::Value::Bool(b) => {
+                    cfg.insert(k.clone(), b.to_string());
+                }
+                _ => {} // skip null, objects, arrays
             }
         }
     }
@@ -107,40 +118,38 @@ pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap
 }
 
 /// Parse a duration string like "30s", "5m", "1h".
+/// Returns `Duration::ZERO` and logs a warning for invalid input.
 pub fn parse_duration(s: &str) -> Duration {
     if s.is_empty() {
         return Duration::ZERO;
     }
     let s = s.trim();
-    if let Some(rest) = s.strip_suffix("ms") {
-        rest.parse::<u64>()
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::ZERO)
+    let result = if let Some(rest) = s.strip_suffix("ms") {
+        rest.parse::<u64>().map(Duration::from_millis)
     } else if let Some(rest) = s.strip_suffix('s') {
-        rest.parse::<u64>()
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::ZERO)
+        rest.parse::<u64>().map(Duration::from_secs)
     } else if let Some(rest) = s.strip_suffix('m') {
-        rest.parse::<u64>()
-            .map(|m| Duration::from_secs(m * 60))
-            .unwrap_or(Duration::ZERO)
+        rest.parse::<u64>().map(|m| Duration::from_secs(m * 60))
     } else if let Some(rest) = s.strip_suffix('h') {
-        rest.parse::<u64>()
-            .map(|h| Duration::from_secs(h * 3600))
-            .unwrap_or(Duration::ZERO)
+        rest.parse::<u64>().map(|h| Duration::from_secs(h * 3600))
     } else {
-        s.parse::<u64>()
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::ZERO)
+        s.parse::<u64>().map(Duration::from_secs)
+    };
+    match result {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!(input = %s, "invalid duration string, defaulting to zero");
+            Duration::ZERO
+        }
     }
 }
 
-/// Convert a ChainDef to a runtime Chain.
-pub fn chain_def_to_chain(def: &ChainDef) -> Chain {
-    Chain {
+/// Convert a FlowDef to a runtime Flow.
+pub fn flow_def_to_flow(def: &FlowDef) -> Flow {
+    Flow {
         id: def.id.clone(),
         summary: def.summary.clone(),
-        config: ChainConfig {
+        config: FlowConfig {
             on_error: if def.config.on_error.is_empty() {
                 "stop".to_string()
             } else {
@@ -156,7 +165,7 @@ pub fn chain_def_to_chain(def: &ChainDef) -> Chain {
 fn node_def_to_node(def: &NodeDef) -> Node {
     Node {
         block: def.block.clone(),
-        chain: def.chain.clone(),
+        flow: def.flow.clone(),
         match_pattern: def.r#match.clone(),
         config: def.config.clone(),
         instance: if def.instance.is_empty() {
@@ -170,12 +179,12 @@ fn node_def_to_node(def: &NodeDef) -> Node {
     }
 }
 
-/// Convert a runtime Chain back to a ChainDef.
-pub fn chain_to_chain_def(c: &Chain) -> ChainDef {
-    ChainDef {
+/// Convert a runtime Flow back to a FlowDef.
+pub fn flow_to_flow_def(c: &Flow) -> FlowDef {
+    FlowDef {
         id: c.id.clone(),
         summary: c.summary.clone(),
-        config: ChainConfigDef {
+        config: FlowConfigDef {
             on_error: c.config.on_error.clone(),
             timeout: if c.config.timeout.is_zero() {
                 String::new()
@@ -191,7 +200,7 @@ pub fn chain_to_chain_def(c: &Chain) -> ChainDef {
 fn node_to_node_def(n: &Node) -> NodeDef {
     NodeDef {
         block: n.block.clone(),
-        chain: n.chain.clone(),
+        flow: n.flow.clone(),
         r#match: n.match_pattern.clone(),
         config: n.config.clone(),
         instance: n.instance.map(|m| m.to_string()).unwrap_or_default(),
@@ -199,9 +208,9 @@ fn node_to_node_def(n: &Node) -> NodeDef {
     }
 }
 
-/// ChainInfo provides read-only info about a chain.
+/// FlowInfo provides read-only info about a flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainInfo {
+pub struct FlowInfo {
     pub id: String,
     pub summary: String,
     #[serde(skip_serializing_if = "String::is_empty")]

@@ -1,5 +1,5 @@
 {
-  "name": "@anthropics/wafer-run-node",
+  "name": "wafer-run",
   "version": "0.1.0",
   "description": "Node.js bindings for the WAFER runtime",
   "license": "MIT",

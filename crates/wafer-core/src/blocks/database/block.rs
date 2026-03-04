@@ -170,8 +170,14 @@ fn convert_sort(defs: Vec<SortFieldDef>) -> Vec<SortField> {
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     match e {
         DatabaseError::NotFound => WaferError::new(ErrorCode::NOT_FOUND, "record not found"),
-        DatabaseError::Internal(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
-        DatabaseError::Other(err) => WaferError::new(ErrorCode::INTERNAL, err.to_string()),
+        DatabaseError::Internal(msg) => {
+            tracing::error!(error = %msg, "database internal error");
+            WaferError::new(ErrorCode::INTERNAL, "internal database error")
+        }
+        DatabaseError::Other(err) => {
+            tracing::error!(error = %err, "database error");
+            WaferError::new(ErrorCode::INTERNAL, "internal database error")
+        }
     }
 }
 

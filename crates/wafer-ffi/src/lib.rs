@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
-use wafer_run::{ChainDef, Message, Result_, Wafer, WASMBlock};
+use wafer_run::{FlowDef, Message, Result_, Wafer, WASMBlock};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
     }
 }
 
-/// Resolve all block references in registered chains.
+/// Resolve all block references in registered flows.
 /// Returns NULL on success, or a JSON error string on failure.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
@@ -129,91 +129,75 @@ pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Some(rt) = deref_ref(w) {
+        if let Some(rt) = deref_mut(w) {
             rt.inner.stop();
         }
     }));
 }
 
 // ---------------------------------------------------------------------------
-// Block Registration
+// Registration
 // ---------------------------------------------------------------------------
 
-/// Register a WASM block from a file path.
+/// Register a block or flow definition from a file path.
+/// If `path` ends with `.wasm`, registers a WASM block with the given name.
+/// Otherwise, reads the file as a JSON flow definition.
 /// Returns NULL on success, or a JSON error string on failure.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_register_wasm_block(
+pub unsafe extern "C" fn wafer_register(
     w: *mut WaferRuntime,
-    type_name: *const c_char,
-    wasm_path: *const c_char,
+    name: *const c_char,
+    path: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rt = match deref_mut(w) {
             Some(r) => r,
             None => return error_json("null runtime pointer"),
         };
-        let name = match c_str_to_str(type_name) {
+        let name_str = match c_str_to_str(name) {
             Some(s) => s,
-            None => return error_json("invalid type_name"),
+            None => return error_json("invalid name"),
         };
-        let path = match c_str_to_str(wasm_path) {
+        let path_str = match c_str_to_str(path) {
             Some(s) => s,
-            None => return error_json("invalid wasm_path"),
+            None => return error_json("invalid path"),
         };
 
-        match WASMBlock::load(path) {
-            Ok(block) => {
-                rt.inner.register_block(name, std::sync::Arc::new(block));
-                std::ptr::null_mut()
+        if path_str.ends_with(".wasm") {
+            match WASMBlock::load(path_str) {
+                Ok(block) => {
+                    rt.inner.register_block(name_str, std::sync::Arc::new(block));
+                    std::ptr::null_mut()
+                }
+                Err(e) => error_json(&e),
             }
-            Err(e) => error_json(&e),
+        } else {
+            match std::fs::read_to_string(path_str) {
+                Ok(json) => {
+                    let def: FlowDef = match serde_json::from_str(&json) {
+                        Ok(d) => d,
+                        Err(e) => return error_json(&format!("invalid FlowDef JSON: {}", e)),
+                    };
+                    rt.inner.add_flow_def(&def);
+                    std::ptr::null_mut()
+                }
+                Err(e) => error_json(&format!("failed to read file: {}", e)),
+            }
         }
     }));
-    result.unwrap_or_else(|_| error_json("panic in wafer_register_wasm_block"))
-}
-
-// ---------------------------------------------------------------------------
-// Chain Management
-// ---------------------------------------------------------------------------
-
-/// Add a chain definition from JSON.
-/// Returns NULL on success, or a JSON error string on failure.
-#[no_mangle]
-pub unsafe extern "C" fn wafer_add_chain_def(
-    w: *mut WaferRuntime,
-    chain_def_json: *const c_char,
-) -> *mut c_char {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_mut(w) {
-            Some(r) => r,
-            None => return error_json("null runtime pointer"),
-        };
-        let json_str = match c_str_to_str(chain_def_json) {
-            Some(s) => s,
-            None => return error_json("invalid chain_def_json"),
-        };
-
-        let def: ChainDef = match serde_json::from_str(json_str) {
-            Ok(d) => d,
-            Err(e) => return error_json(&format!("invalid ChainDef JSON: {}", e)),
-        };
-
-        rt.inner.add_chain_def(&def);
-        std::ptr::null_mut()
-    }));
-    result.unwrap_or_else(|_| error_json("panic in wafer_add_chain_def"))
+    result.unwrap_or_else(|_| error_json("panic in wafer_register"))
 }
 
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Execute a chain with the given message.
+/// Run a flow with the given message.
 /// Returns a JSON result string (always non-NULL).
 #[no_mangle]
-pub unsafe extern "C" fn wafer_execute(
+pub unsafe extern "C" fn wafer_run(
     w: *mut WaferRuntime,
-    chain_id: *const c_char,
+    flow_id: *const c_char,
     message_json: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -229,15 +213,15 @@ pub unsafe extern "C" fn wafer_execute(
                 );
             }
         };
-        let cid = match c_str_to_str(chain_id) {
+        let fid = match c_str_to_str(flow_id) {
             Some(s) => s,
             None => {
                 return to_c_string(
                     &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
                         "ffi_error",
-                        "invalid chain_id",
+                        "invalid flow_id",
                     )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid chain_id"}}"#.to_string()),
+                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid flow_id"}}"#.to_string()),
                 );
             }
         };
@@ -270,7 +254,7 @@ pub unsafe extern "C" fn wafer_execute(
             }
         };
 
-        let result = rt.inner.execute(cid, &mut msg);
+        let result = rt.inner.execute(fid, &mut msg);
 
         to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
             r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#
@@ -279,7 +263,7 @@ pub unsafe extern "C" fn wafer_execute(
     }));
     result.unwrap_or_else(|_| {
         to_c_string(
-            r#"{"action":"error","error":{"code":"ffi_error","message":"panic in wafer_execute"}}"#,
+            r#"{"action":"error","error":{"code":"ffi_error","message":"panic in wafer_run"}}"#,
         )
     })
 }
@@ -288,15 +272,15 @@ pub unsafe extern "C" fn wafer_execute(
 // Introspection
 // ---------------------------------------------------------------------------
 
-/// Get info about all registered chains as a JSON array.
+/// Get info about all registered flows as a JSON array.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_chains_info(w: *mut WaferRuntime) -> *mut c_char {
+pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rt = match deref_ref(w) {
             Some(r) => r,
             None => return to_c_string("[]"),
         };
-        let info = rt.inner.chains_info();
+        let info = rt.inner.flows_info();
         to_c_string(&serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string()))
     }));
     result.unwrap_or_else(|_| to_c_string("[]"))

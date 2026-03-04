@@ -194,6 +194,14 @@ impl Block for CryptoBlock {
                         ))
                     }
                 };
+                // Cap at 1 MB to prevent OOM
+                const MAX_RANDOM_BYTES: usize = 1_048_576;
+                if req.n > MAX_RANDOM_BYTES {
+                    return Result_::error(WaferError::new(
+                        ErrorCode::INVALID_ARGUMENT,
+                        format!("random_bytes n={} exceeds maximum of {}", req.n, MAX_RANDOM_BYTES),
+                    ));
+                }
                 match self.service.random_bytes(req.n) {
                     Ok(bytes) => respond_json(msg, &RandomBytesResponse { bytes }),
                     Err(e) => Result_::error(crypto_error_to_wafer(e)),

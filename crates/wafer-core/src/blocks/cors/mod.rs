@@ -37,7 +37,10 @@ impl Block for CorsBlock {
         let origins = ctx
             .config_get("allowed_origins")
             .map(|s| s.to_string())
-            .unwrap_or_else(|| self.allowed_origins.clone());
+            .unwrap_or_else(|| {
+                tracing::warn!("CORS: no allowed_origins configured — defaulting to '*'. Set 'allowed_origins' in config for production.");
+                self.allowed_origins.clone()
+            });
         let methods = ctx
             .config_get("allowed_methods")
             .map(|s| s.to_string())

@@ -25,7 +25,7 @@ WaferRuntime* wafer_new(void);
 void wafer_free(WaferRuntime* w);
 
 /*
- * Resolve all block references in registered chains.
+ * Resolve all block references in registered flows.
  * Returns NULL on success, or a JSON error string on failure.
  * Caller must free the returned string with wafer_free_string().
  */
@@ -41,32 +41,24 @@ char* wafer_start(WaferRuntime* w);
 /* Stop the runtime and shut down all block instances. */
 void wafer_stop(WaferRuntime* w);
 
-/* --- Block Registration -------------------------------------------------- */
+/* --- Registration -------------------------------------------------------- */
 
 /*
- * Register a WASM block from a file path.
- * type_name: block type identifier (e.g. "my-block")
- * wasm_path: filesystem path to the .wasm file
+ * Register a block or flow definition from a file path.
+ * If path ends with .wasm, registers a WASM block with the given name.
+ * Otherwise, reads the file as a JSON flow definition.
+ * name: identifier (block type name for .wasm, ignored for flow defs)
+ * path: filesystem path to the .wasm or .json file
  * Returns NULL on success, or a JSON error string on failure.
  * Caller must free the returned string with wafer_free_string().
  */
-char* wafer_register_wasm_block(WaferRuntime* w, const char* type_name, const char* wasm_path);
-
-/* --- Chain Management ---------------------------------------------------- */
-
-/*
- * Add a chain definition from JSON.
- * chain_def_json: JSON string matching the ChainDef schema.
- * Returns NULL on success, or a JSON error string on failure.
- * Caller must free the returned string with wafer_free_string().
- */
-char* wafer_add_chain_def(WaferRuntime* w, const char* chain_def_json);
+char* wafer_register(WaferRuntime* w, const char* name, const char* path);
 
 /* --- Execution ----------------------------------------------------------- */
 
 /*
- * Execute a chain with the given message.
- * chain_id: the chain identifier.
+ * Run a flow with the given message.
+ * flow_id: the flow identifier.
  * message_json: JSON string matching the Message schema:
  *   {"kind": "...", "data": "...", "meta": {"key": "val"}}
  *
@@ -75,16 +67,16 @@ char* wafer_add_chain_def(WaferRuntime* w, const char* chain_def_json);
  *
  * Caller must free the returned string with wafer_free_string().
  */
-char* wafer_execute(WaferRuntime* w, const char* chain_id, const char* message_json);
+char* wafer_run(WaferRuntime* w, const char* flow_id, const char* message_json);
 
 /* --- Introspection ------------------------------------------------------- */
 
 /*
- * Get info about all registered chains.
- * Returns a JSON array of ChainInfo objects.
+ * Get info about all registered flows.
+ * Returns a JSON array of FlowInfo objects.
  * Caller must free the returned string with wafer_free_string().
  */
-char* wafer_chains_info(WaferRuntime* w);
+char* wafer_flows_info(WaferRuntime* w);
 
 /*
  * Check whether a block type is registered.

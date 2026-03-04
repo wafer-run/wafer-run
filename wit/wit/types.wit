@@ -7,7 +7,7 @@ interface types {
         value: string,
     }
 
-    /// A message flowing through the block chain.
+    /// A message flowing through the block flow.
     record message {
         kind: string,
         data: list<u8>,
@@ -22,7 +22,7 @@ interface types {
         error,
     }
 
-    /// A response payload returned when a block short-circuits the chain.
+    /// A response payload returned when a block short-circuits the flow.
     record response {
         data: list<u8>,
         meta: list<meta-entry>,
@@ -68,7 +68,7 @@ interface types {
     enum instance-mode {
         per-node,
         singleton,
-        per-chain,
+        per-flow,
         per-execution,
     }
 

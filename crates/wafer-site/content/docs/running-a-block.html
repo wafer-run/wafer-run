@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Running a Block</h2>
-<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/chain executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge">HTTP bridge</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to chains. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose an <code>execute()</code> API you wire into your own HTTP framework.</p>
+<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge">HTTP bridge</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to flows. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
 
 <h3>Install</h3>
 
@@ -45,7 +45,7 @@ axum = "0.8"</code></pre>
 </div>
 
 <h3>Minimal Server</h3>
-<p>A complete runnable example — registers a block, defines a chain, and starts an HTTP server on port 8080:</p>
+<p>A complete runnable example — registers a block, defines a flow, and starts an HTTP server on port 8080:</p>
 
 <div class="lang-tabs">
     <div class="tab-bar">
@@ -67,11 +67,8 @@ axum = "0.8"</code></pre>
 const http = require("http");
 
 const w = new WaferRuntime();
-w.registerWasmBlock("hello", "./hello.wasm");
-w.addChainDef(JSON.stringify({
-    id: "main",
-    root: { block: "hello" }
-}));
+w.register("hello", "./hello.wasm");
+w.register("main", "./main-flow.json");
 w.resolve();
 w.start();
 
@@ -86,7 +83,7 @@ http.createServer((req, res) =&gt; {
             data: body,
             meta: { "http.method": req.method, "http.path": req.url }
         });
-        const result = JSON.parse(w.execute("main", msg));
+        const result = JSON.parse(w.run("main", msg));
         const status = result.action === "error" ? 500 : 200;
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(result.response?.data ?? "{}");
@@ -99,7 +96,6 @@ console.log("listening on :8080");</code></pre>
 <pre><code>package main
 
 import (
-    "encoding/json"
     "fmt"
     "io"
     "net/http"
@@ -111,11 +107,8 @@ func main() {
     w := wafer.New()
     defer w.Close()
 
-    w.RegisterWASMBlock("hello", "./hello.wasm")
-    w.AddChain(wafer.ChainDef{
-        ID:   "main",
-        Root: wafer.NodeDef{Block: "hello"},
-    })
+    w.Register("hello", "./hello.wasm")
+    w.Register("main", "./main-flow.json")
     w.Resolve()
     w.Start()
 
@@ -126,7 +119,7 @@ func main() {
         msg.SetMeta("http.method", r.Method)
         msg.SetMeta("http.path", r.URL.Path)
 
-        result := w.Execute("main", msg)
+        result := w.Run("main", msg)
         rw.Header().Set("Content-Type", "application/json")
         if result.IsError() {
             rw.WriteHeader(500)
@@ -153,11 +146,11 @@ async fn main() {
         json_respond(msg.clone(), 200, &amp;serde_json::json!({"hello": "world"}))
     });
 
-    let chain: ChainDef = serde_json::from_str(r#"{
+    let flow: FlowDef = serde_json::from_str(r#"{
         "id": "main",
         "root": { "block": "hello" }
     }"#).unwrap();
-    w.add_chain_def(&amp;chain);
+    w.add_flow_def(&amp;flow);
     w.resolve().unwrap();
     w.start().unwrap();
 

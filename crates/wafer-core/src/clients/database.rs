@@ -339,7 +339,7 @@ pub fn list_all(
         collection,
         &ListOptions {
             filters,
-            limit: 10000,
+            limit: 100000,
             ..Default::default()
         },
     )?;
@@ -364,7 +364,7 @@ pub fn paginated_list(
             filters,
             sort,
             limit: page_size,
-            offset: (page - 1) * page_size,
+            offset: (page - 1).saturating_mul(page_size),
         },
     )
 }
@@ -378,7 +378,7 @@ pub fn soft_delete(
     let mut data = HashMap::new();
     data.insert(
         "deleted_at".to_string(),
-        serde_json::Value::String("CURRENT_TIMESTAMP".to_string()),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
     );
     update(ctx, collection, id, data)
 }

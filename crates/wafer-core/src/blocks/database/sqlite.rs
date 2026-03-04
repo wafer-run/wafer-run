@@ -12,12 +12,13 @@ pub struct SQLiteDatabaseService {
 impl SQLiteDatabaseService {
     pub fn new(db: Connection) -> Self {
         // Enable WAL mode and foreign keys
-        db.execute_batch(
+        if let Err(e) = db.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
              PRAGMA busy_timeout=5000;",
-        )
-        .ok();
+        ) {
+            tracing::warn!(error = %e, "failed to set SQLite PRAGMAs — performance and safety may be degraded");
+        }
         Self { db: Mutex::new(db) }
     }
 
@@ -82,7 +83,7 @@ impl SQLiteDatabaseService {
 
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -110,6 +111,11 @@ fn sanitize_ident(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '_')
         .collect()
+}
+
+/// Quote an identifier for use in DDL (double-quote escaping).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
@@ -305,14 +311,15 @@ fn schema_default_to_sql(d: &DefaultValue) -> String {
 }
 
 fn schema_column_to_sql(col: &Column) -> String {
-    let mut sql = format!("{} {}", col.name, schema_data_type_to_sql(col.data_type));
+    let qname = quote_ident(&col.name);
+    let mut sql = format!("{} {}", qname, schema_data_type_to_sql(col.data_type));
 
     if col.primary_key && !col.auto_increment {
         sql.push_str(" PRIMARY KEY");
     }
 
     if col.auto_increment {
-        sql.push_str(" PRIMARY KEY AUTOINCREMENT");
+        sql = format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", qname);
     }
 
     if !col.nullable && !col.primary_key {
@@ -332,7 +339,8 @@ fn schema_column_to_sql(col: &Column) -> String {
 }
 
 fn schema_generate_create_table(table: &Table) -> String {
-    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", table.name);
+    let qtable = quote_ident(&table.name);
+    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", qtable);
 
     for (i, col) in table.columns.iter().enumerate() {
         if i > 0 {
@@ -344,15 +352,17 @@ fn schema_generate_create_table(table: &Table) -> String {
 
     // Composite primary key
     if !table.primary_key.is_empty() {
+        let quoted: Vec<String> = table.primary_key.iter().map(|k| quote_ident(k)).collect();
         sql.push_str(",\n    PRIMARY KEY(");
-        sql.push_str(&table.primary_key.join(", "));
+        sql.push_str(&quoted.join(", "));
         sql.push(')');
     }
 
     // Composite unique constraints
     for uk in &table.unique_keys {
+        let quoted: Vec<String> = uk.iter().map(|k| quote_ident(k)).collect();
         sql.push_str(",\n    UNIQUE(");
-        sql.push_str(&uk.join(", "));
+        sql.push_str(&quoted.join(", "));
         sql.push(')');
     }
 
@@ -360,19 +370,19 @@ fn schema_generate_create_table(table: &Table) -> String {
     for col in &table.columns {
         if let Some(ref refs) = col.references {
             sql.push_str(",\n    FOREIGN KEY (");
-            sql.push_str(&col.name);
+            sql.push_str(&quote_ident(&col.name));
             sql.push_str(") REFERENCES ");
-            sql.push_str(&refs.table);
+            sql.push_str(&quote_ident(&refs.table));
             sql.push('(');
-            sql.push_str(&refs.column);
+            sql.push_str(&quote_ident(&refs.column));
             sql.push(')');
             if !refs.on_delete.is_empty() {
                 sql.push_str(" ON DELETE ");
-                sql.push_str(&refs.on_delete);
+                sql.push_str(&sanitize_ident(&refs.on_delete));
             }
             if !refs.on_update.is_empty() {
                 sql.push_str(" ON UPDATE ");
-                sql.push_str(&refs.on_update);
+                sql.push_str(&sanitize_ident(&refs.on_update));
             }
         }
     }
@@ -389,15 +399,16 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
     sql.push_str("INDEX IF NOT EXISTS ");
 
     let name = if idx.name.is_empty() {
-        format!("idx_{}_{}", table_name, idx.columns.join("_"))
+        format!("idx_{}_{}", sanitize_ident(table_name), idx.columns.iter().map(|c| sanitize_ident(c)).collect::<Vec<_>>().join("_"))
     } else {
-        idx.name.clone()
+        sanitize_ident(&idx.name)
     };
     sql.push_str(&name);
     sql.push_str(" ON ");
-    sql.push_str(table_name);
+    sql.push_str(&quote_ident(table_name));
     sql.push('(');
-    sql.push_str(&idx.columns.join(", "));
+    let quoted_cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c)).collect();
+    sql.push_str(&quoted_cols.join(", "));
     sql.push(')');
 
     sql
@@ -461,7 +472,13 @@ impl DatabaseService for SQLiteDatabaseService {
         let records: Vec<Record> = stmt
             .query_map(query_params.as_slice(), Self::row_to_record)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(record) => Some(record),
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping row due to deserialization error");
+                    None
+                }
+            })
             .collect();
 
         let page = if opts.limit > 0 {
@@ -657,7 +674,13 @@ impl DatabaseService for SQLiteDatabaseService {
         let records: Vec<Record> = stmt
             .query_map(query_params.as_slice(), Self::row_to_record)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(record) => Some(record),
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping row due to deserialization error");
+                    None
+                }
+            })
             .collect();
 
         Ok(records)
@@ -680,6 +703,59 @@ impl DatabaseService for SQLiteDatabaseService {
         Ok(rows as i64)
     }
 
+    fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
+        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
+            return Ok(());
+        }
+        let (where_clause, params) = build_where_clause(filters);
+        let sql = format!("DELETE FROM {}{}", table, where_clause);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        db.execute(&sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    fn update_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
+            return Err(DatabaseError::NotFound);
+        }
+
+        let mut data = data;
+        if !data.contains_key("updated_at") {
+            data.insert(
+                "updated_at".to_string(),
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+
+        let set_clauses: Vec<String> = data
+            .keys()
+            .enumerate()
+            .map(|(i, k)| format!("{} = ?{}", sanitize_ident(k), i + 1))
+            .collect();
+
+        let mut values: Vec<SqlValue> = data.values().map(json_to_sql_value).collect();
+        let (where_clause, where_params) = build_where_clause(filters);
+        values.extend(where_params);
+
+        let sql = format!("UPDATE {} SET {}{}", table, set_clauses.join(", "), where_clause);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        db.execute(&sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
     // --- Schema management ---
 
     fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
@@ -694,10 +770,12 @@ impl DatabaseService for SQLiteDatabaseService {
                 if !existing.contains(&col.name.to_lowercase()) {
                     let alter = format!(
                         "ALTER TABLE {} ADD COLUMN {}",
-                        table.name,
+                        quote_ident(&table.name),
                         schema_column_to_sql(col)
                     );
-                    db.execute_batch(&alter).ok();
+                    if let Err(e) = db.execute_batch(&alter) {
+                        tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
+                    }
                 }
             }
         }

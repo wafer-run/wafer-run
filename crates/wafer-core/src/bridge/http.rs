@@ -96,22 +96,22 @@ pub fn http_to_message(
 }
 
 fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut bytes = Vec::with_capacity(s.len());
     let mut chars = s.bytes();
     while let Some(b) = chars.next() {
         if b == b'+' {
-            result.push(' ');
+            bytes.push(b' ');
         } else if b == b'%' {
             let h1 = chars.next().and_then(|c| (c as char).to_digit(16));
             let h2 = chars.next().and_then(|c| (c as char).to_digit(16));
             if let (Some(h1), Some(h2)) = (h1, h2) {
-                result.push((h1 * 16 + h2) as u8 as char);
+                bytes.push((h1 * 16 + h2) as u8);
             }
         } else {
-            result.push(b as char);
+            bytes.push(b);
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
 /// Apply response meta keys as HTTP response headers.
@@ -193,7 +193,12 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .map(|r| r.data)
                 .unwrap_or_default();
 
-            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
+            builder.body(Body::from(body)).unwrap_or_else(|_| {
+                axum::http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("internal server error"))
+                    .unwrap()
+            })
         }
 
         Action::Error => {
@@ -226,7 +231,12 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 "{}".to_string()
             };
 
-            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
+            builder.body(Body::from(body)).unwrap_or_else(|_| {
+                axum::http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("internal server error"))
+                    .unwrap()
+            })
         }
 
         Action::Drop => {
@@ -237,7 +247,12 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 builder = apply_response_meta(builder, &msg.meta);
             }
 
-            builder.body(Body::empty()).expect("BUG: failed to build HTTP response")
+            builder.body(Body::empty()).unwrap_or_else(|_| {
+                axum::http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("internal server error"))
+                    .unwrap()
+            })
         }
 
         Action::Continue => {
@@ -254,19 +269,24 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .map(|m| m.data)
                 .unwrap_or_default();
 
-            builder.body(Body::from(body)).expect("BUG: failed to build HTTP response")
+            builder.body(Body::from(body)).unwrap_or_else(|_| {
+                axum::http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("internal server error"))
+                    .unwrap()
+            })
         }
     }
 }
 
 /// Create an axum handler that converts HTTP requests to WAFER messages
-/// and dispatches them to a specific chain.
+/// and dispatches them to a specific flow.
 pub fn wafer_handler(
     wafer: Arc<Wafer>,
-    chain_id: String,
+    flow_id: String,
 ) -> axum::routing::MethodRouter {
     let w = wafer.clone();
-    let cid = chain_id.clone();
+    let cid = flow_id.clone();
 
     axum::routing::any(move |req: Request| {
         let w = w.clone();
@@ -282,12 +302,20 @@ pub fn wafer_handler(
             let uri = &parts.uri;
             let path = uri.path();
             let query = uri.query().unwrap_or("");
+            // Use the rightmost X-Forwarded-For value (set by the closest trusted
+            // proxy) rather than the leftmost (easily spoofed by the client).
+            // Falls back to the connection peer address if available.
             let remote_addr = parts
                 .headers
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown")
-                .to_string();
+                .and_then(|v| v.rsplit(',').next())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| {
+                    parts.extensions.get::<std::net::SocketAddr>()
+                        .map(|a| a.ip().to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                });
 
             let mut msg =
                 http_to_message(parts.method, path, query, &parts.headers, &remote_addr, body_bytes);
@@ -298,9 +326,9 @@ pub fn wafer_handler(
     })
 }
 
-/// Create a catch-all axum Router that dispatches all requests to a single chain.
-pub fn create_router(wafer: Arc<Wafer>, chain_id: &str) -> Router {
-    let handler = wafer_handler(wafer, chain_id.to_string());
+/// Create a catch-all axum Router that dispatches all requests to a single flow.
+pub fn create_router(wafer: Arc<Wafer>, flow_id: &str) -> Router {
+    let handler = wafer_handler(wafer, flow_id.to_string());
     Router::new()
         .route("/{*rest}", handler.clone())
         .route("/", handler)

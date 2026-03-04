@@ -2,9 +2,9 @@ package wafer
 
 import "encoding/json"
 
-// NewChainDef creates a minimal ChainDef with a root block.
-func NewChainDef(id, rootBlock string) ChainDef {
-	return ChainDef{
+// NewFlowDef creates a minimal FlowDef with a root block.
+func NewFlowDef(id, rootBlock string) FlowDef {
+	return FlowDef{
 		ID:   id,
 		Root: NodeDef{Block: rootBlock},
 	}

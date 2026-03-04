@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use wafer_run::*;
 
-/// InspectorBlock provides runtime introspection — listing blocks, chains, and
+/// InspectorBlock provides runtime introspection — listing blocks, flows, and
 /// serving a visual UI.
 pub struct InspectorBlock;
 
@@ -17,7 +17,7 @@ impl Block for InspectorBlock {
             name: "@wafer/inspector".to_string(),
             version: "0.1.0".to_string(),
             interface: "handler@v1".to_string(),
-            summary: "Runtime introspection — blocks, chains, and visual UI".to_string(),
+            summary: "Runtime introspection — blocks, flows, and visual UI".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
@@ -25,6 +25,12 @@ impl Block for InspectorBlock {
     }
 
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        // Require authentication — reject if no auth.user_id is set
+        let auth_user = msg.get_meta("auth.user_id");
+        if auth_user.is_empty() {
+            return error(msg.clone(), 401, "unauthorized", "inspector requires authentication");
+        }
+
         // Only allow retrieve (GET)
         let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
@@ -39,9 +45,9 @@ impl Block for InspectorBlock {
             return json_respond(msg.clone(), 200, &blocks);
         }
 
-        if path.ends_with("/chains") {
-            let chains = ctx.chain_infos();
-            return json_respond(msg.clone(), 200, &chains);
+        if path.ends_with("/flows") {
+            let flows = ctx.flow_infos();
+            return json_respond(msg.clone(), 200, &flows);
         }
 
         if path.ends_with("/ui") {
@@ -59,24 +65,24 @@ impl Block for InspectorBlock {
             return err_not_found(msg.clone(), &format!("block '{}' not found", decoded));
         }
 
-        // /chains/{id} — single chain def
-        if let Some(chain_id) = extract_segment_after(&path, "/chains/") {
-            let decoded = url_decode(&chain_id);
-            let defs = ctx.chain_defs();
+        // /flows/{id} — single flow def
+        if let Some(flow_id) = extract_segment_after(&path, "/flows/") {
+            let decoded = url_decode(&flow_id);
+            let defs = ctx.flow_defs();
             if let Some(def) = defs.into_iter().find(|c| c.id == decoded) {
                 return json_respond(msg.clone(), 200, &def);
             }
-            return err_not_found(msg.clone(), &format!("chain '{}' not found", decoded));
+            return err_not_found(msg.clone(), &format!("flow '{}' not found", decoded));
         }
 
         // Fallback: summary
         let blocks = ctx.registered_blocks();
-        let chains = ctx.chain_infos();
+        let flows = ctx.flow_infos();
         let summary = serde_json::json!({
             "block_count": blocks.len(),
-            "chain_count": chains.len(),
+            "flow_count": flows.len(),
             "blocks": blocks.iter().map(|b| &b.name).collect::<Vec<_>>(),
-            "chains": chains.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            "flows": flows.iter().map(|c| &c.id).collect::<Vec<_>>(),
         });
         json_respond(msg.clone(), 200, &summary)
     }
@@ -109,21 +115,21 @@ fn extract_segment_after(path: &str, needle: &str) -> Option<String> {
     Some(segment.to_string())
 }
 
-/// Minimal percent-decoding for block/chain names (handles %2F → /).
+/// Minimal percent-decoding for block/flow names (handles %2F → /).
+/// Correctly handles multi-byte UTF-8 sequences.
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut bytes = Vec::with_capacity(s.len());
     let mut chars = s.bytes();
     while let Some(b) = chars.next() {
         if b == b'%' {
             let hi = chars.next().unwrap_or(b'0');
             let lo = chars.next().unwrap_or(b'0');
-            let val = hex_val(hi) * 16 + hex_val(lo);
-            result.push(val as char);
+            bytes.push(hex_val(hi) * 16 + hex_val(lo));
         } else {
-            result.push(b as char);
+            bytes.push(b);
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
 fn hex_val(b: u8) -> u8 {

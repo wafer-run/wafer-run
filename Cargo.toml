@@ -48,6 +48,7 @@ wit-bindgen = "0.41"
 # Crypto
 argon2 = "0.5"
 jsonwebtoken = "9"
+sha2 = "0.10"
 
 # Storage
 aws-sdk-s3 = "1"

@@ -76,6 +76,14 @@ impl Block for NetworkBlock {
                         ))
                     }
                 };
+                // SSRF protection: block requests to private/internal IPs
+                if wafer_run::security::is_blocked_url(&req.url) {
+                    return Result_::error(WaferError::new(
+                        ErrorCode::PERMISSION_DENIED,
+                        "request to private/internal address is not allowed",
+                    ));
+                }
+
                 let request = Request {
                     method: req.method,
                     url: req.url,

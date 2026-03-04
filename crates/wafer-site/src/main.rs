@@ -32,13 +32,13 @@ async fn main() {
     playground::register(&mut w);
     registry::register(&mut w);
 
-    // Add chains
-    let site_chain: ChainDef = serde_json::from_str(r#"{
+    // Add flows
+    let site_flow: FlowDef = serde_json::from_str(r#"{
         "id": "site-main",
-        "summary": "Website main chain",
+        "summary": "Website main flow",
         "config": { "on_error": "stop", "timeout": "30s" },
         "root": {
-            "chain": "http-infra",
+            "flow": "http-infra",
             "next": [{
                 "block": "@wafer/http-router",
                 "config": {
@@ -57,10 +57,10 @@ async fn main() {
                 }
             }]
         }
-    }"#).expect("invalid chain JSON");
+    }"#).expect("invalid flow JSON");
 
-    wafer_core::chains::register_chains(&mut w);
-    w.add_chain_def(&site_chain);
+    let _ = wafer_core::flows::register_flows(&mut w);
+    w.add_flow_def(&site_flow);
 
     // Resolve and start (start populates introspection snapshots)
     if let Err(e) = w.resolve() {
@@ -111,7 +111,7 @@ fn register_site_blocks(w: &mut Wafer) {
             "/docs/creating-a-block" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/creating-a-block.html")),
             "/docs/running-a-block" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/running-a-block.html")),
             "/docs/cli" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/cli.html")),
-            "/docs/chain-configuration" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/chain-configuration.html")),
+            "/docs/flow-configuration" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/flow-configuration.html")),
             "/docs/built-in-blocks" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/built-in-blocks.html")),
             "/docs/services" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/services.html")),
             "/docs/http-bridge" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/http-bridge.html")),

@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use wafer_run::block::{Block, BlockInfo};
+use wafer_run::common::ErrorCode;
 use wafer_run::manifest::{CollectionDef, collections_to_tables};
 use wafer_run::registry::BlockFactory;
-use wafer_run::types::InstanceMode;
+use wafer_run::types::*;
 
 /// DatabaseBlockFactory creates a DatabaseBlock from config.
 ///
@@ -16,6 +17,44 @@ use wafer_run::types::InstanceMode;
 /// - `url`: PostgreSQL connection string
 ///
 /// Env var overrides: `DB_TYPE`, `DB_PATH`, `DATABASE_URL`
+/// A stub block returned when the real database block cannot be created.
+/// Every call returns an INTERNAL error describing the original failure.
+struct FailedDatabaseBlock {
+    reason: String,
+}
+
+impl Block for FailedDatabaseBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo {
+            name: "wafer/database".to_string(),
+            version: "0.1.0".to_string(),
+            interface: "wafer.infra.database".to_string(),
+            summary: "Failed database block (see logs)".to_string(),
+            instance_mode: InstanceMode::PerNode,
+            allowed_modes: Vec::new(),
+            admin_ui: None,
+        }
+    }
+
+    fn handle(&self, _ctx: &dyn wafer_run::context::Context, _msg: &mut Message) -> Result_ {
+        Result_::error(WaferError::new(
+            ErrorCode::INTERNAL,
+            format!("database block failed to initialize: {}", self.reason),
+        ))
+    }
+
+    fn lifecycle(
+        &self,
+        _ctx: &dyn wafer_run::context::Context,
+        _event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            format!("database block failed to initialize: {}", self.reason),
+        ))
+    }
+}
+
 pub struct DatabaseBlockFactory;
 
 impl BlockFactory for DatabaseBlockFactory {
@@ -51,15 +90,22 @@ impl BlockFactory for DatabaseBlockFactory {
                         Arc::new(super::block::DatabaseBlock::new(Arc::new(svc), tables))
                     }
                     Err(e) => {
+                        let reason = format!("failed to open SQLite at {}: {}", path, e);
                         tracing::error!(path = %path, error = %e, "failed to open SQLite database");
-                        panic!("failed to open SQLite database at {}: {}", path, e);
+                        Arc::new(FailedDatabaseBlock { reason })
                     }
                 }
             }
             #[cfg(feature = "postgres")]
             "postgres" | "postgresql" => {
-                let url = super::super::env_or_config_str("DATABASE_URL", config, "url")
-                    .expect("PostgreSQL requires database.url or DATABASE_URL env var");
+                let url = match super::super::env_or_config_str("DATABASE_URL", config, "url") {
+                    Some(u) => u,
+                    None => {
+                        let reason = "PostgreSQL requires database.url or DATABASE_URL env var".to_string();
+                        tracing::error!("{}", reason);
+                        return Arc::new(FailedDatabaseBlock { reason });
+                    }
+                };
 
                 let handle = tokio::runtime::Handle::current();
                 let result = tokio::task::block_in_place(|| {
@@ -74,12 +120,16 @@ impl BlockFactory for DatabaseBlockFactory {
                         Arc::new(super::block::DatabaseBlock::new(Arc::new(svc), tables))
                     }
                     Err(e) => {
-                        panic!("failed to connect to PostgreSQL: {}", e);
+                        let reason = format!("failed to connect to PostgreSQL: {}", e);
+                        tracing::error!("{}", reason);
+                        Arc::new(FailedDatabaseBlock { reason })
                     }
                 }
             }
             other => {
-                panic!("unknown database type: {} — expected 'sqlite' or 'postgres'", other);
+                let reason = format!("unknown database type: {} — expected 'sqlite' or 'postgres'", other);
+                tracing::error!("{}", reason);
+                Arc::new(FailedDatabaseBlock { reason })
             }
         }
     }

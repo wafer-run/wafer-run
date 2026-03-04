@@ -26,6 +26,36 @@ impl LocalStorageService {
         self.root.join(folder).join(key)
     }
 
+    /// Validate that a resolved path stays within the storage root.
+    /// Prevents path traversal attacks via `../` in folder or key names.
+    fn validate_path(&self, path: &Path) -> Result<PathBuf, StorageError> {
+        // Canonicalize the root (always exists after `new`)
+        let canon_root = self.root.canonicalize().map_err(|e| {
+            StorageError::Internal(format!("canonicalize root {:?}: {}", self.root, e))
+        })?;
+        // For paths that don't exist yet (put/create), resolve the parent first
+        let canon_path = if path.exists() {
+            path.canonicalize()
+        } else if let Some(parent) = path.parent() {
+            if parent.exists() {
+                parent.canonicalize().map(|p| p.join(path.file_name().unwrap_or_default()))
+            } else {
+                // Parent doesn't exist — will be created by put; just normalize
+                Ok(path.to_path_buf())
+            }
+        } else {
+            Ok(path.to_path_buf())
+        }
+        .map_err(|e| StorageError::Internal(format!("canonicalize {:?}: {}", path, e)))?;
+
+        if !canon_path.starts_with(&canon_root) {
+            return Err(StorageError::Internal(
+                "path traversal: resolved path escapes storage root".to_string(),
+            ));
+        }
+        Ok(canon_path)
+    }
+
     fn guess_content_type(key: &str) -> String {
         let ext = Path::new(key)
             .extension()
@@ -77,6 +107,8 @@ impl StorageService for LocalStorageService {
                 StorageError::Internal(format!("create dirs for {:?}: {}", path, e))
             })?;
         }
+        // Validate after parent dirs are created so canonicalize can resolve
+        let path = self.validate_path(&path)?;
         fs::write(&path, data)
             .map_err(|e| StorageError::Internal(format!("write {:?}: {}", path, e)))
     }
@@ -86,12 +118,22 @@ impl StorageService for LocalStorageService {
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-
-        let data = fs::read(&path)
-            .map_err(|e| StorageError::Internal(format!("read {:?}: {}", path, e)))?;
+        let path = self.validate_path(&path)?;
 
         let metadata = fs::metadata(&path)
             .map_err(|e| StorageError::Internal(format!("metadata {:?}: {}", path, e)))?;
+
+        // Limit file reads to 100 MB to prevent OOM on huge files
+        const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(StorageError::Internal(format!(
+                "file {:?} is {} bytes, exceeds limit of {} bytes",
+                path, metadata.len(), MAX_FILE_SIZE
+            )));
+        }
+
+        let data = fs::read(&path)
+            .map_err(|e| StorageError::Internal(format!("read {:?}: {}", path, e)))?;
 
         let last_modified = metadata
             .modified()
@@ -113,6 +155,7 @@ impl StorageService for LocalStorageService {
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
+        let path = self.validate_path(&path)?;
         fs::remove_file(&path)
             .map_err(|e| StorageError::Internal(format!("delete {:?}: {}", path, e)))
     }
@@ -125,6 +168,7 @@ impl StorageService for LocalStorageService {
                 total_count: 0,
             });
         }
+        self.validate_path(&dir)?;
 
         let mut objects = Vec::new();
         Self::list_recursive(&dir, &dir, &opts.prefix, &mut objects)?;
@@ -149,8 +193,11 @@ impl StorageService for LocalStorageService {
 
     fn create_folder(&self, name: &str, _public: bool) -> Result<(), StorageError> {
         let path = self.folder_path(name);
+        // Create the directory first so validate_path can canonicalize
         fs::create_dir_all(&path)
-            .map_err(|e| StorageError::Internal(format!("create folder {:?}: {}", path, e)))
+            .map_err(|e| StorageError::Internal(format!("create folder {:?}: {}", path, e)))?;
+        self.validate_path(&path)?;
+        Ok(())
     }
 
     fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
@@ -158,6 +205,7 @@ impl StorageService for LocalStorageService {
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
+        let path = self.validate_path(&path)?;
         fs::remove_dir_all(&path)
             .map_err(|e| StorageError::Internal(format!("delete folder {:?}: {}", path, e)))
     }

@@ -12,7 +12,7 @@ const (
 	ActionError    Action = "error"
 )
 
-// Message flows through the chain. A message contains a kind identifier,
+// Message flows through the flow. A message contains a kind identifier,
 // payload data, and metadata.
 type Message struct {
 	Kind string            `json:"kind"`

@@ -1,16 +1,16 @@
 <!--
-TITLE: Chain Configuration — wafer.run docs
-ACTIVE: chain-configuration
+TITLE: Flow Configuration — wafer.run docs
+ACTIVE: flow-configuration
 -->
 
-<h2>Chain Configuration</h2>
-<p>Chains are defined in JSON using the <code>ChainDef</code> format:</p>
+<h2>Flow Configuration</h2>
+<p>Flows are defined in JSON using the <code>FlowDef</code> format:</p>
 <pre><code>{
     "id": "api",
-    "summary": "API chain",
+    "summary": "API flow",
     "config": { "on_error": "stop" },
     "root": {
-        "chain": "http-infra",
+        "flow": "http-infra",
         "next": [{
             "block": "@wafer/http-router",
             "config": {
@@ -27,7 +27,7 @@ ACTIVE: chain-configuration
 <p>The <code>@wafer/http-router</code> block is the recommended way to route HTTP requests to handler blocks. Routes are evaluated in order — the first match wins. See <a href="/docs/built-in-blocks">Built-in Blocks</a> for full config details.</p>
 
 <h3>Match Patterns</h3>
-<p>Chains also support inline <code>match</code> patterns on nodes for lightweight routing without the router block:</p>
+<p>Flows also support inline <code>match</code> patterns on nodes for lightweight routing without the router block:</p>
 <pre><code>{
     "root": {
         "next": [
@@ -43,18 +43,18 @@ ACTIVE: chain-configuration
     <li><code>/**</code> — wildcard suffix, matches any remaining path segments</li>
 </ul>
 
-<h3>Chain Config</h3>
+<h3>Flow Config</h3>
 <p>The top-level <code>config</code> object supports:</p>
 <ul>
-    <li><code>on_error</code> — error policy: <code>"stop"</code> (abort chain) or <code>"continue"</code> (skip failed block)</li>
+    <li><code>on_error</code> — error policy: <code>"stop"</code> (abort flow) or <code>"continue"</code> (skip failed block)</li>
     <li><code>timeout</code> — request timeout (e.g. <code>"30s"</code>, <code>"5m"</code>)</li>
 </ul>
 
-<h3>Chain Tree Structure</h3>
-<p>Each node in the chain tree has:</p>
+<h3>Flow Tree Structure</h3>
+<p>Each node in the flow tree has:</p>
 <ul>
     <li><code>block</code> — the block to execute at this node</li>
-    <li><code>chain</code> — reference to a pre-built chain (e.g. <code>"http-infra"</code>, <code>"auth-pipe"</code>)</li>
+    <li><code>flow</code> — reference to a pre-built flow (e.g. <code>"http-infra"</code>, <code>"auth-pipe"</code>)</li>
     <li><code>match</code> — the pattern to match against</li>
     <li><code>next</code> — an array of child nodes</li>
     <li><code>config</code> — key-value config passed to the block via <code>ctx.config_get()</code></li>

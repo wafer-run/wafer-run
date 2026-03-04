@@ -2,7 +2,7 @@ package wafer
 
 // Context provides runtime capabilities to blocks during message processing.
 // It is the primary way for blocks to interact with the WAFER runtime, including
-// calling other blocks in the chain.
+// calling other blocks in the flow.
 type Context interface {
 	// CallBlock invokes a named block (e.g. "wafer/database", "wafer/storage")
 	// with the given message and returns the block's result.

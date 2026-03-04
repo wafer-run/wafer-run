@@ -1,8 +1,8 @@
 //! WAFER — WebAssembly Architecture for Flow Execution & Routing
 //!
-//! A message-processing runtime that executes chains of blocks.
+//! A message-processing runtime that executes flows of blocks.
 //! Each block receives a message, processes it, and returns a result
-//! that determines the next step in the chain.
+//! that determines the next step in the flow.
 
 pub mod block;
 pub mod common;
@@ -24,7 +24,7 @@ pub mod wasm;
 // Re-exports for convenience
 pub use block::{AdminUIInfo, Block, BlockInfo};
 pub use config::{
-    Chain, ChainConfig, ChainConfigDef, ChainDef, ChainInfo, Node,
+    Flow, FlowConfig, FlowConfigDef, FlowDef, FlowInfo, Node,
     NodeDef,
 };
 pub use context::{Context, RuntimeContext};

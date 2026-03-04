@@ -47,7 +47,9 @@ impl AuthBlock {
         msg: &mut Message,
         token: &str,
     ) -> std::result::Result<(String, String, Vec<String>), Result_> {
-        // Use deterministic SHA-256 for key lookup (argon2 is non-deterministic)
+        // Use deterministic SHA-256 for key lookup (argon2 is non-deterministic).
+        // We use the hash for DB lookup, then do a constant-time comparison
+        // of the full hash to prevent timing attacks.
         let key_hash = sha256_hex(token.as_bytes());
 
         // Look up in api_keys table
@@ -55,7 +57,7 @@ impl AuthBlock {
             filters: vec![Filter {
                 field: "key_hash".to_string(),
                 operator: FilterOp::Equal,
-                value: serde_json::Value::String(key_hash),
+                value: serde_json::Value::String(key_hash.clone()),
             }],
             limit: 1,
             ..Default::default()
@@ -63,7 +65,10 @@ impl AuthBlock {
 
         let result = match db::list(ctx, "api_keys", &opts) {
             Ok(r) => r,
-            Err(_) => return Err(auth_error(msg, 401, "Invalid API key")),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to look up API key in database");
+                return Err(auth_error(msg, 500, "Authentication service unavailable"));
+            }
         };
 
         if result.records.is_empty() {
@@ -71,6 +76,15 @@ impl AuthBlock {
         }
 
         let key_record = &result.records[0];
+
+        // Constant-time comparison of the hash to prevent timing attacks.
+        // The DB lookup above uses an index (fast), but we verify the full hash
+        // here in constant time to prevent subtle timing leaks.
+        if let Some(stored_hash) = key_record.data.get("key_hash").and_then(|v| v.as_str()) {
+            if !constant_time_eq(key_hash.as_bytes(), stored_hash.as_bytes()) {
+                return Err(auth_error(msg, 401, "Invalid API key"));
+            }
+        }
 
         // Check if revoked
         if let Some(revoked) = key_record.data.get("revoked_at") {
@@ -247,6 +261,18 @@ impl Block for AuthBlock {
 
 fn auth_error(msg: &mut Message, status: u16, message: &str) -> Result_ {
     error(msg.clone(), status, "unauthorized", message)
+}
+
+/// Constant-time byte comparison to prevent timing side-channel attacks.
+/// Iterates over the max length to avoid leaking length information.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..std::cmp::max(a.len(), b.len()) {
+        let x = if i < a.len() { a[i] } else { 0 };
+        let y = if i < b.len() { b[i] } else { 0 };
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn register(w: &mut Wafer) {

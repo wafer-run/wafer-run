@@ -85,18 +85,18 @@ ACTIVE: built-in-blocks
     <li><code>immutable_max_age</code> — cache duration for hashed assets (default: <code>31536000</code>)</li>
 </ul>
 
-<h2>Pre-built Chains</h2>
-<p>wafer-core also registers three chain templates you can reference by ID:</p>
+<h2>Pre-built Flows</h2>
+<p>wafer-core also registers three flow templates you can reference by ID:</p>
 <ul>
     <li><code>http-infra</code> — security-headers &rarr; cors &rarr; readonly-guard &rarr; rate-limit &rarr; monitoring</li>
     <li><code>auth-pipe</code> — http-infra &rarr; auth (requires authentication)</li>
     <li><code>admin-pipe</code> — http-infra &rarr; auth &rarr; iam[role=admin] (requires admin role)</li>
 </ul>
-<p>Reference them in your chain config with <code>"chain": "http-infra"</code>:</p>
+<p>Reference them in your flow config with <code>"flow": "http-infra"</code>:</p>
 <pre><code>{
     "id": "api",
     "root": {
-        "chain": "http-infra",
+        "flow": "http-infra",
         "next": [{
             "block": "@wafer/http-router",
             "config": {

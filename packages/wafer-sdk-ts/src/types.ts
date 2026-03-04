@@ -8,7 +8,7 @@ export interface MetaEntry {
   value: string;
 }
 
-/** A message flowing through the block chain. */
+/** A message flowing through the block flow. */
 export interface Message {
   kind: string;
   data: Uint8Array;
@@ -23,7 +23,7 @@ export enum Action {
   Error = "error",
 }
 
-/** A response payload returned when a block short-circuits the chain. */
+/** A response payload returned when a block short-circuits the flow. */
 export interface Response {
   data: Uint8Array;
   meta: MetaEntry[];
@@ -48,7 +48,7 @@ export interface BlockResult {
 export enum InstanceMode {
   PerNode = "per-node",
   Singleton = "singleton",
-  PerChain = "per-chain",
+  PerFlow = "per-flow",
   PerExecution = "per-execution",
 }
 

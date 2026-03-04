@@ -19,16 +19,16 @@ pub trait Context: Send + Sync {
     /// List all registered blocks.
     fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> { Vec::new() }
 
-    /// List chain summary info.
-    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> { Vec::new() }
+    /// List flow summary info.
+    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> { Vec::new() }
 
-    /// List full chain definitions.
-    fn chain_defs(&self) -> Vec<crate::config::ChainDef> { Vec::new() }
+    /// List full flow definitions.
+    fn flow_defs(&self) -> Vec<crate::config::FlowDef> { Vec::new() }
 }
 
 /// RuntimeContext implements Context for blocks.
 pub struct RuntimeContext {
-    pub chain_id: String,
+    pub flow_id: String,
     pub node_id: String,
     pub config: HashMap<String, String>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -41,10 +41,10 @@ pub struct RuntimeContext {
     pub max_call_depth: u32,
     /// Snapshot of registered block info (populated at start time).
     pub registered_blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
-    /// Snapshot of chain info (populated at start time).
-    pub chain_infos_snapshot: Arc<Vec<crate::config::ChainInfo>>,
-    /// Snapshot of chain definitions (populated at start time).
-    pub chain_defs_snapshot: Arc<Vec<crate::config::ChainDef>>,
+    /// Snapshot of flow info (populated at start time).
+    pub flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
+    /// Snapshot of flow definitions (populated at start time).
+    pub flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
 }
 
 // --- Result helpers ---
@@ -98,7 +98,7 @@ impl Context for RuntimeContext {
 
         // Build a sub-context for the called block
         let sub_ctx = RuntimeContext {
-            chain_id: self.chain_id.clone(),
+            flow_id: self.flow_id.clone(),
             node_id: block_name.to_string(),
             config: self.config.clone(),
             cancelled: self.cancelled.clone(),
@@ -107,8 +107,8 @@ impl Context for RuntimeContext {
             call_depth: self.call_depth.clone(),
             max_call_depth: self.max_call_depth,
             registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
-            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
-            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
+            flow_infos_snapshot: self.flow_infos_snapshot.clone(),
+            flow_defs_snapshot: self.flow_defs_snapshot.clone(),
         };
 
         // Call the block
@@ -144,11 +144,11 @@ impl Context for RuntimeContext {
         (*self.registered_blocks_snapshot).clone()
     }
 
-    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> {
-        (*self.chain_infos_snapshot).clone()
+    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> {
+        (*self.flow_infos_snapshot).clone()
     }
 
-    fn chain_defs(&self) -> Vec<crate::config::ChainDef> {
-        (*self.chain_defs_snapshot).clone()
+    fn flow_defs(&self) -> Vec<crate::config::FlowDef> {
+        (*self.flow_defs_snapshot).clone()
     }
 }

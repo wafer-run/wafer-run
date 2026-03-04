@@ -72,8 +72,11 @@ impl WebBlock {
         // Clean path to prevent traversal
         let clean = clean_path(&req_path);
 
-        // Block dotfiles
-        if clean.split('/').any(|seg| seg.starts_with('.') && seg.len() > 1) {
+        // Block dotfiles (except .well-known for ACME, OAuth, etc.)
+        if clean
+            .split('/')
+            .any(|seg| seg.starts_with('.') && seg.len() > 1 && seg != ".well-known")
+        {
             return err_not_found(msg.clone(), "Not found");
         }
 

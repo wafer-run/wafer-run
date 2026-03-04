@@ -17,8 +17,8 @@ test.describe('Inspector Page', () => {
     // Blocks view is visible
     await expect(page.locator('#blocks-view')).toBeVisible();
 
-    // Chains view is hidden
-    await expect(page.locator('#chains-view')).not.toBeVisible();
+    // Flows view is hidden
+    await expect(page.locator('#flows-view')).not.toBeVisible();
 
     // Intro text is shown
     await expect(page.locator('#blocks-view .intro')).toContainText('Blocks are reusable processing units');
@@ -103,55 +103,55 @@ test.describe('Inspector Page', () => {
   });
 });
 
-// ─── CHAINS TAB ────────────────────────────────────────────
+// ─── FLOWS TAB ─────────────────────────────────────────────
 
-test.describe('Inspector Chains Tab', () => {
-  test('switching to Chains tab shows chain list', async ({ page }) => {
+test.describe('Inspector Flows Tab', () => {
+  test('switching to Flows tab shows flow list', async ({ page }) => {
     await page.goto('/_inspector/ui');
 
-    // Click Chains tab
-    await page.locator('.tab[data-tab="chains"]').click();
+    // Click Flows tab
+    await page.locator('.tab[data-tab="flows"]').click();
 
-    // Chains tab is active
-    await expect(page.locator('.tab[data-tab="chains"]')).toHaveClass(/active/);
+    // Flows tab is active
+    await expect(page.locator('.tab[data-tab="flows"]')).toHaveClass(/active/);
     await expect(page.locator('.tab[data-tab="blocks"]')).not.toHaveClass(/active/);
 
-    // Chains view is visible, blocks view is hidden
-    await expect(page.locator('#chains-view')).toBeVisible();
+    // Flows view is visible, blocks view is hidden
+    await expect(page.locator('#flows-view')).toBeVisible();
     await expect(page.locator('#blocks-view')).not.toBeVisible();
 
     // Intro text is shown
-    await expect(page.locator('#chains-view .intro')).toContainText('Chains wire blocks together');
+    await expect(page.locator('#flows-view .intro')).toContainText('Flows wire blocks together');
 
-    // Chain list area is visible
-    await expect(page.locator('#chain-list')).toBeVisible();
+    // Flow list area is visible
+    await expect(page.locator('#flow-list')).toBeVisible();
 
-    // Empty state message shown before selecting a chain
-    await expect(page.locator('#chain-empty')).toContainText('Select a chain to visualize');
+    // Empty state message shown before selecting a flow
+    await expect(page.locator('#flow-empty')).toContainText('Select a flow to visualize');
   });
 
-  test('clicking a chain renders the horizontal flow', async ({ page }) => {
+  test('clicking a flow renders the horizontal flow', async ({ page }) => {
     await page.goto('/_inspector/ui');
-    await page.locator('.tab[data-tab="chains"]').click();
+    await page.locator('.tab[data-tab="flows"]').click();
 
-    // Wait for chain list to load
+    // Wait for flow list to load
     await page.waitForFunction(() => {
-      const el = document.getElementById('chain-list');
+      const el = document.getElementById('flow-list');
       return el && !el.textContent?.includes('Loading');
     }, null, { timeout: 10000 });
 
-    const chainItems = page.locator('.chain-item');
-    const count = await chainItems.count();
+    const flowItems = page.locator('.flow-item');
+    const count = await flowItems.count();
 
     if (count === 0) {
-      // No chains configured — just verify empty state
+      // No flows configured — just verify empty state
       test.skip();
       return;
     }
 
-    // Click the first chain
-    await chainItems.first().click();
-    await expect(chainItems.first()).toHaveClass(/active/);
+    // Click the first flow
+    await flowItems.first().click();
+    await expect(flowItems.first()).toHaveClass(/active/);
 
     // Wait for flow to render
     await page.waitForSelector('.flow-tree', { timeout: 5000 });
@@ -160,25 +160,25 @@ test.describe('Inspector Chains Tab', () => {
     await expect(page.locator('.flow-node').first()).toBeVisible();
 
     // Empty state should be hidden
-    await expect(page.locator('#chain-empty')).not.toBeVisible();
+    await expect(page.locator('#flow-empty')).not.toBeVisible();
   });
 
   test('clicking a node in the flow opens the detail panel', async ({ page }) => {
     await page.goto('/_inspector/ui');
-    await page.locator('.tab[data-tab="chains"]').click();
+    await page.locator('.tab[data-tab="flows"]').click();
 
-    // Wait for chain list to load
+    // Wait for flow list to load
     await page.waitForFunction(() => {
-      const el = document.getElementById('chain-list');
+      const el = document.getElementById('flow-list');
       return el && !el.textContent?.includes('Loading');
     }, null, { timeout: 10000 });
 
-    const chainItems = page.locator('.chain-item');
-    const count = await chainItems.count();
+    const flowItems = page.locator('.flow-item');
+    const count = await flowItems.count();
     if (count === 0) { test.skip(); return; }
 
-    // Click the first chain
-    await chainItems.first().click();
+    // Click the first flow
+    await flowItems.first().click();
     await page.waitForSelector('.flow-node', { timeout: 5000 });
 
     // Detail panel should be closed initially
@@ -199,22 +199,22 @@ test.describe('Inspector Chains Tab', () => {
     await expect(page.locator('#detail-panel')).not.toHaveClass(/open/);
   });
 
-  test('switching between chains re-renders correctly (no stale state)', async ({ page }) => {
+  test('switching between flows re-renders correctly (no stale state)', async ({ page }) => {
     await page.goto('/_inspector/ui');
-    await page.locator('.tab[data-tab="chains"]').click();
+    await page.locator('.tab[data-tab="flows"]').click();
 
-    // Wait for chain list to load
+    // Wait for flow list to load
     await page.waitForFunction(() => {
-      const el = document.getElementById('chain-list');
+      const el = document.getElementById('flow-list');
       return el && !el.textContent?.includes('Loading');
     }, null, { timeout: 10000 });
 
-    const chainItems = page.locator('.chain-item');
-    const count = await chainItems.count();
+    const flowItems = page.locator('.flow-item');
+    const count = await flowItems.count();
     if (count < 2) { test.skip(); return; }
 
-    // Click first chain
-    await chainItems.nth(0).click();
+    // Click first flow
+    await flowItems.nth(0).click();
     await page.waitForSelector('.flow-tree', { timeout: 5000 });
     const firstNodes = await page.locator('.flow-node').count();
 
@@ -222,11 +222,11 @@ test.describe('Inspector Chains Tab', () => {
     await page.locator('.flow-node').first().click();
     await expect(page.locator('#detail-panel')).toHaveClass(/open/);
 
-    // Switch to second chain — panel should close, flow should re-render
-    await chainItems.nth(1).click();
+    // Switch to second flow — panel should close, flow should re-render
+    await flowItems.nth(1).click();
     await page.waitForSelector('.flow-tree', { timeout: 5000 });
 
-    // Detail panel should be closed after chain switch
+    // Detail panel should be closed after flow switch
     await expect(page.locator('#detail-panel')).not.toHaveClass(/open/);
 
     // Flow should have rendered (at least one node)
@@ -235,8 +235,8 @@ test.describe('Inspector Chains Tab', () => {
     // No previously-selected node should remain
     await expect(page.locator('.flow-node.selected')).toHaveCount(0);
 
-    // Switch back to first chain — should render correctly
-    await chainItems.nth(0).click();
+    // Switch back to first flow — should render correctly
+    await flowItems.nth(0).click();
     await page.waitForSelector('.flow-tree', { timeout: 5000 });
     await expect(page.locator('.flow-node').first()).toBeVisible();
   });
@@ -254,8 +254,8 @@ test.describe('Inspector API', () => {
     expect(data.some((b: { name: string }) => b.name === '@wafer/inspector')).toBeTruthy();
   });
 
-  test('GET /_inspector/chains returns JSON array', async ({ request }) => {
-    const resp = await request.get('/_inspector/chains');
+  test('GET /_inspector/flows returns JSON array', async ({ request }) => {
+    const resp = await request.get('/_inspector/flows');
     expect(resp.status()).toBe(200);
     const data = await resp.json();
     expect(Array.isArray(data)).toBeTruthy();

@@ -6,8 +6,42 @@
 use std::sync::Arc;
 
 use wafer_run::block::{Block, BlockInfo};
+use wafer_run::common::ErrorCode;
+use wafer_run::context::Context;
 use wafer_run::registry::BlockFactory;
-use wafer_run::types::InstanceMode;
+use wafer_run::types::*;
+
+/// Stub block returned when storage initialization fails.
+struct FailedStorageBlock(String);
+
+impl Block for FailedStorageBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo {
+            name: "wafer/storage".to_string(),
+            version: "0.1.0".to_string(),
+            interface: "wafer.infra.storage".to_string(),
+            summary: format!("FAILED: {}", self.0),
+            instance_mode: InstanceMode::PerNode,
+            allowed_modes: Vec::new(),
+            admin_ui: None,
+        }
+    }
+
+    fn handle(&self, _ctx: &dyn Context, _msg: &mut Message) -> Result_ {
+        Result_::error(WaferError::new(
+            ErrorCode::UNAVAILABLE,
+            format!("storage unavailable: {}", self.0),
+        ))
+    }
+
+    fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        Ok(())
+    }
+}
 
 /// StorageBlockFactory creates a StorageBlock from config.
 ///
@@ -36,7 +70,8 @@ impl BlockFactory for StorageBlockFactory {
                         Arc::new(super::block::StorageBlock::new(Arc::new(svc)))
                     }
                     Err(e) => {
-                        panic!("failed to initialize local storage at {}: {}", root, e);
+                        tracing::error!(root = %root, error = %e, "failed to initialize local storage — using error stub");
+                        Arc::new(FailedStorageBlock(format!("local storage init failed: {e}")))
                     }
                 }
             }
@@ -72,12 +107,14 @@ impl BlockFactory for StorageBlockFactory {
                         Arc::new(super::block::StorageBlock::new(Arc::new(svc)))
                     }
                     Err(e) => {
-                        panic!("failed to initialize S3 storage: {}", e);
+                        tracing::error!(error = %e, "failed to initialize S3 storage — using error stub");
+                        Arc::new(FailedStorageBlock(format!("S3 storage init failed: {e}")))
                     }
                 }
             }
             other => {
-                panic!("unknown storage type: {} — expected 'local' or 's3'", other);
+                tracing::error!(storage_type = %other, "unknown storage type — using error stub");
+                Arc::new(FailedStorageBlock(format!("unknown storage type: {other}")))
             }
         }
     }

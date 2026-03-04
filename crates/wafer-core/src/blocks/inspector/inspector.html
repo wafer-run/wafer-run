@@ -54,13 +54,13 @@
   }
   .tooltip:hover .tip-text { display: block; }
 
-  /* ── Chains layout ──────────────────────────────────── */
-  .chains-layout { display: flex; height: calc(100vh - 110px); }
-  .chain-list { width: 260px; border-right: 1px solid #30363d; overflow-y: auto; padding: 8px; flex-shrink: 0; }
-  .chain-item { padding: 10px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 4px; font-size: 13px; word-break: break-all; }
-  .chain-item:hover { background: #21262d; }
-  .chain-item.active { background: #1f6feb33; border: 1px solid #1f6feb; }
-  .chain-view { flex: 1; position: relative; overflow: auto; background: #0d1117; }
+  /* ── Flow layout ──────────────────────────────────── */
+  .flows-layout { display: flex; height: calc(100vh - 110px); }
+  .flow-list { width: 260px; border-right: 1px solid #30363d; overflow-y: auto; padding: 8px; flex-shrink: 0; }
+  .flow-item { padding: 10px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 4px; font-size: 13px; word-break: break-all; }
+  .flow-item:hover { background: #21262d; }
+  .flow-item.active { background: #1f6feb33; border: 1px solid #1f6feb; }
+  .flow-view { flex: 1; position: relative; overflow: auto; background: #0d1117; }
   .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; font-size: 15px; }
   .loading { color: #484f58; padding: 24px; font-size: 14px; }
 
@@ -126,7 +126,7 @@
   <h1><span>WAFER</span> Inspector</h1>
   <div class="tabs">
     <div class="tab active" data-tab="blocks">Blocks</div>
-    <div class="tab" data-tab="chains">Chains</div>
+    <div class="tab" data-tab="flows">Flows</div>
   </div>
 </div>
 
@@ -139,16 +139,16 @@
   </div>
 </div>
 
-<!-- ── Chains view ──────────────────────────────────── -->
-<div id="chains-view" class="content" style="display:none; padding:0;">
-  <div class="chains-layout">
-    <div class="chain-list" id="chain-list">
-      <p class="intro" style="padding:8px;">Chains wire blocks together into processing pipelines. Select a chain to visualize its flow.</p>
-      <div class="loading" id="chain-loading">Loading chains...</div>
+<!-- ── Flows view ──────────────────────────────────── -->
+<div id="flows-view" class="content" style="display:none; padding:0;">
+  <div class="flows-layout">
+    <div class="flow-list" id="flow-list">
+      <p class="intro" style="padding:8px;">Flows wire blocks together into processing pipelines. Select a flow to visualize its flow.</p>
+      <div class="loading" id="flow-loading">Loading flows...</div>
     </div>
-    <div class="chain-view" id="chain-view">
+    <div class="flow-view" id="flow-view">
       <div id="flow-container"></div>
-      <div class="empty-state" id="chain-empty">Select a chain to visualize</div>
+      <div class="empty-state" id="flow-empty">Select a flow to visualize</div>
       <div class="detail-panel" id="detail-panel">
         <button class="panel-close" id="panel-close" aria-label="Close">&times;</button>
         <div id="panel-content"></div>
@@ -170,7 +170,7 @@
       tab.classList.add('active');
       const name = tab.dataset.tab;
       document.getElementById('blocks-view').style.display = name === 'blocks' ? '' : 'none';
-      document.getElementById('chains-view').style.display = name === 'chains' ? '' : 'none';
+      document.getElementById('flows-view').style.display = name === 'flows' ? '' : 'none';
     });
   });
 
@@ -229,43 +229,43 @@
     renderBlockCards(filtered);
   });
 
-  // ── Chains ──────────────────────────────────────────
-  fetch(base + '/chains')
+  // ── Flows ──────────────────────────────────────────
+  fetch(base + '/flows')
     .then(r => r.json())
-    .then(chains => {
-      const list = document.getElementById('chain-list');
-      const loadingEl = document.getElementById('chain-loading');
+    .then(flows => {
+      const list = document.getElementById('flow-list');
+      const loadingEl = document.getElementById('flow-loading');
       if (loadingEl) loadingEl.remove();
-      if (!chains.length) { list.innerHTML += '<div class="empty-state" style="height:auto;padding:24px;">No chains</div>'; return; }
-      chains.sort((a, b) => a.id.localeCompare(b.id));
-      const items = chains.map(c => {
+      if (!flows.length) { list.innerHTML += '<div class="empty-state" style="height:auto;padding:24px;">No flows</div>'; return; }
+      flows.sort((a, b) => a.id.localeCompare(b.id));
+      const items = flows.map(c => {
         const div = document.createElement('div');
-        div.className = 'chain-item';
+        div.className = 'flow-item';
         div.dataset.id = c.id;
         div.innerHTML = esc(c.id) + (c.summary ? '<br><small style="color:#8b949e">' + esc(c.summary) + '</small>' : '');
         div.addEventListener('click', () => {
-          list.querySelectorAll('.chain-item').forEach(i => i.classList.remove('active'));
+          list.querySelectorAll('.flow-item').forEach(i => i.classList.remove('active'));
           div.classList.add('active');
-          loadChain(c.id);
+          loadFlow(c.id);
         });
         return div;
       });
       items.forEach(el => list.appendChild(el));
     })
     .catch(e => {
-      document.getElementById('chain-loading').textContent = 'Error: ' + e.message;
+      document.getElementById('flow-loading').textContent = 'Error: ' + e.message;
     });
 
-  function loadChain(id) {
+  function loadFlow(id) {
     closeDetailPanel();
-    document.getElementById('chain-empty').style.display = 'none';
+    document.getElementById('flow-empty').style.display = 'none';
     document.getElementById('flow-container').innerHTML = '<div class="loading">Loading...</div>';
-    fetch(base + '/chains/' + encodeURIComponent(id))
+    fetch(base + '/flows/' + encodeURIComponent(id))
       .then(r => r.json())
       .then(def => renderFlow(def))
       .catch(e => {
         document.getElementById('flow-container').innerHTML = '';
-        const empty = document.getElementById('chain-empty');
+        const empty = document.getElementById('flow-empty');
         empty.style.display = '';
         empty.textContent = 'Error: ' + e.message;
       });
@@ -290,7 +290,7 @@
     const nodeEl = document.createElement('div');
     nodeEl.className = 'flow-node';
     nodeEl.dataset.nodeData = JSON.stringify(node);
-    const label = node.block || (node.chain ? 'chain:' + node.chain : '(root)');
+    const label = node.block || (node.flow ? 'flow:' + node.flow : '(root)');
     let bodyHtml = '';
     if (node.match) bodyHtml += '<div class="node-match">match: ' + esc(node.match) + '</div>';
     nodeEl.innerHTML = '<div class="node-title">' + esc(label) + '</div>' +
@@ -366,7 +366,7 @@
 
     const panel = document.getElementById('detail-panel');
     const content = document.getElementById('panel-content');
-    const label = node.block || (node.chain ? 'chain:' + node.chain : '(root)');
+    const label = node.block || (node.flow ? 'flow:' + node.flow : '(root)');
 
     let html = '<h3>' + esc(label) + '</h3>';
 
@@ -385,7 +385,7 @@
     }
     if (node.instance_mode) {
       html += '<div class="field"><span class="field-label">Instance override:</span> ' + esc(node.instance_mode) + '</div>';
-      html += '<div class="field-explain">Overrides the block\'s default instance mode for this chain node.</div>';
+      html += '<div class="field-explain">Overrides the block\'s default instance mode for this flow node.</div>';
     }
 
     // Block info (from cached blocks data)
@@ -402,10 +402,10 @@
       }
     }
 
-    if (node.chain) {
-      html += '<div class="section-title">Sub-chain Reference</div>';
-      html += '<div class="field">This node delegates to chain <b>' + esc(node.chain) + '</b>.</div>';
-      html += '<div class="field-explain">Instead of running a block directly, this node forwards messages into another chain.</div>';
+    if (node.flow) {
+      html += '<div class="section-title">Sub-flow Reference</div>';
+      html += '<div class="field">This node delegates to flow <b>' + esc(node.flow) + '</b>.</div>';
+      html += '<div class="field-explain">Instead of running a block directly, this node forwards messages into another flow.</div>';
     }
 
     content.innerHTML = html;

@@ -19,7 +19,7 @@ npm install</code></pre>
     <li><code>wafer.json</code> — block definitions and publish settings</li>
     <li><code>package.json</code> — npm project with <code>wafer-sdk-ts</code> as a dependency</li>
     <li><code>blocks/hello/index.ts</code> — a starter block that returns <code>{"hello":"world"}</code></li>
-    <li><code>chains/main.json</code> — the default chain configuration</li>
+    <li><code>flows/main.json</code> — the default flow configuration</li>
     <li><code>tsconfig.json</code> — TypeScript configuration for the project</li>
     <li><code>.gitignore</code> — ignores <code>node_modules/</code>, <code>dist/</code>, and <code>*.wasm</code></li>
 </ul>
@@ -32,8 +32,8 @@ npm install</code></pre>
   "blocks": [
     { "name": "hello", "source": "blocks/hello" }
   ],
-  "chains": [
-    { "name": "main", "source": "chains/main.json" }
+  "flows": [
+    { "name": "main", "source": "flows/main.json" }
   ],
   "interfaces": [
     { "ref": "github.com/wafer-run/interfaces/http-request@v1.0.0",
@@ -46,8 +46,8 @@ npm install</code></pre>
 }</code></pre>
 <p>The <code>interfaces</code> array is optional and managed by <code>wafer types add</code>.</p>
 
-<h3>chains/main.json</h3>
-<p>Chain definitions live in the <code>chains/</code> folder as separate JSON files:</p>
+<h3>flows/main.json</h3>
+<p>Flow definitions live in the <code>flows/</code> folder as separate JSON files:</p>
 <pre><code>{
   "id": "main",
   "root": { "block": "hello" }
@@ -78,7 +78,7 @@ wafer block greet --lang rust         # creates blocks/greet/index.rs</code></pr
 <h2>wafer dev</h2>
 <p>Build all blocks, start an HTTP dev server, and watch for changes.</p>
 <pre><code>wafer dev</code></pre>
-<p>The dev server loads each compiled <code>.wasm</code> block into a <code>WaferRuntime</code>, loads the chain files referenced in <code>wafer.json</code>, and listens on port 8080. Test it with:</p>
+<p>The dev server loads each compiled <code>.wasm</code> block into a <code>WaferRuntime</code>, loads the flow files referenced in <code>wafer.json</code>, and listens on port 8080. Test it with:</p>
 <pre><code>curl http://localhost:8080
 # {"hello":"world"}</code></pre>
 
@@ -104,7 +104,7 @@ wafer publish --bump major   # 0.1.0 → 1.0.0</code></pre>
 <p>Publishing uses the <code>gh</code> CLI if available (inherits your GitHub auth). If <code>gh</code> is not installed, it falls back to the GitHub REST API using a <code>GITHUB_TOKEN</code> environment variable.</p>
 
 <h3>Registry integration</h3>
-<p>Published <code>.wasm</code> assets are automatically discoverable by the <a href="/docs/registry">package registry</a>. The registry scans GitHub release assets for <code>.wasm</code>, <code>.chain.json</code>, and <code>.interface.json</code> files and makes them available for download.</p>
+<p>Published <code>.wasm</code> assets are automatically discoverable by the <a href="/docs/registry">package registry</a>. The registry scans GitHub release assets for <code>.wasm</code>, <code>.flow.json</code>, and <code>.interface.json</code> files and makes them available for download.</p>
 
 <h2>wafer types</h2>
 <p>Manage interface type packages — reusable JSON Schema definitions that blocks can reference for their input/output contracts.</p>

@@ -1,15 +1,15 @@
-//! Package Registry: Go-module-style, GitHub-backed versions for blocks, chains, and interfaces.
+//! Package Registry: Go-module-style, GitHub-backed versions for blocks, flows, and interfaces.
 //!
 //! GitHub is the source of truth. There is no registration step — packages
 //! are auto-indexed the first time someone looks them up, just like Go modules.
-//! Packages can be blocks (.wasm), chains (.chain.json), interfaces (.interface.json),
+//! Packages can be blocks (.wasm), flows (.flow.json), interfaces (.interface.json),
 //! or any combination (stored as a comma-separated `package_type` string).
 //!
 //! GET  /registry                                                            — browse (HTML UI)
-//! GET  /registry/search?q=term&type=block|chain|interface                   — search indexed packages
+//! GET  /registry/search?q=term&type=block|flow|interface                   — search indexed packages
 //! GET  /registry/packages/{owner}/{repo}                                    — package details + versions (auto-indexes)
 //! GET  /registry/packages/{owner}/{repo}/versions                           — version list from GitHub (auto-indexes)
-//! GET  /registry/packages/{owner}/{repo}/download/{version}?type=block|chain|interface — redirect to GitHub asset
+//! GET  /registry/packages/{owner}/{repo}/download/{version}?type=block|flow|interface — redirect to GitHub asset
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -89,11 +89,12 @@ impl RegistryBlock {
 
         let mut filters = Vec::new();
         if !query.is_empty() {
-            // Search by name OR description
+            // Escape SQL LIKE wildcards in user input
+            let escaped = query.replace('%', "\\%").replace('_', "\\_");
             filters.push(Filter {
                 field: "name".to_string(),
                 operator: FilterOp::Like,
-                value: serde_json::Value::String(format!("%{}%", query)),
+                value: serde_json::Value::String(format!("%{}%", escaped)),
             });
         }
 
@@ -130,9 +131,9 @@ impl RegistryBlock {
                                 .get("package_type")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("block");
-                            // Legacy "both" means "block,chain"
+                            // Legacy "both" means "block,flow"
                             let types: Vec<&str> = if pkg_type == "both" {
-                                vec!["block", "chain"]
+                                vec!["block", "flow"]
                             } else {
                                 pkg_type.split(',').collect()
                             };
@@ -225,7 +226,7 @@ impl RegistryBlock {
         );
         record.insert(
             "download_count".to_string(),
-            serde_json::Value::String("0".to_string()),
+            serde_json::Value::Number(0.into()),
         );
 
         // Detect package type from release assets
@@ -332,20 +333,20 @@ impl RegistryBlock {
             None => return err_bad_request(msg.clone(), "Invalid package name"),
         };
 
-        // Determine asset type: "chain", "interface", or "block" (default)
+        // Determine asset type: "flow", "interface", or "block" (default)
         let asset_type = msg.query("type").to_string();
 
         // Try to find the download URL from cached release data
         let versions = Self::fetch_versions_cached(ctx, name);
         let asset_url = match asset_type.as_str() {
-            "chain" => versions
+            "flow" => versions
                 .iter()
                 .find(|r| r.tag_name == version)
                 .and_then(|r| r.chain_download_url.clone())
                 .unwrap_or_else(|| {
-                    // Convention: {repo}.chain.json
+                    // Convention: {repo}.flow.json
                     format!(
-                        "https://github.com/{}/{}/releases/download/{}/{}.chain.json",
+                        "https://github.com/{}/{}/releases/download/{}/{}.flow.json",
                         owner, repo, version, repo
                     )
                 }),
@@ -376,7 +377,7 @@ impl RegistryBlock {
         // Increment download count atomically
         let _ = db::exec_raw(
             ctx,
-            "UPDATE packages SET download_count = CAST(download_count AS INTEGER) + 1 WHERE name = ?",
+            "UPDATE packages SET download_count = download_count + 1 WHERE name = ?",
             &[serde_json::Value::String(name.to_string())],
         );
 
@@ -567,11 +568,11 @@ impl RegistryBlock {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                // Look for .chain.json asset
+                // Look for .flow.json asset
                 let chain_asset = assets.iter().find(|a| {
                     a.get("name")
                         .and_then(|v| v.as_str())
-                        .map(|n| n.ends_with(".chain.json"))
+                        .map(|n| n.ends_with(".flow.json"))
                         .unwrap_or(false)
                 });
 
@@ -610,7 +611,7 @@ impl RegistryBlock {
     }
 
     /// Determine package type from release assets as a comma-separated string.
-    /// Possible components: "block", "chain", "interface".
+    /// Possible components: "block", "flow", "interface".
     fn detect_package_type(releases: &[GitHubRelease]) -> String {
         let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
         let has_chain = releases.iter().any(|r| r.has_chain_asset);
@@ -620,7 +621,7 @@ impl RegistryBlock {
             types.push("block");
         }
         if has_chain {
-            types.push("chain");
+            types.push("flow");
         }
         if has_interface {
             types.push("interface");
@@ -760,7 +761,7 @@ impl Block for RegistryBlock {
             name: "@wafer-site/registry".to_string(),
             version: "0.4.0".to_string(),
             interface: "handler@v1".to_string(),
-            summary: "Package registry: Go-module-style, GitHub-backed blocks, chains, and interfaces".to_string(),
+            summary: "Package registry: Go-module-style, GitHub-backed blocks, flows, and interfaces".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,

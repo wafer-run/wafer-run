@@ -25,13 +25,13 @@ WAFER-Go is the runtime layer that sits between the WAFER spec and applications 
 │    Runtime, SDK, WASM Loader, CLI           │
 ├─────────────────────────────────────────────┤
 │             WAFER SPEC                     │
-│   Blocks, Chains, Interfaces, Registry      │
+│   Blocks, Flows, Interfaces, Registry        │
 └─────────────────────────────────────────────┘
 ```
 
 WAFER-Go provides:
 - Go SDK for writing blocks
-- Runtime for loading and executing chains
+- Runtime for loading and executing flows
 - WASM block loader using wazero
 - CLI tools for development
 
@@ -54,11 +54,11 @@ go install github.com/suppers-ai/wafer-go/cmd/wafer@latest
 
 ## Embedding in Existing Applications
 
-WAFER doesn't require building a full application from scratch. You can embed chains as reusable logic pipelines within your existing codebase.
+WAFER doesn't require building a full application from scratch. You can embed flows as reusable logic pipelines within your existing codebase.
 
 ### Use Cases
 
-- **Validation pipelines** - Chain validators for complex input processing
+- **Validation pipelines** - Flow validators for complex input processing
 - **Authorization flows** - Compose auth checks without nested if-statements
 - **Data transformation** - Build configurable ETL pipelines
 - **Business rules** - Externalize logic that changes frequently
@@ -80,10 +80,10 @@ func main() {
     db := connectDatabase()
     cache := setupCache()
 
-    // Set up WAFER chain for specific logic
+    // Set up WAFER flow for specific logic
     wfl := wafer.New()
     wfl.RegisterBlock("validate-user", &UserValidationBlock{})
-    wfl.AddChain(wafer.Chain{
+    wfl.AddFlow(wafer.Flow{
         ID:   "user-operations",
         Root: &wafer.Node{Block: "validate-user"},
     })
@@ -94,7 +94,7 @@ func main() {
         // Your existing code...
         body := readBody(r)
 
-        // Run input through WAFER chain by ID
+        // Run input through WAFER flow by ID
         msg := &wafer.Message{Kind: "user.create", Data: body}
         result := wfl.Execute("user-operations", msg)
 
@@ -113,11 +113,11 @@ func main() {
 }
 ```
 
-### Chain as Middleware
+### Flow as Middleware
 
 ```go
-// Use WAFER chain as middleware in any router
-func waferMiddleware(wfl *wafer.Wafer, chainID string) func(http.Handler) http.Handler {
+// Use WAFER flow as middleware in any router
+func waferMiddleware(wfl *wafer.Wafer, flowID string) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             msg := &wafer.Message{
@@ -129,7 +129,7 @@ func waferMiddleware(wfl *wafer.Wafer, chainID string) func(http.Handler) http.H
                 },
             }
 
-            result := wfl.Execute(chainID, msg)
+            result := wfl.Execute(flowID, msg)
 
             switch result.Action {
             case wafer.Error:
@@ -150,9 +150,9 @@ r := chi.NewRouter()
 r.With(waferMiddleware(wfl, "auth-verify")).Post("/api/*", apiHandler)
 ```
 
-### Programmatic Chain Building
+### Programmatic Flow Building
 
-You don't need JSON config files - build chains in code:
+You don't need JSON config files - build flows in code:
 
 ```go
 w := wafer.New()
@@ -162,11 +162,11 @@ w.RegisterBlock("validate", &ValidateBlock{})
 w.RegisterBlock("transform", &TransformBlock{})
 w.RegisterBlock("enrich", &EnrichBlock{})
 
-// Build chain programmatically
-w.AddChain(wafer.Chain{
+// Build flow programmatically
+w.AddFlow(wafer.Flow{
     ID:      "process-order",
     Summary: "Validates, transforms, and enriches incoming orders",
-    Config:  wafer.ChainConfig{OnError: "stop"},
+    Config:  wafer.FlowConfig{OnError: "stop"},
     Root: &wafer.Node{
         Block:  "validate",
         Config: json.RawMessage(`{"schema": "order"}`),
@@ -203,7 +203,7 @@ w.RegisterBlockFunc("add-timestamp", func(ctx wafer.Context, msg *wafer.Message)
 })
 ```
 
-### Minimal Chain (No Config File)
+### Minimal Flow (No Config File)
 
 ```go
 // Entire WAFER setup in a few lines
@@ -212,7 +212,7 @@ w := wafer.New()
 w.RegisterBlockFunc("validate", validateUser)
 w.RegisterBlockFunc("normalize", normalizeEmail)
 
-w.AddChain(wafer.Chain{
+w.AddFlow(wafer.Flow{
     ID:      "user-input",
     Summary: "Validates and normalizes user input data",
     Root:    &wafer.Node{Block: "validate", Next: []*wafer.Node{{Block: "normalize"}}},
@@ -220,25 +220,25 @@ w.AddChain(wafer.Chain{
 
 w.Start()
 
-// Execute chain by ID anywhere in your app
+// Execute flow by ID anywhere in your app
 result := w.Execute("user-input", &wafer.Message{Kind: "user.create", Data: userData})
 ```
 
 This approach lets you:
 - Add WAFER to specific parts of your app incrementally
 - Keep your existing architecture and frameworks
-- Use chains only where block composition makes sense
+- Use flows only where block composition makes sense
 - Mix WAFER logic with regular code freely
 
 ### Real-World Example: Solobase
 
-Solobase embeds WAFER-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Chains compose blocks for request processing:
+Solobase embeds WAFER-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Flows compose blocks for request processing:
 
 ```
 HTTP Request → Router
-  ├── POST /api/auth/login    → auth-login chain
-  ├── GET  /admin/database    → admin-guard → database-ui chain
-  └── POST /api/database/*    → admin-guard → database chain
+  ├── POST /api/auth/login    → auth-login flow
+  ├── GET  /admin/database    → admin-guard → database-ui flow
+  └── POST /api/database/*    → admin-guard → database flow
 ```
 
 See the Solobase documentation for full architecture details.
@@ -265,9 +265,9 @@ func (m *Message) SetData(v any) error          // Marshal and set Data
 type Action int
 
 const (
-    Continue Action = iota  // Pass to next block in chain
+    Continue Action = iota  // Pass to next block in flow
     Respond                 // Short-circuit, return response
-    Drop                    // End chain silently, no response
+    Drop                    // End flow silently, no response
     Error                   // Short-circuit with error
 )
 
@@ -306,9 +306,9 @@ type BlockInfo struct {
 type InstanceMode int
 
 const (
-    PerNode      InstanceMode = iota // One instance per chain node (default)
-    Singleton                        // One instance shared across all chains
-    PerChain                         // One instance per chain, shared across nodes
+    PerNode      InstanceMode = iota // One instance per flow node (default)
+    Singleton                        // One instance shared across all flows
+    PerFlow                         // One instance per flow, shared across nodes
     PerExecution                     // New instance for every message
 )
 
@@ -465,15 +465,15 @@ Interfaces are defined in JSON files using standard JSON Schema:
 
 ### Block Instance Model
 
-Block instance lifecycle is configurable. The block declares its default mode and which modes it supports, while the chain config can override within allowed modes.
+Block instance lifecycle is configurable. The block declares its default mode and which modes it supports, while the flow config can override within allowed modes.
 
 #### Instance Modes
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| `PerNode` | One instance per chain node (default) | Node-specific config, isolated state per usage |
-| `Singleton` | One instance shared across all chains | Connection pools, rate limiters, global caches |
-| `PerChain` | One instance per chain, shared across nodes | Chain-level transaction context |
+| `PerNode` | One instance per flow node (default) | Node-specific config, isolated state per usage |
+| `Singleton` | One instance shared across all flows | Connection pools, rate limiters, global caches |
+| `PerFlow` | One instance per flow, shared across nodes | Flow-level transaction context |
 | `PerExecution` | New instance for every message | Complete isolation, stateless processing |
 
 #### Block Declaration
@@ -490,20 +490,20 @@ func Info() wafer.BlockInfo {
         InstanceMode: wafer.Singleton,  // Default: share one pool
         AllowedModes: []wafer.InstanceMode{
             wafer.Singleton,
-            wafer.PerChain,
+            wafer.PerFlow,
         },
     }
 }
 ```
 
-#### Chain Override
+#### Flow Override
 
-Chains can override the instance mode within allowed modes:
+Flows can override the instance mode within allowed modes:
 
 ```json
 {
   "block": "db-pool",
-  "instance": "per-chain",
+  "instance": "per-flow",
   "config": { "connection_string": "..." }
 }
 ```
@@ -514,9 +514,9 @@ The runtime validates that the requested mode is in `AllowedModes`. If not speci
 
 | Mode | Init | Start | Stop | Handle |
 |------|------|-------|------|--------|
-| `Singleton` | Once globally | Once globally | Once globally | Concurrent from all chains |
+| `Singleton` | Once globally | Once globally | Once globally | Concurrent from all flows |
 | `PerNode` | Once per node | Once per node | Once per node | Concurrent for that node |
-| `PerChain` | Once per chain | Once per chain | Once per chain | Concurrent within chain |
+| `PerFlow` | Once per flow | Once per flow | Once per flow | Concurrent within flow |
 | `PerExecution` | Every message | N/A | N/A | Sequential (own instance) |
 
 #### Example: Thread-Safe Singleton
@@ -532,7 +532,7 @@ func (b *CacheBlock) Info() wafer.BlockInfo {
     return wafer.BlockInfo{
         Name:         "@app/cache",
         InstanceMode: wafer.Singleton,
-        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerFlow},
         // ...
     }
 }
@@ -557,8 +557,8 @@ func (b *TransformBlock) Info() wafer.BlockInfo {
 
 Blocks **must be thread-safe** because:
 
-1. **Multiple chains**: The same singleton block may be used in different chains executing concurrently
-2. **Concurrent requests**: Multiple HTTP requests may trigger chain execution in parallel
+1. **Multiple flows**: The same singleton block may be used in different flows executing concurrently
+2. **Concurrent requests**: Multiple HTTP requests may trigger flow execution in parallel
 
 **Requirements for block authors:**
 
@@ -625,12 +625,12 @@ type Wafer struct {
     // Observability hooks (optional)
     OnBlockStart func(ctx ObservabilityContext)
     OnBlockEnd   func(ctx ObservabilityContext, result Result, duration time.Duration)
-    OnChainStart func(chainID string, msg *Message)
-    OnChainEnd   func(chainID string, result Result, duration time.Duration)
+    OnFlowStart func(flowID string, msg *Message)
+    OnFlowEnd   func(flowID string, result Result, duration time.Duration)
 }
 
 type ObservabilityContext struct {
-    ChainID   string
+    FlowID   string
     NodePath  string  // e.g., "root.0.1" for navigation
     BlockName string
     TraceID   string
@@ -720,7 +720,7 @@ func (b *CacheBlock) Info() wafer.BlockInfo {
         Interface:    "cache@v1",
         Summary:      "In-memory cache. Returns cached response if exists, otherwise continues.",
         InstanceMode: wafer.Singleton,
-        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerFlow},
     }
 }
 
@@ -840,7 +840,7 @@ func (b *SQLiteBlock) Info() wafer.BlockInfo {
         Interface:    "database@v1",
         Summary:      "SQLite database using local file storage. Supports query, insert, update, delete.",
         InstanceMode: wafer.Singleton,  // Share connection pool
-        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerChain},
+        AllowedModes: []wafer.InstanceMode{wafer.Singleton, wafer.PerFlow},
     }
 }
 
@@ -896,31 +896,31 @@ package wafer
 
 type Wafer struct {
     registry *Registry          // Block type registry (name -> factory)
-    chains   map[string]*Chain  // Chain definitions by ID
+    flows   map[string]*Flow  // Flow definitions by ID
     resolved map[string]Block   // blockType -> resolved instance (for Stop lifecycle)
 
     // Observability hooks (optional)
     OnBlockStart func(ctx ObservabilityContext)
     OnBlockEnd   func(ctx ObservabilityContext, result Result, duration time.Duration)
-    OnChainStart func(chainID string, msg *Message)
-    OnChainEnd   func(chainID string, result Result, duration time.Duration)
+    OnFlowStart func(flowID string, msg *Message)
+    OnFlowEnd   func(flowID string, result Result, duration time.Duration)
 }
 
-type Chain struct {
+type Flow struct {
     ID      string
-    Summary string          // Brief description of what this chain accomplishes
-    Config  ChainConfig     // Chain-level configuration
+    Summary string          // Brief description of what this flow accomplishes
+    Config  FlowConfig     // Flow-level configuration
     Root    *Node
 }
 
-type ChainConfig struct {
+type FlowConfig struct {
     OnError string        // "stop" or "continue" (default: "stop")
     Timeout time.Duration // 0 = no timeout
 }
 
 type Node struct {
     Block    string           // Block type name (from registry)
-    Chain    string           // Chain reference (alternative to Block)
+    Flow     string           // Flow reference (alternative to Block)
     Match    string           // Pattern to match against message.Kind
     Config   json.RawMessage  // Block-specific config
     Instance *InstanceMode    // Instance mode override (nil = use block default)
@@ -934,13 +934,13 @@ type Node struct {
 
 ### Resolving Blocks
 
-After all blocks are registered and chains are added, `Resolve()` walks all chain trees and resolves block references to direct instances. This must be called before `Execute`.
+After all blocks are registered and flows are added, `Resolve()` walks all flow trees and resolves block references to direct instances. This must be called before `Execute`.
 
 ```go
 func (w *Wafer) Resolve() error {
-    for _, chain := range w.chains {
-        if err := w.resolveNode(chain.Root); err != nil {
-            return fmt.Errorf("chain %q: %w", chain.ID, err)
+    for _, flow := range w.flows {
+        if err := w.resolveNode(flow.Root); err != nil {
+            return fmt.Errorf("flow %q: %w", flow.ID, err)
         }
     }
     return nil
@@ -982,24 +982,24 @@ func (w *Wafer) resolveNode(node *Node) error {
 
 Resolution happens once at startup. After resolution, each node holds a direct `resolvedBlock` reference and a pre-parsed `configMap`, so execution has no factory lookups or config parsing overhead.
 
-### Executing Chains
+### Executing Flows
 
 ```go
-// Execute runs a chain by ID
-func (w *Wafer) Execute(chainID string, msg *Message) Result {
-    chain, ok := w.chains[chainID]
+// Execute runs a flow by ID
+func (w *Wafer) Execute(flowID string, msg *Message) Result {
+    flow, ok := w.flows[flowID]
     if !ok {
         return Result{
             Action: Error,
-            Error:  &Error{Code: "chain_not_found", Message: "chain not found: " + chainID},
+            Error:  &Error{Code: "flow_not_found", Message: "flow not found: " + flowID},
         }
     }
 
-    return w.executeNode(chain.Root, msg, chainID, chain.Config.OnError, nil, "root")
+    return w.executeNode(flow.Root, msg, flowID, flow.Config.OnError, nil, "root")
 }
 
-// executeNode runs a single node in the chain tree.
-func (w *Wafer) executeNode(node *Node, msg *Message, chainID, onError string, done <-chan struct{}, nodePath string) (result Result) {
+// executeNode runs a single node in the flow tree.
+func (w *Wafer) executeNode(node *Node, msg *Message, flowID, onError string, done <-chan struct{}, nodePath string) (result Result) {
     // Panic recovery
     defer func() {
         if r := recover(); r != nil {
@@ -1014,14 +1014,14 @@ func (w *Wafer) executeNode(node *Node, msg *Message, chainID, onError string, d
         }
     }()
 
-    // Handle chain references
-    if node.Chain != "" {
-        return w.executeChainRef(node, msg, onError, done)
+    // Handle flow references
+    if node.Flow != "" {
+        return w.executeFlowRef(node, msg, onError, done)
     }
 
     // Build context for this node (uses pre-parsed configMap)
     ctx := &runtimeContext{
-        chainID: chainID,
+        flowID: flowID,
         nodeID:  nodePath,
         config:  node.configMap,
         done:    done,
@@ -1047,37 +1047,37 @@ func (w *Wafer) executeNode(node *Node, msg *Message, chainID, onError string, d
         return result
     }
 
-    return w.executeFirstMatch(node.Next, msg, chainID, onError, done, nodePath)
+    return w.executeFirstMatch(node.Next, msg, flowID, onError, done, nodePath)
 }
 
-// executeChainRef executes a chain reference node.
-func (w *Wafer) executeChainRef(node *Node, msg *Message, onError string, done <-chan struct{}) Result {
-    chain, ok := w.chains[node.Chain]
+// executeFlowRef executes a flow reference node.
+func (w *Wafer) executeFlowRef(node *Node, msg *Message, onError string, done <-chan struct{}) Result {
+    flow, ok := w.flows[node.Flow]
     if !ok {
         return Result{
             Action: Error,
-            Error:  &Error{Code: "not_found", Message: "referenced chain not found: " + node.Chain},
+            Error:  &Error{Code: "not_found", Message: "referenced flow not found: " + node.Flow},
         }
     }
 
-    result := w.executeNode(chain.Root, msg, chain.ID, chain.Config.OnError, done, "root")
+    result := w.executeNode(flow.Root, msg, flow.ID, flow.Config.OnError, done, "root")
 
-    // If chain completed with Continue, run our Next nodes
+    // If flow completed with Continue, run our Next nodes
     if result.Action == Continue && len(node.Next) > 0 {
-        return w.executeFirstMatch(node.Next, msg, chain.ID, onError, done, "ref:"+node.Chain)
+        return w.executeFirstMatch(node.Next, msg, flow.ID, onError, done, "ref:"+node.Flow)
     }
 
     return result
 }
 
 // executeFirstMatch runs the first child node whose Match pattern matches msg.Kind.
-func (w *Wafer) executeFirstMatch(nodes []*Node, msg *Message, chainID, onError string, done <-chan struct{}, parentPath string) Result {
+func (w *Wafer) executeFirstMatch(nodes []*Node, msg *Message, flowID, onError string, done <-chan struct{}, parentPath string) Result {
     for i, child := range nodes {
         if !matchesPattern(child.Match, msg.Kind) {
             continue
         }
         childPath := fmt.Sprintf("%s.%d", parentPath, i)
-        return w.executeNode(child, msg, chainID, onError, done, childPath)
+        return w.executeNode(child, msg, flowID, onError, done, childPath)
     }
     return Result{Action: Continue, Message: msg}
 }
@@ -1249,9 +1249,9 @@ interface types {
     }
 
     enum instance-mode {
-        per-node,       // One instance per chain node (default)
-        singleton,      // One instance shared across all chains
-        per-chain,      // One instance per chain
+        per-node,       // One instance per flow node (default)
+        singleton,      // One instance shared across all flows
+        per-flow,      // One instance per flow
         per-execution,  // New instance for every message
     }
 
@@ -1655,7 +1655,7 @@ func TestValidateBlock(t *testing.T) {
 
 ## Configuration Example
 
-Chains can also be defined as JSON configuration. Match patterns on `next` nodes handle routing by comparing against `msg.Kind`.
+Flows can also be defined as JSON configuration. Match patterns on `next` nodes handle routing by comparing against `msg.Kind`.
 
 ```json
 {
@@ -1682,16 +1682,16 @@ Chains can also be defined as JSON configuration. Match patterns on `next` nodes
       "source": "./blocks/logger.wasm"
     }
   ],
-  "chains": [
+  "flows": [
     {
       "id": "api",
-      "summary": "HTTP API entrypoint that routes requests to handler chains",
+      "summary": "HTTP API entrypoint that routes requests to handler flows",
       "root": {
         "block": "http",
         "config": { "port": 8080 },
         "next": [
-          { "match": "POST:/users", "chain": "create-user" },
-          { "match": "GET:/users/*", "chain": "get-user" }
+          { "match": "POST:/users", "flow": "create-user" },
+          { "match": "GET:/users/*", "flow": "get-user" }
         ]
       }
     },
@@ -1726,15 +1726,15 @@ Chains can also be defined as JSON configuration. Match patterns on `next` nodes
 ```
 
 In this configuration:
-- The `api` chain has an HTTP block at its root that processes incoming requests
-- Match patterns route `POST:/users` to the `create-user` chain reference
-- The `create-user` chain processes messages through log, validate, auth, and db blocks sequentially
+- The `api` flow has an HTTP block at its root that processes incoming requests
+- Match patterns route `POST:/users` to the `create-user` flow reference
+- The `create-user` flow processes messages through log, validate, auth, and db blocks sequentially
 
 ---
 
 ## Related Documents
 
-- **[WAFER Spec](./WAFER_SPEC.md)** — The specification that WAFER-Go implements (blocks, chains, interfaces, registry)
+- **[WAFER Spec](./WAFER_SPEC.md)** — The specification that WAFER-Go implements (blocks, flows, interfaces, registry)
 - **Solobase** — BaaS platform built on WAFER-Go (block-based architecture with Preact UIs)
 
 ---

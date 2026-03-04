@@ -1,6 +1,6 @@
 # Waffle
 
-Waffle is a message-processing framework built around composable blocks and chains.
+Waffle is a message-processing framework built around composable blocks and flows.
 
 ## Spec
 

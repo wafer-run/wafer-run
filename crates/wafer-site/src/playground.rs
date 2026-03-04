@@ -160,7 +160,7 @@ fn main() {
     let mut headers = HashMap::new();
     headers.insert("content-type", "application/json");
     headers.insert("x-request-id", "req-42");
-    headers.insert("x-wafer-chain", "main");
+    headers.insert("x-wafer-flow", "main");
 
     println!("Incoming message:");
     for (key, value) in &headers {
@@ -275,6 +275,18 @@ block.handle({
 });
 "#;
 
+/// Shared HTTP client for playground proxy requests — avoids per-request TLS setup.
+fn playground_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// Proxy a JSON POST request using async reqwest, bridged via block_in_place.
 fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, String> {
     let handle = tokio::runtime::Handle::current();
@@ -282,10 +294,7 @@ fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, St
     let body = payload.to_string();
     tokio::task::block_in_place(|| {
         handle.block_on(async {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| e.to_string())?;
+            let client = playground_client();
             let resp = client
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -305,10 +314,7 @@ fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String
     let params: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     tokio::task::block_in_place(|| {
         handle.block_on(async {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| e.to_string())?;
+            let client = playground_client();
             let resp = client
                 .post(&url)
                 .form(&params)

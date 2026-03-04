@@ -24,6 +24,8 @@ parking_lot = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
+sha2 = { workspace = true }
+url = "2"
 
 # WASM (Wasmtime)
 wasmtime = { workspace = true, optional = true }

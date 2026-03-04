@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::meta::*;
 
-/// Message flows through the chain. A message contains a kind identifier,
+/// Message flows through the flow. A message contains a kind identifier,
 /// payload data, and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -56,8 +56,9 @@ impl Message {
     }
 
     /// Unmarshal parses Data into the given type.
+    #[deprecated(note = "use `decode` instead")]
     pub fn unmarshal<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(&self.data)
+        self.decode()
     }
 
     /// Decode unmarshals the JSON body into dest.
@@ -91,7 +92,7 @@ impl Message {
         }
     }
 
-    /// Respond returns a Result that short-circuits the chain with a response.
+    /// Respond returns a Result that short-circuits the flow with a response.
     pub fn respond(self, r: Response) -> Result_ {
         Result_ {
             action: Action::Respond,
@@ -101,7 +102,7 @@ impl Message {
         }
     }
 
-    /// Drop returns a Result that ends the chain silently.
+    /// Drop returns a Result that ends the flow silently.
     pub fn drop_msg(self) -> Result_ {
         Result_ {
             action: Action::Drop,
@@ -111,7 +112,7 @@ impl Message {
         }
     }
 
-    /// Err returns a Result that short-circuits the chain with an error.
+    /// Err returns a Result that short-circuits the flow with an error.
     pub fn err(self, e: WaferError) -> Result_ {
         Result_ {
             action: Action::Error,
@@ -240,7 +241,7 @@ impl Message {
             .filter(|&ps| ps > 0 && ps <= 100)
             .unwrap_or(default_page_size);
 
-        let offset = (page - 1) * page_size;
+        let offset = (page - 1).saturating_mul(page_size);
         (page, page_size, offset)
     }
 }
@@ -384,8 +385,8 @@ pub enum InstanceMode {
     PerNode,
     #[serde(rename = "singleton")]
     Singleton,
-    #[serde(rename = "per-chain")]
-    PerChain,
+    #[serde(rename = "per-flow")]
+    PerFlow,
     #[serde(rename = "per-execution")]
     PerExecution,
 }
@@ -395,7 +396,7 @@ impl InstanceMode {
         match self {
             Self::PerNode => "per-node",
             Self::Singleton => "singleton",
-            Self::PerChain => "per-chain",
+            Self::PerFlow => "per-flow",
             Self::PerExecution => "per-execution",
         }
     }
@@ -404,7 +405,7 @@ impl InstanceMode {
         match s {
             "per-node" | "" => Some(Self::PerNode),
             "singleton" => Some(Self::Singleton),
-            "per-chain" => Some(Self::PerChain),
+            "per-flow" => Some(Self::PerFlow),
             "per-execution" => Some(Self::PerExecution),
             _ => None,
         }

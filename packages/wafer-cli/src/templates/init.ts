@@ -1,4 +1,4 @@
-import type { WaferConfig, ChainDef } from "../config/types.js";
+import type { WaferConfig, FlowDef } from "../config/types.js";
 
 export function waferJsonTemplate(name: string): WaferConfig {
   return {
@@ -7,8 +7,8 @@ export function waferJsonTemplate(name: string): WaferConfig {
     blocks: [
       { name: "hello", source: "blocks/hello" },
     ],
-    chains: [
-      { name: "main", source: "chains/main.json" },
+    flows: [
+      { name: "main", source: "flows/main.json" },
     ],
     publish: {
       repo: `wafer-run/${name}`,
@@ -17,7 +17,7 @@ export function waferJsonTemplate(name: string): WaferConfig {
   };
 }
 
-export function mainChainTemplate(): ChainDef {
+export function mainFlowTemplate(): FlowDef {
   return {
     id: "main",
     root: { block: "hello" },

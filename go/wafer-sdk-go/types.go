@@ -2,7 +2,7 @@ package wafer
 
 import "encoding/json"
 
-// Message represents a message flowing through a WAFER chain.
+// Message represents a message flowing through a WAFER flow.
 type Message struct {
 	Kind string
 	Data []byte
@@ -130,7 +130,7 @@ type InstanceMode int
 const (
 	PerNode InstanceMode = iota
 	Singleton
-	PerChain
+	PerFlow
 	PerExecution
 )
 
@@ -140,8 +140,8 @@ func (m InstanceMode) String() string {
 		return "per-node"
 	case Singleton:
 		return "singleton"
-	case PerChain:
-		return "per-chain"
+	case PerFlow:
+		return "per-flow"
 	case PerExecution:
 		return "per-execution"
 	default:

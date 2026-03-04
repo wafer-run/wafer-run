@@ -3,5 +3,5 @@
 [modes]
 per_node      = { value = "per-node",      description = "One instance per node (default)" }
 singleton     = { value = "singleton",     description = "Single shared instance" }
-per_chain     = { value = "per-chain",     description = "One instance per chain" }
+per_flow      = { value = "per-flow",      description = "One instance per flow" }
 per_execution = { value = "per-execution", description = "New instance per execution" }

@@ -7,7 +7,7 @@ const docPages = [
   { path: '/docs/creating-a-block', title: 'Creating a Block', heading: 'Creating a Block' },
   { path: '/docs/running-a-block', title: 'Running a Block', heading: 'Running a Block' },
   { path: '/docs/cli', title: 'CLI', heading: 'CLI' },
-  { path: '/docs/chain-configuration', title: 'Chain Configuration', heading: 'Chain Configuration' },
+  { path: '/docs/flow-configuration', title: 'Flow Configuration', heading: 'Flow Configuration' },
   { path: '/docs/built-in-blocks', title: 'Built-in Blocks', heading: 'Built-in Blocks' },
   { path: '/docs/services', title: 'Services', heading: 'Services' },
   { path: '/docs/http-bridge', title: 'HTTP Bridge', heading: 'HTTP Bridge' },

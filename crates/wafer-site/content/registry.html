@@ -39,7 +39,7 @@
 
         /* Type badges */
         .badge-block     { background: #eff6ff; color: #1e40af; }
-        .badge-chain     { background: #fdf4ff; color: #86198f; }
+        .badge-flow      { background: #fdf4ff; color: #86198f; }
         .badge-interface { background: #f0fdf4; color: #166534; }
         .badge-both      { background: #fefce8; color: #854d0e; }
 
@@ -76,14 +76,14 @@
     </div>
     <div class="page-title">
         <h1>Package Registry</h1>
-        <p>Discover and share wafer blocks, chains, and interfaces</p>
+        <p>Discover and share wafer blocks, flows, and interfaces</p>
     </div>
     <div class="container">
         <input type="text" class="search-box" id="search" placeholder="Search packages..." oninput="searchPackages(this.value)">
         <div class="filter-tabs">
             <button class="filter-tab active" onclick="setTypeFilter('')">All</button>
             <button class="filter-tab" onclick="setTypeFilter('block')">Blocks</button>
-            <button class="filter-tab" onclick="setTypeFilter('chain')">Chains</button>
+            <button class="filter-tab" onclick="setTypeFilter('flow')">Flows</button>
             <button class="filter-tab" onclick="setTypeFilter('interface')">Interfaces</button>
         </div>
         <ul class="package-list" id="packages">
@@ -96,7 +96,7 @@
 
         function setTypeFilter(type) {
             activeTypeFilter = type;
-            var labelMap = { '': 'all', 'block': 'blocks', 'chain': 'chains', 'interface': 'interfaces' };
+            var labelMap = { '': 'all', 'block': 'blocks', 'flow': 'flows', 'interface': 'interfaces' };
             var activeLabel = labelMap[type] || 'all';
             document.querySelectorAll('.filter-tab').forEach(btn => {
                 btn.classList.toggle('active', btn.textContent.trim().toLowerCase() === activeLabel);
@@ -130,9 +130,9 @@
         }
 
         function typeBadge(pkgType) {
-            const labels = { block: 'Block', chain: 'Chain', interface: 'Interface' };
-            // Legacy "both" means "block,chain"
-            if (pkgType === 'both') pkgType = 'block,chain';
+            const labels = { block: 'Block', flow: 'Flow', interface: 'Interface' };
+            // Legacy "both" means "block,flow"
+            if (pkgType === 'both') pkgType = 'block,flow';
             var types = (pkgType || 'block').split(',');
             return types.map(function(t) {
                 t = t.trim();
@@ -149,7 +149,7 @@
                     + '<p class="subtitle">No packages have been indexed yet.</p>'
                     + '<div class="api-guide">'
                     + '<p>Packages are auto-indexed from GitHub the first time someone requests them.</p>'
-                    + '<p>Just push your block, chain, or interface to GitHub, <a href="/docs/registry">create a release</a>, and it will appear here.</p>'
+                    + '<p>Just push your block, flow, or interface to GitHub, <a href="/docs/registry">create a release</a>, and it will appear here.</p>'
                     + '</div>'
                     + '</li>';
                 return;

@@ -65,7 +65,13 @@ impl NetworkService for HttpNetworkService {
             NetworkError::RequestError(format!("invalid method: {}", e))
         })?;
 
-        let client = self.client.get_or_init(|| reqwest::blocking::Client::new());
+        let client = self.client.get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new())
+        });
         let mut builder = client.request(method, &req.url);
 
         for (key, value) in &req.headers {
