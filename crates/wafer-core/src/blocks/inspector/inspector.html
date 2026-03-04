@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAFER Inspector</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; }
+
+  /* ── Header & Tabs ─────────────────────────────────── */
+  .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header h1 span { color: #58a6ff; }
+  .tabs { display: flex; gap: 4px; }
+  .tab { padding: 6px 16px; border-radius: 6px; cursor: pointer; background: transparent; border: 1px solid transparent; color: #8b949e; font-size: 14px; transition: color .15s; }
+  .tab.active { background: #21262d; border-color: #30363d; color: #e1e4e8; }
+  .tab:hover { color: #e1e4e8; }
+  .content { padding: 24px; }
+
+  /* ── Intro text ─────────────────────────────────────── */
+  .intro { font-size: 14px; color: #8b949e; margin-bottom: 16px; line-height: 1.5; max-width: 720px; }
+
+  /* ── Search ─────────────────────────────────────────── */
+  .search-bar { margin-bottom: 16px; }
+  .search-bar input {
+    width: 100%; max-width: 480px; padding: 8px 12px; border-radius: 6px;
+    border: 1px solid #30363d; background: #0d1117; color: #e1e4e8; font-size: 14px; outline: none;
+  }
+  .search-bar input:focus { border-color: #58a6ff; }
+  .search-bar input::placeholder { color: #484f58; }
+
+  /* ── Block cards ────────────────────────────────────── */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; transition: border-color .15s; }
+  .card:hover { border-color: #484f58; }
+  .card-header { display: flex; justify-content: space-between; align-items: flex-start; cursor: pointer; }
+  .card h3 { font-size: 15px; color: #58a6ff; word-break: break-all; margin-bottom: 4px; }
+  .card .summary { font-size: 13px; color: #8b949e; line-height: 1.4; }
+  .card .toggle { color: #484f58; font-size: 18px; flex-shrink: 0; margin-left: 8px; user-select: none; transition: transform .2s; }
+  .card.expanded .toggle { transform: rotate(90deg); }
+  .card .details { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #21262d; }
+  .card.expanded .details { display: block; }
+  .detail-row { font-size: 13px; color: #8b949e; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .detail-row b { color: #c9d1d9; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-interface { background: #1f6feb33; color: #58a6ff; border: 1px solid #1f6feb55; }
+  .badge-instance { background: #23863633; color: #3fb950; border: 1px solid #23863655; }
+  .tooltip { position: relative; cursor: help; border-bottom: 1px dotted #484f58; }
+  .tooltip .tip-text {
+    display: none; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%);
+    background: #21262d; color: #c9d1d9; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    white-space: nowrap; z-index: 10; border: 1px solid #30363d; pointer-events: none;
+  }
+  .tooltip:hover .tip-text { display: block; }
+
+  /* ── Chains layout ──────────────────────────────────── */
+  .chains-layout { display: flex; height: calc(100vh - 110px); }
+  .chain-list { width: 260px; border-right: 1px solid #30363d; overflow-y: auto; padding: 8px; flex-shrink: 0; }
+  .chain-item { padding: 10px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 4px; font-size: 13px; word-break: break-all; }
+  .chain-item:hover { background: #21262d; }
+  .chain-item.active { background: #1f6feb33; border: 1px solid #1f6feb; }
+  .chain-view { flex: 1; position: relative; overflow: auto; background: #0d1117; }
+  .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; font-size: 15px; }
+  .loading { color: #484f58; padding: 24px; font-size: 14px; }
+
+  /* ── Flow tree (CSS-only horizontal layout) ─────────── */
+  .flow-tree { padding: 32px; min-width: max-content; }
+  .flow-branch { display: flex; align-items: center; }
+  .flow-node {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; min-width: 170px;
+    cursor: pointer; transition: border-color .15s, box-shadow .15s; flex-shrink: 0;
+  }
+  .flow-node:hover { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff44; }
+  .flow-node.selected { border-color: #58a6ff; box-shadow: 0 0 0 2px #58a6ff44; }
+  .flow-node .node-title { background: #21262d; border-bottom: 1px solid #30363d; padding: 8px 12px; border-radius: 8px 8px 0 0; font-weight: 600; font-size: 13px; color: #58a6ff; }
+  .flow-node .node-body { padding: 8px 12px; font-size: 12px; color: #8b949e; }
+  .flow-node .node-match { color: #f0883e; margin-top: 2px; }
+  .flow-connector { display: flex; align-items: center; }
+  .flow-connector .h-line { width: 40px; height: 2px; background: #30363d; position: relative; }
+  .flow-connector .h-line::after {
+    content: ''; position: absolute; right: -1px; top: -4px;
+    border: 5px solid transparent; border-left-color: #30363d;
+  }
+  .flow-children { display: flex; flex-direction: column; gap: 0; position: relative; }
+  .flow-children > .flow-child { display: flex; align-items: center; position: relative; }
+  .flow-children > .flow-child .child-connector { width: 40px; height: 2px; background: #30363d; position: relative; }
+  .flow-children > .flow-child .child-connector::after {
+    content: ''; position: absolute; right: -1px; top: -4px;
+    border: 5px solid transparent; border-left-color: #30363d;
+  }
+  /* Vertical branch line connecting children */
+  .flow-children::before {
+    content: ''; position: absolute; left: 0; top: 50%;
+    width: 2px; background: #30363d;
+    /* Sized dynamically via JS for accuracy */
+  }
+  .flow-children.has-branch-line::before {
+    display: block;
+  }
+
+  /* ── Detail panel (slide-in from right) ─────────────── */
+  .detail-panel {
+    position: absolute; top: 0; right: 0; width: 360px; height: 100%;
+    background: #161b22; border-left: 1px solid #30363d; overflow-y: auto;
+    transform: translateX(100%); transition: transform .2s ease;
+    z-index: 20; padding: 20px;
+  }
+  .detail-panel.open { transform: translateX(0); }
+  .detail-panel .panel-close {
+    position: absolute; top: 12px; right: 12px; background: none; border: none;
+    color: #8b949e; cursor: pointer; font-size: 20px; line-height: 1;
+  }
+  .detail-panel .panel-close:hover { color: #e1e4e8; }
+  .detail-panel h3 { font-size: 16px; color: #58a6ff; margin-bottom: 16px; word-break: break-all; }
+  .detail-panel .section-title { font-size: 12px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 8px; }
+  .detail-panel .field { font-size: 13px; color: #c9d1d9; margin-bottom: 8px; line-height: 1.5; }
+  .detail-panel .field-label { color: #8b949e; }
+  .detail-panel .field-explain { font-size: 12px; color: #484f58; margin-top: 2px; font-style: italic; }
+  .detail-panel pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
+  .no-cards-match { color: #484f58; font-size: 14px; padding: 24px 0; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><span>WAFER</span> Inspector</h1>
+  <div class="tabs">
+    <div class="tab active" data-tab="blocks">Blocks</div>
+    <div class="tab" data-tab="chains">Chains</div>
+  </div>
+</div>
+
+<!-- ── Blocks view ──────────────────────────────────── -->
+<div id="blocks-view" class="content">
+  <p class="intro">Blocks are reusable processing units that handle messages. Each block declares an interface (the protocol it speaks) and an instance mode (whether it is shared or created per use).</p>
+  <div class="search-bar"><input type="text" id="block-search" placeholder="Search blocks by name, interface, or summary..." /></div>
+  <div id="block-cards" class="cards">
+    <div class="loading">Loading blocks...</div>
+  </div>
+</div>
+
+<!-- ── Chains view ──────────────────────────────────── -->
+<div id="chains-view" class="content" style="display:none; padding:0;">
+  <div class="chains-layout">
+    <div class="chain-list" id="chain-list">
+      <p class="intro" style="padding:8px;">Chains wire blocks together into processing pipelines. Select a chain to visualize its flow.</p>
+      <div class="loading" id="chain-loading">Loading chains...</div>
+    </div>
+    <div class="chain-view" id="chain-view">
+      <div id="flow-container"></div>
+      <div class="empty-state" id="chain-empty">Select a chain to visualize</div>
+      <div class="detail-panel" id="detail-panel">
+        <button class="panel-close" id="panel-close" aria-label="Close">&times;</button>
+        <div id="panel-content"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const base = window.location.pathname.replace(/\/ui\/?$/, '');
+  let blocksData = [];
+  let selectedNodeEl = null;
+
+  // ── Tab switching ───────────────────────────────────
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const name = tab.dataset.tab;
+      document.getElementById('blocks-view').style.display = name === 'blocks' ? '' : 'none';
+      document.getElementById('chains-view').style.display = name === 'chains' ? '' : 'none';
+    });
+  });
+
+  // ── Blocks ──────────────────────────────────────────
+  fetch(base + '/blocks')
+    .then(r => r.json())
+    .then(blocks => {
+      blocksData = blocks;
+      blocks.sort((a, b) => a.name.localeCompare(b.name));
+      renderBlockCards(blocks);
+    })
+    .catch(e => {
+      document.getElementById('block-cards').innerHTML = '<div class="loading">Error loading blocks: ' + esc(e.message) + '</div>';
+    });
+
+  function renderBlockCards(blocks) {
+    const container = document.getElementById('block-cards');
+    if (!blocks.length) { container.innerHTML = '<div class="no-cards-match">No blocks registered</div>'; return; }
+    container.innerHTML = blocks.map((b, i) => `
+      <div class="card" data-index="${i}">
+        <div class="card-header" data-card-toggle>
+          <div>
+            <h3>${esc(b.name)}</h3>
+            <div class="summary">${esc(b.summary)}</div>
+          </div>
+          <span class="toggle">&#9654;</span>
+        </div>
+        <div class="details">
+          <div class="detail-row"><b>Version:</b> ${esc(b.version)}</div>
+          <div class="detail-row">
+            <span class="tooltip">Interface<span class="tip-text">The protocol this block uses to communicate (e.g. handler@v1 handles HTTP-style request/response)</span></span>
+            <span class="badge badge-interface">${esc(b.interface)}</span>
+          </div>
+          <div class="detail-row">
+            <span class="tooltip">Instance mode<span class="tip-text">Singleton: one shared instance. Per-use: a new instance for each invocation.</span></span>
+            <span class="badge badge-instance">${esc(b.instance_mode)}</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+
+    container.addEventListener('click', e => {
+      const header = e.target.closest('[data-card-toggle]');
+      if (header) header.closest('.card').classList.toggle('expanded');
+    });
+  }
+
+  // ── Block search ────────────────────────────────────
+  document.getElementById('block-search').addEventListener('input', function() {
+    const q = this.value.toLowerCase().trim();
+    const filtered = blocksData.filter(b =>
+      b.name.toLowerCase().includes(q) ||
+      b.interface.toLowerCase().includes(q) ||
+      (b.summary && b.summary.toLowerCase().includes(q))
+    );
+    renderBlockCards(filtered);
+  });
+
+  // ── Chains ──────────────────────────────────────────
+  fetch(base + '/chains')
+    .then(r => r.json())
+    .then(chains => {
+      const list = document.getElementById('chain-list');
+      const loadingEl = document.getElementById('chain-loading');
+      if (loadingEl) loadingEl.remove();
+      if (!chains.length) { list.innerHTML += '<div class="empty-state" style="height:auto;padding:24px;">No chains</div>'; return; }
+      chains.sort((a, b) => a.id.localeCompare(b.id));
+      const items = chains.map(c => {
+        const div = document.createElement('div');
+        div.className = 'chain-item';
+        div.dataset.id = c.id;
+        div.innerHTML = esc(c.id) + (c.summary ? '<br><small style="color:#8b949e">' + esc(c.summary) + '</small>' : '');
+        div.addEventListener('click', () => {
+          list.querySelectorAll('.chain-item').forEach(i => i.classList.remove('active'));
+          div.classList.add('active');
+          loadChain(c.id);
+        });
+        return div;
+      });
+      items.forEach(el => list.appendChild(el));
+    })
+    .catch(e => {
+      document.getElementById('chain-loading').textContent = 'Error: ' + e.message;
+    });
+
+  function loadChain(id) {
+    closeDetailPanel();
+    document.getElementById('chain-empty').style.display = 'none';
+    document.getElementById('flow-container').innerHTML = '<div class="loading">Loading...</div>';
+    fetch(base + '/chains/' + encodeURIComponent(id))
+      .then(r => r.json())
+      .then(def => renderFlow(def))
+      .catch(e => {
+        document.getElementById('flow-container').innerHTML = '';
+        const empty = document.getElementById('chain-empty');
+        empty.style.display = '';
+        empty.textContent = 'Error: ' + e.message;
+      });
+  }
+
+  // ── Flow rendering (CSS flexbox tree) ───────────────
+  function renderFlow(def) {
+    const container = document.getElementById('flow-container');
+    container.innerHTML = '';
+    const tree = document.createElement('div');
+    tree.className = 'flow-tree';
+    tree.appendChild(buildBranch(def.root));
+    container.appendChild(tree);
+    layoutBranchLines(tree);
+  }
+
+  function buildBranch(node) {
+    const branch = document.createElement('div');
+    branch.className = 'flow-branch';
+
+    // Node element
+    const nodeEl = document.createElement('div');
+    nodeEl.className = 'flow-node';
+    nodeEl.dataset.nodeData = JSON.stringify(node);
+    const label = node.block || (node.chain ? 'chain:' + node.chain : '(root)');
+    let bodyHtml = '';
+    if (node.match) bodyHtml += '<div class="node-match">match: ' + esc(node.match) + '</div>';
+    nodeEl.innerHTML = '<div class="node-title">' + esc(label) + '</div>' +
+                       (bodyHtml ? '<div class="node-body">' + bodyHtml + '</div>' : '');
+    nodeEl.addEventListener('click', () => openDetailPanel(node, nodeEl));
+    branch.appendChild(nodeEl);
+
+    // Children
+    if (node.next && node.next.length) {
+      const connector = document.createElement('div');
+      connector.className = 'flow-connector';
+      connector.innerHTML = '<div class="h-line"></div>';
+      branch.appendChild(connector);
+
+      if (node.next.length === 1) {
+        branch.appendChild(buildBranch(node.next[0]));
+      } else {
+        const children = document.createElement('div');
+        children.className = 'flow-children';
+        node.next.forEach(child => {
+          const childWrapper = document.createElement('div');
+          childWrapper.className = 'flow-child';
+          const childConn = document.createElement('div');
+          childConn.className = 'child-connector';
+          childWrapper.appendChild(childConn);
+          childWrapper.appendChild(buildBranch(child));
+          children.appendChild(childWrapper);
+        });
+        branch.appendChild(children);
+      }
+    }
+
+    return branch;
+  }
+
+  function layoutBranchLines(root) {
+    root.querySelectorAll('.flow-children').forEach(container => {
+      const children = container.querySelectorAll(':scope > .flow-child');
+      if (children.length < 2) return;
+      const first = children[0];
+      const last = children[children.length - 1];
+      const containerRect = container.getBoundingClientRect();
+      const firstRect = first.getBoundingClientRect();
+      const lastRect = last.getBoundingClientRect();
+      const top = firstRect.top + firstRect.height / 2 - containerRect.top;
+      const bottom = lastRect.top + lastRect.height / 2 - containerRect.top;
+      container.style.setProperty('--branch-top', top + 'px');
+      container.style.setProperty('--branch-height', (bottom - top) + 'px');
+      container.classList.add('has-branch-line');
+      container.style.position = 'relative';
+      // Apply via pseudo-element CSS custom properties
+      const style = container.style;
+      style.setProperty('position', 'relative');
+      // We need inline override since pseudo-elements can't use inline style directly
+      // Use a real element instead
+      let line = container.querySelector('.v-branch-line');
+      if (!line) {
+        line = document.createElement('div');
+        line.className = 'v-branch-line';
+        line.style.cssText = 'position:absolute;left:0;width:2px;background:#30363d;';
+        container.insertBefore(line, container.firstChild);
+      }
+      line.style.top = top + 'px';
+      line.style.height = (bottom - top) + 'px';
+    });
+  }
+
+  // ── Detail panel ────────────────────────────────────
+  function openDetailPanel(node, nodeEl) {
+    if (selectedNodeEl) selectedNodeEl.classList.remove('selected');
+    selectedNodeEl = nodeEl;
+    nodeEl.classList.add('selected');
+
+    const panel = document.getElementById('detail-panel');
+    const content = document.getElementById('panel-content');
+    const label = node.block || (node.chain ? 'chain:' + node.chain : '(root)');
+
+    let html = '<h3>' + esc(label) + '</h3>';
+
+    // Node info
+    html += '<div class="section-title">Node Configuration</div>';
+    if (node.match) {
+      html += '<div class="field"><span class="field-label">Match pattern:</span> ' + esc(node.match) + '</div>';
+      html += '<div class="field-explain">Messages are routed to this node only when they match this pattern.</div>';
+    } else {
+      html += '<div class="field"><span class="field-label">Match pattern:</span> (none &mdash; receives all messages)</div>';
+    }
+    if (node.config) {
+      const cfgStr = typeof node.config === 'string' ? node.config : JSON.stringify(node.config, null, 2);
+      html += '<div class="field"><span class="field-label">Config:</span></div><pre>' + esc(cfgStr) + '</pre>';
+      html += '<div class="field-explain">Static configuration passed to this block instance at startup.</div>';
+    }
+    if (node.instance_mode) {
+      html += '<div class="field"><span class="field-label">Instance override:</span> ' + esc(node.instance_mode) + '</div>';
+      html += '<div class="field-explain">Overrides the block\'s default instance mode for this chain node.</div>';
+    }
+
+    // Block info (from cached blocks data)
+    if (node.block) {
+      const blockInfo = blocksData.find(b => b.name === node.block);
+      if (blockInfo) {
+        html += '<div class="section-title">Block Details</div>';
+        html += '<div class="field"><span class="field-label">Summary:</span> ' + esc(blockInfo.summary) + '</div>';
+        html += '<div class="field"><span class="field-label">Version:</span> ' + esc(blockInfo.version) + '</div>';
+        html += '<div class="field"><span class="field-label">Interface:</span> <span class="badge badge-interface">' + esc(blockInfo.interface) + '</span></div>';
+        html += '<div class="field-explain">The protocol this block uses (e.g. handler@v1 for HTTP request/response).</div>';
+        html += '<div class="field"><span class="field-label">Instance mode:</span> <span class="badge badge-instance">' + esc(blockInfo.instance_mode) + '</span></div>';
+        html += '<div class="field-explain">Singleton means one shared instance; per-use creates a fresh instance each time.</div>';
+      }
+    }
+
+    if (node.chain) {
+      html += '<div class="section-title">Sub-chain Reference</div>';
+      html += '<div class="field">This node delegates to chain <b>' + esc(node.chain) + '</b>.</div>';
+      html += '<div class="field-explain">Instead of running a block directly, this node forwards messages into another chain.</div>';
+    }
+
+    content.innerHTML = html;
+    panel.classList.add('open');
+  }
+
+  function closeDetailPanel() {
+    document.getElementById('detail-panel').classList.remove('open');
+    if (selectedNodeEl) { selectedNodeEl.classList.remove('selected'); selectedNodeEl = null; }
+  }
+
+  document.getElementById('panel-close').addEventListener('click', closeDetailPanel);
+
+  // ── Utility ─────────────────────────────────────────
+  function esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+})();
+</script>
+</body>
+</html>

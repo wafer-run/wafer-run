@@ -344,6 +344,18 @@ impl Context for ContextWrapper {
     fn config_get(&self, key: &str) -> Option<&str> {
         unsafe { &*self.0 }.config_get(key)
     }
+
+    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
+        unsafe { &*self.0 }.registered_blocks()
+    }
+
+    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> {
+        unsafe { &*self.0 }.chain_infos()
+    }
+
+    fn chain_defs(&self) -> Vec<crate::config::ChainDef> {
+        unsafe { &*self.0 }.chain_defs()
+    }
 }
 
 impl From<ContextWrapper> for Arc<dyn Context> {

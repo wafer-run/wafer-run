@@ -37,6 +37,7 @@ pub fn register_all(w: &mut wafer_run::Wafer) {
     blocks::rate_limit::register(w);
     blocks::readonly_guard::register(w);
     blocks::monitoring::register(w);
+    blocks::inspector::register(w);
     blocks::auth::register(w);
     blocks::iam::register(w);
     blocks::web::register(w);

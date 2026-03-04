@@ -100,6 +100,12 @@ pub struct Wafer {
     /// All registered blocks (infrastructure + application), shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
+    /// Snapshot of registered block info (populated at start time).
+    pub(crate) blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
+    /// Snapshot of chain info (populated at start time).
+    pub(crate) chain_infos_snapshot: Arc<Vec<crate::config::ChainInfo>>,
+    /// Snapshot of chain definitions (populated at start time).
+    pub(crate) chain_defs_snapshot: Arc<Vec<crate::config::ChainDef>>,
     /// Shared WASM engine for all WASM blocks (enables epoch-based interruption).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
@@ -121,6 +127,9 @@ impl Wafer {
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
             hooks: ObservabilityBus::new(),
+            blocks_snapshot: Arc::new(Vec::new()),
+            chain_infos_snapshot: Arc::new(Vec::new()),
+            chain_defs_snapshot: Arc::new(Vec::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
         }
@@ -186,14 +195,19 @@ impl Wafer {
     }
 
     /// RegisterBlock registers a block instance under the given type name.
+    /// The instance is also pre-resolved so it is available via `call_block()`
+    /// even when it is not referenced as a chain node.
     pub fn register_block(&mut self, type_name: impl Into<String>, block: Arc<dyn Block>) {
+        let name = type_name.into();
         let block_clone = block.clone();
+        let name_clone = name.clone();
         let _ = self.registry.register(
-            type_name,
+            name_clone,
             Arc::new(StructBlockFactory {
                 new_func: move || block_clone.clone(),
             }),
         );
+        self.resolved.insert(name, block);
     }
 
     /// RegisterBlockFunc registers an inline handler function as a block.
@@ -286,6 +300,9 @@ impl Wafer {
                     all_blocks: self.all_blocks_arc(),
                     call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                     max_call_depth: 16,
+                    registered_blocks_snapshot: self.blocks_snapshot.clone(),
+                    chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+                    chain_defs_snapshot: self.chain_defs_snapshot.clone(),
                 };
 
                 block
@@ -336,6 +353,9 @@ impl Wafer {
                     all_blocks: self.all_blocks_arc(),
                     call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                     max_call_depth: 16,
+                    registered_blocks_snapshot: self.blocks_snapshot.clone(),
+                    chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+                    chain_defs_snapshot: self.chain_defs_snapshot.clone(),
                 };
 
                 block
@@ -375,6 +395,9 @@ impl Wafer {
                         all_blocks: self.all_blocks_arc(),
                         call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                         max_call_depth: 16,
+                        registered_blocks_snapshot: self.blocks_snapshot.clone(),
+                        chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+                        chain_defs_snapshot: self.chain_defs_snapshot.clone(),
                     };
 
                     block
@@ -579,6 +602,11 @@ impl Wafer {
         // Rebuild the all_blocks map so contexts can see all resolved blocks
         self.rebuild_all_blocks();
 
+        // Snapshot introspection data for contexts
+        self.blocks_snapshot = Arc::new(self.registry.list());
+        self.chain_infos_snapshot = Arc::new(self.chains_info());
+        self.chain_defs_snapshot = Arc::new(self.chain_defs());
+
         // Spawn epoch ticker for WASM engine interrupt support
         #[cfg(feature = "wasm")]
         if let Some(ref engine) = self.wasm_engine {
@@ -605,6 +633,9 @@ impl Wafer {
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_call_depth: 16,
+            registered_blocks_snapshot: self.blocks_snapshot.clone(),
+            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
         };
         for block in self.resolved.values() {
             let _ = block.lifecycle(
@@ -714,6 +745,9 @@ impl Wafer {
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_call_depth: 16,
+            registered_blocks_snapshot: self.blocks_snapshot.clone(),
+            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
         };
 
         // Observability: block start

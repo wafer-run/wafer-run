@@ -43,6 +43,8 @@ async fn main() {
                 "block": "@wafer/http-router",
                 "config": {
                     "routes": [
+                        { "path": "/_inspector/**", "block": "@wafer/inspector" },
+                        { "path": "/_inspector", "block": "@wafer/inspector" },
                         { "path": "/api/**", "block": "@wafer-site/api" },
                         { "path": "/playground/**", "block": "@wafer-site/playground" },
                         { "path": "/playground", "block": "@wafer-site/playground" },
@@ -60,9 +62,13 @@ async fn main() {
     wafer_core::chains::register_chains(&mut w);
     w.add_chain_def(&site_chain);
 
-    // Resolve
+    // Resolve and start (start populates introspection snapshots)
     if let Err(e) = w.resolve() {
         tracing::error!("Failed to resolve: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = w.start() {
+        tracing::error!("Failed to start: {}", e);
         std::process::exit(1);
     }
 

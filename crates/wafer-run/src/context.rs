@@ -15,6 +15,15 @@ pub trait Context: Send + Sync {
 
     /// Get a config value from the block's node config.
     fn config_get(&self, key: &str) -> Option<&str>;
+
+    /// List all registered blocks.
+    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> { Vec::new() }
+
+    /// List chain summary info.
+    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> { Vec::new() }
+
+    /// List full chain definitions.
+    fn chain_defs(&self) -> Vec<crate::config::ChainDef> { Vec::new() }
 }
 
 /// RuntimeContext implements Context for blocks.
@@ -30,6 +39,12 @@ pub struct RuntimeContext {
     pub call_depth: Arc<std::sync::atomic::AtomicU32>,
     /// Maximum call depth (default: 16).
     pub max_call_depth: u32,
+    /// Snapshot of registered block info (populated at start time).
+    pub registered_blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
+    /// Snapshot of chain info (populated at start time).
+    pub chain_infos_snapshot: Arc<Vec<crate::config::ChainInfo>>,
+    /// Snapshot of chain definitions (populated at start time).
+    pub chain_defs_snapshot: Arc<Vec<crate::config::ChainDef>>,
 }
 
 // --- Result helpers ---
@@ -91,6 +106,9 @@ impl Context for RuntimeContext {
             all_blocks: self.all_blocks.clone(),
             call_depth: self.call_depth.clone(),
             max_call_depth: self.max_call_depth,
+            registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
+            chain_infos_snapshot: self.chain_infos_snapshot.clone(),
+            chain_defs_snapshot: self.chain_defs_snapshot.clone(),
         };
 
         // Call the block
@@ -120,5 +138,17 @@ impl Context for RuntimeContext {
 
     fn config_get(&self, key: &str) -> Option<&str> {
         self.config.get(key).map(|s| s.as_str())
+    }
+
+    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
+        (*self.registered_blocks_snapshot).clone()
+    }
+
+    fn chain_infos(&self) -> Vec<crate::config::ChainInfo> {
+        (*self.chain_infos_snapshot).clone()
+    }
+
+    fn chain_defs(&self) -> Vec<crate::config::ChainDef> {
+        (*self.chain_defs_snapshot).clone()
     }
 }
