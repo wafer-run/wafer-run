@@ -75,7 +75,7 @@ impl Block for CorsBlock {
 
         // Handle OPTIONS preflight
         if msg.get_meta("http.method") == "OPTIONS" {
-            return respond(msg.clone(), 204, Vec::new(), "");
+            return msg.clone().drop_msg();
         }
 
         msg.clone().cont()

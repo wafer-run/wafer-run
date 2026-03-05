@@ -75,7 +75,7 @@ impl RegistryBlock {
             "resp.header.Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         );
-        respond(msg.clone(), 200, html.as_bytes().to_vec(), "text/html")
+        respond(msg.clone(), html.as_bytes().to_vec(), "text/html")
     }
 
     // -----------------------------------------------------------------------
@@ -147,7 +147,6 @@ impl RegistryBlock {
 
                 json_respond(
                     msg.clone(),
-                    200,
                     &serde_json::json!({
                         "packages": filtered,
                         "total": filtered_count,
@@ -158,7 +157,7 @@ impl RegistryBlock {
                 )
             }
             Err(_) => {
-                json_respond(msg.clone(), 200, &serde_json::json!({"packages": []}))
+                json_respond(msg.clone(), &serde_json::json!({"packages": []}))
             }
         }
     }
@@ -286,7 +285,6 @@ impl RegistryBlock {
 
         json_respond(
             msg.clone(),
-            200,
             &serde_json::json!({
                 "package": pkg,
                 "versions": versions
@@ -306,7 +304,6 @@ impl RegistryBlock {
 
         json_respond(
             msg.clone(),
-            200,
             &serde_json::json!({
                 "package": name,
                 "versions": versions
@@ -382,7 +379,7 @@ impl RegistryBlock {
         );
 
         // 302 redirect
-        ResponseBuilder::new(msg.clone(), 302)
+        ResponseBuilder::new(msg.clone()).status(302)
             .set_header("Location", &asset_url)
             .body(vec![], "text/plain")
     }

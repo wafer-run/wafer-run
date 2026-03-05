@@ -15,8 +15,8 @@ ACTIVE: flow-configuration
             "block": "@wafer/router",
             "config": {
                 "routes": [
-                    { "path": "/api/hello", "methods": ["GET"], "block": "hello" },
-                    { "path": "/api/users", "methods": ["POST"], "block": "create-user" },
+                    { "path": "/api/hello", "actions": ["retrieve"], "block": "hello" },
+                    { "path": "/api/users", "actions": ["create"], "block": "create-user" },
                     { "path": "/api/items/{id}", "block": "items" },
                     { "path": "/api/files/**", "block": "file-handler" }
                 ]

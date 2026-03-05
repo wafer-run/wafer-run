@@ -53,12 +53,7 @@ impl Block for RateLimitBlock {
 
         let client_ip = msg.remote_addr().to_string();
         if client_ip.is_empty() {
-            return error(
-                msg.clone(),
-                400,
-                "bad_request",
-                "Client IP could not be determined",
-            );
+            return err_bad_request(msg.clone(), "Client IP could not be determined");
         }
 
         let mut buckets = self.buckets.lock();
@@ -101,7 +96,7 @@ impl Block for RateLimitBlock {
             );
             m.set_meta("resp.header.X-RateLimit-Remaining", "0");
 
-            return error(m, 429, "rate_limited", "Too many requests");
+            return error(m, "resource_exhausted", "Too many requests");
         }
 
         let remaining = max - bucket.count;

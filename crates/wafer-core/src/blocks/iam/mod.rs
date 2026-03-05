@@ -66,12 +66,7 @@ impl Block for IAMBlock {
         // Check that user is authenticated
         let user_id = msg.user_id().to_string();
         if user_id.is_empty() {
-            return error(
-                msg.clone(),
-                401,
-                "unauthorized",
-                "Authentication required",
-            );
+            return err_unauthorized(msg.clone(), "Authentication required");
         }
 
         // Get required role from config (default: "admin")
@@ -89,12 +84,7 @@ impl Block for IAMBlock {
         if has_role {
             msg.clone().cont()
         } else {
-            error(
-                msg.clone(),
-                403,
-                "forbidden",
-                &format!("Requires '{}' role", required_role),
-            )
+            err_forbidden(msg.clone(), &format!("Requires '{}' role", required_role))
         }
     }
 

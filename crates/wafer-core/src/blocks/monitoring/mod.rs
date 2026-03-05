@@ -73,13 +73,12 @@ impl Block for MonitoringBlock {
                 || remote == "::1"
                 || remote.starts_with("127.");
             if !is_local {
-                return error(msg.clone(), 403, "forbidden", "stats endpoint is restricted to localhost");
+                return err_forbidden(msg.clone(), "stats endpoint is restricted to localhost");
             }
             let stats = self.stats.lock();
             let uptime = self.start_time.elapsed().as_secs();
             return json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({
                     "uptime_seconds": uptime,
                     "total_requests": stats.total_requests,

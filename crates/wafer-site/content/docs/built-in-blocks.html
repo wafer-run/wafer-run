@@ -25,19 +25,20 @@ ACTIVE: built-in-blocks
     <li><code>routes</code> — array of route objects, each with:
         <ul>
             <li><code>path</code> — path pattern with <code>{var}</code> params and <code>/**</code> wildcard support</li>
-            <li><code>methods</code> — optional array of HTTP methods (e.g. <code>["GET", "POST"]</code>); if omitted, matches any method</li>
+            <li><code>actions</code> — optional array of actions (e.g. <code>["retrieve", "create"]</code>); if omitted, matches any action. Also accepts <code>methods</code> with HTTP verbs (<code>["GET", "POST"]</code>) which are automatically mapped to actions.</li>
             <li><code>block</code> — the block name to call when matched</li>
         </ul>
     </li>
 </ul>
+<p>Action mapping: <code>GET</code>/<code>HEAD</code> &rarr; <code>retrieve</code>, <code>POST</code> &rarr; <code>create</code>, <code>PUT</code>/<code>PATCH</code> &rarr; <code>update</code>, <code>DELETE</code> &rarr; <code>delete</code>, <code>OPTIONS</code> &rarr; <code>execute</code>.</p>
 <p>Path variables captured by <code>{var}</code> patterns are set as <code>req.param.var</code> in the message meta. Routes are evaluated in order — the first match wins.</p>
 <pre><code>{
     "block": "@wafer/router",
     "config": {
         "routes": [
-            { "path": "/users", "methods": ["GET"], "block": "my-app/list-users" },
-            { "path": "/users/{id}", "methods": ["GET"], "block": "my-app/get-user" },
-            { "path": "/users", "methods": ["POST"], "block": "my-app/create-user" },
+            { "path": "/users", "actions": ["retrieve"], "block": "my-app/list-users" },
+            { "path": "/users/{id}", "actions": ["retrieve"], "block": "my-app/get-user" },
+            { "path": "/users", "actions": ["create"], "block": "my-app/create-user" },
             { "path": "/health", "block": "my-app/health" }
         ]
     }

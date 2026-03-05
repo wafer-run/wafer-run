@@ -240,7 +240,7 @@ fn serve_static_file(msg: &mut Message, path: &PathBuf, config: &WebConfig) -> R
     let mut m = msg.clone();
     m.set_meta("resp.header.Cache-Control", &cc);
 
-    respond(m, 200, data, &content_type)
+    respond(m, data, &content_type)
 }
 
 fn serve_index_spa(msg: &mut Message, index_path: &PathBuf) -> Result_ {
@@ -252,7 +252,7 @@ fn serve_index_spa(msg: &mut Message, index_path: &PathBuf) -> Result_ {
     let mut m = msg.clone();
     m.set_meta("resp.header.Cache-Control", "no-cache");
 
-    respond(m, 200, data, "text/html; charset=utf-8")
+    respond(m, data, "text/html; charset=utf-8")
 }
 
 impl Block for WebBlock {
@@ -272,7 +272,7 @@ impl Block for WebBlock {
         // Only handle GET requests
         let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
-            return error(msg.clone(), 405, "method_not_allowed", "Only GET is supported");
+            return error(msg.clone(), "unimplemented", "Only retrieve action is supported");
         }
 
         let config = self.get_config(ctx);

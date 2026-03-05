@@ -3,19 +3,38 @@ use wafer_run::block::{Block, BlockInfo};
 use wafer_run::registry::BlockFactory;
 use wafer_run::*;
 
+/// Normalize a value to a standard action. Accepts both action names
+/// (`"retrieve"`) and HTTP methods (`"GET"`).
+fn normalize_action(s: &str) -> String {
+    match s.to_uppercase().as_str() {
+        "GET" | "HEAD" => "retrieve".to_string(),
+        "POST" => "create".to_string(),
+        "PUT" | "PATCH" => "update".to_string(),
+        "DELETE" => "delete".to_string(),
+        "OPTIONS" => "execute".to_string(),
+        _ => s.to_lowercase(),
+    }
+}
+
 /// A single route entry parsed from block config.
 struct Route {
     path: String,
-    methods: Vec<String>,
+    actions: Vec<String>,
     block: String,
 }
 
 /// `@wafer/router` matches incoming messages against configured routes
-/// using standard message properties (action, path) and dispatches to
-/// the appropriate handler block via `ctx.call_block()`.
+/// using standard message properties (`req.action`, `req.resource`) and
+/// dispatches to the appropriate handler block via `ctx.call_block()`.
 ///
-/// Transport-agnostic — works with any message that has `req.resource`
-/// and optionally `http.method` in its meta.
+/// Transport-agnostic — works with any message that has standard meta.
+///
+/// Route config accepts either `"actions"` or `"methods"`:
+/// ```json
+/// { "path": "/users", "actions": ["retrieve"], "block": "list-users" }
+/// { "path": "/users", "methods": ["GET"],      "block": "list-users" }
+/// ```
+/// HTTP methods are automatically mapped to actions (GET → retrieve, etc.).
 pub struct RouterBlock {
     routes: Vec<Route>,
 }
@@ -34,13 +53,13 @@ impl Block for RouterBlock {
     }
 
     fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        let method = msg.get_meta("http.method").to_string();
+        let action = msg.action().to_string();
         let path = msg.path().to_string();
 
         for route in &self.routes {
-            // Check method match (empty methods list matches any method)
-            if !route.methods.is_empty()
-                && !route.methods.iter().any(|m| m.eq_ignore_ascii_case(&method))
+            // Check action match (empty list matches any action)
+            if !route.actions.is_empty()
+                && !route.actions.iter().any(|a| *a == action)
             {
                 continue;
             }
@@ -83,18 +102,21 @@ impl BlockFactory for RouterBlockFactory {
                     .filter_map(|entry| {
                         let path = entry.get("path")?.as_str()?.to_string();
                         let block = entry.get("block")?.as_str()?.to_string();
-                        let methods = entry
-                            .get("methods")
-                            .and_then(|m| m.as_array())
+                        // Accept "actions" or "methods" — both are normalized
+                        let raw = entry
+                            .get("actions")
+                            .or_else(|| entry.get("methods"))
+                            .and_then(|m| m.as_array());
+                        let actions = raw
                             .map(|arr| {
                                 arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_uppercase()))
+                                    .filter_map(|v| v.as_str().map(normalize_action))
                                     .collect()
                             })
                             .unwrap_or_default();
                         Some(Route {
                             path,
-                            methods,
+                            actions,
                             block,
                         })
                     })

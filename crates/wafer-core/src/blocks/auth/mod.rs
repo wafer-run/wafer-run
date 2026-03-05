@@ -67,12 +67,12 @@ impl AuthBlock {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, "failed to look up API key in database");
-                return Err(auth_error(msg, 500, "Authentication service unavailable"));
+                return Err(err_internal(msg.clone(), "Authentication service unavailable"));
             }
         };
 
         if result.records.is_empty() {
-            return Err(auth_error(msg, 401, "Invalid API key"));
+            return Err(auth_error(msg,"Invalid API key"));
         }
 
         let key_record = &result.records[0];
@@ -82,14 +82,14 @@ impl AuthBlock {
         // here in constant time to prevent subtle timing leaks.
         if let Some(stored_hash) = key_record.data.get("key_hash").and_then(|v| v.as_str()) {
             if !constant_time_eq(key_hash.as_bytes(), stored_hash.as_bytes()) {
-                return Err(auth_error(msg, 401, "Invalid API key"));
+                return Err(auth_error(msg,"Invalid API key"));
             }
         }
 
         // Check if revoked
         if let Some(revoked) = key_record.data.get("revoked_at") {
             if !revoked.is_null() {
-                return Err(auth_error(msg, 401, "API key has been revoked"));
+                return Err(auth_error(msg,"API key has been revoked"));
             }
         }
 
@@ -99,7 +99,7 @@ impl AuthBlock {
                 if !expires_str.is_empty() {
                     if let Ok(exp_time) = chrono::DateTime::parse_from_rfc3339(expires_str) {
                         if exp_time < chrono::Utc::now() {
-                            return Err(auth_error(msg, 401, "API key has expired"));
+                            return Err(auth_error(msg,"API key has expired"));
                         }
                     }
                 }
@@ -115,7 +115,7 @@ impl AuthBlock {
             .to_string();
 
         if user_id.is_empty() {
-            return Err(auth_error(msg, 401, "API key has no associated user"));
+            return Err(auth_error(msg,"API key has no associated user"));
         }
 
         // Look up user email
@@ -160,7 +160,7 @@ impl AuthBlock {
         // Verify JWT signature and extract claims
         let claims_map = match crypto::verify(ctx, token) {
             Ok(data) => data,
-            Err(_) => return Err(auth_error(msg, 401, "Invalid or expired token")),
+            Err(_) => return Err(auth_error(msg,"Invalid or expired token")),
         };
 
         // Convert claims HashMap to serde_json::Value for uniform access
@@ -198,7 +198,7 @@ impl AuthBlock {
         };
 
         if user_id.is_empty() {
-            return Err(auth_error(msg, 401, "Token missing user_id"));
+            return Err(auth_error(msg,"Token missing user_id"));
         }
 
         Ok((user_id, email, roles))
@@ -222,7 +222,7 @@ impl Block for AuthBlock {
         // Extract token
         let token = match Self::extract_token(msg) {
             Some(t) => t,
-            None => return auth_error(msg, 401, "No authentication token provided"),
+            None => return auth_error(msg,"No authentication token provided"),
         };
 
         // Validate based on token type
@@ -259,8 +259,8 @@ impl Block for AuthBlock {
     }
 }
 
-fn auth_error(msg: &mut Message, status: u16, message: &str) -> Result_ {
-    error(msg.clone(), status, "unauthorized", message)
+fn auth_error(msg: &mut Message, message: &str) -> Result_ {
+    error(msg.clone(), "unauthenticated", message)
 }
 
 /// Constant-time byte comparison to prevent timing side-channel attacks.

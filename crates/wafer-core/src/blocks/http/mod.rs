@@ -7,6 +7,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use parking_lot::Mutex;
 
 use wafer_run::block::{Block, BlockInfo};
+use wafer_run::common::ErrorCode;
 use wafer_run::meta::*;
 use wafer_run::registry::BlockFactory;
 use wafer_run::runtime::RuntimeHandle;
@@ -150,7 +151,31 @@ fn apply_response_meta(
     builder
 }
 
+/// Map a semantic error code to an HTTP status code.
+fn error_code_to_http_status(code: &str) -> u16 {
+    match code {
+        ErrorCode::OK => 200,
+        ErrorCode::CANCELLED => 499,
+        ErrorCode::INVALID_ARGUMENT => 400,
+        ErrorCode::DEADLINE_EXCEEDED => 504,
+        ErrorCode::NOT_FOUND => 404,
+        ErrorCode::ALREADY_EXISTS => 409,
+        ErrorCode::PERMISSION_DENIED => 403,
+        ErrorCode::RESOURCE_EXHAUSTED => 429,
+        ErrorCode::FAILED_PRECONDITION => 412,
+        ErrorCode::ABORTED => 409,
+        ErrorCode::OUT_OF_RANGE => 400,
+        ErrorCode::UNIMPLEMENTED => 501,
+        ErrorCode::INTERNAL => 500,
+        ErrorCode::UNAVAILABLE => 503,
+        ErrorCode::DATA_LOSS => 500,
+        ErrorCode::UNAUTHENTICATED => 401,
+        _ => 500,
+    }
+}
+
 fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
+    // Explicit override takes precedence
     if let Some(code) = meta.get(META_RESP_STATUS) {
         if let Ok(n) = code.parse::<u16>() {
             return n;
@@ -162,6 +187,19 @@ fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
         }
     }
     default_code
+}
+
+fn get_error_status_code(error: Option<&WaferError>, meta: &HashMap<String, String>) -> u16 {
+    // Explicit override in meta takes precedence
+    let from_meta = get_status_code(meta, 0);
+    if from_meta > 0 {
+        return from_meta;
+    }
+    // Derive from error code
+    if let Some(err) = error {
+        return error_code_to_http_status(&err.code);
+    }
+    500
 }
 
 /// Convert a WAFER Result to an HTTP response.
@@ -209,7 +247,7 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 .map(|e| &e.meta)
                 .unwrap_or(&empty_meta);
 
-            let status_code = get_status_code(err_meta, 500);
+            let status_code = get_error_status_code(result.error.as_ref(), err_meta);
             let mut builder = axum::http::Response::builder().status(
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             );

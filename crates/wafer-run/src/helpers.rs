@@ -3,70 +3,68 @@ use crate::meta::*;
 use crate::types::*;
 use std::collections::HashMap;
 
-/// Respond returns a Result with a response body and status code.
-pub fn respond(msg: Message, status: u16, data: Vec<u8>, content_type: &str) -> Result_ {
+/// Respond returns a Result with a response body and content type.
+/// The transport layer determines the status code (default 200 for Respond).
+pub fn respond(msg: Message, data: Vec<u8>, content_type: &str) -> Result_ {
     let mut meta = HashMap::new();
-    meta.insert(META_RESP_STATUS.to_string(), status.to_string());
     if !content_type.is_empty() {
         meta.insert(META_RESP_CONTENT_TYPE.to_string(), content_type.to_string());
     }
     msg.respond(Response { data, meta })
 }
 
-/// Error returns an error Result with a status code.
-pub fn error(msg: Message, status: u16, err_code: &str, err_message: &str) -> Result_ {
+/// Error returns an error Result with an error code and message.
+/// The transport layer maps the error code to a status code.
+pub fn error(msg: Message, err_code: &str, err_message: &str) -> Result_ {
     Result_ {
         action: Action::Error,
-        error: Some(
-            WaferError::new(err_code, err_message)
-                .with_meta(META_RESP_STATUS, status.to_string()),
-        ),
+        error: Some(WaferError::new(err_code, err_message)),
         response: None,
         message: Some(msg),
     }
 }
 
 /// JSONRespond marshals data as JSON and returns a response.
-pub fn json_respond<T: serde::Serialize>(msg: Message, status: u16, data: &T) -> Result_ {
+pub fn json_respond<T: serde::Serialize>(msg: Message, data: &T) -> Result_ {
     match serde_json::to_vec(data) {
-        Ok(body) => respond(msg, status, body, "application/json"),
-        Err(e) => error(msg, 500, ErrorCode::INTERNAL, &e.to_string()),
+        Ok(body) => respond(msg, body, "application/json"),
+        Err(e) => error(msg, ErrorCode::INTERNAL, &e.to_string()),
     }
 }
 
 /// ErrBadRequest returns a 400 error.
 pub fn err_bad_request(msg: Message, message: &str) -> Result_ {
-    error(msg, 400, ErrorCode::INVALID_ARGUMENT, message)
+    error(msg, ErrorCode::INVALID_ARGUMENT, message)
 }
 
 /// ErrUnauthorized returns a 401 error.
 pub fn err_unauthorized(msg: Message, message: &str) -> Result_ {
-    error(msg, 401, ErrorCode::UNAUTHENTICATED, message)
+    error(msg, ErrorCode::UNAUTHENTICATED, message)
 }
 
 /// ErrForbidden returns a 403 error.
 pub fn err_forbidden(msg: Message, message: &str) -> Result_ {
-    error(msg, 403, ErrorCode::PERMISSION_DENIED, message)
+    error(msg, ErrorCode::PERMISSION_DENIED, message)
 }
 
 /// ErrNotFound returns a 404 error.
 pub fn err_not_found(msg: Message, message: &str) -> Result_ {
-    error(msg, 404, ErrorCode::NOT_FOUND, message)
+    error(msg, ErrorCode::NOT_FOUND, message)
 }
 
 /// ErrConflict returns a 409 error.
 pub fn err_conflict(msg: Message, message: &str) -> Result_ {
-    error(msg, 409, ErrorCode::ALREADY_EXISTS, message)
+    error(msg, ErrorCode::ALREADY_EXISTS, message)
 }
 
 /// ErrValidation returns a 422 error.
 pub fn err_validation(msg: Message, message: &str) -> Result_ {
-    error(msg, 422, ErrorCode::INVALID_ARGUMENT, message)
+    error(msg, ErrorCode::INVALID_ARGUMENT, message)
 }
 
 /// ErrInternal returns a 500 error.
 pub fn err_internal(msg: Message, message: &str) -> Result_ {
-    error(msg, 500, ErrorCode::INTERNAL, message)
+    error(msg, ErrorCode::INTERNAL, message)
 }
 
 /// ResponseBuilder builds responses with headers and cookies.
@@ -78,14 +76,21 @@ pub struct ResponseBuilder {
 
 impl ResponseBuilder {
     /// Create a new response builder.
-    pub fn new(msg: Message, status: u16) -> Self {
-        let mut meta = HashMap::new();
-        meta.insert(META_RESP_STATUS.to_string(), status.to_string());
+    /// Use `.status()` to set an explicit status code for non-200 responses (e.g. redirects).
+    pub fn new(msg: Message) -> Self {
         Self {
             msg,
-            meta,
+            meta: HashMap::new(),
             cookie_count: 0,
         }
+    }
+
+    /// Set an explicit status code override (e.g. 201, 301, 302).
+    /// If not called, the transport layer uses its default (200 for Respond).
+    pub fn status(mut self, status: u16) -> Self {
+        self.meta
+            .insert(META_RESP_STATUS.to_string(), status.to_string());
+        self
     }
 
     /// SetCookie adds a Set-Cookie header to the response.
@@ -120,7 +125,7 @@ impl ResponseBuilder {
                     meta: self.meta,
                 })
             }
-            Err(e) => error(self.msg, 500, ErrorCode::INTERNAL, &e.to_string()),
+            Err(e) => error(self.msg, ErrorCode::INTERNAL, &e.to_string()),
         }
     }
 
@@ -163,6 +168,11 @@ pub fn respond_empty(msg: &Message) -> Result_ {
     }
 }
 
+/// Convenience function to create a new ResponseBuilder.
+pub fn new_response(msg: Message) -> ResponseBuilder {
+    ResponseBuilder::new(msg)
+}
+
 /// Encode bytes as lowercase hex string.
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -185,11 +195,6 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = sha2::Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
-}
-
-/// Convenience function to create a new ResponseBuilder.
-pub fn new_response(msg: Message, status: u16) -> ResponseBuilder {
-    ResponseBuilder::new(msg, status)
 }
 
 /// Expand environment variables in the format $VAR or ${VAR}.

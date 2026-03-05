@@ -36,7 +36,7 @@ impl Block for PlaygroundBlock {
             // Serve playground page
             (_, "/playground") | (_, "/playground/") => {
                 let html = include_str!("../content/playground.html");
-                respond(msg.clone(), 200, html.as_bytes().to_vec(), "text/html")
+                respond(msg.clone(), html.as_bytes().to_vec(), "text/html")
             }
 
             // --- Proxy: Rust Playground ---
@@ -69,14 +69,13 @@ impl Block for PlaygroundBlock {
                 match proxy_post_json("https://play.rust-lang.org/execute", &payload) {
                     Ok(bytes) => respond(
                         msg.clone(),
-                        200,
                         bytes,
                         "application/json",
                     ),
-                    Err(e) => json_respond(
+                    Err(e) => error(
                         msg.clone(),
-                        502,
-                        &serde_json::json!({ "error": format!("Rust Playground error: {}", e) }),
+                        "unavailable",
+                        &format!("Rust Playground error: {}", e),
                     ),
                 }
             }
@@ -104,14 +103,13 @@ impl Block for PlaygroundBlock {
                 ) {
                     Ok(bytes) => respond(
                         msg.clone(),
-                        200,
                         bytes,
                         "application/json",
                     ),
-                    Err(e) => json_respond(
+                    Err(e) => error(
                         msg.clone(),
-                        502,
-                        &serde_json::json!({ "error": format!("Go Playground error: {}", e) }),
+                        "unavailable",
+                        &format!("Go Playground error: {}", e),
                     ),
                 }
             }
@@ -119,19 +117,16 @@ impl Block for PlaygroundBlock {
             // --- Templates ---
             ("retrieve", "/playground/templates/rust") => json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({ "language": "rust", "template": RUST_TEMPLATE }),
             ),
 
             ("retrieve", "/playground/templates/go") => json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({ "language": "go", "template": GO_TEMPLATE }),
             ),
 
             ("retrieve", "/playground/templates/javascript") => json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({ "language": "javascript", "template": JS_TEMPLATE }),
             ),
 

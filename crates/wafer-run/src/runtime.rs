@@ -260,13 +260,24 @@ impl Wafer {
     }
 
     /// RegisterBlockFunc registers an inline handler function as a block.
+    /// The block is also pre-resolved so it is available via `call_block()`.
     pub fn register_block_func(
         &mut self,
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
     ) {
-        if let Err(e) = self.registry.register_func(type_name, handler) {
-            tracing::warn!(error = %e, "registry registration failed for block func");
+        let name = type_name.into();
+        match self.registry.register_func(&name, handler) {
+            Ok(()) => {
+                // Pre-resolve: create an instance so call_block() can find it
+                if let Some(factory) = self.registry.get(&name) {
+                    let block = factory.create(None);
+                    self.resolved.insert(name, block);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(block = %name, error = %e, "registry registration failed for block func");
+            }
         }
     }
 
@@ -637,9 +648,7 @@ impl Wafer {
     /// Use this when you don't need the HTTP listener (e.g. wafer-run-node,
     /// wafer-ffi, or integration tests that manage their own serving).
     pub fn start_without_bind(&mut self) -> Result<(), String> {
-        if self.resolved.is_empty() {
-            self.resolve()?;
-        }
+        self.resolve()?;
 
         // Rebuild the all_blocks map so contexts can see all resolved blocks
         self.rebuild_all_blocks();
@@ -698,7 +707,7 @@ impl Wafer {
         let handle = RuntimeHandle {
             inner: arc_self.clone(),
         };
-        for block in arc_self.resolved.values() {
+        for (_, block) in &arc_self.resolved {
             block.bind(handle.clone());
         }
 

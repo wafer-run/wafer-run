@@ -28,13 +28,13 @@ impl Block for InspectorBlock {
         // Require authentication — reject if no auth.user_id is set
         let auth_user = msg.get_meta("auth.user_id");
         if auth_user.is_empty() {
-            return error(msg.clone(), 401, "unauthorized", "inspector requires authentication");
+            return err_unauthorized(msg.clone(), "inspector requires authentication");
         }
 
         // Only allow retrieve (GET)
         let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
-            return error(msg.clone(), 405, "method_not_allowed", "only GET is allowed");
+            return error(msg.clone(), "unimplemented", "only retrieve action is allowed");
         }
 
         let path = msg.path().to_string();
@@ -42,17 +42,17 @@ impl Block for InspectorBlock {
         // Suffix-based routing — works regardless of mount prefix
         if path.ends_with("/blocks") {
             let blocks = ctx.registered_blocks();
-            return json_respond(msg.clone(), 200, &blocks);
+            return json_respond(msg.clone(), &blocks);
         }
 
         if path.ends_with("/flows") {
             let flows = ctx.flow_infos();
-            return json_respond(msg.clone(), 200, &flows);
+            return json_respond(msg.clone(), &flows);
         }
 
         if path.ends_with("/ui") {
             let html = include_str!("inspector.html");
-            return respond(msg.clone(), 200, html.as_bytes().to_vec(), "text/html; charset=utf-8");
+            return respond(msg.clone(), html.as_bytes().to_vec(), "text/html; charset=utf-8");
         }
 
         // /blocks/{name} — single block info
@@ -60,7 +60,7 @@ impl Block for InspectorBlock {
             let decoded = url_decode(&block_name);
             let blocks = ctx.registered_blocks();
             if let Some(info) = blocks.into_iter().find(|b| b.name == decoded) {
-                return json_respond(msg.clone(), 200, &info);
+                return json_respond(msg.clone(), &info);
             }
             return err_not_found(msg.clone(), &format!("block '{}' not found", decoded));
         }
@@ -70,7 +70,7 @@ impl Block for InspectorBlock {
             let decoded = url_decode(&flow_id);
             let defs = ctx.flow_defs();
             if let Some(def) = defs.into_iter().find(|c| c.id == decoded) {
-                return json_respond(msg.clone(), 200, &def);
+                return json_respond(msg.clone(), &def);
             }
             return err_not_found(msg.clone(), &format!("flow '{}' not found", decoded));
         }
@@ -84,7 +84,7 @@ impl Block for InspectorBlock {
             "blocks": blocks.iter().map(|b| &b.name).collect::<Vec<_>>(),
             "flows": flows.iter().map(|c| &c.id).collect::<Vec<_>>(),
         });
-        json_respond(msg.clone(), 200, &summary)
+        json_respond(msg.clone(), &summary)
     }
 
     fn lifecycle(

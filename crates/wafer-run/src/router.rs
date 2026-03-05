@@ -90,12 +90,11 @@ impl Router {
 
         // OPTIONS/Execute handling for CORS preflight
         if msg.action() == RequestAction::Execute.as_str() {
-            return helpers::respond(msg.clone(), 204, Vec::new(), "");
+            return msg.clone().drop_msg();
         }
 
         helpers::error(
             msg.clone(),
-            404,
             "not_found",
             &format!("route not found: {} {}", action, path),
         )

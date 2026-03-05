@@ -90,11 +90,11 @@ fn register_site_blocks(w: &mut Wafer) {
         // Serve static assets
         if path == "/images/hero.webp" {
             let bytes = include_bytes!("../public/images/hero.webp");
-            return respond(msg.clone(), 200, bytes.to_vec(), "image/webp");
+            return respond(msg.clone(),bytes.to_vec(), "image/webp");
         }
         if path == "/css/theme.css" {
             let css = include_str!(concat!(env!("OUT_DIR"), "/content/theme.css"));
-            return respond(msg.clone(), 200, css.as_bytes().to_vec(), "text/css");
+            return respond(msg.clone(),css.as_bytes().to_vec(), "text/css");
         }
 
         let content = match path {
@@ -114,7 +114,7 @@ fn register_site_blocks(w: &mut Wafer) {
             "/docs/api-sdk" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-sdk.html")),
             "/docs/api-types" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-types.html")),
             "/docs/api-reference" => {
-                return ResponseBuilder::new(msg.clone(), 301)
+                return ResponseBuilder::new(msg.clone()).status(301)
                     .set_header("Location", "/docs/api-runtime")
                     .body(b"Redirecting to /docs/api-runtime".to_vec(), "text/plain");
             }
@@ -123,7 +123,6 @@ fn register_site_blocks(w: &mut Wafer) {
             _ => {
                 return json_respond(
                     msg.clone(),
-                    200,
                     &serde_json::json!({
                         "page": "wafer-site",
                         "path": path,
@@ -133,7 +132,7 @@ fn register_site_blocks(w: &mut Wafer) {
             }
         };
 
-        respond(msg.clone(), 200, content.as_bytes().to_vec(), "text/html")
+        respond(msg.clone(),content.as_bytes().to_vec(), "text/html")
     });
 
     // API block — JSON endpoints
@@ -142,12 +141,10 @@ fn register_site_blocks(w: &mut Wafer) {
         match path {
             "/api/health" => json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({ "status": "ok" }),
             ),
             "/api/blocks" => json_respond(
                 msg.clone(),
-                200,
                 &serde_json::json!({
                     "blocks": [
                         {"name": "@wafer/http-listener", "version": "0.1.0"},

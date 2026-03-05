@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -284,16 +283,16 @@ fn test_router_basic() {
     let mut router = Router::new();
 
     router.retrieve("/items", |_ctx, msg| {
-        json_respond(msg.clone(), 200, &serde_json::json!({"items": []}))
+        json_respond(msg.clone(), &serde_json::json!({"items": []}))
     });
 
     router.create("/items", |_ctx, msg| {
-        json_respond(msg.clone(), 201, &serde_json::json!({"id": "new-1"}))
+        new_response(msg.clone()).status(201).json(&serde_json::json!({"id": "new-1"}))
     });
 
     router.retrieve("/items/{id}", |_ctx, msg| {
         let id = msg.var("id").to_string();
-        json_respond(msg.clone(), 200, &serde_json::json!({"id": id}))
+        json_respond(msg.clone(), &serde_json::json!({"id": id}))
     });
 
     // Simulate a GET /items request
@@ -351,11 +350,11 @@ fn test_router_update_delete() {
 
     router.update("/items/{id}", |_ctx, msg| {
         let id = msg.var("id").to_string();
-        json_respond(msg.clone(), 200, &serde_json::json!({"updated": id}))
+        json_respond(msg.clone(), &serde_json::json!({"updated": id}))
     });
 
     router.delete("/items/{id}", |_ctx, msg| {
-        respond(msg.clone(), 204, Vec::new(), "")
+        msg.clone().drop_msg()
     });
 
     let ctx = make_test_context();
@@ -377,8 +376,7 @@ fn test_router_update_delete() {
     msg.set_meta("req.resource", "/items/99");
 
     let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Respond);
-    assert!(result.response.unwrap().data.is_empty());
+    assert_eq!(result.action, Action::Drop);
 }
 
 // ===========================================================================
@@ -388,25 +386,23 @@ fn test_router_update_delete() {
 #[test]
 fn test_respond_helper() {
     let msg = Message::new("test", "payload");
-    let result = respond(msg, 200, b"ok".to_vec(), "text/plain");
+    let result = respond(msg, b"ok".to_vec(), "text/plain");
 
     assert_eq!(result.action, Action::Respond);
     let resp = result.response.unwrap();
     assert_eq!(resp.data, b"ok");
-    assert_eq!(resp.meta.get("resp.status").unwrap(), "200");
     assert_eq!(resp.meta.get("resp.content_type").unwrap(), "text/plain");
 }
 
 #[test]
 fn test_error_helper() {
     let msg = Message::new("test", "");
-    let result = error(msg, 400, "bad_request", "missing field");
+    let result = error(msg, "bad_request", "missing field");
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
     assert_eq!(err.code, "bad_request");
     assert_eq!(err.message, "missing field");
-    assert_eq!(err.meta.get("resp.status").unwrap(), "400");
 }
 
 #[test]
@@ -422,7 +418,7 @@ fn test_json_respond_helper() {
         id: 1,
         name: "Widget".to_string(),
     };
-    let result = json_respond(msg, 200, &item);
+    let result = json_respond(msg, &item);
 
     assert_eq!(result.action, Action::Respond);
     let resp = result.response.unwrap();
@@ -437,7 +433,6 @@ fn test_standard_error_helpers() {
     let msg = Message::new("test", "");
     let r = err_bad_request(msg, "bad");
     assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
-    assert_eq!(r.error.as_ref().unwrap().meta.get("resp.status").unwrap(), "400");
 
     let msg = Message::new("test", "");
     let r = err_unauthorized(msg, "no auth");
@@ -468,7 +463,7 @@ fn test_standard_error_helpers() {
 fn test_response_builder() {
     let msg = Message::new("test", "");
 
-    let result = new_response(msg, 200)
+    let result = new_response(msg)
         .set_header("X-Request-Id", "abc-123")
         .set_cookie("session=xyz; Path=/; HttpOnly")
         .set_cookie("theme=dark; Path=/")
@@ -480,7 +475,6 @@ fn test_response_builder() {
     let parsed: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
     assert_eq!(parsed["ok"], true);
     assert_eq!(resp.meta.get("resp.content_type").unwrap(), "application/json");
-    assert_eq!(resp.meta.get("resp.status").unwrap(), "200");
     assert_eq!(
         resp.meta.get("resp.header.X-Request-Id").unwrap(),
         "abc-123"
@@ -498,7 +492,7 @@ fn test_response_builder() {
 #[test]
 fn test_response_builder_body() {
     let msg = Message::new("test", "");
-    let result = new_response(msg, 201)
+    let result = new_response(msg).status(201)
         .body(b"raw bytes here".to_vec(), "application/octet-stream");
 
     assert_eq!(result.action, Action::Respond);
@@ -633,7 +627,7 @@ fn test_flow_reference_short_circuit() {
 
     // The inner flow responds immediately (short-circuits)
     w.register_block_func("responder", |_ctx, msg| {
-        respond(msg.clone(), 200, b"early-response".to_vec(), "text/plain")
+        respond(msg.clone(), b"early-response".to_vec(), "text/plain")
     });
 
     w.register_block_func("should-not-run", |_ctx, msg| {
@@ -783,7 +777,7 @@ fn test_respond_short_circuits() {
     let mut w = Wafer::new();
 
     w.register_block_func("early-respond", |_ctx, msg| {
-        respond(msg.clone(), 200, b"early".to_vec(), "text/plain")
+        respond(msg.clone(), b"early".to_vec(), "text/plain")
     });
 
     w.register_block_func("unreachable", |_ctx, msg| {
