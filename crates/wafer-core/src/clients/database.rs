@@ -22,7 +22,7 @@ pub use crate::blocks::database::service::{
 
 use super::{call_service, decode};
 
-const BLOCK: &str = "wafer/database";
+const BLOCK: &str = "@wafer/database";
 
 // --- Wire-format request types ---
 

@@ -49,6 +49,8 @@ impl Block for RouterBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 
@@ -77,7 +79,7 @@ impl Block for RouterBlock {
         }
 
         // No route matched — 404
-        err_not_found(msg.clone(), "no matching route")
+        err_not_found(msg, "no matching route")
     }
 
     fn lifecycle(
@@ -140,6 +142,8 @@ impl BlockFactory for RouterBlockFactory {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 }

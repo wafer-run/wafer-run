@@ -183,12 +183,18 @@ BlockInfo {
     summary:       string          // Brief description of this implementation
     instance_mode: InstanceMode    // Default instance lifecycle (default: PerNode)
     allowed_modes: []InstanceMode  // Modes this block supports (default: all)
+    runtime:       BlockRuntime    // Native or Wasm (default: Native)
+    requires:      []string        // Block names this block may call via call_block()
 }
 ```
 
 The `interface` field declares what contract the block implements. Every block MUST implement an interface. The `summary` describes this specific implementation (e.g., "SQLite database using local file storage").
 
 The `instance_mode` and `allowed_modes` fields control block instantiation. See [Instance Modes](#instance-modes) for details.
+
+The `runtime` field indicates whether a block requires native OS access (`Native`) or can run sandboxed as WebAssembly (`Wasm`). Blocks that make external calls (database drivers, filesystem, network sockets) are typically `Native`; blocks containing pure logic or that access services only via `call_block()` are typically `Wasm`.
+
+The `requires` field lists the block names that this block is allowed to call via `call_block()`. If non-empty, the runtime enforces this at call time — any `call_block()` to a block not in the list returns `PERMISSION_DENIED`. If empty, the block may call any registered block.
 
 ### InterfaceDefinition
 

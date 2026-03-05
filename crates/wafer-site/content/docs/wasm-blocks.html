@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>WASM Blocks</h2>
-<p>Write blocks in any language that compiles to WebAssembly. WASM blocks declare what services they need via a capability model, and the runtime provides only those. This is the guest-side counterpart to the <a href="/docs/creating-a-block">native Block trait</a> — same interface, but compiled to <code>.wasm</code> and loaded by the runtime at startup.</p>
+<p>Write blocks in any language that compiles to WebAssembly. WASM blocks set <code>runtime: Wasm</code> in their <code>BlockInfo</code> and declare what services they need via a capability model and the <code>requires</code> list. The runtime provides only the declared services. This is the guest-side counterpart to the <a href="/docs/creating-a-block">native Block trait</a> — same interface, but compiled to <code>.wasm</code> and loaded by the runtime at startup.</p>
 
 <h3>Guest SDKs</h3>
 
@@ -209,6 +209,17 @@ wafer_sdk::export!(MyBlock);</code></pre>
     <li><code>lifecycle(ptr, len) &rarr; i64</code> — handle init/start/stop events</li>
 </ul>
 <p>The host writes JSON into guest memory via <code>malloc</code>, calls the function, and reads the JSON result back from the returned <code>(ptr, len)</code>.</p>
+
+<h3>Runtime &amp; Requires</h3>
+<p>WASM blocks should set <code>runtime: Wasm</code> in their <code>BlockInfo</code>. The <code>requires</code> field lists which blocks a WASM block is allowed to call via <code>call_block()</code>. If <code>requires</code> is non-empty, the runtime enforces it — calling an unlisted block returns <code>PERMISSION_DENIED</code>.</p>
+<pre><code>// Example: a WASM block that needs database and crypto
+BlockInfo {
+    name: "@app/my-block",
+    runtime: Wasm,
+    requires: ["@wafer/database", "@wafer/crypto"],
+    ...
+}</code></pre>
+<p>This complements the fine-grained <code>BlockCapabilities</code> sandbox (allowed collections, storage folders, network URLs) that the host can impose on WASM blocks.</p>
 
 <h3>Available Services</h3>
 <p>WASM blocks can access runtime services through the <code>Context</code> object. Each SDK provides typed clients:</p>

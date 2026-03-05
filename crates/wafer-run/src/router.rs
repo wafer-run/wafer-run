@@ -1,3 +1,4 @@
+use crate::common::ErrorCode;
 use crate::context::Context;
 use crate::executor::{extract_path_vars, match_path};
 use crate::helpers;
@@ -5,10 +6,10 @@ use crate::meta::*;
 use crate::types::*;
 
 /// Route defines a route in a message-based router.
-pub struct Route {
-    pub action: String,
-    pub pattern: String,
-    pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
+pub(crate) struct Route {
+    action: String,
+    pattern: String,
+    handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
 }
 
 /// Router routes wafer messages based on request action + resource path.
@@ -72,6 +73,15 @@ impl Router {
         self.on(RequestAction::Delete, pattern, handler);
     }
 
+    /// Execute registers a route for execute (OPTIONS) requests.
+    pub fn execute(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
+        self.on(RequestAction::Execute, pattern, handler);
+    }
+
     /// Route finds the matching route, extracts path variables, and calls the handler.
     pub fn route(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let action = msg.get_meta(META_REQ_ACTION).to_string();
@@ -88,14 +98,14 @@ impl Router {
             return (route.handler)(ctx, msg);
         }
 
-        // OPTIONS/Execute handling for CORS preflight
-        if msg.action() == RequestAction::Execute.as_str() {
+        // Default execute handling (e.g. CORS preflight): drop if no explicit handler
+        if action == RequestAction::Execute.as_str() {
             return msg.clone().drop_msg();
         }
 
         helpers::error(
-            msg.clone(),
-            "not_found",
+            msg,
+            ErrorCode::NOT_FOUND,
             &format!("route not found: {} {}", action, path),
         )
     }

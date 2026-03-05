@@ -22,6 +22,13 @@ END_EXTRA_STYLES_INLINE
     <tr><td><code>PerExecution</code></td><td>Fresh instance for every message</td></tr>
 </table>
 
+<h3>BlockRuntime</h3>
+<table>
+    <tr><th>Value</th><th>Description</th></tr>
+    <tr><td><code>Native</code></td><td>Block requires host OS access (database drivers, filesystem, network sockets)</td></tr>
+    <tr><td><code>Wasm</code></td><td>Block can run sandboxed as WebAssembly (pure logic or services via <code>call_block()</code>)</td></tr>
+</table>
+
 <h3>LifecycleType</h3>
 <table>
     <tr><th>Value</th><th>Description</th></tr>

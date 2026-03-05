@@ -58,13 +58,15 @@ fn respond_ok(msg: &Message) -> Result_ {
 impl Block for LoggerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/logger".to_string(),
+            name: "@wafer/logger".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.logger".to_string(),
+            interface: "logger@v1".to_string(),
             summary: "Structured logging via tracing".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 

@@ -7,6 +7,9 @@ use std::time::Instant;
 use crate::block::Block;
 use crate::config::*;
 use crate::context::RuntimeContext;
+
+/// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
+const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 use crate::executor::{matches_pattern, extract_path_vars};
 use crate::helpers::expand_env_vars;
 use crate::observability::{ObservabilityBus, ObservabilityContext};
@@ -110,7 +113,7 @@ pub struct Wafer {
     pub(crate) resolved: HashMap<String, Arc<dyn Block>>,
     /// Block configurations loaded from blocks.json (name → config JSON).
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
-    /// All registered blocks (infrastructure + application), shared with contexts.
+    /// All registered blocks, shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
     /// Snapshot of registered block info (populated at start time).
@@ -134,8 +137,7 @@ impl Wafer {
     /// Create a new Wafer runtime.
     ///
     /// Block factories are no longer auto-registered here. Call
-    /// `wafer_core::register_all(&mut wafer)` to register infrastructure
-    /// and application blocks.
+    /// `wafer_core::register_all(&mut wafer)` to register all blocks.
     pub fn new() -> Self {
         let registry = Registry::new();
 
@@ -158,7 +160,7 @@ impl Wafer {
         }
     }
 
-    /// Returns all blocks (resolved + infrastructure) as an Arc for use in contexts.
+    /// Returns all resolved blocks as an Arc for use in contexts.
     fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
         self.all_blocks.clone()
     }
@@ -180,15 +182,16 @@ impl Wafer {
             deadline,
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_call_depth: 16,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             registered_blocks_snapshot: self.blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            caller_requires: None, // unrestricted by default; overridden per-block in execute_node
         }
     }
 
     /// Rebuild the all_blocks map from the resolved blocks.
-    /// Call this after resolve() completes and after registering infrastructure blocks.
+    /// Call this after resolve() completes.
     pub fn rebuild_all_blocks(&mut self) {
         let mut map = HashMap::new();
         for (name, block) in &self.resolved {
@@ -210,9 +213,9 @@ impl Wafer {
     /// Example:
     /// ```json
     /// {
-    ///     "wafer/database": { "type": "sqlite", "path": "data/app.db" },
-    ///     "wafer/crypto": { "jwt_secret": "${JWT_SECRET}" },
-    ///     "wafer/logger": {}
+    ///     "@wafer/database": { "type": "sqlite", "path": "data/app.db" },
+    ///     "@wafer/crypto": { "jwt_secret": "${JWT_SECRET}" },
+    ///     "@wafer/logger": {}
     /// }
     /// ```
     pub fn load_blocks_json(&mut self, path: &str) -> Result<(), String> {
@@ -508,7 +511,7 @@ impl Wafer {
             return Err(format!("failed to download {}: empty response body", url));
         }
 
-        let engine = self.wasm_engine().clone();
+        let engine = self.wasm_engine()?.clone();
         let block = WASMBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
             .map_err(|e| format!("failed to load remote block {}: {}", url, e))?;
 
@@ -617,7 +620,7 @@ impl Wafer {
         }
 
         // 5. Load via WASM engine
-        let engine = self.wasm_engine().clone();
+        let engine = self.wasm_engine()?.clone();
         let block =
             WASMBlock::load_with_engine(&engine, &dl_body, BlockCapabilities::none())
                 .map_err(|e| {
@@ -632,15 +635,15 @@ impl Wafer {
 
     /// Get or create the shared WASM engine with hardened configuration.
     #[cfg(feature = "wasm")]
-    pub fn wasm_engine(&mut self) -> &wasmtime::Engine {
+    pub fn wasm_engine(&mut self) -> Result<&wasmtime::Engine, String> {
         if self.wasm_engine.is_none() {
             let mut config = wasmtime::Config::new();
             config.epoch_interruption(true);
             let engine = wasmtime::Engine::new(&config)
-                .expect("failed to create hardened WASM engine");
+                .map_err(|e| format!("failed to create WASM engine: {}", e))?;
             self.wasm_engine = Some(Arc::new(engine));
         }
-        self.wasm_engine.as_ref().expect("BUG: wasm engine not initialized")
+        Ok(self.wasm_engine.as_ref().unwrap())
     }
 
     /// Initialize the runtime without calling `bind()` on blocks.
@@ -857,14 +860,23 @@ impl Wafer {
             }
         };
 
-        // Build context for this node
-        let ctx = self.make_context(
+        // Build context for this node, with requires enforcement
+        let caller_requires = {
+            let info = block.info();
+            if info.requires.is_empty() {
+                None // unrestricted
+            } else {
+                Some(info.requires)
+            }
+        };
+        let mut ctx = self.make_context(
             flow_id,
             node_path,
             node.config_map.clone(),
             cancelled.clone(),
             deadline,
         );
+        ctx.caller_requires = caller_requires;
 
         // Observability: block start
         let obs_ctx = ObservabilityContext {

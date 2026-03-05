@@ -19,9 +19,9 @@ async fn main() {
     let mut w = Wafer::new();
 
     // Configure infrastructure blocks
-    w.add_block_config("wafer/database", serde_json::json!({"type": "sqlite", "path": "data/wafer-site.db"}));
-    w.add_block_config("wafer/network", serde_json::json!({}));
-    w.add_block_config("wafer/logger", serde_json::json!({}));
+    w.add_block_config("@wafer/database", serde_json::json!({"type": "sqlite", "path": "data/wafer-site.db"}));
+    w.add_block_config("@wafer/network", serde_json::json!({}));
+    w.add_block_config("@wafer/logger", serde_json::json!({}));
 
     // Configure the HTTP listener — owns TCP listen + HTTP↔Message conversion
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
@@ -65,7 +65,10 @@ async fn main() {
         }
     }"#).expect("invalid flow JSON");
 
-    let _ = wafer_core::flows::register_flows(&mut w);
+    wafer_core::flows::register_flows(&mut w).unwrap_or_else(|e| {
+        tracing::error!("Failed to register core flows: {}", e);
+        std::process::exit(1);
+    });
     w.add_flow_def(&site_flow);
 
     // Start — the @wafer/http-listener block spawns the Axum listener internally
@@ -88,13 +91,17 @@ fn register_site_blocks(w: &mut Wafer) {
         let path = msg.path();
 
         // Serve static assets
-        if path == "/images/hero.webp" {
-            let bytes = include_bytes!("../public/images/hero.webp");
-            return respond(msg.clone(),bytes.to_vec(), "image/webp");
+        if path == "/images/logo.webp" {
+            let bytes = include_bytes!("../public/images/logo.webp");
+            return respond(msg, bytes.to_vec(), "image/webp");
+        }
+        if path == "/favicon.ico" {
+            let bytes = include_bytes!("../public/images/favicon.ico");
+            return respond(msg, bytes.to_vec(), "image/x-icon");
         }
         if path == "/css/theme.css" {
             let css = include_str!(concat!(env!("OUT_DIR"), "/content/theme.css"));
-            return respond(msg.clone(),css.as_bytes().to_vec(), "text/css");
+            return respond(msg, css.as_bytes().to_vec(), "text/css");
         }
 
         let content = match path {
@@ -114,7 +121,7 @@ fn register_site_blocks(w: &mut Wafer) {
             "/docs/api-sdk" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-sdk.html")),
             "/docs/api-types" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-types.html")),
             "/docs/api-reference" => {
-                return ResponseBuilder::new(msg.clone()).status(301)
+                return ResponseBuilder::new(msg).status(301)
                     .set_header("Location", "/docs/api-runtime")
                     .body(b"Redirecting to /docs/api-runtime".to_vec(), "text/plain");
             }
@@ -122,7 +129,7 @@ fn register_site_blocks(w: &mut Wafer) {
             "/docs/deployment" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/deployment.html")),
             _ => {
                 return json_respond(
-                    msg.clone(),
+                    msg,
                     &serde_json::json!({
                         "page": "wafer-site",
                         "path": path,
@@ -132,7 +139,7 @@ fn register_site_blocks(w: &mut Wafer) {
             }
         };
 
-        respond(msg.clone(),content.as_bytes().to_vec(), "text/html")
+        respond(msg, content.as_bytes().to_vec(), "text/html")
     });
 
     // API block — JSON endpoints
@@ -140,11 +147,11 @@ fn register_site_blocks(w: &mut Wafer) {
         let path = msg.path();
         match path {
             "/api/health" => json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({ "status": "ok" }),
             ),
             "/api/blocks" => json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({
                     "blocks": [
                         {"name": "@wafer/http-listener", "version": "0.1.0"},
@@ -160,7 +167,7 @@ fn register_site_blocks(w: &mut Wafer) {
                     ]
                 }),
             ),
-            _ => err_not_found(msg.clone(), &format!("API endpoint not found: {}", path)),
+            _ => err_not_found(msg, &format!("API endpoint not found: {}", path)),
         }
     });
 }

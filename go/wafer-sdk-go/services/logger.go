@@ -21,7 +21,7 @@ func logWithCallBlock(ctx wafer.Context, level, text string, fields []LogField) 
 	msg := wafer.NewMessage("logger."+level, fieldsData)
 	msg.SetMeta("message", text)
 	msg.SetMeta("level", level)
-	ctx.CallBlock("wafer/logger", msg)
+	ctx.CallBlock("@wafer/logger", msg)
 }
 
 // LogDebugCtx sends a debug-level log message using CallBlock.
@@ -47,7 +47,7 @@ func LogErrorCtx(ctx wafer.Context, msg string, fields ...LogField) {
 // --- Legacy direct-import implementations (backward compatible) ---
 
 // LogDebug sends a debug-level log message.
-// When CallBlock is available, it routes through the "wafer/logger" block.
+// When CallBlock is available, it routes through the "@wafer/logger" block.
 func LogDebug(msg string, fields ...LogField) {
 	if wafer.HasCallBlock() {
 		LogDebugCtx(wafer.NewContext(), msg, fields...)

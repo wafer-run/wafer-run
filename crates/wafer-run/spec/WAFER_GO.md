@@ -42,12 +42,12 @@ For a real-world example of an application built on WAFER-Go, see Solobase — a
 ## Installation
 
 ```bash
-go get github.com/suppers-ai/wafer-go
+go get github.com/wafer-run/wafer-go
 ```
 
 CLI (optional):
 ```bash
-go install github.com/suppers-ai/wafer-go/cmd/wafer@latest
+go install github.com/wafer-run/wafer-go/cmd/wafer@latest
 ```
 
 ---
@@ -72,7 +72,7 @@ package main
 import (
     "net/http"
 
-    "github.com/suppers-ai/wafer-go"
+    "github.com/wafer-run/wafer-go"
 )
 
 func main() {
@@ -659,7 +659,7 @@ w.OnBlockEnd = func(ctx wafer.ObservabilityContext, result wafer.Result, d time.
 // blocks/validate.go
 package main
 
-import "github.com/suppers-ai/wafer-go"
+import "github.com/wafer-run/wafer-go"
 
 func Info() wafer.BlockInfo {
     return wafer.BlockInfo{
@@ -702,7 +702,7 @@ package main
 import (
     "sync"
 
-    "github.com/suppers-ai/wafer-go"
+    "github.com/wafer-run/wafer-go"
 )
 
 // CacheBlock is a thread-safe in-memory cache.
@@ -765,7 +765,7 @@ import (
     "encoding/json"
     "time"
 
-    "github.com/suppers-ai/wafer-go"
+    "github.com/wafer-run/wafer-go"
 )
 
 // AuthBlock holds configuration set once during Init.
@@ -822,8 +822,8 @@ import (
     "database/sql"
     "encoding/json"
 
-    "github.com/suppers-ai/wafer-go"
-    databasev1 "github.com/suppers-ai/wafer-go/interfaces/database/v1"
+    "github.com/wafer-run/wafer-go"
+    databasev1 "github.com/wafer-run/wafer-go/interfaces/database/v1"
     _ "github.com/mattn/go-sqlite3"
 )
 
@@ -1558,7 +1558,7 @@ package main
 import (
     "testing"
 
-    "github.com/suppers-ai/wafer-go"
+    "github.com/wafer-run/wafer-go"
 )
 
 // Mock context for testing - implements wafer.Context
@@ -1663,7 +1663,7 @@ Flows can also be defined as JSON configuration. Match patterns on `next` nodes 
   "blocks": [
     {
       "type": "http",
-      "source": "github.com/suppers-ai/wafer-go/blocks/http"
+      "source": "github.com/wafer-run/wafer-go/blocks/http"
     },
     {
       "type": "validate",
@@ -1671,11 +1671,11 @@ Flows can also be defined as JSON configuration. Match patterns on `next` nodes 
     },
     {
       "type": "auth",
-      "source": "github.com/suppers-ai/wafer-go/blocks/auth-jwt@v2.0.0"
+      "source": "github.com/wafer-run/wafer-go/blocks/auth-jwt@v2.0.0"
     },
     {
       "type": "db",
-      "source": "github.com/suppers-ai/wafer-go/blocks/sqlite"
+      "source": "github.com/wafer-run/wafer-go/blocks/sqlite"
     },
     {
       "type": "log",

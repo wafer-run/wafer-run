@@ -33,7 +33,7 @@ impl Block for GreetBlock {
     }
 
     fn handle(&amp;self, _ctx: &amp;dyn Context, msg: &amp;mut Message) -&gt; Result_ {
-        json_respond(msg.clone(), 200, &amp;serde_json::json!({"greeting": "hi there"}))
+        json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
     }
 
     fn lifecycle(&amp;self, _ctx: &amp;dyn Context, _event: LifecycleEvent)
@@ -51,7 +51,7 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
 
 <p>For simple blocks you can skip the struct entirely and register an inline handler:</p>
 <pre><code>w.register_block_func("greet", |_ctx, msg| {
-    json_respond(msg.clone(), 200, &amp;serde_json::json!({"greeting": "hi there"}))
+    json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
 });</code></pre>
 
 <h2>WASM Blocks</h2>
@@ -106,19 +106,19 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
     </div>
     <div class="tab-panel" data-lang="ts">
 <pre><code>// blocks/greet/index.ts
-import { Block, BlockInfo, Context, Message, Result, register } from "wafer-sdk-ts";
+import { Block, BlockInfo, Context, Message, BlockResult, defineBlock } from "wafer-sdk-ts";
 
 class GreetBlock extends Block {
     info(): BlockInfo {
         return { name: "greet", version: "1.0.0", interface: "handler@v1", summary: "Returns a greeting" };
     }
 
-    handle(ctx: Context, msg: Message): Result {
-        return msg.respond(200, '{"greeting":"hi there"}', "application/json");
+    handle(ctx: Context, msg: Message): BlockResult {
+        return msg.jsonRespond({"greeting": "hi there"});
     }
 }
 
-register(new GreetBlock());</code></pre>
+defineBlock(new GreetBlock());</code></pre>
     </div>
     <div class="tab-panel" data-lang="go" style="display:none">
 <pre><code>// blocks/greet/index.go
@@ -138,7 +138,7 @@ func (b *GreetBlock) Info() wafer.BlockInfo {
 }
 
 func (b *GreetBlock) Handle(ctx *wafer.Context, msg *wafer.Message) *wafer.Result {
-    return wafer.JSONRespond(msg, 200, map[string]string{"greeting": "hi there"})
+    return wafer.JSONRespond(msg, map[string]string{"greeting": "hi there"})
 }
 
 func (b *GreetBlock) Lifecycle(ctx *wafer.Context, event wafer.LifecycleEvent) error {
@@ -172,7 +172,7 @@ impl Block for GreetBlock {
     }
 
     fn handle(&amp;self, _ctx: &amp;Context, msg: &amp;mut Message) -&gt; Result_ {
-        json_respond(msg.clone(), 200, &amp;serde_json::json!({"greeting": "hi there"}))
+        json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
     }
 }
 

@@ -14,7 +14,7 @@ import (
 // CryptoHashCtx computes a hash of the given password using CallBlock.
 func CryptoHashCtx(ctx wafer.Context, password string) (string, error) {
 	msg := wafer.NewMessage("crypto.hash", []byte(password))
-	result := ctx.CallBlock("wafer/crypto", msg)
+	result := ctx.CallBlock("@wafer/crypto", msg)
 	if result.Error != nil {
 		return "", fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -26,7 +26,7 @@ func CryptoHashCtx(ctx wafer.Context, password string) (string, error) {
 func CryptoCompareHashCtx(ctx wafer.Context, password, hash string) error {
 	msg := wafer.NewMessage("crypto.compare_hash", []byte(password))
 	msg.SetMeta("hash", hash)
-	result := ctx.CallBlock("wafer/crypto", msg)
+	result := ctx.CallBlock("@wafer/crypto", msg)
 	if result.Error != nil {
 		return fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -38,7 +38,7 @@ func CryptoCompareHashCtx(ctx wafer.Context, password, hash string) error {
 func CryptoSignCtx(ctx wafer.Context, claims string, expirySecs uint64) (string, error) {
 	msg := wafer.NewMessage("crypto.sign", []byte(claims))
 	msg.SetMeta("expiry_secs", strconv.FormatUint(expirySecs, 10))
-	result := ctx.CallBlock("wafer/crypto", msg)
+	result := ctx.CallBlock("@wafer/crypto", msg)
 	if result.Error != nil {
 		return "", fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -49,7 +49,7 @@ func CryptoSignCtx(ctx wafer.Context, claims string, expirySecs uint64) (string,
 // using CallBlock.
 func CryptoVerifyCtx(ctx wafer.Context, token string) (string, error) {
 	msg := wafer.NewMessage("crypto.verify", []byte(token))
-	result := ctx.CallBlock("wafer/crypto", msg)
+	result := ctx.CallBlock("@wafer/crypto", msg)
 	if result.Error != nil {
 		return "", fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -61,7 +61,7 @@ func CryptoVerifyCtx(ctx wafer.Context, token string) (string, error) {
 func CryptoRandomBytesCtx(ctx wafer.Context, n uint32) ([]byte, error) {
 	msg := wafer.NewMessage("crypto.random_bytes", nil)
 	msg.SetMeta("n", strconv.FormatUint(uint64(n), 10))
-	result := ctx.CallBlock("wafer/crypto", msg)
+	result := ctx.CallBlock("@wafer/crypto", msg)
 	if result.Error != nil {
 		return nil, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -76,7 +76,7 @@ func CryptoRandomBytesCtx(ctx wafer.Context, n uint32) ([]byte, error) {
 // --- Legacy direct-import implementations (backward compatible) ---
 
 // CryptoHash computes a hash of the given password (e.g., bcrypt).
-// When CallBlock is available, it routes through the "wafer/crypto" block.
+// When CallBlock is available, it routes through the "@wafer/crypto" block.
 func CryptoHash(password string) (string, error) {
 	if wafer.HasCallBlock() {
 		return CryptoHashCtx(wafer.NewContext(), password)

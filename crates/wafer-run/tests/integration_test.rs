@@ -283,16 +283,16 @@ fn test_router_basic() {
     let mut router = Router::new();
 
     router.retrieve("/items", |_ctx, msg| {
-        json_respond(msg.clone(), &serde_json::json!({"items": []}))
+        json_respond(msg, &serde_json::json!({"items": []}))
     });
 
     router.create("/items", |_ctx, msg| {
-        new_response(msg.clone()).status(201).json(&serde_json::json!({"id": "new-1"}))
+        new_response(msg).status(201).json(&serde_json::json!({"id": "new-1"}))
     });
 
     router.retrieve("/items/{id}", |_ctx, msg| {
         let id = msg.var("id").to_string();
-        json_respond(msg.clone(), &serde_json::json!({"id": id}))
+        json_respond(msg, &serde_json::json!({"id": id}))
     });
 
     // Simulate a GET /items request
@@ -350,7 +350,7 @@ fn test_router_update_delete() {
 
     router.update("/items/{id}", |_ctx, msg| {
         let id = msg.var("id").to_string();
-        json_respond(msg.clone(), &serde_json::json!({"updated": id}))
+        json_respond(msg, &serde_json::json!({"updated": id}))
     });
 
     router.delete("/items/{id}", |_ctx, msg| {
@@ -386,7 +386,7 @@ fn test_router_update_delete() {
 #[test]
 fn test_respond_helper() {
     let msg = Message::new("test", "payload");
-    let result = respond(msg, b"ok".to_vec(), "text/plain");
+    let result = respond(&msg, b"ok".to_vec(), "text/plain");
 
     assert_eq!(result.action, Action::Respond);
     let resp = result.response.unwrap();
@@ -397,7 +397,7 @@ fn test_respond_helper() {
 #[test]
 fn test_error_helper() {
     let msg = Message::new("test", "");
-    let result = error(msg, "bad_request", "missing field");
+    let result = error(&msg, "bad_request", "missing field");
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
@@ -418,7 +418,7 @@ fn test_json_respond_helper() {
         id: 1,
         name: "Widget".to_string(),
     };
-    let result = json_respond(msg, &item);
+    let result = json_respond(&msg, &item);
 
     assert_eq!(result.action, Action::Respond);
     let resp = result.response.unwrap();
@@ -431,31 +431,31 @@ fn test_json_respond_helper() {
 #[test]
 fn test_standard_error_helpers() {
     let msg = Message::new("test", "");
-    let r = err_bad_request(msg, "bad");
+    let r = err_bad_request(&msg, "bad");
     assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
 
     let msg = Message::new("test", "");
-    let r = err_unauthorized(msg, "no auth");
+    let r = err_unauthorized(&msg, "no auth");
     assert_eq!(r.error.as_ref().unwrap().code, "unauthenticated");
 
     let msg = Message::new("test", "");
-    let r = err_forbidden(msg, "denied");
+    let r = err_forbidden(&msg, "denied");
     assert_eq!(r.error.as_ref().unwrap().code, "permission_denied");
 
     let msg = Message::new("test", "");
-    let r = err_not_found(msg, "gone");
+    let r = err_not_found(&msg, "gone");
     assert_eq!(r.error.as_ref().unwrap().code, "not_found");
 
     let msg = Message::new("test", "");
-    let r = err_conflict(msg, "exists");
+    let r = err_conflict(&msg, "exists");
     assert_eq!(r.error.as_ref().unwrap().code, "already_exists");
 
     let msg = Message::new("test", "");
-    let r = err_validation(msg, "invalid");
+    let r = err_validation(&msg, "invalid");
     assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
 
     let msg = Message::new("test", "");
-    let r = err_internal(msg, "oops");
+    let r = err_internal(&msg, "oops");
     assert_eq!(r.error.as_ref().unwrap().code, "internal");
 }
 
@@ -463,7 +463,7 @@ fn test_standard_error_helpers() {
 fn test_response_builder() {
     let msg = Message::new("test", "");
 
-    let result = new_response(msg)
+    let result = new_response(&msg)
         .set_header("X-Request-Id", "abc-123")
         .set_cookie("session=xyz; Path=/; HttpOnly")
         .set_cookie("theme=dark; Path=/")
@@ -492,7 +492,7 @@ fn test_response_builder() {
 #[test]
 fn test_response_builder_body() {
     let msg = Message::new("test", "");
-    let result = new_response(msg).status(201)
+    let result = new_response(&msg).status(201)
         .body(b"raw bytes here".to_vec(), "application/octet-stream");
 
     assert_eq!(result.action, Action::Respond);
@@ -627,7 +627,7 @@ fn test_flow_reference_short_circuit() {
 
     // The inner flow responds immediately (short-circuits)
     w.register_block_func("responder", |_ctx, msg| {
-        respond(msg.clone(), b"early-response".to_vec(), "text/plain")
+        respond(msg, b"early-response".to_vec(), "text/plain")
     });
 
     w.register_block_func("should-not-run", |_ctx, msg| {
@@ -777,7 +777,7 @@ fn test_respond_short_circuits() {
     let mut w = Wafer::new();
 
     w.register_block_func("early-respond", |_ctx, msg| {
-        respond(msg.clone(), b"early".to_vec(), "text/plain")
+        respond(msg, b"early".to_vec(), "text/plain")
     });
 
     w.register_block_func("unreachable", |_ctx, msg| {

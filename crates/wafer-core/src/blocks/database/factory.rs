@@ -1,4 +1,4 @@
-//! Self-configuring BlockFactory for the database infrastructure block.
+//! BlockFactory for the database block.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,13 +26,15 @@ struct FailedDatabaseBlock {
 impl Block for FailedDatabaseBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/database".to_string(),
+            name: "@wafer/database".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.database".to_string(),
+            interface: "database@v1".to_string(),
             summary: "Failed database block (see logs)".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 
@@ -136,13 +138,15 @@ impl BlockFactory for DatabaseBlockFactory {
 
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/database".to_string(),
+            name: "@wafer/database".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.database".to_string(),
-            summary: "Self-configuring database block factory".to_string(),
+            interface: "database@v1".to_string(),
+            summary: "Database block factory".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 }

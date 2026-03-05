@@ -3,11 +3,11 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'WAFFLE',
-  tagline: 'Wired Architecture For Flow-Linked Execution',
+  title: 'WAFER',
+  tagline: 'Wired Architecture For Flow-linked Execution Runtime',
   favicon: 'img/favicon.ico',
 
-  url: 'https://waffle.suppers.ai',
+  url: 'https://wafer.run',
   baseUrl: '/',
 
   onBrokenLinks: 'warn',
@@ -42,7 +42,7 @@ const config: Config = {
 
   themeConfig: {
     navbar: {
-      title: 'WAFFLE',
+      title: 'WAFER',
       items: [
         {
           type: 'docSidebar',
@@ -51,7 +51,7 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/suppers-ai/waffle',
+          href: 'https://github.com/wafer-run/wafer-run',
           label: 'GitHub',
           position: 'right',
         },
@@ -59,7 +59,7 @@ const config: Config = {
     },
     footer: {
       style: 'dark',
-      copyright: `Copyright \u00a9 ${new Date().getFullYear()} Suppers AI. Built with Docusaurus.`,
+      copyright: `Copyright \u00a9 ${new Date().getFullYear()} wafer.run. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,

@@ -7,7 +7,7 @@ use wafer_run::context::Context;
 
 use super::call_service;
 
-const BLOCK: &str = "wafer/logger";
+const BLOCK: &str = "@wafer/logger";
 
 // --- Wire-format types ---
 

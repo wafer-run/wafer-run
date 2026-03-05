@@ -9,7 +9,7 @@ use wafer_run::common::ErrorCode;
 use wafer_run::context::Context;
 use wafer_run::types::*;
 
-/// Call an infrastructure block and return the raw response bytes.
+/// Call a block and return the raw response bytes.
 /// Returns `Err(WaferError)` if the block returns an error.
 pub(crate) fn call_service(
     ctx: &dyn Context,

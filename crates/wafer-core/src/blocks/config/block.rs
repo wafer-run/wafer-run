@@ -44,13 +44,15 @@ struct GetResponse {
 impl Block for ConfigBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/config".to_string(),
+            name: "@wafer/config".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.config".to_string(),
+            interface: "config@v1".to_string(),
             summary: "Configuration key-value access via ConfigService or node config".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 

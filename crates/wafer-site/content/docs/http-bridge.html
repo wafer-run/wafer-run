@@ -4,17 +4,25 @@ ACTIVE: http-bridge
 -->
 
 <h2>HTTP Bridge</h2>
-<p>The HTTP bridge converts incoming HTTP requests into wafer messages and dispatches them to flows. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). Use <code>wafer_core::bridge::create_router(wafer, "flow-id")</code> to create an axum Router for a flow.</p>
+<p>The <code>@wafer/http-listener</code> block converts incoming HTTP requests into wafer messages and dispatches them to flows. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). Configure it as a block — the runtime spawns the HTTP server automatically on <code>start()</code>.</p>
 
 <h3>Setup</h3>
 <p>Enable the <code>http</code> feature in your <code>Cargo.toml</code>:</p>
 <pre><code>[dependencies]
 wafer-core = { version = "0.1", features = ["http"] }</code></pre>
-<p>Create a router for a flow and serve it with axum:</p>
-<pre><code>let app = wafer_core::bridge::create_router(wafer.clone(), "my-flow");
-let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-axum::serve(listener, app).await.unwrap();</code></pre>
-<p>For more control, use <code>wafer_handler()</code> to get an axum <code>MethodRouter</code> you can mount on specific paths, or call <code>http_to_message()</code> and <code>wafer_result_to_response()</code> directly for custom integrations.</p>
+<p>Add the HTTP listener block config and start the runtime:</p>
+<pre><code>let mut w = Wafer::new();
+wafer_core::register_all(&amp;mut w);
+
+w.add_block_config("@wafer/http-listener", serde_json::json!({
+    "flow": "my-flow",
+    "listen": "0.0.0.0:8080",
+}));
+
+// ... add flows ...
+let w = w.start().unwrap();
+tokio::signal::ctrl_c().await.unwrap();
+w.shutdown();</code></pre>
 
 <h3>Method to Action Mapping</h3>
 <p>Each HTTP method is mapped to a semantic action stored in <code>req.action</code>:</p>
@@ -50,24 +58,28 @@ axum::serve(listener, app).await.unwrap();</code></pre>
 
 <h3>Response Helpers</h3>
 <pre><code>// Raw response with content type
-respond(msg, 200, data_bytes, "text/plain")
+respond(msg, data_bytes, "text/plain")
 
 // JSON response
-json_respond(msg, 200, &amp;json!({"status": "ok"}))
+json_respond(msg, &amp;json!({"status": "ok"}))
 
-// Error helpers
+// Error helpers (transport layer maps error codes to HTTP status)
 err_bad_request(msg, "Invalid input")
 err_not_found(msg, "User not found")
 err_unauthorized(msg, "Token expired")
 err_internal(msg, "Something went wrong")</code></pre>
 
 <h3>ResponseBuilder</h3>
-<p>For fine-grained control over the response (custom headers, cookies):</p>
-<pre><code>ResponseBuilder::new(msg, 200)
+<p>For fine-grained control over the response (custom headers, cookies, explicit status):</p>
+<pre><code>new_response(msg)
     .set_header("X-Custom", "value")
     .set_cookie("session=abc123; HttpOnly; Secure")
     .json(&amp;json!({"ok": true}))</code></pre>
 <p>Or with a raw body:</p>
-<pre><code>ResponseBuilder::new(msg, 200)
+<pre><code>new_response(msg)
     .set_header("X-Custom", "value")
     .body(data_bytes, "application/octet-stream")</code></pre>
+<p>Use <code>.status(code)</code> to set an explicit HTTP status (e.g. for redirects):</p>
+<pre><code>new_response(msg).status(301)
+    .set_header("Location", "/new-path")
+    .body(b"Redirecting".to_vec(), "text/plain")</code></pre>

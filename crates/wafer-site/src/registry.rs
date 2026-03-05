@@ -75,7 +75,7 @@ impl RegistryBlock {
             "resp.header.Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         );
-        respond(msg.clone(), html.as_bytes().to_vec(), "text/html")
+        respond(msg, html.as_bytes().to_vec(), "text/html")
     }
 
     // -----------------------------------------------------------------------
@@ -146,7 +146,7 @@ impl RegistryBlock {
                 let filtered_count = filtered.len() as i64;
 
                 json_respond(
-                    msg.clone(),
+                    msg,
                     &serde_json::json!({
                         "packages": filtered,
                         "total": filtered_count,
@@ -157,7 +157,7 @@ impl RegistryBlock {
                 )
             }
             Err(_) => {
-                json_respond(msg.clone(), &serde_json::json!({"packages": []}))
+                json_respond(msg, &serde_json::json!({"packages": []}))
             }
         }
     }
@@ -277,14 +277,14 @@ impl RegistryBlock {
     fn handle_get_package(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
         let pkg = match Self::ensure_package(ctx, name) {
             Ok(r) => r,
-            Err(e) => return err_not_found(msg.clone(), &e),
+            Err(e) => return err_not_found(msg, &e),
         };
 
         // Fetch versions from GitHub (cached)
         let versions = Self::fetch_versions_cached(ctx, name);
 
         json_respond(
-            msg.clone(),
+            msg,
             &serde_json::json!({
                 "package": pkg,
                 "versions": versions
@@ -297,13 +297,13 @@ impl RegistryBlock {
     // -----------------------------------------------------------------------
     fn handle_get_versions(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
         if let Err(e) = Self::ensure_package(ctx, name) {
-            return err_not_found(msg.clone(), &e);
+            return err_not_found(msg, &e);
         }
 
         let versions = Self::fetch_versions_cached(ctx, name);
 
         json_respond(
-            msg.clone(),
+            msg,
             &serde_json::json!({
                 "package": name,
                 "versions": versions
@@ -321,13 +321,13 @@ impl RegistryBlock {
         version: &str,
     ) -> Result_ {
         if let Err(e) = Self::ensure_package(ctx, name) {
-            return err_not_found(msg.clone(), &e);
+            return err_not_found(msg, &e);
         }
 
         // Parse owner/repo from name (github.com/owner/repo)
         let (owner, repo) = match Self::parse_owner_repo(name) {
             Some(pair) => pair,
-            None => return err_bad_request(msg.clone(), "Invalid package name"),
+            None => return err_bad_request(msg, "Invalid package name"),
         };
 
         // Determine asset type: "flow", "interface", or "block" (default)
@@ -379,7 +379,7 @@ impl RegistryBlock {
         );
 
         // 302 redirect
-        ResponseBuilder::new(msg.clone()).status(302)
+        ResponseBuilder::new(msg).status(302)
             .set_header("Location", &asset_url)
             .body(vec![], "text/plain")
     }
@@ -762,6 +762,8 @@ impl Block for RegistryBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 
@@ -797,7 +799,7 @@ impl Block for RegistryBlock {
             }
 
             _ => err_not_found(
-                msg.clone(),
+                msg,
                 &format!("Registry endpoint not found: {}", path),
             ),
         }

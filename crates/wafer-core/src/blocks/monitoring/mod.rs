@@ -58,6 +58,8 @@ impl Block for MonitoringBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 
@@ -73,12 +75,12 @@ impl Block for MonitoringBlock {
                 || remote == "::1"
                 || remote.starts_with("127.");
             if !is_local {
-                return err_forbidden(msg.clone(), "stats endpoint is restricted to localhost");
+                return err_forbidden(msg, "stats endpoint is restricted to localhost");
             }
             let stats = self.stats.lock();
             let uptime = self.start_time.elapsed().as_secs();
             return json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({
                     "uptime_seconds": uptime,
                     "total_requests": stats.total_requests,

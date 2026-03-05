@@ -34,7 +34,7 @@ CMD ["my-app"]</code></pre>
 <h3>Health Checks</h3>
 <p>Add a health check endpoint to your flow for load balancers and orchestrators:</p>
 <pre><code>w.register_block_func("health", |_ctx, msg| {
-    json_respond(msg.clone(), 200, &amp;serde_json::json!({"status": "ok"}))
+    json_respond(msg, &amp;serde_json::json!({"status": "ok"}))
 });</code></pre>
 <p>Or use the built-in monitoring block which exposes <code>/_stats</code> automatically.</p>
 

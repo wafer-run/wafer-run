@@ -58,7 +58,7 @@ fn make_msg(kind: &str, data: &impl Serialize) -> Message {
 }
 
 fn call_network(msg: &Message) -> Result<Vec<u8>, NetworkError> {
-    let result = runtime::call_block("wafer/network", msg);
+    let result = runtime::call_block("@wafer/network", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

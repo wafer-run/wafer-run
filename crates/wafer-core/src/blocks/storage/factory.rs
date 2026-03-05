@@ -1,4 +1,4 @@
-//! Self-configuring BlockFactory implementation for the storage block.
+//! BlockFactory for the storage block.
 //!
 //! Reads config from the JSON value passed to `create()`, constructs the
 //! appropriate storage service backend, and wraps it in a StorageBlock.
@@ -17,13 +17,15 @@ struct FailedStorageBlock(String);
 impl Block for FailedStorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/storage".to_string(),
+            name: "@wafer/storage".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.storage".to_string(),
+            interface: "storage@v1".to_string(),
             summary: format!("FAILED: {}", self.0),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 
@@ -121,13 +123,15 @@ impl BlockFactory for StorageBlockFactory {
 
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/storage".to_string(),
+            name: "@wafer/storage".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.storage".to_string(),
-            summary: "Self-configuring storage block factory".to_string(),
+            interface: "storage@v1".to_string(),
+            summary: "Storage block factory".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 }

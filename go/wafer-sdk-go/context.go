@@ -4,7 +4,7 @@ package wafer
 // It is the primary way for blocks to interact with the WAFER runtime, including
 // calling other blocks in the flow.
 type Context interface {
-	// CallBlock invokes a named block (e.g. "wafer/database", "wafer/storage")
+	// CallBlock invokes a named block (e.g. "@wafer/database", "@wafer/storage")
 	// with the given message and returns the block's result.
 	CallBlock(blockName string, msg *Message) *BlockResult
 }

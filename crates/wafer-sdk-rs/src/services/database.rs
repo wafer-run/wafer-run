@@ -170,7 +170,7 @@ fn make_msg(kind: &str, data: &impl Serialize) -> Message {
 }
 
 fn call_db(msg: &Message) -> Result<Vec<u8>, DatabaseError> {
-    let result = runtime::call_block("wafer/database", msg);
+    let result = runtime::call_block("@wafer/database", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

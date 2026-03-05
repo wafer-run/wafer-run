@@ -25,6 +25,8 @@ impl Block for PlaygroundBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 
@@ -36,14 +38,14 @@ impl Block for PlaygroundBlock {
             // Serve playground page
             (_, "/playground") | (_, "/playground/") => {
                 let html = include_str!("../content/playground.html");
-                respond(msg.clone(), html.as_bytes().to_vec(), "text/html")
+                respond(msg, html.as_bytes().to_vec(), "text/html")
             }
 
             // --- Proxy: Rust Playground ---
             ("create", "/playground/run/rust") => {
                 let body: serde_json::Value = match msg.decode() {
                     Ok(v) => v,
-                    Err(_) => return err_bad_request(msg.clone(), "Invalid JSON body"),
+                    Err(_) => return err_bad_request(msg, "Invalid JSON body"),
                 };
 
                 let source = body
@@ -53,7 +55,7 @@ impl Block for PlaygroundBlock {
                     .to_string();
 
                 if source.is_empty() {
-                    return err_bad_request(msg.clone(), "No source code provided");
+                    return err_bad_request(msg, "No source code provided");
                 }
 
                 let payload = serde_json::json!({
@@ -68,12 +70,12 @@ impl Block for PlaygroundBlock {
 
                 match proxy_post_json("https://play.rust-lang.org/execute", &payload) {
                     Ok(bytes) => respond(
-                        msg.clone(),
+                        msg,
                         bytes,
                         "application/json",
                     ),
                     Err(e) => error(
-                        msg.clone(),
+                        msg,
                         "unavailable",
                         &format!("Rust Playground error: {}", e),
                     ),
@@ -84,7 +86,7 @@ impl Block for PlaygroundBlock {
             ("create", "/playground/run/go") => {
                 let body: serde_json::Value = match msg.decode() {
                     Ok(v) => v,
-                    Err(_) => return err_bad_request(msg.clone(), "Invalid JSON body"),
+                    Err(_) => return err_bad_request(msg, "Invalid JSON body"),
                 };
 
                 let source = body
@@ -94,7 +96,7 @@ impl Block for PlaygroundBlock {
                     .to_string();
 
                 if source.is_empty() {
-                    return err_bad_request(msg.clone(), "No source code provided");
+                    return err_bad_request(msg, "No source code provided");
                 }
 
                 match proxy_post_form(
@@ -102,12 +104,12 @@ impl Block for PlaygroundBlock {
                     &[("version", "2"), ("body", &source), ("withVet", "true")],
                 ) {
                     Ok(bytes) => respond(
-                        msg.clone(),
+                        msg,
                         bytes,
                         "application/json",
                     ),
                     Err(e) => error(
-                        msg.clone(),
+                        msg,
                         "unavailable",
                         &format!("Go Playground error: {}", e),
                     ),
@@ -116,22 +118,22 @@ impl Block for PlaygroundBlock {
 
             // --- Templates ---
             ("retrieve", "/playground/templates/rust") => json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({ "language": "rust", "template": RUST_TEMPLATE }),
             ),
 
             ("retrieve", "/playground/templates/go") => json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({ "language": "go", "template": GO_TEMPLATE }),
             ),
 
             ("retrieve", "/playground/templates/javascript") => json_respond(
-                msg.clone(),
+                msg,
                 &serde_json::json!({ "language": "javascript", "template": JS_TEMPLATE }),
             ),
 
             _ => err_not_found(
-                msg.clone(),
+                msg,
                 &format!("Playground endpoint not found: {}", path),
             ),
         }

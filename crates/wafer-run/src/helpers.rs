@@ -5,65 +5,65 @@ use std::collections::HashMap;
 
 /// Respond returns a Result with a response body and content type.
 /// The transport layer determines the status code (default 200 for Respond).
-pub fn respond(msg: Message, data: Vec<u8>, content_type: &str) -> Result_ {
+pub fn respond(msg: &Message, data: Vec<u8>, content_type: &str) -> Result_ {
     let mut meta = HashMap::new();
     if !content_type.is_empty() {
         meta.insert(META_RESP_CONTENT_TYPE.to_string(), content_type.to_string());
     }
-    msg.respond(Response { data, meta })
+    msg.clone().respond(Response { data, meta })
 }
 
 /// Error returns an error Result with an error code and message.
 /// The transport layer maps the error code to a status code.
-pub fn error(msg: Message, err_code: &str, err_message: &str) -> Result_ {
+pub fn error(msg: &Message, err_code: &str, err_message: &str) -> Result_ {
     Result_ {
         action: Action::Error,
         error: Some(WaferError::new(err_code, err_message)),
         response: None,
-        message: Some(msg),
+        message: Some(msg.clone()),
     }
 }
 
 /// JSONRespond marshals data as JSON and returns a response.
-pub fn json_respond<T: serde::Serialize>(msg: Message, data: &T) -> Result_ {
+pub fn json_respond<T: serde::Serialize>(msg: &Message, data: &T) -> Result_ {
     match serde_json::to_vec(data) {
         Ok(body) => respond(msg, body, "application/json"),
         Err(e) => error(msg, ErrorCode::INTERNAL, &e.to_string()),
     }
 }
 
-/// ErrBadRequest returns a 400 error.
-pub fn err_bad_request(msg: Message, message: &str) -> Result_ {
+/// ErrBadRequest returns an invalid argument error.
+pub fn err_bad_request(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::INVALID_ARGUMENT, message)
 }
 
-/// ErrUnauthorized returns a 401 error.
-pub fn err_unauthorized(msg: Message, message: &str) -> Result_ {
+/// ErrUnauthorized returns an unauthenticated error.
+pub fn err_unauthorized(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::UNAUTHENTICATED, message)
 }
 
-/// ErrForbidden returns a 403 error.
-pub fn err_forbidden(msg: Message, message: &str) -> Result_ {
+/// ErrForbidden returns a permission denied error.
+pub fn err_forbidden(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::PERMISSION_DENIED, message)
 }
 
-/// ErrNotFound returns a 404 error.
-pub fn err_not_found(msg: Message, message: &str) -> Result_ {
+/// ErrNotFound returns a not found error.
+pub fn err_not_found(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::NOT_FOUND, message)
 }
 
-/// ErrConflict returns a 409 error.
-pub fn err_conflict(msg: Message, message: &str) -> Result_ {
+/// ErrConflict returns an already exists error.
+pub fn err_conflict(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::ALREADY_EXISTS, message)
 }
 
-/// ErrValidation returns a 422 error.
-pub fn err_validation(msg: Message, message: &str) -> Result_ {
+/// ErrValidation returns a validation error.
+pub fn err_validation(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::INVALID_ARGUMENT, message)
 }
 
-/// ErrInternal returns a 500 error.
-pub fn err_internal(msg: Message, message: &str) -> Result_ {
+/// ErrInternal returns an internal error.
+pub fn err_internal(msg: &Message, message: &str) -> Result_ {
     error(msg, ErrorCode::INTERNAL, message)
 }
 
@@ -77,9 +77,9 @@ pub struct ResponseBuilder {
 impl ResponseBuilder {
     /// Create a new response builder.
     /// Use `.status()` to set an explicit status code for non-200 responses (e.g. redirects).
-    pub fn new(msg: Message) -> Self {
+    pub fn new(msg: &Message) -> Self {
         Self {
-            msg,
+            msg: msg.clone(),
             meta: HashMap::new(),
             cookie_count: 0,
         }
@@ -125,7 +125,7 @@ impl ResponseBuilder {
                     meta: self.meta,
                 })
             }
-            Err(e) => error(self.msg, ErrorCode::INTERNAL, &e.to_string()),
+            Err(e) => error(&self.msg, ErrorCode::INTERNAL, &e.to_string()),
         }
     }
 
@@ -169,7 +169,7 @@ pub fn respond_empty(msg: &Message) -> Result_ {
 }
 
 /// Convenience function to create a new ResponseBuilder.
-pub fn new_response(msg: Message) -> ResponseBuilder {
+pub fn new_response(msg: &Message) -> ResponseBuilder {
     ResponseBuilder::new(msg)
 }
 

@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Running a Block</h2>
-<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge">HTTP bridge</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to flows. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
+<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge"><code>@wafer/http-listener</code> block</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to flows. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
 
 <h3>Install</h3>
 
@@ -39,8 +39,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 wafer-run = "0.1"
 wafer-core = { version = "0.1", features = ["http"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-axum = "0.8"</code></pre>
+tokio = { version = "1", features = ["full"] }</code></pre>
     </div>
 </div>
 
@@ -135,30 +134,33 @@ func main() {
     </div>
     <div class="tab-panel" data-lang="rust" style="display:none">
 <pre><code>use wafer_run::*;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     let mut w = Wafer::new();
+    wafer_core::register_all(&amp;mut w);
 
     // Rust can define blocks inline — no .wasm needed
     w.register_block_func("hello", |_ctx, msg| {
-        json_respond(msg.clone(), 200, &amp;serde_json::json!({"hello": "world"}))
+        json_respond(msg, &amp;serde_json::json!({"hello": "world"}))
     });
+
+    // Configure the HTTP listener block
+    w.add_block_config("@wafer/http-listener", serde_json::json!({
+        "flow": "main",
+        "listen": "0.0.0.0:8080",
+    }));
 
     let flow: FlowDef = serde_json::from_str(r#"{
         "id": "main",
         "root": { "block": "hello" }
     }"#).unwrap();
     w.add_flow_def(&amp;flow);
-    w.resolve().unwrap();
-    w.start().unwrap();
 
-    // HTTP bridge from wafer-core converts requests to messages
-    let app = wafer_core::bridge::create_router(Arc::new(w), "main");
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    let w = w.start().unwrap();
     println!("listening on :8080");
-    axum::serve(listener, app).await.unwrap();
+    tokio::signal::ctrl_c().await.unwrap();
+    w.shutdown();
 }</code></pre>
     </div>
 </div>

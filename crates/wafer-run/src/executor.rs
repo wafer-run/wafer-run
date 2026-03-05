@@ -115,9 +115,6 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
     true
 }
 
-// Note: execute_first_match_children was removed — matching logic lives in
-// runtime.rs execute_first_match() which handles the full execution context.
-
 #[cfg(test)]
 mod tests {
     use super::*;

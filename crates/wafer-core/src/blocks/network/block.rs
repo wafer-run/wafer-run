@@ -54,13 +54,15 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
 impl Block for NetworkBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/network".to_string(),
+            name: "@wafer/network".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.network".to_string(),
+            interface: "network@v1".to_string(),
             summary: "Outbound network requests via NetworkService".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 

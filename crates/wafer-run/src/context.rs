@@ -33,7 +33,7 @@ pub struct RuntimeContext {
     pub config: HashMap<String, String>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub deadline: Option<std::time::Instant>,
-    /// All registered blocks (infrastructure + application).
+    /// All registered blocks.
     pub all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     /// Current call depth to prevent infinite recursion.
     pub call_depth: Arc<std::sync::atomic::AtomicU32>,
@@ -45,6 +45,9 @@ pub struct RuntimeContext {
     pub flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
+    /// Block names the caller is allowed to call via `call_block()`.
+    /// `None` means unrestricted. `Some(list)` enforces the allowlist.
+    pub caller_requires: Option<Vec<String>>,
 }
 
 // --- Result helpers ---
@@ -83,6 +86,21 @@ impl Context for RuntimeContext {
             return err_result(ErrorCode::CANCELLED, "execution cancelled");
         }
 
+        // Enforce requires: if the caller declared a requires list, check it
+        if let Some(ref requires) = self.caller_requires {
+            if !requires.iter().any(|r| r == block_name) {
+                self.call_depth
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return err_result(
+                    ErrorCode::PERMISSION_DENIED,
+                    format!(
+                        "block '{}' not in requires list — call_block denied",
+                        block_name
+                    ),
+                );
+            }
+        }
+
         // Look up the block
         let block = match self.all_blocks.get(block_name) {
             Some(b) => b.clone(),
@@ -93,6 +111,16 @@ impl Context for RuntimeContext {
                     ErrorCode::NOT_FOUND,
                     format!("block '{}' not found", block_name),
                 );
+            }
+        };
+
+        // Derive the called block's requires for its own sub-context
+        let called_requires = {
+            let info = block.info();
+            if info.requires.is_empty() {
+                None // unrestricted
+            } else {
+                Some(info.requires)
             }
         };
 
@@ -109,6 +137,7 @@ impl Context for RuntimeContext {
             registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            caller_requires: called_requires,
         };
 
         // Call the block

@@ -36,6 +36,8 @@ impl Block for RateLimitBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 
@@ -53,7 +55,7 @@ impl Block for RateLimitBlock {
 
         let client_ip = msg.remote_addr().to_string();
         if client_ip.is_empty() {
-            return err_bad_request(msg.clone(), "Client IP could not be determined");
+            return err_bad_request(msg, "Client IP could not be determined");
         }
 
         let mut buckets = self.buckets.lock();
@@ -96,7 +98,7 @@ impl Block for RateLimitBlock {
             );
             m.set_meta("resp.header.X-RateLimit-Remaining", "0");
 
-            return error(m, "resource_exhausted", "Too many requests");
+            return error(&m, "resource_exhausted", "Too many requests");
         }
 
         let remaining = max - bucket.count;

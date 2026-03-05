@@ -22,6 +22,8 @@ impl Block for ReadonlyGuardBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 
@@ -38,7 +40,7 @@ impl Block for ReadonlyGuardBlock {
         let action = msg.action();
         if action == "create" || action == "update" || action == "delete" {
             return err_forbidden(
-                msg.clone(),
+                msg,
                 "This instance is in read-only mode. Write operations are not allowed.",
             );
         }

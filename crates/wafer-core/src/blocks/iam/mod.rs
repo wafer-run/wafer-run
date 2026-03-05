@@ -59,6 +59,8 @@ impl Block for IAMBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: vec!["@wafer/database".to_string()],
         }
     }
 
@@ -66,7 +68,7 @@ impl Block for IAMBlock {
         // Check that user is authenticated
         let user_id = msg.user_id().to_string();
         if user_id.is_empty() {
-            return err_unauthorized(msg.clone(), "Authentication required");
+            return err_unauthorized(msg, "Authentication required");
         }
 
         // Get required role from config (default: "admin")
@@ -84,7 +86,7 @@ impl Block for IAMBlock {
         if has_role {
             msg.clone().cont()
         } else {
-            err_forbidden(msg.clone(), &format!("Requires '{}' role", required_role))
+            err_forbidden(msg, &format!("Requires '{}' role", required_role))
         }
     }
 

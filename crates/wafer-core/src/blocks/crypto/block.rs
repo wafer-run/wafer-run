@@ -108,13 +108,15 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
 impl Block for CryptoBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/crypto".to_string(),
+            name: "@wafer/crypto".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.crypto".to_string(),
+            interface: "crypto@v1".to_string(),
             summary: "Cryptographic operations via CryptoService".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 

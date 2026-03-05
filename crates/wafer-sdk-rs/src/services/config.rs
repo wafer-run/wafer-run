@@ -38,7 +38,7 @@ fn make_msg(kind: &str, data: &impl Serialize) -> Message {
 /// Retrieve a configuration value by key, returning `None` if not found.
 pub fn get(key: &str) -> Option<String> {
     let msg = make_msg("config.get", &GetReq { key });
-    let result = runtime::call_block("wafer/config", &msg);
+    let result = runtime::call_block("@wafer/config", &msg);
     match result.action {
         Action::Error => None,
         _ => {
@@ -60,5 +60,5 @@ pub fn get_default(key: &str, default_value: &str) -> String {
 /// Store a configuration key-value pair.
 pub fn set(key: &str, value: &str) {
     let msg = make_msg("config.set", &SetReq { key, value });
-    let _ = runtime::call_block("wafer/config", &msg);
+    let _ = runtime::call_block("@wafer/config", &msg);
 }

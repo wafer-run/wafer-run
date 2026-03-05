@@ -91,13 +91,15 @@ fn storage_error_to_wafer(e: StorageError) -> WaferError {
 impl Block for StorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/storage".to_string(),
+            name: "@wafer/storage".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.storage".to_string(),
+            interface: "storage@v1".to_string(),
             summary: "Object storage operations via StorageService".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 

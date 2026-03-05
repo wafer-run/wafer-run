@@ -28,11 +28,11 @@ ACTIVE: core-concepts
 <h3>Context</h3>
 <p>The <code>Context</code> is passed to every block's <code>handle()</code> method. It provides:</p>
 <ul>
-    <li><code>call_block(name, msg)</code> — call another block by name (including infrastructure blocks like <code>wafer/database</code>, <code>wafer/crypto</code>, etc.)</li>
+    <li><code>call_block(name, msg)</code> — call another block by name (e.g. <code>@wafer/database</code>, <code>@wafer/crypto</code>). Enforced against the caller's <code>requires</code> list when set.</li>
     <li><code>config_get(key)</code> — read a configuration value</li>
     <li><code>is_cancelled()</code> — check if the request has timed out or been cancelled</li>
 </ul>
-<p>Use the <code>wafer_run::clients</code> module (or the Guest SDK typed clients for WASM blocks) for convenient typed access to infrastructure services like database, storage, crypto, etc.</p>
+<p>Use the <code>wafer_run::clients</code> module (or the Guest SDK typed clients for WASM blocks) for convenient typed access to services like database, storage, crypto, etc.</p>
 
 <h3>Flows</h3>
 <p>Flows are trees of blocks. When a message arrives, it flows through the tree. Each node can match on the message (by HTTP method, path, etc.) and route to child blocks. Flows are defined in JSON and loaded at startup.</p>

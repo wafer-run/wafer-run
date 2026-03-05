@@ -45,7 +45,6 @@ pub trait MessageExt {
     fn set_meta(&mut self, key: &str, value: &str);
     fn meta_map(&self) -> HashMap<String, String>;
 
-    fn unmarshal<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error>;
     fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error>;
     fn set_data<T: serde::Serialize>(&mut self, v: &T) -> Result<(), serde_json::Error>;
 
@@ -91,12 +90,8 @@ impl MessageExt for Message {
         self.meta.iter().map(|e| (e.key.clone(), e.value.clone())).collect()
     }
 
-    fn unmarshal<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_slice(&self.data)
-    }
-
     fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        self.unmarshal()
+        serde_json::from_slice(&self.data)
     }
 
     fn set_data<T: serde::Serialize>(&mut self, v: &T) -> Result<(), serde_json::Error> {

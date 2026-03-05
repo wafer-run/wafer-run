@@ -42,6 +42,13 @@ pub struct BlockInfo {
     pub allowed_modes: Vec<InstanceMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admin_ui: Option<AdminUIInfo>,
+    /// Where this block executes: native (host) or wasm (sandbox).
+    #[serde(default)]
+    pub runtime: BlockRuntime,
+    /// Block names this block is allowed to call via `call_block()`.
+    /// Empty means unrestricted (can call any block).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
 }
 
 impl BlockInfo {

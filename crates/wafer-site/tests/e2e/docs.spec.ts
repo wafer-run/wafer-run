@@ -4,15 +4,20 @@ import { test, expect } from '@playwright/test';
 
 const docPages = [
   { path: '/docs', title: 'Quick Start', heading: 'Quick Start' },
+  { path: '/docs/core-concepts', title: 'Core Concepts', heading: 'Core Concepts' },
   { path: '/docs/creating-a-block', title: 'Creating a Block', heading: 'Creating a Block' },
   { path: '/docs/running-a-block', title: 'Running a Block', heading: 'Running a Block' },
+  { path: '/docs/wasm-blocks', title: 'Wasm Blocks', heading: 'WASM Blocks' },
   { path: '/docs/cli', title: 'CLI', heading: 'CLI' },
   { path: '/docs/flow-configuration', title: 'Flow Configuration', heading: 'Flow Configuration' },
   { path: '/docs/built-in-blocks', title: 'Built-in Blocks', heading: 'Built-in Blocks' },
-  { path: '/docs/services', title: 'Services', heading: 'Services' },
+  { path: '/docs/services', title: 'Services', heading: 'Clients' },
   { path: '/docs/http-bridge', title: 'HTTP Bridge', heading: 'HTTP Bridge' },
-  { path: '/docs/api-reference', title: 'API Reference', heading: 'API Reference' },
-  { path: '/docs/registry', title: 'Block Registry', heading: 'Block Registry' },
+  { path: '/docs/api-runtime', title: 'API Runtime', heading: 'Runtime API' },
+  { path: '/docs/api-services', title: 'API Services', heading: 'Clients API' },
+  { path: '/docs/api-sdk', title: 'API SDK', heading: 'Guest SDK' },
+  { path: '/docs/api-types', title: 'API Types', heading: 'Types & Constants' },
+  { path: '/docs/registry', title: 'Block Registry', heading: 'Package Registry' },
   { path: '/docs/deployment', title: 'Deployment', heading: 'Deployment' },
 ];
 
@@ -28,9 +33,9 @@ test.describe('Docs Sub-Pages', () => {
       // Content heading matches
       await expect(page.locator('.docs-content h2').first()).toHaveText(doc.heading);
 
-      // Sidebar is present with 11 links
+      // Sidebar is present with 16 links
       const sidebarLinks = page.locator('.sidebar a');
-      await expect(sidebarLinks).toHaveCount(11);
+      await expect(sidebarLinks).toHaveCount(16);
 
       // Current page link has active class
       const activeLink = page.locator('.sidebar a.active');

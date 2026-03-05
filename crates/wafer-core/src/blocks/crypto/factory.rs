@@ -1,4 +1,4 @@
-//! Self-configuring BlockFactory for the crypto infrastructure block.
+//! BlockFactory for the crypto block.
 
 /// CryptoBlockFactory creates a CryptoBlock from config.
 ///
@@ -42,13 +42,15 @@ impl wafer_run::registry::BlockFactory for CryptoBlockFactory {
 
     fn info(&self) -> wafer_run::block::BlockInfo {
         wafer_run::block::BlockInfo {
-            name: "wafer/crypto".to_string(),
+            name: "@wafer/crypto".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.crypto".to_string(),
-            summary: "Self-configuring crypto block factory".to_string(),
+            interface: "crypto@v1".to_string(),
+            summary: "Crypto block factory".to_string(),
             instance_mode: wafer_run::types::InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 }

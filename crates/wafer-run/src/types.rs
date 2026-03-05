@@ -55,13 +55,7 @@ impl Message {
         }
     }
 
-    /// Unmarshal parses Data into the given type.
-    #[deprecated(note = "use `decode` instead")]
-    pub fn unmarshal<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        self.decode()
-    }
-
-    /// Decode unmarshals the JSON body into dest.
+    /// Decode deserializes the JSON body into the given type.
     pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }
@@ -374,6 +368,32 @@ impl Result_ {
             response: None,
             error: Some(err),
             message: None,
+        }
+    }
+}
+
+/// BlockRuntime declares where a block can execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockRuntime {
+    /// Runs natively on the host (needs direct OS/FFI access).
+    #[serde(rename = "native")]
+    Native,
+    /// Runs inside a WASM sandbox (Go, JS, TS, or portable Rust blocks).
+    #[serde(rename = "wasm")]
+    Wasm,
+}
+
+impl Default for BlockRuntime {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl fmt::Display for BlockRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Native => f.write_str("native"),
+            Self::Wasm => f.write_str("wasm"),
         }
     }
 }

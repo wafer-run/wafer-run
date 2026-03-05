@@ -1,4 +1,4 @@
-//! Self-configuring BlockFactory for the network infrastructure block.
+//! BlockFactory for the network block.
 
 /// NetworkBlockFactory creates a NetworkBlock with an HTTP client.
 ///
@@ -19,13 +19,15 @@ impl wafer_run::registry::BlockFactory for NetworkBlockFactory {
 
     fn info(&self) -> wafer_run::block::BlockInfo {
         wafer_run::block::BlockInfo {
-            name: "wafer/network".to_string(),
+            name: "@wafer/network".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.network".to_string(),
-            summary: "Self-configuring network block factory".to_string(),
+            interface: "network@v1".to_string(),
+            summary: "Network block factory".to_string(),
             instance_mode: wafer_run::types::InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 }

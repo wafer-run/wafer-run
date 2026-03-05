@@ -27,7 +27,7 @@ func NetworkDoRequestCtx(ctx wafer.Context, req HttpRequest) (HttpResponse, erro
 		return HttpResponse{}, fmt.Errorf("internal: failed to marshal request: %w", err)
 	}
 	msg := wafer.NewMessage("network.do_request", reqJSON)
-	result := ctx.CallBlock("wafer/network", msg)
+	result := ctx.CallBlock("@wafer/network", msg)
 	if result.Error != nil {
 		return HttpResponse{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -62,7 +62,7 @@ func NetworkPostJSONCtx(ctx wafer.Context, url string, body []byte) (HttpRespons
 // --- Legacy direct-import implementations (backward compatible) ---
 
 // NetworkDoRequest executes an outbound HTTP request through the runtime.
-// When CallBlock is available, it routes through the "wafer/network" block.
+// When CallBlock is available, it routes through the "@wafer/network" block.
 func NetworkDoRequest(req HttpRequest) (HttpResponse, error) {
 	if wafer.HasCallBlock() {
 		return NetworkDoRequestCtx(wafer.NewContext(), req)

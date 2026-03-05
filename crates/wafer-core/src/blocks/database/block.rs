@@ -184,13 +184,15 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 impl Block for DatabaseBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "wafer/database".to_string(),
+            name: "@wafer/database".to_string(),
             version: "0.1.0".to_string(),
-            interface: "wafer.infra.database".to_string(),
+            interface: "database@v1".to_string(),
             summary: "Database CRUD operations via DatabaseService".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 

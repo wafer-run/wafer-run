@@ -67,7 +67,7 @@ impl AuthBlock {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, "failed to look up API key in database");
-                return Err(err_internal(msg.clone(), "Authentication service unavailable"));
+                return Err(err_internal(msg, "Authentication service unavailable"));
             }
         };
 
@@ -215,6 +215,11 @@ impl Block for AuthBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: vec![
+                "@wafer/crypto".to_string(),
+                "@wafer/database".to_string(),
+            ],
         }
     }
 
@@ -260,7 +265,7 @@ impl Block for AuthBlock {
 }
 
 fn auth_error(msg: &mut Message, message: &str) -> Result_ {
-    error(msg.clone(), "unauthenticated", message)
+    error(msg, "unauthenticated", message)
 }
 
 /// Constant-time byte comparison to prevent timing side-channel attacks.

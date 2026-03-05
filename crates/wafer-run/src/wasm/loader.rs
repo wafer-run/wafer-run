@@ -112,6 +112,8 @@ impl Block for WASMBlock {
                     instance_mode: InstanceMode::PerNode,
                     allowed_modes: Vec::new(),
                     admin_ui: None,
+                    runtime: BlockRuntime::Wasm,
+                    requires: Vec::new(),
                 };
             }
         };
@@ -127,6 +129,8 @@ impl Block for WASMBlock {
                     instance_mode: InstanceMode::PerNode,
                     allowed_modes: Vec::new(),
                     admin_ui: None,
+                    runtime: BlockRuntime::Wasm,
+                    requires: Vec::new(),
                 };
             }
         };
@@ -286,6 +290,8 @@ fn block_info_from_wit(wbi: bindings::types::BlockInfo) -> BlockInfo {
         instance_mode,
         allowed_modes,
         admin_ui: None,
+        runtime: BlockRuntime::Wasm,
+        requires: Vec::new(),
     }
 }
 

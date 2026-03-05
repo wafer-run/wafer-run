@@ -4,12 +4,12 @@ const sidebars: SidebarsConfig = {
   specSidebar: [
     {
       type: 'doc',
-      id: 'WAFFLE_SPEC',
+      id: 'WAFER_SPEC',
       label: 'Core Specification',
     },
     {
       type: 'doc',
-      id: 'WAFFLE_GO',
+      id: 'WAFER_GO',
       label: 'Go Implementation',
     },
   ],

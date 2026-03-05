@@ -77,13 +77,13 @@ impl WebBlock {
             .split('/')
             .any(|seg| seg.starts_with('.') && seg.len() > 1 && seg != ".well-known")
         {
-            return err_not_found(msg.clone(), "Not found");
+            return err_not_found(msg, "Not found");
         }
 
         // Resolve absolute path
         let abs_root = match std::fs::canonicalize(&config.root) {
             Ok(p) => p,
-            Err(_) => return err_not_found(msg.clone(), "Web root not found"),
+            Err(_) => return err_not_found(msg, "Web root not found"),
         };
 
         let file_path = abs_root.join(clean.trim_start_matches('/'));
@@ -97,12 +97,12 @@ impl WebBlock {
                     let index_path = abs_root.join(&config.index_file);
                     return serve_index_spa(msg, &index_path);
                 }
-                return err_not_found(msg.clone(), "File not found");
+                return err_not_found(msg, "File not found");
             }
         };
 
         if !resolved.starts_with(&abs_root) {
-            return err_not_found(msg.clone(), "Not found");
+            return err_not_found(msg, "Not found");
         }
 
         // Handle directories
@@ -111,7 +111,7 @@ impl WebBlock {
             if index.exists() {
                 return serve_static_file(msg, &index, config);
             }
-            return err_not_found(msg.clone(), "Not found");
+            return err_not_found(msg, "Not found");
         }
 
         serve_static_file(msg, &resolved, config)
@@ -231,28 +231,26 @@ fn cache_control(path: &Path, content_type: &str, config: &WebConfig) -> String 
 fn serve_static_file(msg: &mut Message, path: &PathBuf, config: &WebConfig) -> Result_ {
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(_) => return err_not_found(msg.clone(), "File not found"),
+        Err(_) => return err_not_found(msg, "File not found"),
     };
 
     let content_type = mime_for_ext(path);
     let cc = cache_control(path, &content_type, config);
 
-    let mut m = msg.clone();
-    m.set_meta("resp.header.Cache-Control", &cc);
+    msg.set_meta("resp.header.Cache-Control", &cc);
 
-    respond(m, data, &content_type)
+    respond(msg, data, &content_type)
 }
 
 fn serve_index_spa(msg: &mut Message, index_path: &PathBuf) -> Result_ {
     let data = match std::fs::read(index_path) {
         Ok(d) => d,
-        Err(_) => return err_not_found(msg.clone(), "Index file not found"),
+        Err(_) => return err_not_found(msg, "Index file not found"),
     };
 
-    let mut m = msg.clone();
-    m.set_meta("resp.header.Cache-Control", "no-cache");
+    msg.set_meta("resp.header.Cache-Control", "no-cache");
 
-    respond(m, data, "text/html; charset=utf-8")
+    respond(msg, data, "text/html; charset=utf-8")
 }
 
 impl Block for WebBlock {
@@ -265,6 +263,8 @@ impl Block for WebBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: vec![InstanceMode::PerNode],
             admin_ui: None,
+            runtime: wafer_run::types::BlockRuntime::Wasm,
+            requires: Vec::new(),
         }
     }
 
@@ -272,7 +272,7 @@ impl Block for WebBlock {
         // Only handle GET requests
         let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
-            return error(msg.clone(), "unimplemented", "Only retrieve action is supported");
+            return error(msg, "unimplemented", "Only retrieve action is supported");
         }
 
         let config = self.get_config(ctx);

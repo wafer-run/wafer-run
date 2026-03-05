@@ -115,6 +115,8 @@ impl Registry {
                         instance_mode: InstanceMode::PerNode,
                         allowed_modes: Vec::new(),
                         admin_ui: None,
+                        runtime: BlockRuntime::default(),
+                        requires: Vec::new(),
                     },
                     handler: {
                         let h = self.handler.clone();
@@ -132,6 +134,8 @@ impl Registry {
                     instance_mode: InstanceMode::PerNode,
                     allowed_modes: Vec::new(),
                     admin_ui: None,
+                    runtime: BlockRuntime::default(),
+                    requires: Vec::new(),
                 }
             }
         }
