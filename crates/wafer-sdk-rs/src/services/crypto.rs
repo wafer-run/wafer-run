@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::wafer::block_world::runtime;
-use crate::wafer::block_world::types::{Action, Message};
+use crate::types::{Action, Message};
+use crate::call_block;
 
 /// Crypto error type.
 #[derive(Debug, Clone)]
@@ -64,15 +64,11 @@ struct BytesResp {
 // --- Helpers ---
 
 fn make_msg(kind: &str, data: &impl Serialize) -> Message {
-    Message {
-        kind: kind.to_string(),
-        data: serde_json::to_vec(data).unwrap_or_default(),
-        meta: Vec::new(),
-    }
+    Message::new(kind, serde_json::to_vec(data).unwrap_or_default())
 }
 
 fn call_crypto(msg: &Message) -> Result<Vec<u8>, CryptoError> {
-    let result = runtime::call_block("@wafer/crypto", msg);
+    let result = call_block("@wafer/crypto", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

@@ -8,6 +8,7 @@ description = "WAFER website, documentation, playground, and block registry"
 [dependencies]
 wafer-run = { path = "../wafer-run" }
 wafer-core = { path = "../wafer-core", features = ["full", "http"] }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

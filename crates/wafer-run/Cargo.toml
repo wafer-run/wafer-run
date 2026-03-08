@@ -8,27 +8,27 @@ repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
 default = ["wasm"]
-wasm = ["dep:wasmtime", "dep:reqwest"]
-full = ["wasm"]
+wasm = ["dep:wasmi", "dep:reqwest"]
+full = ["wasm", "dep:tokio", "dep:tracing-subscriber"]
 
 [dependencies]
 # Core
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, optional = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 url = "2"
 
-# WASM (Wasmtime)
-wasmtime = { workspace = true, optional = true }
+# WASM (wasmi interpreter)
+wasmi = { workspace = true, optional = true }
 
 # Network (reqwest for WASM remote block downloads)
 reqwest = { workspace = true, optional = true }

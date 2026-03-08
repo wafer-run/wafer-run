@@ -7,14 +7,14 @@ description = "Shared reusable WAFER blocks and flow templates"
 
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite"]
-postgres = ["dep:sqlx"]
-crypto = ["dep:argon2", "dep:jsonwebtoken"]
+sqlite = ["dep:rusqlite", "dep:uuid"]
+postgres = ["dep:sqlx", "dep:tokio", "dep:uuid"]
+crypto = ["dep:argon2", "dep:jsonwebtoken", "dep:uuid"]
 storage-local = []
-storage-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+storage-s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
 network = ["dep:reqwest"]
 config-toml = ["dep:toml"]
-http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper"]
+http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:tokio"]
 full = ["sqlite", "postgres", "crypto", "storage-local", "storage-s3", "network", "config-toml"]
 
 [dependencies]
@@ -25,8 +25,8 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
-tokio = { workspace = true }
+uuid = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 

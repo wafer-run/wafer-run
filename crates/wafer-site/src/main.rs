@@ -72,7 +72,7 @@ async fn main() {
     w.add_flow_def(&site_flow);
 
     // Start — the @wafer/http-listener block spawns the Axum listener internally
-    let w = w.start().unwrap_or_else(|e| {
+    let w = w.start().await.unwrap_or_else(|e| {
         tracing::error!("Failed to start: {}", e);
         std::process::exit(1);
     });
@@ -82,7 +82,7 @@ async fn main() {
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await.expect("failed to listen for ctrl+c");
     tracing::info!("Shutting down...");
-    w.shutdown();
+    w.shutdown().await;
 }
 
 fn register_site_blocks(w: &mut Wafer) {
@@ -158,11 +158,11 @@ fn register_site_blocks(w: &mut Wafer) {
                         {"name": "@wafer/router", "version": "0.1.0"},
                         {"name": "@wafer/security-headers", "version": "0.1.0"},
                         {"name": "@wafer/cors", "version": "0.1.0"},
-                        {"name": "@wafer/rate-limit", "version": "0.1.0"},
+                        {"name": "@wafer/ip-rate-limit", "version": "0.1.0"},
                         {"name": "@wafer/readonly-guard", "version": "0.1.0"},
                         {"name": "@wafer/monitoring", "version": "0.1.0"},
-                        {"name": "@wafer/auth", "version": "0.1.0"},
-                        {"name": "@wafer/iam", "version": "0.1.0"},
+                        {"name": "@wafer/auth-validator", "version": "0.1.0"},
+                        {"name": "@wafer/iam-guard", "version": "0.1.0"},
                         {"name": "@wafer/web", "version": "0.1.0"}
                     ]
                 }),

@@ -24,11 +24,13 @@ use wafer_run::{FlowDef, Message, Wafer, WASMBlock};
 #[napi]
 pub struct WaferRuntime {
     inner: Wafer,
+    /// Tokio runtime for bridging async calls at the NAPI boundary.
+    rt: tokio::runtime::Runtime,
 }
 
 impl Drop for WaferRuntime {
     fn drop(&mut self) {
-        self.inner.stop();
+        self.rt.block_on(self.inner.stop());
     }
 }
 
@@ -36,10 +38,13 @@ impl Drop for WaferRuntime {
 impl WaferRuntime {
     /// Create a new WAFER runtime instance.
     #[napi(constructor)]
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {}", e)))?;
+        Ok(Self {
             inner: Wafer::new(),
-        }
+            rt,
+        })
     }
 
     /// Register a block or flow definition from a file path.
@@ -65,8 +70,7 @@ impl WaferRuntime {
     /// Resolve all block references in registered flows.
     #[napi]
     pub fn resolve(&mut self) -> Result<()> {
-        self.inner
-            .resolve()
+        self.rt.block_on(self.inner.resolve())
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -76,15 +80,14 @@ impl WaferRuntime {
     /// own HTTP handling — blocks that spawn listeners are not needed here.
     #[napi]
     pub fn start(&mut self) -> Result<()> {
-        self.inner
-            .start_without_bind()
+        self.rt.block_on(self.inner.start_without_bind())
             .map_err(|e| Error::from_reason(e))
     }
 
     /// Stop the runtime and shut down all block instances.
     #[napi]
     pub fn stop(&mut self) {
-        self.inner.stop();
+        self.rt.block_on(self.inner.stop());
     }
 
     /// Run a flow with the given message.
@@ -96,7 +99,7 @@ impl WaferRuntime {
         let mut msg: Message = serde_json::from_str(&message_json)
             .map_err(|e| Error::from_reason(format!("invalid Message JSON: {}", e)))?;
 
-        let result = self.inner.execute(&flow_id, &mut msg);
+        let result = self.rt.block_on(self.inner.execute(&flow_id, &mut msg));
 
         serde_json::to_string(&result)
             .map_err(|e| Error::from_reason(format!("failed to serialize result: {}", e)))

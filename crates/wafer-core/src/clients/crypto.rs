@@ -68,21 +68,21 @@ struct RandomBytesResp {
 // --- Public API ---
 
 /// Hash a password (Argon2).
-pub fn hash(ctx: &dyn Context, password: &str) -> Result<String, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password })?;
+pub async fn hash(ctx: &dyn Context, password: &str) -> Result<String, WaferError> {
+    let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password }).await?;
     let resp: HashResp = decode(&data)?;
     Ok(resp.hash)
 }
 
 /// Compare a password against a hash.
 /// Returns `Ok(())` on match, `Err` with `UNAUTHENTICATED` on mismatch.
-pub fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Result<(), WaferError> {
+pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Result<(), WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
         ServiceOp::CRYPTO_COMPARE_HASH,
         &CompareHashReq { password, hash },
-    )?;
+    ).await?;
     let resp: CompareHashResp = decode(&data)?;
     if resp.matches {
         Ok(())
@@ -95,7 +95,7 @@ pub fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Result<(),
 }
 
 /// Sign claims into a JWT with the given expiry.
-pub fn sign(
+pub async fn sign(
     ctx: &dyn Context,
     claims: &HashMap<String, serde_json::Value>,
     expiry: std::time::Duration,
@@ -108,29 +108,29 @@ pub fn sign(
             claims,
             expiry_secs: expiry.as_secs(),
         },
-    )?;
+    ).await?;
     let resp: SignResp = decode(&data)?;
     Ok(resp.token)
 }
 
 /// Verify a JWT and return its claims.
-pub fn verify(
+pub async fn verify(
     ctx: &dyn Context,
     token: &str,
 ) -> Result<HashMap<String, serde_json::Value>, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &VerifyReq { token })?;
+    let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &VerifyReq { token }).await?;
     let resp: VerifyResp = decode(&data)?;
     Ok(resp.claims)
 }
 
 /// Generate `n` cryptographically-secure random bytes.
-pub fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferError> {
+pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
         ServiceOp::CRYPTO_RANDOM_BYTES,
         &RandomBytesReq { n },
-    )?;
+    ).await?;
     let resp: RandomBytesResp = decode(&data)?;
     Ok(resp.bytes)
 }

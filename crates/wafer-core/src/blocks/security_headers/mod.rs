@@ -9,11 +9,13 @@ pub struct SecurityHeadersBlock {
 impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {
-            csp: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
+            csp: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
         }
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for SecurityHeadersBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -29,7 +31,7 @@ impl Block for SecurityHeadersBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Read CSP from config if available
         let csp = ctx
             .config_get("csp")
@@ -53,7 +55,7 @@ impl Block for SecurityHeadersBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -62,6 +64,7 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/security-headers", Arc::new(SecurityHeadersBlock::new()));
 }

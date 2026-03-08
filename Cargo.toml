@@ -4,6 +4,7 @@ members = [
     "crates/wafer-run",
     "crates/wafer-core",
     "crates/wafer-ffi",
+    "crates/wafer-local",
     "crates/wafer-run-node",
     "crates/wafer-sdk-rs",
     "crates/wafer-site",
@@ -29,6 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 parking_lot = "0.12"
 async-trait = "0.1"
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 
@@ -42,8 +44,7 @@ hyper = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM
-wasmtime = { version = "29", features = ["component-model"] }
-wit-bindgen = "0.41"
+wasmi = "0.44"
 
 # Crypto
 argon2 = "0.5"

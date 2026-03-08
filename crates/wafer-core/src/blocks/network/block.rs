@@ -51,6 +51,8 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for NetworkBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -66,7 +68,7 @@ impl Block for NetworkBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         match msg.kind.as_str() {
             ServiceOp::NETWORK_DO_REQUEST => {
                 let req: DoRequest = match msg.decode() {
@@ -78,8 +80,13 @@ impl Block for NetworkBlock {
                         ))
                     }
                 };
-                // SSRF protection: block requests to private/internal IPs
-                if wafer_run::security::is_blocked_url(&req.url) {
+                // SSRF protection: block requests to private/internal IPs.
+                // Disabled when ALLOW_PRIVATE_NETWORK=true (for local dev/testing
+                // with mock services like Stripe test mode).
+                let allow_private = std::env::var("ALLOW_PRIVATE_NETWORK")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false);
+                if !allow_private && wafer_run::security::is_blocked_url(&req.url) {
                     return Result_::error(WaferError::new(
                         ErrorCode::PERMISSION_DENIED,
                         "request to private/internal address is not allowed",
@@ -92,8 +99,14 @@ impl Block for NetworkBlock {
                     headers: req.headers,
                     body: req.body,
                 };
-                match self.service.do_request(&request) {
-                    Ok(resp) => respond_json(
+                // Run blocking network I/O on a dedicated thread to avoid
+                // panicking reqwest::blocking inside the tokio async runtime.
+                let svc = self.service.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    svc.do_request(&request)
+                }).await;
+                match result {
+                    Ok(Ok(resp)) => respond_json(
                         msg,
                         &DoResponse {
                             status_code: resp.status_code,
@@ -101,7 +114,11 @@ impl Block for NetworkBlock {
                             body: resp.body,
                         },
                     ),
-                    Err(e) => Result_::error(network_error_to_wafer(e)),
+                    Ok(Err(e)) => Result_::error(network_error_to_wafer(e)),
+                    Err(e) => Result_::error(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!("network task panicked: {e}"),
+                    )),
                 }
             }
             other => Result_::error(WaferError::new(
@@ -111,7 +128,7 @@ impl Block for NetworkBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

@@ -348,7 +348,7 @@ pub struct Result_ {
     pub response: Option<Response>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<WaferError>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<Message>,
 }
 
@@ -439,16 +439,20 @@ impl fmt::Display for InstanceMode {
 }
 
 /// LifecycleType identifies the kind of lifecycle event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LifecycleType {
+    #[serde(rename = "init")]
     Init,
+    #[serde(rename = "start")]
     Start,
+    #[serde(rename = "stop")]
     Stop,
 }
 
 /// LifecycleEvent is sent to blocks during lifecycle transitions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleEvent {
     pub event_type: LifecycleType,
+    #[serde(with = "serde_bytes_or_default")]
     pub data: Vec<u8>,
 }

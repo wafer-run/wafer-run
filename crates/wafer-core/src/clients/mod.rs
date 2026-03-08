@@ -11,7 +11,7 @@ use wafer_run::types::*;
 
 /// Call a block and return the raw response bytes.
 /// Returns `Err(WaferError)` if the block returns an error.
-pub(crate) fn call_service(
+pub(crate) async fn call_service(
     ctx: &dyn Context,
     block: &str,
     kind: &str,
@@ -20,7 +20,7 @@ pub(crate) fn call_service(
     let payload = serde_json::to_vec(data)
         .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e.to_string()))?;
     let mut msg = Message::new(kind, payload);
-    let result = ctx.call_block(block, &mut msg);
+    let result = ctx.call_block(block, &mut msg).await;
     match result.action {
         Action::Error => Err(result
             .error

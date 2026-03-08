@@ -20,8 +20,8 @@ struct LogReq<'a> {
 
 // --- Public API ---
 
-fn log(ctx: &dyn Context, kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    if let Err(e) = call_service(ctx, BLOCK, kind, &LogReq { message, fields }) {
+async fn log(ctx: &dyn Context, kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
+    if let Err(e) = call_service(ctx, BLOCK, kind, &LogReq { message, fields }).await {
         // Fall back to tracing if the logger block is unavailable.
         tracing::warn!(
             logger_error = %e,
@@ -31,34 +31,34 @@ fn log(ctx: &dyn Context, kind: &str, message: &str, fields: &HashMap<String, se
     }
 }
 
-pub fn debug(ctx: &dyn Context, message: &str) {
-    log(ctx, ServiceOp::LOGGER_DEBUG, message, &HashMap::new());
+pub async fn debug(ctx: &dyn Context, message: &str) {
+    log(ctx, ServiceOp::LOGGER_DEBUG, message, &HashMap::new()).await;
 }
 
-pub fn info(ctx: &dyn Context, message: &str) {
-    log(ctx, ServiceOp::LOGGER_INFO, message, &HashMap::new());
+pub async fn info(ctx: &dyn Context, message: &str) {
+    log(ctx, ServiceOp::LOGGER_INFO, message, &HashMap::new()).await;
 }
 
-pub fn warn(ctx: &dyn Context, message: &str) {
-    log(ctx, ServiceOp::LOGGER_WARN, message, &HashMap::new());
+pub async fn warn(ctx: &dyn Context, message: &str) {
+    log(ctx, ServiceOp::LOGGER_WARN, message, &HashMap::new()).await;
 }
 
-pub fn error(ctx: &dyn Context, message: &str) {
-    log(ctx, ServiceOp::LOGGER_ERROR, message, &HashMap::new());
+pub async fn error(ctx: &dyn Context, message: &str) {
+    log(ctx, ServiceOp::LOGGER_ERROR, message, &HashMap::new()).await;
 }
 
-pub fn debug_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    log(ctx, ServiceOp::LOGGER_DEBUG, message, fields);
+pub async fn debug_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
+    log(ctx, ServiceOp::LOGGER_DEBUG, message, fields).await;
 }
 
-pub fn info_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    log(ctx, ServiceOp::LOGGER_INFO, message, fields);
+pub async fn info_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
+    log(ctx, ServiceOp::LOGGER_INFO, message, fields).await;
 }
 
-pub fn warn_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    log(ctx, ServiceOp::LOGGER_WARN, message, fields);
+pub async fn warn_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
+    log(ctx, ServiceOp::LOGGER_WARN, message, fields).await;
 }
 
-pub fn error_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    log(ctx, ServiceOp::LOGGER_ERROR, message, fields);
+pub async fn error_with(ctx: &dyn Context, message: &str, fields: &HashMap<String, serde_json::Value>) {
+    log(ctx, ServiceOp::LOGGER_ERROR, message, fields).await;
 }

@@ -1,9 +1,9 @@
-//! Config service client — calls `wafer/config` block via `call-block`.
+//! Config service client — calls `wafer/config` block via `call_block`.
 
 use serde::{Deserialize, Serialize};
 
-use crate::wafer::block_world::runtime;
-use crate::wafer::block_world::types::{Action, Message};
+use crate::types::{Action, Message};
+use crate::call_block;
 
 // --- Internal request/response types ---
 
@@ -23,22 +23,12 @@ struct GetResp {
     value: Option<String>,
 }
 
-// --- Helpers ---
-
-fn make_msg(kind: &str, data: &impl Serialize) -> Message {
-    Message {
-        kind: kind.to_string(),
-        data: serde_json::to_vec(data).unwrap_or_default(),
-        meta: Vec::new(),
-    }
-}
-
 // --- Public API ---
 
 /// Retrieve a configuration value by key, returning `None` if not found.
 pub fn get(key: &str) -> Option<String> {
-    let msg = make_msg("config.get", &GetReq { key });
-    let result = runtime::call_block("@wafer/config", &msg);
+    let msg = Message::new("config.get", serde_json::to_vec(&GetReq { key }).unwrap_or_default());
+    let result = call_block("@wafer/config", &msg);
     match result.action {
         Action::Error => None,
         _ => {
@@ -59,6 +49,6 @@ pub fn get_default(key: &str, default_value: &str) -> String {
 
 /// Store a configuration key-value pair.
 pub fn set(key: &str, value: &str) {
-    let msg = make_msg("config.set", &SetReq { key, value });
-    let _ = runtime::call_block("@wafer/config", &msg);
+    let msg = Message::new("config.set", serde_json::to_vec(&SetReq { key, value }).unwrap_or_default());
+    let _ = call_block("@wafer/config", &msg);
 }

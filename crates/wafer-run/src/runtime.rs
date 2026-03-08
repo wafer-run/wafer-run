@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::panic;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+use futures::FutureExt;
 
 use crate::block::Block;
 use crate::config::*;
@@ -100,8 +103,8 @@ pub struct RuntimeHandle {
 
 impl RuntimeHandle {
     /// Execute a flow by ID.
-    pub fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
-        self.inner.execute(flow_id, msg)
+    pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+        self.inner.execute(flow_id, msg).await
     }
 }
 
@@ -122,15 +125,9 @@ pub struct Wafer {
     pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
-    /// Shared WASM engine for all WASM blocks (enables epoch-based interruption).
+    /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
-    pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
-    /// Stop flag for the epoch ticker thread.
-    #[cfg(feature = "wasm")]
-    epoch_ticker_stop: Arc<AtomicBool>,
-    /// Handle for the epoch ticker thread so it can be joined on shutdown.
-    #[cfg(feature = "wasm")]
-    epoch_ticker_handle: Option<std::thread::JoinHandle<()>>,
+    pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
 }
 
 impl Wafer {
@@ -153,10 +150,6 @@ impl Wafer {
             flow_defs_snapshot: Arc::new(Vec::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
-            #[cfg(feature = "wasm")]
-            epoch_ticker_stop: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "wasm")]
-            epoch_ticker_handle: None,
         }
     }
 
@@ -339,13 +332,17 @@ impl Wafer {
     /// (loaded via `load_blocks_json` or `add_block_config`). Blocks that
     /// are already in `resolved` (from explicit `register_block` calls) are
     /// skipped.
-    pub fn resolve(&mut self) -> Result<(), String> {
+    pub async fn resolve(&mut self) -> Result<(), String> {
         // Gather uses contributions before creating blocks
         self.gather_uses_configs();
 
         // Resolve blocks from block_configs
         let configs: Vec<(String, serde_json::Value)> =
             self.block_configs.drain().collect();
+
+        // Collect names of pre-registered blocks so we can init them after
+        // all infrastructure blocks (database, etc.) are resolved.
+        let pre_registered: Vec<String> = self.resolved.keys().cloned().collect();
 
         for (name, config) in configs {
             if self.resolved.contains_key(&name) {
@@ -372,6 +369,7 @@ impl Wafer {
                             data: serde_json::to_vec(&config).unwrap_or_default(),
                         },
                     )
+                    .await
                     .map_err(|e| format!("init block {:?}: {}", name, e))?;
 
                 self.resolved.insert(name.clone(), block);
@@ -380,65 +378,62 @@ impl Wafer {
             }
         }
 
-        let flow_ids: Vec<String> = self.flows.keys().cloned().collect();
-        for flow_id in flow_ids {
-            // Take flow out temporarily
-            let mut flow = self.flows.remove(&flow_id).expect("BUG: flow disappeared during iteration");
-            self.resolve_node(&mut flow.root)?;
-            self.flows.insert(flow_id.clone(), flow);
-        }
-        Ok(())
-    }
+        // Now that all block_configs are resolved (database, crypto, etc.),
+        // rebuild the all_blocks snapshot so lifecycle contexts can find them.
+        self.rebuild_all_blocks();
 
-    fn resolve_node(&mut self, node: &mut Node) -> Result<(), String> {
-        // Parse config map
-        if let Some(ref config) = node.config {
-            node.config_map = parse_config_map(config);
-        }
-
-        if !node.block.is_empty() {
-            if let Some(block) = self.resolved.get(&node.block) {
-                node.resolved_block = Some(block.clone());
-            } else if let Some(factory) = self.registry.get(&node.block) {
-                let block = factory.create(node.config.as_ref());
-
-                // Initialize block
+        // Run lifecycle Init for blocks that were explicitly registered via
+        // register_block() — they were skipped above because they were already
+        // in resolved. Now they can safely call into infrastructure blocks.
+        for name in &pre_registered {
+            if let Some(block) = self.resolved.get(name) {
                 let ctx = self.make_context(
                     String::new(),
                     String::new(),
-                    node.config_map.clone(),
+                    HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
                 );
-
                 block
                     .lifecycle(
                         &ctx,
                         LifecycleEvent {
                             event_type: LifecycleType::Init,
-                            data: node
-                                .config
-                                .as_ref()
-                                .map(|c| serde_json::to_vec(c).unwrap_or_default())
-                                .unwrap_or_default(),
+                            data: Vec::new(),
                         },
                     )
-                    .map_err(|e| format!("init block {:?}: {}", node.block, e))?;
+                    .await
+                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+            }
+        }
 
-                self.resolved.insert(node.block.clone(), block.clone());
-                node.resolved_block = Some(block);
-            } else {
-                // Try remote block download (wasm feature only)
-                #[cfg(feature = "wasm")]
-                {
-                    let block = if let Some(remote_ref) = parse_versioned_block(&node.block) {
-                        self.download_remote_block(&remote_ref)?
-                    } else if let Some(remote_ref) = parse_unversioned_block(&node.block) {
-                        self.resolve_latest_wasm_release(&remote_ref)?
-                    } else {
-                        return Err(format!("block type not found: {}", node.block));
-                    };
+        let flow_ids: Vec<String> = self.flows.keys().cloned().collect();
+        for flow_id in flow_ids {
+            // Take flow out temporarily
+            let mut flow = self.flows.remove(&flow_id).expect("BUG: flow disappeared during iteration");
+            self.resolve_node(&mut flow.root).await?;
+            self.flows.insert(flow_id.clone(), flow);
+        }
+        Ok(())
+    }
 
+    fn resolve_node<'a>(
+        &'a mut self,
+        node: &'a mut Node,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            // Parse config map
+            if let Some(ref config) = node.config {
+                node.config_map = parse_config_map(config);
+            }
+
+            if !node.block.is_empty() {
+                if let Some(block) = self.resolved.get(&node.block) {
+                    node.resolved_block = Some(block.clone());
+                } else if let Some(factory) = self.registry.get(&node.block) {
+                    let block = factory.create(node.config.as_ref());
+
+                    // Initialize block
                     let ctx = self.make_context(
                         String::new(),
                         String::new(),
@@ -459,28 +454,67 @@ impl Wafer {
                                     .unwrap_or_default(),
                             },
                         )
-                        .map_err(|e| format!("init remote block {:?}: {}", node.block, e))?;
+                        .await
+                        .map_err(|e| format!("init block {:?}: {}", node.block, e))?;
 
                     self.resolved.insert(node.block.clone(), block.clone());
                     node.resolved_block = Some(block);
+                } else {
+                    // Try remote block download (wasm feature only)
+                    #[cfg(feature = "wasm")]
+                    {
+                        let block = if let Some(remote_ref) = parse_versioned_block(&node.block) {
+                            self.download_remote_block(&remote_ref).await?
+                        } else if let Some(remote_ref) = parse_unversioned_block(&node.block) {
+                            self.resolve_latest_wasm_release(&remote_ref).await?
+                        } else {
+                            return Err(format!("block type not found: {}", node.block));
+                        };
+
+                        let ctx = self.make_context(
+                            String::new(),
+                            String::new(),
+                            node.config_map.clone(),
+                            Arc::new(AtomicBool::new(false)),
+                            None,
+                        );
+
+                        block
+                            .lifecycle(
+                                &ctx,
+                                LifecycleEvent {
+                                    event_type: LifecycleType::Init,
+                                    data: node
+                                        .config
+                                        .as_ref()
+                                        .map(|c| serde_json::to_vec(c).unwrap_or_default())
+                                        .unwrap_or_default(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| format!("init remote block {:?}: {}", node.block, e))?;
+
+                        self.resolved.insert(node.block.clone(), block.clone());
+                        node.resolved_block = Some(block);
+                    }
+
+                    #[cfg(not(feature = "wasm"))]
+                    return Err(format!("block type not found: {}", node.block));
                 }
-
-                #[cfg(not(feature = "wasm"))]
-                return Err(format!("block type not found: {}", node.block));
             }
-        }
 
-        for child in &mut node.next {
-            self.resolve_node(child)?;
-        }
-        Ok(())
+            for child in &mut node.next {
+                self.resolve_node(child).await?;
+            }
+            Ok(())
+        })
     }
 
     /// Download a remote block from GitHub Releases and load it as a sandboxed
     /// WASM block. The `.wasm` asset is expected at:
     /// `https://github.com/{owner}/{repo}/releases/download/{version}/{repo}.wasm`
     #[cfg(feature = "wasm")]
-    fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
+    async fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
 
@@ -489,13 +523,14 @@ impl Wafer {
             r.owner, r.repo, r.version, r.repo
         );
 
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("failed to create HTTP client: {}", e))?;
         let resp = client
             .get(&url)
             .send()
+            .await
             .map_err(|e| format!("failed to download {}: {}", url, e))?;
 
         let status = resp.status().as_u16();
@@ -505,6 +540,7 @@ impl Wafer {
 
         let body = resp
             .bytes()
+            .await
             .map_err(|e| format!("failed to read body from {}: {}", url, e))?;
 
         if body.is_empty() {
@@ -521,14 +557,14 @@ impl Wafer {
     /// Resolve the latest GitHub Release that has a `.wasm` asset and load it
     /// as a sandboxed WASM block.
     #[cfg(feature = "wasm")]
-    fn resolve_latest_wasm_release(
+    async fn resolve_latest_wasm_release(
         &mut self,
         r: &UnversionedRemoteBlockRef,
     ) -> Result<Arc<dyn Block>, String> {
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
 
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("failed to create HTTP client: {}", e))?;
@@ -544,6 +580,7 @@ impl Wafer {
             .header("User-Agent", "wafer-run/0.1.0")
             .header("Accept", "application/vnd.github+json")
             .send()
+            .await
             .map_err(|e| format!("failed to fetch releases for {}/{}: {}", r.owner, r.repo, e))?;
 
         let api_status = api_resp.status().as_u16();
@@ -556,6 +593,7 @@ impl Wafer {
 
         let api_body = api_resp
             .bytes()
+            .await
             .map_err(|e| format!("failed to read releases response: {}", e))?;
 
         // 2. Parse the JSON response
@@ -598,6 +636,7 @@ impl Wafer {
         let dl_resp = client
             .get(&wasm_url)
             .send()
+            .await
             .map_err(|e| format!("failed to download {}: {}", wasm_url, e))?;
 
         let dl_status = dl_resp.status().as_u16();
@@ -610,6 +649,7 @@ impl Wafer {
 
         let dl_body = dl_resp
             .bytes()
+            .await
             .map_err(|e| format!("failed to read body from {}: {}", wasm_url, e))?;
 
         if dl_body.is_empty() {
@@ -633,14 +673,13 @@ impl Wafer {
         Ok(Arc::new(block))
     }
 
-    /// Get or create the shared WASM engine with hardened configuration.
+    /// Get or create the shared WASM engine with fuel metering.
     #[cfg(feature = "wasm")]
-    pub fn wasm_engine(&mut self) -> Result<&wasmtime::Engine, String> {
+    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, String> {
         if self.wasm_engine.is_none() {
-            let mut config = wasmtime::Config::new();
-            config.epoch_interruption(true);
-            let engine = wasmtime::Engine::new(&config)
-                .map_err(|e| format!("failed to create WASM engine: {}", e))?;
+            let mut config = wasmi::Config::default();
+            config.consume_fuel(true);
+            let engine = wasmi::Engine::new(&config);
             self.wasm_engine = Some(Arc::new(engine));
         }
         Ok(self.wasm_engine.as_ref().unwrap())
@@ -650,8 +689,8 @@ impl Wafer {
     ///
     /// Use this when you don't need the HTTP listener (e.g. wafer-run-node,
     /// wafer-ffi, or integration tests that manage their own serving).
-    pub fn start_without_bind(&mut self) -> Result<(), String> {
-        self.resolve()?;
+    pub async fn start_without_bind(&mut self) -> Result<(), String> {
+        self.resolve().await?;
 
         // Rebuild the all_blocks map so contexts can see all resolved blocks
         self.rebuild_all_blocks();
@@ -661,19 +700,6 @@ impl Wafer {
         self.flow_infos_snapshot = Arc::new(self.flows_info());
         self.flow_defs_snapshot = Arc::new(self.flow_defs());
 
-        // Spawn epoch ticker for WASM engine interrupt support
-        #[cfg(feature = "wasm")]
-        if let Some(ref engine) = self.wasm_engine {
-            let engine = engine.clone();
-            let stop = self.epoch_ticker_stop.clone();
-            self.epoch_ticker_handle = Some(std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    engine.increment_epoch();
-                }
-            }));
-        }
-
         Ok(())
     }
 
@@ -681,9 +707,9 @@ impl Wafer {
     ///
     /// This is the primary entry point for applications that want blocks
     /// (like `@wafer/http`) to spawn their own async tasks.
-    pub fn start(mut self) -> Result<Arc<Self>, String> {
+    pub async fn start(mut self) -> Result<Arc<Self>, String> {
         // 1. All mutable work
-        self.start_without_bind()?;
+        self.start_without_bind().await?;
 
         // 2. Call lifecycle(Start) on all blocks
         let ctx = self.make_context(
@@ -700,7 +726,7 @@ impl Wafer {
                     event_type: LifecycleType::Start,
                     data: Vec::new(),
                 },
-            );
+            ).await;
         }
 
         // 3. Wrap in Arc
@@ -719,12 +745,7 @@ impl Wafer {
     }
 
     /// Shut down all resolved block instances (works through `Arc`).
-    pub fn shutdown(&self) {
-        #[cfg(feature = "wasm")]
-        {
-            self.epoch_ticker_stop.store(true, Ordering::Relaxed);
-        }
-
+    pub async fn shutdown(&self) {
         let ctx = self.make_context(
             "shutdown",
             "shutdown",
@@ -739,22 +760,14 @@ impl Wafer {
                     event_type: LifecycleType::Stop,
                     data: Vec::new(),
                 },
-            );
+            ).await;
         }
     }
 
     /// Stop shuts down all resolved block instances (requires `&mut self`).
     ///
     /// Prefer `shutdown()` when the runtime is behind an `Arc`.
-    pub fn stop(&mut self) {
-        #[cfg(feature = "wasm")]
-        {
-            self.epoch_ticker_stop.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.epoch_ticker_handle.take() {
-                let _ = handle.join();
-            }
-        }
-
+    pub async fn stop(&mut self) {
         let ctx = self.make_context(
             "shutdown",
             "shutdown",
@@ -769,12 +782,12 @@ impl Wafer {
                     event_type: LifecycleType::Stop,
                     data: Vec::new(),
                 },
-            );
+            ).await;
         }
     }
 
     /// Execute runs a flow by ID with the given message.
-    pub fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+    pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
         let flow = match self.flows.get(flow_id) {
             Some(c) => c,
             None => {
@@ -806,7 +819,7 @@ impl Wafer {
         let mut visited_flows = HashSet::new();
         visited_flows.insert(flow_id.to_string());
 
-        let result = self.execute_node(&flow.root, msg, flow_id, &flow.config.on_error, &cancelled, deadline, &mut visited_flows, "root");
+        let result = self.execute_node(&flow.root, msg, flow_id, &flow.config.on_error, &cancelled, deadline, &mut visited_flows, "root").await;
 
         // Check timeout
         let result = if deadline.is_some() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
@@ -829,207 +842,213 @@ impl Wafer {
         result
     }
 
-    fn execute_node(
-        &self,
-        node: &Node,
-        msg: &mut Message,
-        flow_id: &str,
-        on_error: &str,
-        cancelled: &Arc<AtomicBool>,
+    fn execute_node<'a>(
+        &'a self,
+        node: &'a Node,
+        msg: &'a mut Message,
+        flow_id: &'a str,
+        on_error: &'a str,
+        cancelled: &'a Arc<AtomicBool>,
         deadline: Option<Instant>,
-        visited_flows: &mut HashSet<String>,
-        node_path: &str,
-    ) -> Result_ {
-        // Handle flow references
-        if !node.flow.is_empty() {
-            return self.execute_flow_ref(node, msg, on_error, cancelled, deadline, visited_flows);
-        }
-
-        let block = match &node.resolved_block {
-            Some(b) => b.clone(),
-            None => {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "unresolved",
-                        format!("block not resolved: {}", node.block),
-                    )),
-                    response: None,
-                    message: None,
-                };
+        visited_flows: &'a mut HashSet<String>,
+        node_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+        Box::pin(async move {
+            // Handle flow references
+            if !node.flow.is_empty() {
+                return self.execute_flow_ref(node, msg, on_error, cancelled, deadline, visited_flows).await;
             }
-        };
 
-        // Build context for this node, with requires enforcement
-        let caller_requires = {
-            let info = block.info();
-            if info.requires.is_empty() {
-                None // unrestricted
-            } else {
-                Some(info.requires)
-            }
-        };
-        let mut ctx = self.make_context(
-            flow_id,
-            node_path,
-            node.config_map.clone(),
-            cancelled.clone(),
-            deadline,
-        );
-        ctx.caller_requires = caller_requires;
-
-        // Observability: block start
-        let obs_ctx = ObservabilityContext {
-            flow_id: flow_id.to_string(),
-            node_path: node_path.to_string(),
-            block_name: node.block.clone(),
-            trace_id: msg.get_meta("trace_id").to_string(),
-            message: Some(msg.clone()),
-        };
-        self.hooks.fire_block_start(&obs_ctx);
-        let start = Instant::now();
-
-        // Execute block with panic recovery
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            block.handle(&ctx, msg)
-        }));
-
-        let result = match result {
-            Ok(r) => r,
-            Err(panic_info) => {
-                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
-                    response: None,
-                    message: Some(msg.clone()),
+            let block = match &node.resolved_block {
+                Some(b) => b.clone(),
+                None => {
+                    return Result_ {
+                        action: Action::Error,
+                        error: Some(WaferError::new(
+                            "unresolved",
+                            format!("block not resolved: {}", node.block),
+                        )),
+                        response: None,
+                        message: None,
+                    };
                 }
-            }
-        };
-
-        // Observability: block end
-        self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
-
-        // Process result
-        match result.action {
-            Action::Respond | Action::Drop => return result,
-            Action::Error => {
-                if on_error == "stop" {
-                    return result;
-                }
-                // on_error=continue: fall through to children
-            }
-            Action::Continue => {}
-        }
-
-        // Update message from result if available
-        if let Some(ref result_msg) = result.message {
-            *msg = result_msg.clone();
-        }
-
-        if node.next.is_empty() {
-            if result.action == Action::Error {
-                // on_error=continue with no more nodes: swallow error
-                return Result_::continue_with(msg.clone());
-            }
-            return result;
-        }
-
-        self.execute_first_match(&node.next, msg, flow_id, on_error, cancelled, deadline, visited_flows, node_path)
-    }
-
-    fn execute_flow_ref(
-        &self,
-        node: &Node,
-        msg: &mut Message,
-        on_error: &str,
-        cancelled: &Arc<AtomicBool>,
-        deadline: Option<Instant>,
-        visited_flows: &mut HashSet<String>,
-    ) -> Result_ {
-        // Circular flow reference detection
-        if visited_flows.contains(&node.flow) {
-            return Result_ {
-                action: Action::Error,
-                error: Some(WaferError::new(
-                    "circular_flow",
-                    format!("circular flow reference detected: {}", node.flow),
-                )),
-                response: None,
-                message: None,
             };
-        }
 
-        let target = match self.flows.get(&node.flow) {
-            Some(c) => c,
-            None => {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "not_found",
-                        format!("referenced flow not found: {}", node.flow),
-                    )),
-                    response: None,
-                    message: None,
-                };
-            }
-        };
-
-        visited_flows.insert(node.flow.clone());
-        let result = self.execute_node(&target.root, msg, &target.id, &target.config.on_error, cancelled, deadline, visited_flows, "root");
-        visited_flows.remove(&node.flow);
-
-        if result.action == Action::Continue && !node.next.is_empty() {
-            return self.execute_first_match(
-                &node.next,
-                msg,
-                &target.id,
-                on_error,
-                cancelled,
+            // Build context for this node, with requires enforcement
+            let caller_requires = {
+                let info = block.info();
+                if info.requires.is_empty() {
+                    None // unrestricted
+                } else {
+                    Some(info.requires)
+                }
+            };
+            let mut ctx = self.make_context(
+                flow_id,
+                node_path,
+                node.config_map.clone(),
+                cancelled.clone(),
                 deadline,
-                visited_flows,
-                &format!("ref:{}", node.flow),
             );
-        }
+            ctx.caller_requires = caller_requires;
 
-        result
-    }
+            // Observability: block start
+            let obs_ctx = ObservabilityContext {
+                flow_id: flow_id.to_string(),
+                node_path: node_path.to_string(),
+                block_name: node.block.clone(),
+                trace_id: msg.get_meta("trace_id").to_string(),
+                message: Some(msg.clone()),
+            };
+            self.hooks.fire_block_start(&obs_ctx);
+            let start = Instant::now();
 
-    fn execute_first_match(
-        &self,
-        nodes: &[Box<Node>],
-        msg: &mut Message,
-        flow_id: &str,
-        on_error: &str,
-        cancelled: &Arc<AtomicBool>,
-        deadline: Option<Instant>,
-        visited_flows: &mut HashSet<String>,
-        parent_path: &str,
-    ) -> Result_ {
-        for (i, child) in nodes.iter().enumerate() {
-            if !matches_pattern(&child.match_pattern, &msg.kind) {
-                continue;
-            }
-            // Extract path variables from HTTP route patterns
-            if !child.match_pattern.is_empty() {
-                if let Some(idx) = child.match_pattern.find(":/") {
-                    let pattern_path = &child.match_pattern[idx + 1..];
-                    if let Some(msg_idx) = msg.kind.find(":/") {
-                        let msg_path = msg.kind[msg_idx + 1..].to_string();
-                        extract_path_vars(pattern_path, &msg_path, msg);
+            // Execute block with panic recovery
+            let result = std::panic::AssertUnwindSafe(block.handle(&ctx, msg))
+                .catch_unwind()
+                .await;
+
+            let result = match result {
+                Ok(r) => r,
+                Err(panic_info) => {
+                    let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    Result_ {
+                        action: Action::Error,
+                        error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
+                        response: None,
+                        message: Some(msg.clone()),
                     }
                 }
+            };
+
+            // Observability: block end
+            self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
+
+            // Process result
+            match result.action {
+                Action::Respond | Action::Drop => return result,
+                Action::Error => {
+                    if on_error == "stop" {
+                        return result;
+                    }
+                    // on_error=continue: fall through to children
+                }
+                Action::Continue => {}
             }
-            let child_path = format!("{}.{}", parent_path, i);
-            return self.execute_node(child, msg, flow_id, on_error, cancelled, deadline, visited_flows, &child_path);
-        }
-        Result_::continue_with(msg.clone())
+
+            // Update message from result if available
+            if let Some(ref result_msg) = result.message {
+                *msg = result_msg.clone();
+            }
+
+            if node.next.is_empty() {
+                if result.action == Action::Error {
+                    // on_error=continue with no more nodes: swallow error
+                    return Result_::continue_with(msg.clone());
+                }
+                return result;
+            }
+
+            self.execute_first_match(&node.next, msg, flow_id, on_error, cancelled, deadline, visited_flows, node_path).await
+        })
+    }
+
+    fn execute_flow_ref<'a>(
+        &'a self,
+        node: &'a Node,
+        msg: &'a mut Message,
+        on_error: &'a str,
+        cancelled: &'a Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        visited_flows: &'a mut HashSet<String>,
+    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+        Box::pin(async move {
+            // Circular flow reference detection
+            if visited_flows.contains(&node.flow) {
+                return Result_ {
+                    action: Action::Error,
+                    error: Some(WaferError::new(
+                        "circular_flow",
+                        format!("circular flow reference detected: {}", node.flow),
+                    )),
+                    response: None,
+                    message: None,
+                };
+            }
+
+            let target = match self.flows.get(&node.flow) {
+                Some(c) => c,
+                None => {
+                    return Result_ {
+                        action: Action::Error,
+                        error: Some(WaferError::new(
+                            "not_found",
+                            format!("referenced flow not found: {}", node.flow),
+                        )),
+                        response: None,
+                        message: None,
+                    };
+                }
+            };
+
+            visited_flows.insert(node.flow.clone());
+            let result = self.execute_node(&target.root, msg, &target.id, &target.config.on_error, cancelled, deadline, visited_flows, "root").await;
+            visited_flows.remove(&node.flow);
+
+            if result.action == Action::Continue && !node.next.is_empty() {
+                return self.execute_first_match(
+                    &node.next,
+                    msg,
+                    &target.id,
+                    on_error,
+                    cancelled,
+                    deadline,
+                    visited_flows,
+                    &format!("ref:{}", node.flow),
+                ).await;
+            }
+
+            result
+        })
+    }
+
+    fn execute_first_match<'a>(
+        &'a self,
+        nodes: &'a [Box<Node>],
+        msg: &'a mut Message,
+        flow_id: &'a str,
+        on_error: &'a str,
+        cancelled: &'a Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        visited_flows: &'a mut HashSet<String>,
+        parent_path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+        Box::pin(async move {
+            for (i, child) in nodes.iter().enumerate() {
+                if !matches_pattern(&child.match_pattern, &msg.kind) {
+                    continue;
+                }
+                // Extract path variables from HTTP route patterns
+                if !child.match_pattern.is_empty() {
+                    if let Some(idx) = child.match_pattern.find(":/") {
+                        let pattern_path = &child.match_pattern[idx + 1..];
+                        if let Some(msg_idx) = msg.kind.find(":/") {
+                            let msg_path = msg.kind[msg_idx + 1..].to_string();
+                            extract_path_vars(pattern_path, &msg_path, msg);
+                        }
+                    }
+                }
+                let child_path = format!("{}.{}", parent_path, i);
+                return self.execute_node(child, msg, flow_id, on_error, cancelled, deadline, visited_flows, &child_path).await;
+            }
+            Result_::continue_with(msg.clone())
+        })
     }
 
     /// GetFlow returns a flow by ID.

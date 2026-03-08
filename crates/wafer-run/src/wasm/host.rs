@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use wasmi::{Caller, Memory, AsContext, AsContextMut, Val};
+
 use crate::context::Context;
 use crate::wasm::capabilities::BlockCapabilities;
-use super::bindings;
 
 /// HostState stores the wafer Context and capabilities for host function calls.
 pub struct HostState {
@@ -11,116 +12,97 @@ pub struct HostState {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime host implementation (call-block, log, is-cancelled)
+// Memory helpers for thin ABI
 // ---------------------------------------------------------------------------
 
-impl bindings::runtime::Host for HostState {
-    fn is_cancelled(&mut self) -> bool {
-        match &self.context {
-            Some(ctx) => ctx.is_cancelled(),
-            None => false,
-        }
+/// Read a byte slice from WASM linear memory at the given pointer and length.
+pub fn mem_read(ctx: impl AsContext<Data = HostState>, memory: &Memory, ptr: u32, len: u32) -> Result<Vec<u8>, String> {
+    let data = memory.data(&ctx);
+    let start = ptr as usize;
+    let end = start + len as usize;
+    if end > data.len() {
+        return Err(format!(
+            "out of bounds memory read: {}..{} (memory size {})",
+            start,
+            end,
+            data.len()
+        ));
     }
-
-    fn call_block(
-        &mut self,
-        block_name: String,
-        msg: bindings::types::Message,
-    ) -> bindings::types::BlockResult {
-        let ctx = match &self.context {
-            Some(ctx) => ctx.clone(),
-            None => {
-                return bindings::types::BlockResult {
-                    action: bindings::types::Action::Error,
-                    response: None,
-                    error: Some(bindings::types::WaferError {
-                        code: bindings::types::ErrorCode::Internal,
-                        message: "no context available".to_string(),
-                        meta: vec![],
-                    }),
-                    message: None,
-                };
-            }
-        };
-
-        // Convert WIT message to internal Message
-        let mut internal_msg = crate::types::Message {
-            kind: msg.kind,
-            data: msg.data,
-            meta: msg.meta.into_iter().map(|e| (e.key, e.value)).collect(),
-        };
-
-        // Call through the context's call_block
-        let result = ctx.call_block(&block_name, &mut internal_msg);
-
-        // Convert internal Result_ back to WIT BlockResult
-        let action = match result.action {
-            crate::types::Action::Continue => bindings::types::Action::Continue,
-            crate::types::Action::Respond => bindings::types::Action::Respond,
-            crate::types::Action::Drop => bindings::types::Action::Drop,
-            crate::types::Action::Error => bindings::types::Action::Error,
-        };
-
-        let response = result.response.map(|r| bindings::types::Response {
-            data: r.data,
-            meta: r.meta.into_iter()
-                .map(|(k, v)| bindings::types::MetaEntry { key: k, value: v })
-                .collect(),
-        });
-
-        let error = result.error.map(|e| {
-            let code = match e.code.as_str() {
-                "ok" => bindings::types::ErrorCode::Ok,
-                "cancelled" => bindings::types::ErrorCode::Cancelled,
-                "invalid_argument" => bindings::types::ErrorCode::InvalidArgument,
-                "not_found" => bindings::types::ErrorCode::NotFound,
-                "already_exists" => bindings::types::ErrorCode::AlreadyExists,
-                "permission_denied" => bindings::types::ErrorCode::PermissionDenied,
-                "unauthenticated" => bindings::types::ErrorCode::Unauthenticated,
-                "resource_exhausted" => bindings::types::ErrorCode::ResourceExhausted,
-                "unimplemented" => bindings::types::ErrorCode::Unimplemented,
-                "unavailable" => bindings::types::ErrorCode::Unavailable,
-                "internal" => bindings::types::ErrorCode::Internal,
-                _ => bindings::types::ErrorCode::Unknown,
-            };
-            bindings::types::WaferError {
-                code,
-                message: e.message,
-                meta: e.meta.into_iter()
-                    .map(|(k, v)| bindings::types::MetaEntry { key: k, value: v })
-                    .collect(),
-            }
-        });
-
-        let message = result.message.map(|m| bindings::types::Message {
-            kind: m.kind,
-            data: m.data,
-            meta: m.meta.into_iter()
-                .map(|(k, v)| bindings::types::MetaEntry { key: k, value: v })
-                .collect(),
-        });
-
-        bindings::types::BlockResult {
-            action,
-            response,
-            error,
-            message,
-        }
-    }
-
-    fn log(&mut self, level: String, msg: String) {
-        match level.as_str() {
-            "debug" => tracing::debug!("{}", msg),
-            "info" => tracing::info!("{}", msg),
-            "warn" => tracing::warn!("{}", msg),
-            "error" => tracing::error!("{}", msg),
-            _ => tracing::info!("{}", msg),
-        }
-    }
+    Ok(data[start..end].to_vec())
 }
 
-// ---------------------------------------------------------------------------
-// Types host implementation (needed because types is imported too)
-// ---------------------------------------------------------------------------
+/// Read a byte slice from WASM linear memory using a Caller (for use in host functions).
+pub fn mem_read_caller(caller: &Caller<'_, HostState>, ptr: u32, len: u32) -> Result<Vec<u8>, String> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "guest has no exported memory".to_string())?;
 
-impl bindings::types::Host for HostState {}
+    let data = memory.data(caller);
+    let start = ptr as usize;
+    let end = start + len as usize;
+    if end > data.len() {
+        return Err(format!(
+            "out of bounds memory read: {}..{} (memory size {})",
+            start,
+            end,
+            data.len()
+        ));
+    }
+    Ok(data[start..end].to_vec())
+}
+
+/// Write bytes into WASM linear memory using the guest's allocator.
+///
+/// Returns `(ptr, len)` of the written data in guest memory.
+/// The guest must export `__wafer_alloc(len: i32) -> i32`.
+pub fn mem_write(caller: &mut Caller<'_, HostState>, data: &[u8]) -> Result<(u32, u32), String> {
+    let alloc = caller
+        .get_export("__wafer_alloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| "guest has no __wafer_alloc export".to_string())?;
+
+    let len = data.len() as i32;
+    let mut result = [Val::I32(0)];
+    alloc
+        .call(caller.as_context_mut(), &[Val::I32(len)], &mut result)
+        .map_err(|e| format!("calling __wafer_alloc: {e}"))?;
+
+    let ptr = match result[0] {
+        Val::I32(v) => v as u32,
+        _ => return Err("__wafer_alloc returned non-i32".to_string()),
+    };
+
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| "guest has no exported memory".to_string())?;
+
+    let mem_data = memory.data_mut(caller.as_context_mut());
+    let start = ptr as usize;
+    let end = start + data.len();
+    if end > mem_data.len() {
+        return Err(format!(
+            "out of bounds memory write: {}..{} (memory size {})",
+            start,
+            end,
+            mem_data.len()
+        ));
+    }
+    mem_data[start..end].copy_from_slice(data);
+
+    Ok((ptr, data.len() as u32))
+}
+
+/// Pack a (ptr, len) pair into a single i64 return value.
+/// High 32 bits = ptr, low 32 bits = len.
+pub fn pack_ptr_len(ptr: u32, len: u32) -> i64 {
+    ((ptr as i64) << 32) | (len as i64)
+}
+
+/// Unpack a packed i64 into (ptr, len).
+pub fn unpack_ptr_len(packed: i64) -> (u32, u32) {
+    let ptr = (packed >> 32) as u32;
+    let len = (packed & 0xFFFF_FFFF) as u32;
+    (ptr, len)
+}

@@ -253,6 +253,8 @@ fn serve_index_spa(msg: &mut Message, index_path: &PathBuf) -> Result_ {
     respond(msg, data, "text/html; charset=utf-8")
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for WebBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -268,7 +270,7 @@ impl Block for WebBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Only handle GET requests
         let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
@@ -279,7 +281,7 @@ impl Block for WebBlock {
         Self::serve_file(msg, &config)
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         ctx: &dyn Context,
         event: LifecycleEvent,
@@ -298,6 +300,7 @@ impl Block for WebBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/web", Arc::new(WebBlock::new()));
 }

@@ -11,6 +11,8 @@ impl InspectorBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for InspectorBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -26,7 +28,7 @@ impl Block for InspectorBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Require authentication — reject if no auth.user_id is set
         let auth_user = msg.get_meta("auth.user_id");
         if auth_user.is_empty() {
@@ -89,7 +91,7 @@ impl Block for InspectorBlock {
         json_respond(msg, &summary)
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -143,6 +145,7 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/inspector", Arc::new(InspectorBlock::new()));
 }

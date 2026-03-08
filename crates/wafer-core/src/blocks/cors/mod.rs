@@ -20,6 +20,8 @@ impl CorsBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for CorsBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -35,7 +37,7 @@ impl Block for CorsBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let origins = ctx
             .config_get("allowed_origins")
             .map(|s| s.to_string())
@@ -83,7 +85,7 @@ impl Block for CorsBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -92,6 +94,7 @@ impl Block for CorsBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/cors", Arc::new(CorsBlock::new()));
 }

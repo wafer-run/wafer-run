@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wafer-run = { path = "../wafer-run", features = ["full"] }
+tokio = { workspace = true }
 napi = { workspace = true }
 napi-derive = { workspace = true }
 serde_json = { workspace = true }

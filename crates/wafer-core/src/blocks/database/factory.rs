@@ -23,6 +23,8 @@ struct FailedDatabaseBlock {
     reason: String,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for FailedDatabaseBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -38,14 +40,14 @@ impl Block for FailedDatabaseBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn wafer_run::context::Context, _msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn wafer_run::context::Context, _msg: &mut Message) -> Result_ {
         Result_::error(WaferError::new(
             ErrorCode::INTERNAL,
             format!("database block failed to initialize: {}", self.reason),
         ))
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn wafer_run::context::Context,
         _event: LifecycleEvent,

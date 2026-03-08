@@ -26,10 +26,12 @@ impl RateLimitBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for RateLimitBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer/rate-limit".to_string(),
+            name: "@wafer/ip-rate-limit".to_string(),
             version: "0.1.0".to_string(),
             interface: "middleware@v1".to_string(),
             summary: "Per-IP rate limiting".to_string(),
@@ -41,7 +43,7 @@ impl Block for RateLimitBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let max = ctx
             .config_get("max_requests")
             .and_then(|s| s.parse::<u32>().ok())
@@ -114,7 +116,7 @@ impl Block for RateLimitBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -123,6 +125,7 @@ impl Block for RateLimitBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
-    w.register_block("@wafer/rate-limit", Arc::new(RateLimitBlock::new()));
+    w.register_block("@wafer/ip-rate-limit", Arc::new(RateLimitBlock::new()));
 }

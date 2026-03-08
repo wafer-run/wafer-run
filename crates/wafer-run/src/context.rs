@@ -1,14 +1,20 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use crate::block::Block;
-use crate::common::ErrorCode;
 use crate::types::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::block::Block;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::common::ErrorCode;
+
 /// Context provides runtime capabilities to blocks.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait Context: Send + Sync {
     /// Call another block by name.
-    fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
+    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
 
     /// Check if the context has been cancelled.
     fn is_cancelled(&self) -> bool;
@@ -27,6 +33,8 @@ pub trait Context: Send + Sync {
 }
 
 /// RuntimeContext implements Context for blocks.
+/// Only available on non-wasm32 targets (uses std::time::Instant).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RuntimeContext {
     pub flow_id: String,
     pub node_id: String,
@@ -50,8 +58,9 @@ pub struct RuntimeContext {
     pub caller_requires: Option<Vec<String>>,
 }
 
-// --- Result helpers ---
+// --- Result helpers (used by RuntimeContext impl) ---
 
+#[cfg(not(target_arch = "wasm32"))]
 fn err_result(code: impl Into<String>, message: impl Into<String>) -> Result_ {
     Result_ {
         action: Action::Error,
@@ -61,8 +70,10 @@ fn err_result(code: impl Into<String>, message: impl Into<String>) -> Result_ {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
 impl Context for RuntimeContext {
-    fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
         // Recursion depth check
         let depth = self
             .call_depth
@@ -141,7 +152,7 @@ impl Context for RuntimeContext {
         };
 
         // Call the block
-        let result = block.handle(&sub_ctx, msg);
+        let result = block.handle(&sub_ctx, msg).await;
 
         self.call_depth
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);

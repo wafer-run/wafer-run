@@ -29,19 +29,19 @@ struct SetReq<'a> {
 // --- Public API ---
 
 /// Get a config value by key. Returns `Err` with `NOT_FOUND` if the key does not exist.
-pub fn get(ctx: &dyn Context, key: &str) -> Result<String, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key })?;
+pub async fn get(ctx: &dyn Context, key: &str) -> Result<String, WaferError> {
+    let data = call_service(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }).await?;
     let resp: GetResp = decode(&data)?;
     Ok(resp.value)
 }
 
 /// Get a config value, returning `default` if the key does not exist.
-pub fn get_default(ctx: &dyn Context, key: &str, default: &str) -> String {
-    get(ctx, key).unwrap_or_else(|_| default.to_string())
+pub async fn get_default(ctx: &dyn Context, key: &str, default: &str) -> String {
+    get(ctx, key).await.unwrap_or_else(|_| default.to_string())
 }
 
 /// Set a config value.
-pub fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferError> {
-    call_service(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value })?;
+pub async fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferError> {
+    call_service(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }).await?;
     Ok(())
 }

@@ -48,6 +48,8 @@ impl MonitoringBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for MonitoringBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -63,7 +65,7 @@ impl Block for MonitoringBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let path = msg.path().to_string();
 
         // Stats endpoint — only accessible from loopback addresses.
@@ -104,7 +106,7 @@ impl Block for MonitoringBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -113,6 +115,7 @@ impl Block for MonitoringBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/monitoring", Arc::new(MonitoringBlock::new()));
 }

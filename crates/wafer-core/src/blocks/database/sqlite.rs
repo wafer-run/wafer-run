@@ -225,6 +225,29 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
     Ok(cols)
 }
 
+/// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
+fn has_integer_pk(db: &Connection, table: &str) -> bool {
+    let safe_table = sanitize_ident(table);
+    let mut stmt = match db.prepare(&format!("PRAGMA table_info(\"{}\")", safe_table)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let result = stmt.query_map([], |row| {
+        let name: String = row.get(1)?;
+        let col_type: String = row.get(2)?;
+        let pk: i32 = row.get(5)?;
+        Ok((name, col_type, pk))
+    });
+    if let Ok(rows) = result {
+        for r in rows.flatten() {
+            if r.0.to_lowercase() == "id" && r.2 > 0 && r.1.to_uppercase().contains("INT") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Check if a table exists in the database.
 fn table_exists(db: &Connection, table: &str) -> bool {
     db.query_row(
@@ -505,8 +528,10 @@ impl DatabaseService for SQLiteDatabaseService {
 
         let mut data = data;
 
-        // Auto-generate ID if not provided
-        if !data.contains_key("id") {
+        // Auto-generate ID if not provided, but only for string/UUID PKs.
+        // Tables with INTEGER PRIMARY KEY AUTOINCREMENT should not get a
+        // UUID — let SQLite handle the autoincrement.
+        if !data.contains_key("id") && !has_integer_pk(&db, &table) {
             data.insert(
                 "id".to_string(),
                 serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
@@ -552,7 +577,13 @@ impl DatabaseService for SQLiteDatabaseService {
         let id = match data.get("id") {
             Some(serde_json::Value::String(s)) => s.clone(),
             Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => String::new(),
+            _ => {
+                // For autoincrement tables, retrieve the generated id
+                let rowid = db.last_insert_rowid();
+                let id_str = rowid.to_string();
+                data.insert("id".to_string(), serde_json::json!(rowid));
+                id_str
+            }
         };
 
         Ok(Record { id, data })

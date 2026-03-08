@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::wafer::block_world::runtime;
-use crate::wafer::block_world::types::{Action, Message};
+use crate::types::{Action, Message};
+use crate::call_block;
 
 /// Metadata about a stored object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,15 +80,11 @@ struct ListResp {
 // --- Helpers ---
 
 fn make_msg(kind: &str, data: &impl Serialize) -> Message {
-    Message {
-        kind: kind.to_string(),
-        data: serde_json::to_vec(data).unwrap_or_default(),
-        meta: Vec::new(),
-    }
+    Message::new(kind, serde_json::to_vec(data).unwrap_or_default())
 }
 
 fn call_storage(msg: &Message) -> Result<Vec<u8>, StorageError> {
-    let result = runtime::call_block("@wafer/storage", msg);
+    let result = call_block("@wafer/storage", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

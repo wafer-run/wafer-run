@@ -1,16 +1,11 @@
 //! Guest-side types for WAFER blocks.
 //!
-//! These types mirror the WIT-generated types but provide ergonomic Rust APIs
-//! with HashMap-based metadata, helper methods, and conversions.
+//! These types are serialized as JSON over the thin ABI boundary.
+//! They mirror the host-side types in `wafer-run::types`.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-
-// Re-export WIT-generated types that block authors use directly.
-pub use crate::wafer::block_world::types::{
-    Action, BlockInfo, BlockResult, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType,
-    MetaEntry, Response, WaferError,
-};
 
 // ---------------------------------------------------------------------------
 // Meta key constants (mirrors host meta.rs)
@@ -32,74 +27,50 @@ pub const META_RESP_CONTENT_TYPE: &str = "resp.content_type";
 pub const META_RESP_HEADER_PREFIX: &str = "resp.header.";
 pub const META_RESP_COOKIE_PREFIX: &str = "resp.set_cookie.";
 
-// Re-export Message as the WIT-generated type.
-pub use crate::wafer::block_world::types::Message;
-
 // ---------------------------------------------------------------------------
-// Extension trait for Message
+// Core types
 // ---------------------------------------------------------------------------
 
-/// Extension methods for the WIT-generated Message type.
-pub trait MessageExt {
-    fn get_meta(&self, key: &str) -> &str;
-    fn set_meta(&mut self, key: &str, value: &str);
-    fn meta_map(&self) -> HashMap<String, String>;
-
-    fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error>;
-    fn set_data<T: serde::Serialize>(&mut self, v: &T) -> Result<(), serde_json::Error>;
-
-    fn cont(self) -> BlockResult;
-    fn respond_with(self, r: Response) -> BlockResult;
-    fn drop_msg(self) -> BlockResult;
-    fn err(self, e: WaferError) -> BlockResult;
-
-    fn var(&self, name: &str) -> &str;
-    fn query(&self, name: &str) -> &str;
-    fn header(&self, name: &str) -> &str;
-    fn action_str(&self) -> &str;
-    fn path(&self) -> &str;
-    fn content_type(&self) -> &str;
-    fn user_id(&self) -> &str;
-    fn user_email(&self) -> &str;
-    fn user_roles(&self) -> Vec<&str>;
-    fn is_admin(&self) -> bool;
-    fn remote_addr(&self) -> &str;
-    fn body(&self) -> &[u8];
-    fn cookie(&self, name: &str) -> &str;
-    fn query_params(&self) -> HashMap<&str, &str>;
-    fn pagination_params(&self, default_page_size: usize) -> (usize, usize, usize);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub kind: String,
+    #[serde(default)]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
 }
 
-impl MessageExt for Message {
-    fn get_meta(&self, key: &str) -> &str {
-        self.meta.iter()
-            .find(|e| e.key == key)
-            .map(|e| e.value.as_str())
-            .unwrap_or("")
-    }
-
-    fn set_meta(&mut self, key: &str, value: &str) {
-        if let Some(entry) = self.meta.iter_mut().find(|e| e.key == key) {
-            entry.value = value.to_string();
-        } else {
-            self.meta.push(MetaEntry { key: key.to_string(), value: value.to_string() });
+impl Message {
+    pub fn new(kind: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            kind: kind.into(),
+            data: data.into(),
+            meta: HashMap::new(),
         }
     }
 
-    fn meta_map(&self) -> HashMap<String, String> {
-        self.meta.iter().map(|e| (e.key.clone(), e.value.clone())).collect()
+    pub fn get_meta(&self, key: &str) -> &str {
+        self.meta.get(key).map(|s| s.as_str()).unwrap_or("")
     }
 
-    fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+    pub fn set_meta(&mut self, key: &str, value: &str) {
+        self.meta.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn meta_map(&self) -> &HashMap<String, String> {
+        &self.meta
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }
 
-    fn set_data<T: serde::Serialize>(&mut self, v: &T) -> Result<(), serde_json::Error> {
+    pub fn set_data<T: serde::Serialize>(&mut self, v: &T) -> Result<(), serde_json::Error> {
         self.data = serde_json::to_vec(v)?;
         Ok(())
     }
 
-    fn cont(self) -> BlockResult {
+    pub fn cont(self) -> BlockResult {
         BlockResult {
             action: Action::Continue,
             response: None,
@@ -108,7 +79,7 @@ impl MessageExt for Message {
         }
     }
 
-    fn respond_with(self, r: Response) -> BlockResult {
+    pub fn respond_with(self, r: Response) -> BlockResult {
         BlockResult {
             action: Action::Respond,
             response: Some(r),
@@ -117,7 +88,7 @@ impl MessageExt for Message {
         }
     }
 
-    fn drop_msg(self) -> BlockResult {
+    pub fn drop_msg(self) -> BlockResult {
         BlockResult {
             action: Action::Drop,
             response: None,
@@ -126,7 +97,7 @@ impl MessageExt for Message {
         }
     }
 
-    fn err(self, e: WaferError) -> BlockResult {
+    pub fn err(self, e: WaferError) -> BlockResult {
         BlockResult {
             action: Action::Error,
             response: None,
@@ -135,42 +106,42 @@ impl MessageExt for Message {
         }
     }
 
-    fn var(&self, name: &str) -> &str {
+    pub fn var(&self, name: &str) -> &str {
         let key = format!("{}{}", META_REQ_PARAM_PREFIX, name);
-        self.get_meta(&key)
+        self.meta.get(&key).map(|s| s.as_str()).unwrap_or("")
     }
 
-    fn query(&self, name: &str) -> &str {
+    pub fn query(&self, name: &str) -> &str {
         let key = format!("{}{}", META_REQ_QUERY_PREFIX, name);
-        self.get_meta(&key)
+        self.meta.get(&key).map(|s| s.as_str()).unwrap_or("")
     }
 
-    fn header(&self, name: &str) -> &str {
+    pub fn header(&self, name: &str) -> &str {
         let key = format!("http.header.{}", name);
-        self.get_meta(&key)
+        self.meta.get(&key).map(|s| s.as_str()).unwrap_or("")
     }
 
-    fn action_str(&self) -> &str {
+    pub fn action_str(&self) -> &str {
         self.get_meta(META_REQ_ACTION)
     }
 
-    fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         self.get_meta(META_REQ_RESOURCE)
     }
 
-    fn content_type(&self) -> &str {
+    pub fn content_type(&self) -> &str {
         self.get_meta(META_REQ_CONTENT_TYPE)
     }
 
-    fn user_id(&self) -> &str {
+    pub fn user_id(&self) -> &str {
         self.get_meta(META_AUTH_USER_ID)
     }
 
-    fn user_email(&self) -> &str {
+    pub fn user_email(&self) -> &str {
         self.get_meta(META_AUTH_USER_EMAIL)
     }
 
-    fn user_roles(&self) -> Vec<&str> {
+    pub fn user_roles(&self) -> Vec<&str> {
         let roles = self.get_meta(META_AUTH_USER_ROLES);
         if roles.is_empty() {
             Vec::new()
@@ -179,19 +150,19 @@ impl MessageExt for Message {
         }
     }
 
-    fn is_admin(&self) -> bool {
+    pub fn is_admin(&self) -> bool {
         self.user_roles().contains(&"admin")
     }
 
-    fn remote_addr(&self) -> &str {
+    pub fn remote_addr(&self) -> &str {
         self.get_meta(META_REQ_CLIENT_IP)
     }
 
-    fn body(&self) -> &[u8] {
+    pub fn body(&self) -> &[u8] {
         &self.data
     }
 
-    fn cookie(&self, name: &str) -> &str {
+    pub fn cookie(&self, name: &str) -> &str {
         let raw = self.get_meta("http.header.Cookie");
         if raw.is_empty() {
             return "";
@@ -207,21 +178,24 @@ impl MessageExt for Message {
         ""
     }
 
-    fn query_params(&self) -> HashMap<&str, &str> {
-        self.meta.iter()
-            .filter(|e| e.key.starts_with(META_REQ_QUERY_PREFIX))
-            .map(|e| (&e.key[META_REQ_QUERY_PREFIX.len()..], e.value.as_str()))
+    pub fn query_params(&self) -> HashMap<&str, &str> {
+        self.meta
+            .iter()
+            .filter(|(k, _)| k.starts_with(META_REQ_QUERY_PREFIX))
+            .map(|(k, v)| (&k[META_REQ_QUERY_PREFIX.len()..], v.as_str()))
             .collect()
     }
 
-    fn pagination_params(&self, default_page_size: usize) -> (usize, usize, usize) {
-        let page = self.query("page")
+    pub fn pagination_params(&self, default_page_size: usize) -> (usize, usize, usize) {
+        let page = self
+            .query("page")
             .parse::<usize>()
             .ok()
             .filter(|&p| p > 0)
             .unwrap_or(1);
 
-        let page_size = self.query("page_size")
+        let page_size = self
+            .query("page_size")
             .parse::<usize>()
             .ok()
             .filter(|&ps| ps > 0 && ps <= 100)
@@ -232,8 +206,149 @@ impl MessageExt for Message {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Action {
+    #[serde(rename = "continue")]
+    Continue,
+    #[serde(rename = "respond")]
+    Respond,
+    #[serde(rename = "drop")]
+    Drop,
+    #[serde(rename = "error")]
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Response {
+    #[serde(default)]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaferError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
+}
+
+impl WaferError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            meta: HashMap::new(),
+        }
+    }
+}
+
+impl fmt::Display for WaferError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for WaferError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockResult {
+    pub action: Action,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<Response>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<WaferError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<Message>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InstanceMode {
+    #[serde(rename = "per-node")]
+    PerNode,
+    #[serde(rename = "singleton")]
+    Singleton,
+    #[serde(rename = "per-flow")]
+    PerFlow,
+    #[serde(rename = "per-execution")]
+    PerExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockRuntime {
+    #[serde(rename = "native")]
+    Native,
+    #[serde(rename = "wasm")]
+    Wasm,
+}
+
+impl Default for BlockRuntime {
+    fn default() -> Self {
+        Self::Wasm
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUIInfo {
+    pub path: String,
+    pub icon: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInfo {
+    pub name: String,
+    pub version: String,
+    pub interface: String,
+    pub summary: String,
+    pub instance_mode: InstanceMode,
+    #[serde(default)]
+    pub allowed_modes: Vec<InstanceMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_ui: Option<AdminUIInfo>,
+    #[serde(default)]
+    pub runtime: BlockRuntime,
+    #[serde(default)]
+    pub requires: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LifecycleType {
+    #[serde(rename = "init")]
+    Init,
+    #[serde(rename = "start")]
+    Start,
+    #[serde(rename = "stop")]
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub event_type: LifecycleType,
+    #[serde(default)]
+    pub data: Vec<u8>,
+}
+
 // ---------------------------------------------------------------------------
-// RequestAction (convenience enum, not in WIT)
+// Error code constants (matching host ErrorCode)
+// ---------------------------------------------------------------------------
+
+pub const ERROR_OK: &str = "ok";
+pub const ERROR_CANCELLED: &str = "cancelled";
+pub const ERROR_UNKNOWN: &str = "unknown";
+pub const ERROR_INVALID_ARGUMENT: &str = "invalid_argument";
+pub const ERROR_NOT_FOUND: &str = "not_found";
+pub const ERROR_ALREADY_EXISTS: &str = "already_exists";
+pub const ERROR_PERMISSION_DENIED: &str = "permission_denied";
+pub const ERROR_UNAUTHENTICATED: &str = "unauthenticated";
+pub const ERROR_RESOURCE_EXHAUSTED: &str = "resource_exhausted";
+pub const ERROR_UNIMPLEMENTED: &str = "unimplemented";
+pub const ERROR_INTERNAL: &str = "internal";
+pub const ERROR_UNAVAILABLE: &str = "unavailable";
+
+// ---------------------------------------------------------------------------
+// RequestAction (convenience enum)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -278,25 +393,15 @@ impl fmt::Display for RequestAction {
 // Helper constructors
 // ---------------------------------------------------------------------------
 
-/// Create a new message with the given kind and data.
 pub fn new_message(kind: impl Into<String>, data: impl Into<Vec<u8>>) -> Message {
-    Message {
-        kind: kind.into(),
-        data: data.into(),
-        meta: Vec::new(),
-    }
+    Message::new(kind, data)
 }
 
-/// Create an error BlockResult.
-pub fn error_result(code: ErrorCode, message: &str) -> BlockResult {
+pub fn error_result(code: &str, message: &str) -> BlockResult {
     BlockResult {
         action: Action::Error,
         response: None,
-        error: Some(WaferError {
-            code,
-            message: message.to_string(),
-            meta: Vec::new(),
-        }),
+        error: Some(WaferError::new(code, message)),
         message: None,
     }
 }

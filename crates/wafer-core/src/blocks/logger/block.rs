@@ -55,6 +55,8 @@ fn respond_ok(msg: &Message) -> Result_ {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for LoggerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -70,7 +72,7 @@ impl Block for LoggerBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Parse the log message from the data payload.
         // If parsing fails, use the raw data bytes as the message string.
         let (log_msg, fields_str) = match msg.decode::<LogRequest>() {
@@ -122,7 +124,7 @@ impl Block for LoggerBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

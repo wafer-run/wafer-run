@@ -62,7 +62,7 @@ struct DeleteFolderReq<'a> {
 // --- Public API ---
 
 /// Store an object.
-pub fn put(
+pub async fn put(
     ctx: &dyn Context,
     folder: &str,
     key: &str,
@@ -79,34 +79,34 @@ pub fn put(
             data,
             content_type,
         },
-    )?;
+    ).await?;
     Ok(())
 }
 
 /// Retrieve an object and its metadata.
-pub fn get(
+pub async fn get(
     ctx: &dyn Context,
     folder: &str,
     key: &str,
 ) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key })?;
+    let data = call_service(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key }).await?;
     let resp: GetResp = decode(&data)?;
     Ok((resp.data, resp.info))
 }
 
 /// Delete an object.
-pub fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), WaferError> {
+pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_DELETE,
         &DeleteReq { folder, key },
-    )?;
+    ).await?;
     Ok(())
 }
 
 /// List objects in a folder.
-pub fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
+pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -117,12 +117,12 @@ pub fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<Objec
             limit: opts.limit,
             offset: opts.offset,
         },
-    )?;
+    ).await?;
     decode(&data)
 }
 
 /// Create a storage folder.
-pub fn create_folder(
+pub async fn create_folder(
     ctx: &dyn Context,
     name: &str,
     public: bool,
@@ -132,28 +132,28 @@ pub fn create_folder(
         BLOCK,
         ServiceOp::STORAGE_CREATE_FOLDER,
         &CreateFolderReq { name, public },
-    )?;
+    ).await?;
     Ok(())
 }
 
 /// Delete a storage folder and all its contents.
-pub fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferError> {
+pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_DELETE_FOLDER,
         &DeleteFolderReq { name },
-    )?;
+    ).await?;
     Ok(())
 }
 
 /// List all storage folders.
-pub fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferError> {
+pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_LIST_FOLDERS,
         &serde_json::json!({}),
-    )?;
+    ).await?;
     decode(&data)
 }

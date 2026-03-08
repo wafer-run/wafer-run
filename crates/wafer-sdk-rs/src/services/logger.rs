@@ -1,49 +1,49 @@
-//! Logger service client — uses `runtime::log` directly.
+//! Logger service client — uses the thin ABI `log` host import directly.
 
-use crate::wafer::block_world::runtime;
+use crate::log;
 
 /// Log a message at the DEBUG level.
 pub fn debug(msg: &str) {
-    runtime::log("debug", msg);
+    log("debug", msg);
 }
 
 /// Log a message at the DEBUG level with structured fields.
 pub fn debug_with(msg: &str, fields: &[(&str, &str)]) {
     let formatted = format_with_fields(msg, fields);
-    runtime::log("debug", &formatted);
+    log("debug", &formatted);
 }
 
 /// Log a message at the INFO level.
 pub fn info(msg: &str) {
-    runtime::log("info", msg);
+    log("info", msg);
 }
 
 /// Log a message at the INFO level with structured fields.
 pub fn info_with(msg: &str, fields: &[(&str, &str)]) {
     let formatted = format_with_fields(msg, fields);
-    runtime::log("info", &formatted);
+    log("info", &formatted);
 }
 
 /// Log a message at the WARN level.
 pub fn warn(msg: &str) {
-    runtime::log("warn", msg);
+    log("warn", msg);
 }
 
 /// Log a message at the WARN level with structured fields.
 pub fn warn_with(msg: &str, fields: &[(&str, &str)]) {
     let formatted = format_with_fields(msg, fields);
-    runtime::log("warn", &formatted);
+    log("warn", &formatted);
 }
 
 /// Log a message at the ERROR level.
 pub fn error(msg: &str) {
-    runtime::log("error", msg);
+    log("error", msg);
 }
 
 /// Log a message at the ERROR level with structured fields.
 pub fn error_with(msg: &str, fields: &[(&str, &str)]) {
     let formatted = format_with_fields(msg, fields);
-    runtime::log("error", &formatted);
+    log("error", &formatted);
 }
 
 fn format_with_fields(msg: &str, fields: &[(&str, &str)]) -> String {

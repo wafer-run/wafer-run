@@ -27,7 +27,7 @@ const INFRA_JSON: &str = r#"{
                         "block": "@wafer/readonly-guard",
                         "next": [
                             {
-                                "block": "@wafer/rate-limit",
+                                "block": "@wafer/ip-rate-limit",
                                 "next": [
                                     {
                                         "block": "@wafer/monitoring"
@@ -50,7 +50,7 @@ const AUTH_PIPE_JSON: &str = r#"{
         "flow": "@wafer/infra",
         "next": [
             {
-                "block": "@wafer/auth"
+                "block": "@wafer/auth-validator"
             }
         ]
     }
@@ -72,10 +72,10 @@ const ADMIN_PIPE_JSON: &str = r#"{
         "flow": "@wafer/infra",
         "next": [
             {
-                "block": "@wafer/auth",
+                "block": "@wafer/auth-validator",
                 "next": [
                     {
-                        "block": "@wafer/iam",
+                        "block": "@wafer/iam-guard",
                         "config": { "role": "admin" }
                     }
                 ]
@@ -85,6 +85,7 @@ const ADMIN_PIPE_JSON: &str = r#"{
 }"#;
 
 /// Register the standard flow templates with a Wafer runtime.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register_flows(w: &mut wafer_run::Wafer) -> Result<(), String> {
     w.add_flow_def(&infra_flow()?);
     w.add_flow_def(&auth_pipe_flow()?);

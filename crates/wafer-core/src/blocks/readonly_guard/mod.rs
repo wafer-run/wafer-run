@@ -12,6 +12,8 @@ impl ReadonlyGuardBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for ReadonlyGuardBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -27,7 +29,7 @@ impl Block for ReadonlyGuardBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let readonly = ctx
             .config_get("readonly")
             .map(|s| s == "true" || s == "1")
@@ -48,7 +50,7 @@ impl Block for ReadonlyGuardBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -57,6 +59,7 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.register_block("@wafer/readonly-guard", Arc::new(ReadonlyGuardBlock::new()));
 }

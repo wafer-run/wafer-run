@@ -31,7 +31,7 @@ pub struct NetworkResponse {
 // --- Public API ---
 
 /// Perform an outbound HTTP request.
-pub fn do_request(
+pub async fn do_request(
     ctx: &dyn Context,
     method: &str,
     url: &str,
@@ -48,6 +48,6 @@ pub fn do_request(
             headers,
             body,
         },
-    )?;
+    ).await?;
     decode(&data)
 }

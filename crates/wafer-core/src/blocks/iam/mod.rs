@@ -13,7 +13,7 @@ impl IAMBlock {
     }
 
     /// Check if user has the required role by querying iam_user_roles table.
-    fn has_role_db(ctx: &dyn Context, user_id: &str, role: &str) -> Option<bool> {
+    async fn has_role_db(ctx: &dyn Context, user_id: &str, role: &str) -> Option<bool> {
         let filters = vec![
             Filter {
                 field: "user_id".to_string(),
@@ -33,7 +33,7 @@ impl IAMBlock {
             ..Default::default()
         };
 
-        match db::list(ctx, "iam_user_roles", &opts) {
+        match db::list(ctx, "iam_user_roles", &opts).await {
             Ok(result) => Some(!result.records.is_empty()),
             Err(_) => None,
         }
@@ -49,10 +49,12 @@ impl IAMBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for IAMBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer/iam".to_string(),
+            name: "@wafer/iam-guard".to_string(),
             version: "0.1.0".to_string(),
             interface: "middleware@v1".to_string(),
             summary: "Role-based access control middleware".to_string(),
@@ -64,7 +66,7 @@ impl Block for IAMBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Check that user is authenticated
         let user_id = msg.user_id().to_string();
         if user_id.is_empty() {
@@ -78,7 +80,7 @@ impl Block for IAMBlock {
             .to_string();
 
         // Try database lookup first, fall back to meta roles
-        let has_role = match Self::has_role_db(ctx, &user_id, &required_role) {
+        let has_role = match Self::has_role_db(ctx, &user_id, &required_role).await {
             Some(result) => result,
             None => Self::has_role_meta(msg, &required_role),
         };
@@ -90,7 +92,7 @@ impl Block for IAMBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -99,6 +101,7 @@ impl Block for IAMBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
-    w.register_block("@wafer/iam", Arc::new(IAMBlock::new()));
+    w.register_block("@wafer/iam-guard", Arc::new(IAMBlock::new()));
 }

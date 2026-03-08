@@ -181,6 +181,8 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for DatabaseBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -196,7 +198,7 @@ impl Block for DatabaseBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         match msg.kind.as_str() {
             ServiceOp::DATABASE_GET => {
                 let req: GetRequest = match msg.decode() {
@@ -348,7 +350,7 @@ impl Block for DatabaseBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         event: LifecycleEvent,

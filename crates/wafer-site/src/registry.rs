@@ -65,12 +65,8 @@ impl RegistryBlock {
         Self
     }
 
-    // -----------------------------------------------------------------------
-    // GET /registry — serve HTML
-    // -----------------------------------------------------------------------
     fn handle_browse(msg: &mut Message) -> Result_ {
         let html = include_str!("../content/registry.html");
-        // Allow inline scripts/styles and Google Fonts
         msg.set_meta(
             "resp.header.Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
@@ -78,18 +74,13 @@ impl RegistryBlock {
         respond(msg, html.as_bytes().to_vec(), "text/html")
     }
 
-    // -----------------------------------------------------------------------
-    // GET /registry/search?q=term
-    // -----------------------------------------------------------------------
-    fn handle_search(msg: &mut Message, ctx: &dyn Context) -> Result_ {
+    async fn handle_search(msg: &mut Message, ctx: &dyn Context) -> Result_ {
         let query = msg.query("q").to_string();
         let type_filter = msg.query("type").to_string();
-
         let (page, page_size, _) = msg.pagination_params(20);
 
         let mut filters = Vec::new();
         if !query.is_empty() {
-            // Escape SQL LIKE wildcards in user input
             let escaped = query.replace('%', "\\%").replace('_', "\\_");
             filters.push(Filter {
                 field: "name".to_string(),
@@ -100,429 +91,175 @@ impl RegistryBlock {
 
         let opts = ListOptions {
             filters,
-            sort: vec![SortField {
-                field: "download_count".to_string(),
-                desc: true,
-            }],
+            sort: vec![SortField { field: "download_count".to_string(), desc: true }],
             limit: page_size as i64,
             offset: ((page - 1) * page_size) as i64,
         };
 
-        match db::list(ctx, "packages", &opts) {
+        match db::list(ctx, "packages", &opts).await {
             Ok(result) => {
-                // Filter out blocked packages and apply type filter
-                let blocked = Self::get_blocked_patterns(ctx);
-                let filtered: Vec<_> = result
-                    .records
-                    .into_iter()
-                    .filter(|pkg| {
-                        let name = pkg
-                            .data
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if Self::matches_any_pattern(name, &blocked) {
-                            return false;
-                        }
-                        // Apply type filter: check if the filter appears in the comma-separated pkg_type
-                        if !type_filter.is_empty() {
-                            let pkg_type = pkg
-                                .data
-                                .get("package_type")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("block");
-                            // Legacy "both" means "block,flow"
-                            let types: Vec<&str> = if pkg_type == "both" {
-                                vec!["block", "flow"]
-                            } else {
-                                pkg_type.split(',').collect()
-                            };
-                            types.contains(&type_filter.as_str())
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
+                let blocked = Self::get_blocked_patterns(ctx).await;
+                let filtered: Vec<_> = result.records.into_iter().filter(|pkg| {
+                    let name = pkg.data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if Self::matches_any_pattern(name, &blocked) { return false; }
+                    if !type_filter.is_empty() {
+                        let pkg_type = pkg.data.get("package_type").and_then(|v| v.as_str()).unwrap_or("block");
+                        let types: Vec<&str> = if pkg_type == "both" { vec!["block", "flow"] } else { pkg_type.split(',').collect() };
+                        types.contains(&type_filter.as_str())
+                    } else { true }
+                }).collect();
                 let filtered_count = filtered.len() as i64;
-
-                json_respond(
-                    msg,
-                    &serde_json::json!({
-                        "packages": filtered,
-                        "total": filtered_count,
-                        "page": page,
-                        "page_size": page_size,
-                        "query": query
-                    }),
-                )
+                json_respond(msg, &serde_json::json!({
+                    "packages": filtered, "total": filtered_count,
+                    "page": page, "page_size": page_size, "query": query
+                }))
             }
-            Err(_) => {
-                json_respond(msg, &serde_json::json!({"packages": []}))
-            }
+            Err(_) => json_respond(msg, &serde_json::json!({"packages": []})),
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Auto-index: ensure a package exists in the DB, fetching from GitHub
-    // on first lookup (like Go's module proxy).
-    // -----------------------------------------------------------------------
-    fn ensure_package(
-        ctx: &dyn Context,
-        name: &str,
-    ) -> std::result::Result<Record, String> {
-        // Blocklist check — reject before hitting GitHub or DB
-        if Self::is_blocked(ctx, name) {
+    async fn ensure_package(ctx: &dyn Context, name: &str) -> std::result::Result<Record, String> {
+        if Self::is_blocked(ctx, name).await {
             return Err(format!("Package '{}' is blocked", name));
         }
-
-        // Already indexed? Return it (backfilling package_type if missing).
-        if let Ok(record) = db::get_by_field(
-            ctx,
-            "packages",
-            "name",
-            serde_json::Value::String(name.to_string()),
-        ) {
+        if let Ok(record) = db::get_by_field(ctx, "packages", "name", serde_json::Value::String(name.to_string())).await {
             if record.data.get("package_type").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                let versions = Self::fetch_versions_cached(ctx, name);
+                let versions = Self::fetch_versions_cached(ctx, name).await;
                 let pkg_type = Self::detect_package_type(&versions);
                 let mut update = HashMap::new();
-                update.insert(
-                    "package_type".to_string(),
-                    serde_json::Value::String(pkg_type.to_string()),
-                );
-                let _ = db::update(ctx, "packages", &record.id, update);
+                update.insert("package_type".to_string(), serde_json::Value::String(pkg_type));
+                let _ = db::update(ctx, "packages", &record.id, update).await;
             }
             return Ok(record);
         }
-
-        // Validate name format
         if !Self::validate_package_name(name) {
             return Err(format!("Invalid package name: {}", name));
         }
-
-        // Verify repo exists on GitHub and get description
-        let description = Self::fetch_repo_description(ctx, name)
+        let description = Self::fetch_repo_description(ctx, name).await
             .ok_or_else(|| format!("Repository '{}' not found on GitHub", name))?;
-
-        // Auto-index
         let repo_url = format!("https://{}", name);
         let mut record = HashMap::new();
-        record.insert(
-            "name".to_string(),
-            serde_json::Value::String(name.to_string()),
-        );
-        record.insert(
-            "description".to_string(),
-            serde_json::Value::String(description),
-        );
-        record.insert(
-            "repo_url".to_string(),
-            serde_json::Value::String(repo_url),
-        );
-        record.insert(
-            "owner_id".to_string(),
-            serde_json::Value::String(String::new()),
-        );
-        record.insert(
-            "download_count".to_string(),
-            serde_json::Value::Number(0.into()),
-        );
-
-        // Detect package type from release assets
-        let versions = Self::fetch_versions_cached(ctx, name);
+        record.insert("name".to_string(), serde_json::Value::String(name.to_string()));
+        record.insert("description".to_string(), serde_json::Value::String(description));
+        record.insert("repo_url".to_string(), serde_json::Value::String(repo_url));
+        record.insert("owner_id".to_string(), serde_json::Value::String(String::new()));
+        record.insert("download_count".to_string(), serde_json::Value::Number(0.into()));
+        let versions = Self::fetch_versions_cached(ctx, name).await;
         let pkg_type = Self::detect_package_type(&versions);
-        record.insert(
-            "package_type".to_string(),
-            serde_json::Value::String(pkg_type.to_string()),
-        );
-
-        db::create(ctx, "packages", record)
-            .map_err(|e| format!("Failed to index package: {}", e))
+        record.insert("package_type".to_string(), serde_json::Value::String(pkg_type));
+        db::create(ctx, "packages", record).await.map_err(|e| format!("Failed to index package: {}", e))
     }
 
-    // -----------------------------------------------------------------------
-    // Fetch repo description from GitHub API
-    // -----------------------------------------------------------------------
-    fn fetch_repo_description(ctx: &dyn Context, name: &str) -> Option<String> {
+    async fn fetch_repo_description(ctx: &dyn Context, name: &str) -> Option<String> {
         let (owner, repo) = Self::parse_owner_repo(name)?;
-
         let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), "wafer-registry/0.1".to_string());
-        headers.insert(
-            "Accept".to_string(),
-            "application/vnd.github+json".to_string(),
-        );
+        headers.insert("Accept".to_string(), "application/vnd.github+json".to_string());
         if let Some(token) = github_token() {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
-
-        let response = network::do_request(ctx, "GET", &url, &headers, None).ok()?;
-        if response.status_code != 200 {
-            return None;
-        }
-
+        let response = network::do_request(ctx, "GET", &url, &headers, None).await.ok()?;
+        if response.status_code != 200 { return None; }
         let data: serde_json::Value = serde_json::from_slice(&response.body).ok()?;
-        Some(
-            data.get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        )
+        Some(data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string())
     }
 
-    // -----------------------------------------------------------------------
-    // GET /registry/packages/{name} — package details + versions
-    // -----------------------------------------------------------------------
-    fn handle_get_package(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
-        let pkg = match Self::ensure_package(ctx, name) {
+    async fn handle_get_package(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
+        let pkg = match Self::ensure_package(ctx, name).await {
             Ok(r) => r,
             Err(e) => return err_not_found(msg, &e),
         };
-
-        // Fetch versions from GitHub (cached)
-        let versions = Self::fetch_versions_cached(ctx, name);
-
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "package": pkg,
-                "versions": versions
-            }),
-        )
+        let versions = Self::fetch_versions_cached(ctx, name).await;
+        json_respond(msg, &serde_json::json!({"package": pkg, "versions": versions}))
     }
 
-    // -----------------------------------------------------------------------
-    // GET /registry/packages/{name}/versions
-    // -----------------------------------------------------------------------
-    fn handle_get_versions(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
-        if let Err(e) = Self::ensure_package(ctx, name) {
+    async fn handle_get_versions(msg: &mut Message, ctx: &dyn Context, name: &str) -> Result_ {
+        if let Err(e) = Self::ensure_package(ctx, name).await {
             return err_not_found(msg, &e);
         }
-
-        let versions = Self::fetch_versions_cached(ctx, name);
-
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "package": name,
-                "versions": versions
-            }),
-        )
+        let versions = Self::fetch_versions_cached(ctx, name).await;
+        json_respond(msg, &serde_json::json!({"package": name, "versions": versions}))
     }
 
-    // -----------------------------------------------------------------------
-    // GET /registry/packages/{name}/download/{version} — redirect to asset
-    // -----------------------------------------------------------------------
-    fn handle_download(
-        msg: &mut Message,
-        ctx: &dyn Context,
-        name: &str,
-        version: &str,
-    ) -> Result_ {
-        if let Err(e) = Self::ensure_package(ctx, name) {
+    async fn handle_download(msg: &mut Message, ctx: &dyn Context, name: &str, version: &str) -> Result_ {
+        if let Err(e) = Self::ensure_package(ctx, name).await {
             return err_not_found(msg, &e);
         }
-
-        // Parse owner/repo from name (github.com/owner/repo)
         let (owner, repo) = match Self::parse_owner_repo(name) {
             Some(pair) => pair,
             None => return err_bad_request(msg, "Invalid package name"),
         };
-
-        // Determine asset type: "flow", "interface", or "block" (default)
         let asset_type = msg.query("type").to_string();
-
-        // Try to find the download URL from cached release data
-        let versions = Self::fetch_versions_cached(ctx, name);
+        let versions = Self::fetch_versions_cached(ctx, name).await;
         let asset_url = match asset_type.as_str() {
-            "flow" => versions
-                .iter()
-                .find(|r| r.tag_name == version)
-                .and_then(|r| r.chain_download_url.clone())
-                .unwrap_or_else(|| {
-                    // Convention: {repo}.flow.json
-                    format!(
-                        "https://github.com/{}/{}/releases/download/{}/{}.flow.json",
-                        owner, repo, version, repo
-                    )
-                }),
-            "interface" => versions
-                .iter()
-                .find(|r| r.tag_name == version)
-                .and_then(|r| r.interface_download_url.clone())
-                .unwrap_or_else(|| {
-                    // Convention: {repo}.interface.json
-                    format!(
-                        "https://github.com/{}/{}/releases/download/{}/{}.interface.json",
-                        owner, repo, version, repo
-                    )
-                }),
-            _ => versions
-                .iter()
-                .find(|r| r.tag_name == version)
-                .and_then(|r| r.wasm_download_url.clone())
-                .unwrap_or_else(|| {
-                    // Convention: {repo}.wasm
-                    format!(
-                        "https://github.com/{}/{}/releases/download/{}/{}.wasm",
-                        owner, repo, version, repo
-                    )
-                }),
+            "flow" => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.chain_download_url.clone())
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.flow.json", owner, repo, version, repo)),
+            "interface" => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.interface_download_url.clone())
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.interface.json", owner, repo, version, repo)),
+            _ => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.wasm_download_url.clone())
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.wasm", owner, repo, version, repo)),
         };
-
-        // Increment download count atomically
-        let _ = db::exec_raw(
-            ctx,
-            "UPDATE packages SET download_count = download_count + 1 WHERE name = ?",
-            &[serde_json::Value::String(name.to_string())],
-        );
-
-        // 302 redirect
-        ResponseBuilder::new(msg).status(302)
-            .set_header("Location", &asset_url)
-            .body(vec![], "text/plain")
+        let _ = db::exec_raw(ctx, "UPDATE packages SET download_count = download_count + 1 WHERE name = ?", &[serde_json::Value::String(name.to_string())]).await;
+        ResponseBuilder::new(msg).status(302).set_header("Location", &asset_url).body(vec![], "text/plain")
     }
 
-    // -----------------------------------------------------------------------
-    // GitHub API: fetch versions
-    // -----------------------------------------------------------------------
-    fn fetch_versions_cached(ctx: &dyn Context, name: &str) -> Vec<GitHubRelease> {
+    async fn fetch_versions_cached(ctx: &dyn Context, name: &str) -> Vec<GitHubRelease> {
         let (owner, repo) = match Self::parse_owner_repo(name) {
             Some(pair) => pair,
             None => return Vec::new(),
         };
-
         let ttl = cache_ttl_secs();
-
-        // Check cache
-        let cached = db::get_by_field(
-            ctx,
-            "github_tag_cache",
-            "package_name",
-            serde_json::Value::String(name.to_string()),
-        )
-        .ok();
-
+        let cached = db::get_by_field(ctx, "github_tag_cache", "package_name", serde_json::Value::String(name.to_string())).await.ok();
         if let Some(ref cache_record) = cached {
-            let fetched_at = cache_record
-                .data
-                .get("fetched_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
+            let fetched_at = cache_record.data.get("fetched_at").and_then(|v| v.as_str()).unwrap_or("");
             if Self::is_cache_fresh(fetched_at, ttl) {
-                // Cache is fresh — return cached data
-                if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str())
-                {
+                if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
                     if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
                         return releases;
                     }
                 }
             }
         }
-
-        // Cache is stale or missing — fetch from GitHub
-        let etag = cached
-            .as_ref()
-            .and_then(|r| r.data.get("etag"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page=100",
-            owner, repo
-        );
-
+        let etag = cached.as_ref().and_then(|r| r.data.get("etag")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let url = format!("https://api.github.com/repos/{}/{}/releases?per_page=100", owner, repo);
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), "wafer-registry/0.1".to_string());
-        headers.insert(
-            "Accept".to_string(),
-            "application/vnd.github+json".to_string(),
-        );
+        headers.insert("Accept".to_string(), "application/vnd.github+json".to_string());
         if let Some(token) = github_token() {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
         if !etag.is_empty() {
             headers.insert("If-None-Match".to_string(), etag.clone());
         }
-
-        match network::do_request(ctx, "GET", &url, &headers, None) {
+        match network::do_request(ctx, "GET", &url, &headers, None).await {
             Ok(response) => {
                 if response.status_code == 304 {
-                    // Not modified — refresh timestamp, return cached
                     if let Some(ref cache_record) = cached {
                         let mut update = HashMap::new();
-                        update.insert(
-                            "fetched_at".to_string(),
-                            serde_json::Value::String(Self::now_timestamp()),
-                        );
-                        let _ = db::update(ctx, "github_tag_cache", &cache_record.id, update);
-
-                        if let Some(tags_json) =
-                            cache_record.data.get("tags_json").and_then(|v| v.as_str())
-                        {
-                            if let Ok(releases) =
-                                serde_json::from_str::<Vec<GitHubRelease>>(tags_json)
-                            {
+                        update.insert("fetched_at".to_string(), serde_json::Value::String(Self::now_timestamp()));
+                        let _ = db::update(ctx, "github_tag_cache", &cache_record.id, update).await;
+                        if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
+                            if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
                                 return releases;
                             }
                         }
                     }
                     return Vec::new();
                 }
-
-                if response.status_code != 200 {
-                    // On error, return stale cache if available
-                    return Self::return_stale_cache(&cached);
-                }
-
-                // Parse response
+                if response.status_code != 200 { return Self::return_stale_cache(&cached); }
                 let releases = Self::parse_github_releases(&response.body, &repo);
-
-                // Extract new ETag
-                let new_etag = response
-                    .headers
-                    .get("etag")
-                    .and_then(|v| v.first())
-                    .cloned()
-                    .unwrap_or_default();
-
-                // Store in cache
+                let new_etag = response.headers.get("etag").and_then(|v| v.first()).cloned().unwrap_or_default();
                 let tags_json = serde_json::to_string(&releases).unwrap_or_default();
                 let mut cache_data = HashMap::new();
-                cache_data.insert(
-                    "package_name".to_string(),
-                    serde_json::Value::String(name.to_string()),
-                );
-                cache_data.insert(
-                    "tags_json".to_string(),
-                    serde_json::Value::String(tags_json),
-                );
-                cache_data.insert(
-                    "fetched_at".to_string(),
-                    serde_json::Value::String(Self::now_timestamp()),
-                );
-                cache_data.insert(
-                    "etag".to_string(),
-                    serde_json::Value::String(new_etag),
-                );
-
-                let _ = db::upsert(
-                    ctx,
-                    "github_tag_cache",
-                    "package_name",
-                    serde_json::Value::String(name.to_string()),
-                    cache_data,
-                );
-
+                cache_data.insert("package_name".to_string(), serde_json::Value::String(name.to_string()));
+                cache_data.insert("tags_json".to_string(), serde_json::Value::String(tags_json));
+                cache_data.insert("fetched_at".to_string(), serde_json::Value::String(Self::now_timestamp()));
+                cache_data.insert("etag".to_string(), serde_json::Value::String(new_etag));
+                let _ = db::upsert(ctx, "github_tag_cache", "package_name", serde_json::Value::String(name.to_string()), cache_data).await;
                 releases
             }
-            Err(_) => {
-                // Network error — return stale cache if available
-                Self::return_stale_cache(&cached)
-            }
+            Err(_) => Self::return_stale_cache(&cached),
         }
     }
 
@@ -531,108 +268,35 @@ impl RegistryBlock {
             Ok(v) => v,
             Err(_) => return Vec::new(),
         };
-
-        raw.iter()
-            .map(|release| {
-                let tag_name = release
-                    .get("tag_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let published_at = release
-                    .get("published_at")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                // Look for .wasm asset
-                let assets = release
-                    .get("assets")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let wasm_asset = assets.iter().find(|a| {
-                    a.get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|n| n.ends_with(".wasm"))
-                        .unwrap_or(false)
-                });
-
-                let has_wasm_asset = wasm_asset.is_some();
-                let wasm_download_url = wasm_asset
-                    .and_then(|a| a.get("browser_download_url"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                // Look for .flow.json asset
-                let chain_asset = assets.iter().find(|a| {
-                    a.get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|n| n.ends_with(".flow.json"))
-                        .unwrap_or(false)
-                });
-
-                let has_chain_asset = chain_asset.is_some();
-                let chain_download_url = chain_asset
-                    .and_then(|a| a.get("browser_download_url"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                // Look for .interface.json asset
-                let interface_asset = assets.iter().find(|a| {
-                    a.get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|n| n.ends_with(".interface.json"))
-                        .unwrap_or(false)
-                });
-
-                let has_interface_asset = interface_asset.is_some();
-                let interface_download_url = interface_asset
-                    .and_then(|a| a.get("browser_download_url"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                GitHubRelease {
-                    tag_name,
-                    has_wasm_asset,
-                    wasm_download_url,
-                    has_chain_asset,
-                    chain_download_url,
-                    has_interface_asset,
-                    interface_download_url,
-                    published_at,
-                }
-            })
-            .collect()
+        raw.iter().map(|release| {
+            let tag_name = release.get("tag_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let published_at = release.get("published_at").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let assets = release.get("assets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let wasm_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".wasm")).unwrap_or(false));
+            let has_wasm_asset = wasm_asset.is_some();
+            let wasm_download_url = wasm_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let chain_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".flow.json")).unwrap_or(false));
+            let has_chain_asset = chain_asset.is_some();
+            let chain_download_url = chain_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let interface_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".interface.json")).unwrap_or(false));
+            let has_interface_asset = interface_asset.is_some();
+            let interface_download_url = interface_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            GitHubRelease { tag_name, has_wasm_asset, wasm_download_url, has_chain_asset, chain_download_url, has_interface_asset, interface_download_url, published_at }
+        }).collect()
     }
 
-    /// Determine package type from release assets as a comma-separated string.
-    /// Possible components: "block", "flow", "interface".
     fn detect_package_type(releases: &[GitHubRelease]) -> String {
         let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
         let has_chain = releases.iter().any(|r| r.has_chain_asset);
         let has_interface = releases.iter().any(|r| r.has_interface_asset);
         let mut types = Vec::new();
-        if has_wasm {
-            types.push("block");
-        }
-        if has_chain {
-            types.push("flow");
-        }
-        if has_interface {
-            types.push("interface");
-        }
-        if types.is_empty() {
-            "block".to_string()
-        } else {
-            types.join(",")
-        }
+        if has_wasm { types.push("block"); }
+        if has_chain { types.push("flow"); }
+        if has_interface { types.push("interface"); }
+        if types.is_empty() { "block".to_string() } else { types.join(",") }
     }
 
-    fn return_stale_cache(
-        cached: &Option<Record>,
-    ) -> Vec<GitHubRelease> {
+    fn return_stale_cache(cached: &Option<Record>) -> Vec<GitHubRelease> {
         if let Some(ref cache_record) = cached {
             if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
                 if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
@@ -643,48 +307,22 @@ impl RegistryBlock {
         Vec::new()
     }
 
-    // -----------------------------------------------------------------------
-    // Blocklist
-    // -----------------------------------------------------------------------
-
-    /// Load all `name_pattern` values from the `blocked_packages` table.
-    /// Returns an empty vec if the table doesn't exist yet.
-    fn get_blocked_patterns(ctx: &dyn Context) -> Vec<String> {
-        let opts = ListOptions {
-            filters: Vec::new(),
-            sort: Vec::new(),
-            limit: 0,
-            offset: 0,
-        };
-
-        match db::list(ctx, "blocked_packages", &opts) {
-            Ok(result) => result
-                .records
-                .iter()
-                .filter_map(|r| {
-                    r.data
-                        .get("name_pattern")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect(),
+    async fn get_blocked_patterns(ctx: &dyn Context) -> Vec<String> {
+        let opts = ListOptions { filters: Vec::new(), sort: Vec::new(), limit: 0, offset: 0 };
+        match db::list(ctx, "blocked_packages", &opts).await {
+            Ok(result) => result.records.iter().filter_map(|r| r.data.get("name_pattern").and_then(|v| v.as_str()).map(|s| s.to_string())).collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    /// Check whether `name` matches any pattern in the blocklist.
-    /// Supports exact matches and wildcard suffix patterns (e.g. `github.com/baduser/*`).
-    fn is_blocked(ctx: &dyn Context, name: &str) -> bool {
-        let patterns = Self::get_blocked_patterns(ctx);
+    async fn is_blocked(ctx: &dyn Context, name: &str) -> bool {
+        let patterns = Self::get_blocked_patterns(ctx).await;
         Self::matches_any_pattern(name, &patterns)
     }
 
-    /// Returns `true` if `name` matches any of the given patterns.
     fn matches_any_pattern(name: &str, patterns: &[String]) -> bool {
         for pattern in patterns {
-            if pattern == name {
-                return true;
-            }
+            if pattern == name { return true; }
             if let Some(prefix) = pattern.strip_suffix("/*") {
                 if name.starts_with(prefix) && name.len() > prefix.len() && name.as_bytes()[prefix.len()] == b'/' {
                     return true;
@@ -694,64 +332,34 @@ impl RegistryBlock {
         false
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    /// Validate that name matches `github.com/{owner}/{repo}`.
     fn validate_package_name(name: &str) -> bool {
         let parts: Vec<&str> = name.split('/').collect();
-        if parts.len() != 3 {
-            return false;
-        }
-        if parts[0] != "github.com" {
-            return false;
-        }
-        // owner and repo must be non-empty and alphanumeric + hyphens
-        let valid_segment = |s: &str| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-        };
+        if parts.len() != 3 || parts[0] != "github.com" { return false; }
+        let valid_segment = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.');
         valid_segment(parts[1]) && valid_segment(parts[2])
     }
 
-    /// Parse `github.com/owner/repo` into `(owner, repo)`.
     fn parse_owner_repo(name: &str) -> Option<(String, String)> {
         let parts: Vec<&str> = name.split('/').collect();
-        if parts.len() != 3 || parts[0] != "github.com" {
-            return None;
-        }
+        if parts.len() != 3 || parts[0] != "github.com" { return None; }
         Some((parts[1].to_string(), parts[2].to_string()))
     }
 
-    /// Check if a cached timestamp (unix seconds string) is still fresh.
     fn is_cache_fresh(fetched_at: &str, ttl_secs: u64) -> bool {
-        if fetched_at.is_empty() {
-            return false;
-        }
-        let fetched: u64 = match fetched_at.parse() {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
+        if fetched_at.is_empty() { return false; }
+        let fetched: u64 = match fetched_at.parse() { Ok(v) => v, Err(_) => return false };
         let now = Self::unix_now();
         now.saturating_sub(fetched) < ttl_secs
     }
 
-    /// Current time as Unix seconds.
     fn unix_now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
     }
 
-    /// Current time as a string (unix seconds).
-    fn now_timestamp() -> String {
-        Self::unix_now().to_string()
-    }
+    fn now_timestamp() -> String { Self::unix_now().to_string() }
 }
 
+#[async_trait::async_trait]
 impl Block for RegistryBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -767,56 +375,32 @@ impl Block for RegistryBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
-
         match (action.as_str(), path.as_str()) {
-            // Browse / landing — serve HTML
-            ("retrieve", "/registry") | ("retrieve", "/registry/") => {
-                Self::handle_browse(msg)
-            }
-
-            // Search API
-            ("retrieve", "/registry/search") => Self::handle_search(msg, ctx),
-
-            // Path-based routing for package endpoints with multi-segment names
+            ("retrieve", "/registry") | ("retrieve", "/registry/") => Self::handle_browse(msg),
+            ("retrieve", "/registry/search") => Self::handle_search(msg, ctx).await,
             ("retrieve", p) if p.starts_with("/registry/packages/") => {
                 let rest = &p["/registry/packages/".len()..];
-
                 if let Some(pos) = rest.find("/download/") {
-                    // .../download/{version}
                     let name = &rest[..pos];
                     let version = &rest[pos + "/download/".len()..];
-                    Self::handle_download(msg, ctx, name, version)
+                    Self::handle_download(msg, ctx, name, version).await
                 } else if rest.ends_with("/versions") {
                     let name = &rest[..rest.len() - "/versions".len()];
-                    Self::handle_get_versions(msg, ctx, name)
+                    Self::handle_get_versions(msg, ctx, name).await
                 } else {
-                    // Package details
-                    Self::handle_get_package(msg, ctx, rest)
+                    Self::handle_get_package(msg, ctx, rest).await
                 }
             }
-
-            _ => err_not_found(
-                msg,
-                &format!("Registry endpoint not found: {}", path),
-            ),
+            _ => err_not_found(msg, &format!("Registry endpoint not found: {}", path)),
         }
     }
 
-    fn lifecycle(
-        &self,
-        ctx: &dyn Context,
-        event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
+    async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            // Backfill: set package_type = 'block' for any rows missing it
-            let _ = db::exec_raw(
-                ctx,
-                "UPDATE packages SET package_type = 'block' WHERE package_type IS NULL",
-                &[],
-            );
+            let _ = db::exec_raw(ctx, "UPDATE packages SET package_type = 'block' WHERE package_type IS NULL", &[]).await;
         }
         Ok(())
     }

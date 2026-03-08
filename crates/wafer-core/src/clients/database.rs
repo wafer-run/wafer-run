@@ -154,12 +154,12 @@ fn to_sort_defs(sort: &[SortField]) -> Vec<SortDef<'_>> {
 
 // --- Public API: core CRUD ---
 
-pub fn get(ctx: &dyn Context, collection: &str, id: &str) -> Result<Record, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id })?;
+pub async fn get(ctx: &dyn Context, collection: &str, id: &str) -> Result<Record, WaferError> {
+    let data = call_service(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id }).await?;
     decode(&data)
 }
 
-pub fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
+pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -171,11 +171,11 @@ pub fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<R
             limit: opts.limit,
             offset: opts.offset,
         },
-    )?;
+    ).await?;
     decode(&data)
 }
 
-pub fn create(
+pub async fn create(
     ctx: &dyn Context,
     collection: &str,
     data: HashMap<String, serde_json::Value>,
@@ -188,11 +188,11 @@ pub fn create(
             collection,
             data: &data,
         },
-    )?;
+    ).await?;
     decode(&resp)
 }
 
-pub fn update(
+pub async fn update(
     ctx: &dyn Context,
     collection: &str,
     id: &str,
@@ -207,21 +207,21 @@ pub fn update(
             id,
             data: &data,
         },
-    )?;
+    ).await?;
     decode(&resp)
 }
 
-pub fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(), WaferError> {
+pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
         BLOCK,
         ServiceOp::DATABASE_DELETE,
         &DeleteReq { collection, id },
-    )?;
+    ).await?;
     Ok(())
 }
 
-pub fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
+pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -230,12 +230,12 @@ pub fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<
             collection,
             filters: to_filter_defs(filters),
         },
-    )?;
+    ).await?;
     let resp: CountResp = decode(&data)?;
     Ok(resp.count)
 }
 
-pub fn sum(
+pub async fn sum(
     ctx: &dyn Context,
     collection: &str,
     field: &str,
@@ -250,12 +250,12 @@ pub fn sum(
             field,
             filters: to_filter_defs(filters),
         },
-    )?;
+    ).await?;
     let resp: SumResp = decode(&data)?;
     Ok(resp.sum)
 }
 
-pub fn query_raw(
+pub async fn query_raw(
     ctx: &dyn Context,
     query: &str,
     args: &[serde_json::Value],
@@ -265,11 +265,11 @@ pub fn query_raw(
         BLOCK,
         ServiceOp::DATABASE_QUERY_RAW,
         &QueryRawReq { query, args },
-    )?;
+    ).await?;
     decode(&data)
 }
 
-pub fn exec_raw(
+pub async fn exec_raw(
     ctx: &dyn Context,
     query: &str,
     args: &[serde_json::Value],
@@ -279,7 +279,7 @@ pub fn exec_raw(
         BLOCK,
         ServiceOp::DATABASE_EXEC_RAW,
         &ExecRawReq { query, args },
-    )?;
+    ).await?;
     let resp: ExecRawResp = decode(&data)?;
     Ok(resp.rows_affected)
 }
@@ -287,7 +287,7 @@ pub fn exec_raw(
 // --- Public API: higher-level helpers ---
 
 /// Retrieve a single record where `field` equals `value`.
-pub fn get_by_field(
+pub async fn get_by_field(
     ctx: &dyn Context,
     collection: &str,
     field: &str,
@@ -305,7 +305,7 @@ pub fn get_by_field(
             limit: 1,
             ..Default::default()
         },
-    )?;
+    ).await?;
     result
         .records
         .into_iter()
@@ -314,22 +314,22 @@ pub fn get_by_field(
 }
 
 /// Create or update a record based on a field match.
-pub fn upsert(
+pub async fn upsert(
     ctx: &dyn Context,
     collection: &str,
     field: &str,
     value: serde_json::Value,
     data: HashMap<String, serde_json::Value>,
 ) -> Result<Record, WaferError> {
-    match get_by_field(ctx, collection, field, value) {
-        Ok(existing) => update(ctx, collection, &existing.id, data),
-        Err(e) if e.code == ErrorCode::NOT_FOUND => create(ctx, collection, data),
+    match get_by_field(ctx, collection, field, value).await {
+        Ok(existing) => update(ctx, collection, &existing.id, data).await,
+        Err(e) if e.code == ErrorCode::NOT_FOUND => create(ctx, collection, data).await,
         Err(e) => Err(e),
     }
 }
 
 /// Retrieve all records from a collection with optional filters.
-pub fn list_all(
+pub async fn list_all(
     ctx: &dyn Context,
     collection: &str,
     filters: Vec<Filter>,
@@ -342,12 +342,12 @@ pub fn list_all(
             limit: 100000,
             ..Default::default()
         },
-    )?;
+    ).await?;
     Ok(result.records)
 }
 
 /// Retrieve a paginated list of records.
-pub fn paginated_list(
+pub async fn paginated_list(
     ctx: &dyn Context,
     collection: &str,
     page: i64,
@@ -366,11 +366,11 @@ pub fn paginated_list(
             limit: page_size,
             offset: (page - 1).saturating_mul(page_size),
         },
-    )
+    ).await
 }
 
 /// Set `deleted_at` on a record (soft delete).
-pub fn soft_delete(
+pub async fn soft_delete(
     ctx: &dyn Context,
     collection: &str,
     id: &str,
@@ -380,11 +380,11 @@ pub fn soft_delete(
         "deleted_at".to_string(),
         serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
     );
-    update(ctx, collection, id, data)
+    update(ctx, collection, id, data).await
 }
 
 /// Delete all records where `field` equals `value`.
-pub fn delete_by_field(
+pub async fn delete_by_field(
     ctx: &dyn Context,
     collection: &str,
     field: &str,
@@ -398,15 +398,15 @@ pub fn delete_by_field(
             operator: FilterOp::Equal,
             value,
         }],
-    )?;
+    ).await?;
     for r in records {
-        delete(ctx, collection, &r.id)?;
+        delete(ctx, collection, &r.id).await?;
     }
     Ok(())
 }
 
 /// Count records where `field` equals `value`.
-pub fn count_by_field(
+pub async fn count_by_field(
     ctx: &dyn Context,
     collection: &str,
     field: &str,
@@ -420,32 +420,32 @@ pub fn count_by_field(
             operator: FilterOp::Equal,
             value,
         }],
-    )
+    ).await
 }
 
 /// Delete all records matching filters.
-pub fn delete_by_filters(
+pub async fn delete_by_filters(
     ctx: &dyn Context,
     collection: &str,
     filters: Vec<Filter>,
 ) -> Result<(), WaferError> {
-    let records = list_all(ctx, collection, filters)?;
+    let records = list_all(ctx, collection, filters).await?;
     for r in records {
-        delete(ctx, collection, &r.id)?;
+        delete(ctx, collection, &r.id).await?;
     }
     Ok(())
 }
 
 /// Update all records matching filters.
-pub fn update_by_filters(
+pub async fn update_by_filters(
     ctx: &dyn Context,
     collection: &str,
     filters: Vec<Filter>,
     data: HashMap<String, serde_json::Value>,
 ) -> Result<(), WaferError> {
-    let records = list_all(ctx, collection, filters)?;
+    let records = list_all(ctx, collection, filters).await?;
     for r in records {
-        update(ctx, collection, &r.id, data.clone())?;
+        update(ctx, collection, &r.id, data.clone()).await?;
     }
     Ok(())
 }

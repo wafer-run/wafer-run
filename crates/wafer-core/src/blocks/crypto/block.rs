@@ -105,6 +105,8 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for CryptoBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -120,7 +122,7 @@ impl Block for CryptoBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         match msg.kind.as_str() {
             ServiceOp::CRYPTO_HASH => {
                 let req: HashRequest = match msg.decode() {
@@ -216,7 +218,7 @@ impl Block for CryptoBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

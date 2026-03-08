@@ -88,6 +88,8 @@ fn storage_error_to_wafer(e: StorageError) -> WaferError {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for StorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -103,7 +105,7 @@ impl Block for StorageBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         match msg.kind.as_str() {
             ServiceOp::STORAGE_PUT => {
                 let req: PutRequest = match msg.decode() {
@@ -216,7 +218,7 @@ impl Block for StorageBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

@@ -41,6 +41,8 @@ struct GetResponse {
     value: String,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for ConfigBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -56,7 +58,7 @@ impl Block for ConfigBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         match msg.kind.as_str() {
             ServiceOp::CONFIG_GET => {
                 // Try to parse key from JSON body first, then fall back to meta
@@ -117,7 +119,7 @@ impl Block for ConfigBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

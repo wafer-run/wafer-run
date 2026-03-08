@@ -8,6 +8,7 @@ pub mod flows;
 pub mod clients;
 
 /// Register all wafer-core blocks with a Wafer runtime.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register_all(w: &mut wafer_run::Wafer) {
     use std::sync::Arc;
 

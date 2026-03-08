@@ -39,6 +39,8 @@ pub struct RouterBlock {
     routes: Vec<Route>,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for RouterBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -54,7 +56,7 @@ impl Block for RouterBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let action = msg.action().to_string();
         let path = msg.path().to_string();
 
@@ -75,14 +77,14 @@ impl Block for RouterBlock {
             extract_path_vars(&route.path, &path, msg);
 
             // Dispatch to the matched handler block
-            return ctx.call_block(&route.block, msg);
+            return ctx.call_block(&route.block, msg).await;
         }
 
         // No route matched — 404
         err_not_found(msg, "no matching route")
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -148,6 +150,7 @@ impl BlockFactory for RouterBlockFactory {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
     w.registry()
         .register("@wafer/router", Arc::new(RouterBlockFactory))

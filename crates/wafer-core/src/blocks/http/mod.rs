@@ -336,6 +336,8 @@ pub struct HttpListenerBlock {
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -352,11 +354,11 @@ impl Block for HttpListenerBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn wafer_run::context::Context,
         event: LifecycleEvent,
@@ -421,7 +423,7 @@ impl Block for HttpListenerBlock {
                             body_bytes,
                         );
 
-                        let result = h.execute(&fid, &mut msg);
+                        let result = h.execute(&fid, &mut msg).await;
                         wafer_result_to_response(result)
                     }
                 })
@@ -496,6 +498,7 @@ impl BlockFactory for HttpListenerBlockFactory {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut wafer_run::Wafer) {
     w.registry()
         .register("@wafer/http-listener", Arc::new(HttpListenerBlockFactory))

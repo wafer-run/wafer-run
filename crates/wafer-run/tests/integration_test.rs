@@ -76,8 +76,8 @@ fn test_register_inline_block() {
 // 2. Build and execute a single-node flow
 // ===========================================================================
 
-#[test]
-fn test_single_block_flow() {
+#[tokio::test]
+async fn test_single_block_flow() {
     let mut w = Wafer::new();
 
     w.register_block_func("upper", |_ctx, msg| {
@@ -89,10 +89,10 @@ fn test_single_block_flow() {
 
     let root = block_node("upper");
     w.add_flow(make_flow("to-upper", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("text", "hello world");
-    let result = w.execute("to-upper", &mut msg);
+    let result = w.execute("to-upper", &mut msg).await;
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(
@@ -105,8 +105,8 @@ fn test_single_block_flow() {
 // 3. Multi-block sequential flow (a -> b -> c)
 // ===========================================================================
 
-#[test]
-fn test_sequential_flow() {
+#[tokio::test]
+async fn test_sequential_flow() {
     let mut w = Wafer::new();
 
     // Block A: append "-A"
@@ -144,10 +144,10 @@ fn test_sequential_flow() {
     root.next.push(node_b);
 
     w.add_flow(make_flow("abc", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "start");
-    let result = w.execute("abc", &mut msg);
+    let result = w.execute("abc", &mut msg).await;
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "start-A-B-C");
@@ -157,8 +157,8 @@ fn test_sequential_flow() {
 // 4. Pattern matching (first-match siblings)
 // ===========================================================================
 
-#[test]
-fn test_pattern_matching_exact() {
+#[tokio::test]
+async fn test_pattern_matching_exact() {
     let mut w = Wafer::new();
 
     w.register_block_func("create-handler", |_ctx, msg| {
@@ -181,23 +181,23 @@ fn test_pattern_matching_exact() {
     root.next.push(match_node("delete-handler", "user.delete"));
 
     w.add_flow(make_flow("dispatch", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     // Test user.create
     let mut msg = Message::new("user.create", "");
-    let result = w.execute("dispatch", &mut msg);
+    let result = w.execute("dispatch", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "created");
 
     // Test user.delete
     let mut msg = Message::new("user.delete", "");
-    let result = w.execute("dispatch", &mut msg);
+    let result = w.execute("dispatch", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "deleted");
 }
 
-#[test]
-fn test_pattern_matching_wildcard() {
+#[tokio::test]
+async fn test_pattern_matching_wildcard() {
     let mut w = Wafer::new();
 
     w.register_block_func("user-handler", |_ctx, msg| {
@@ -219,23 +219,23 @@ fn test_pattern_matching_wildcard() {
     root.next.push(match_node("fallback", "")); // empty = always matches
 
     w.add_flow(make_flow("wildcard", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     // "user.update" matches "user.*"
     let mut msg = Message::new("user.update", "");
-    let result = w.execute("wildcard", &mut msg);
+    let result = w.execute("wildcard", &mut msg).await;
     assert_eq!(String::from_utf8_lossy(&msg.data), "user-matched");
     assert_eq!(result.action, Action::Continue);
 
     // "order.create" does not match "user.*", falls to fallback
     let mut msg = Message::new("order.create", "");
-    let result = w.execute("wildcard", &mut msg);
+    let result = w.execute("wildcard", &mut msg).await;
     assert_eq!(String::from_utf8_lossy(&msg.data), "fallback-matched");
     assert_eq!(result.action, Action::Continue);
 }
 
-#[test]
-fn test_pattern_matching_double_wildcard() {
+#[tokio::test]
+async fn test_pattern_matching_double_wildcard() {
     let mut w = Wafer::new();
 
     w.register_block_func("deep-handler", |_ctx, msg| {
@@ -250,17 +250,17 @@ fn test_pattern_matching_double_wildcard() {
     root.next.push(match_node("deep-handler", "event.**"));
 
     w.add_flow(make_flow("deep-match", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     // "event.user.created" matches "event.**"
     let mut msg = Message::new("event.user.created", "");
-    let result = w.execute("deep-match", &mut msg);
+    let result = w.execute("deep-match", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "deep");
 
     // "other.thing" does NOT match "event.**", no match so continue
     let mut msg = Message::new("other.thing", "");
-    let result = w.execute("deep-match", &mut msg);
+    let result = w.execute("deep-match", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), ""); // unchanged
 }
@@ -508,8 +508,8 @@ fn test_response_builder_body() {
 // 7. Observability hooks
 // ===========================================================================
 
-#[test]
-fn test_observability_flow_hooks() {
+#[tokio::test]
+async fn test_observability_flow_hooks() {
     let mut w = Wafer::new();
 
     let flow_start_count = Arc::new(AtomicUsize::new(0));
@@ -528,22 +528,22 @@ fn test_observability_flow_hooks() {
 
     let root = block_node("noop");
     w.add_flow(make_flow("observed", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
-    w.execute("observed", &mut msg);
+    w.execute("observed", &mut msg).await;
 
     assert_eq!(flow_start_count.load(Ordering::SeqCst), 1);
     assert_eq!(flow_end_count.load(Ordering::SeqCst), 1);
 
     // Execute again
-    w.execute("observed", &mut msg);
+    w.execute("observed", &mut msg).await;
     assert_eq!(flow_start_count.load(Ordering::SeqCst), 2);
     assert_eq!(flow_end_count.load(Ordering::SeqCst), 2);
 }
 
-#[test]
-fn test_observability_block_hooks() {
+#[tokio::test]
+async fn test_observability_block_hooks() {
     let mut w = Wafer::new();
 
     let block_names = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
@@ -568,10 +568,10 @@ fn test_observability_block_hooks() {
     root.next.push(block_node("step-2"));
 
     w.add_flow(make_flow("two-steps", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    w.execute("two-steps", &mut msg);
+    w.execute("two-steps", &mut msg).await;
 
     let names = block_names.lock();
     assert_eq!(names.len(), 2);
@@ -586,8 +586,8 @@ fn test_observability_block_hooks() {
 // 8. Flow references
 // ===========================================================================
 
-#[test]
-fn test_flow_reference() {
+#[tokio::test]
+async fn test_flow_reference() {
     let mut w = Wafer::new();
 
     w.register_block_func("validate", |_ctx, msg| {
@@ -611,18 +611,18 @@ fn test_flow_reference() {
     ref_node.next.push(block_node("store"));
 
     w.add_flow(make_flow("main-flow", ref_node));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("user.create", "data");
-    let result = w.execute("main-flow", &mut msg);
+    let result = w.execute("main-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(msg.get_meta("validated"), "true");
     assert_eq!(String::from_utf8_lossy(&msg.data), "stored");
 }
 
-#[test]
-fn test_flow_reference_short_circuit() {
+#[tokio::test]
+async fn test_flow_reference_short_circuit() {
     let mut w = Wafer::new();
 
     // The inner flow responds immediately (short-circuits)
@@ -643,18 +643,18 @@ fn test_flow_reference_short_circuit() {
     ref_node.next.push(block_node("should-not-run"));
 
     w.add_flow(make_flow("outer", ref_node));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("outer", &mut msg);
+    let result = w.execute("outer", &mut msg).await;
 
     assert_eq!(result.action, Action::Respond);
     let resp = result.response.unwrap();
     assert_eq!(resp.data, b"early-response");
 }
 
-#[test]
-fn test_flow_reference_not_found() {
+#[tokio::test]
+async fn test_flow_reference_not_found() {
     let mut w = Wafer::new();
 
     w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
@@ -665,10 +665,10 @@ fn test_flow_reference_not_found() {
 
     w.add_flow(make_flow("bad-ref", ref_node));
     // We register noop so the outer node resolves fine
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("bad-ref", &mut msg);
+    let result = w.execute("bad-ref", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
     assert!(result
@@ -683,8 +683,8 @@ fn test_flow_reference_not_found() {
 // 9. Error handling: on_error = stop vs continue
 // ===========================================================================
 
-#[test]
-fn test_on_error_stop() {
+#[tokio::test]
+async fn test_on_error_stop() {
     let mut w = Wafer::new();
 
     w.register_block_func("fail", |_ctx, msg| {
@@ -702,10 +702,10 @@ fn test_on_error_stop() {
     root.next.push(block_node("after-fail"));
 
     w.add_flow(make_flow_with_on_error("stop-flow", root, "stop"));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("stop-flow", &mut msg);
+    let result = w.execute("stop-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
     assert_eq!(result.error.as_ref().unwrap().code, "test_error");
@@ -713,8 +713,8 @@ fn test_on_error_stop() {
     assert_ne!(String::from_utf8_lossy(&msg.data), "should-not-run");
 }
 
-#[test]
-fn test_on_error_continue() {
+#[tokio::test]
+async fn test_on_error_continue() {
     let mut w = Wafer::new();
 
     let fail_count = Arc::new(AtomicUsize::new(0));
@@ -736,10 +736,10 @@ fn test_on_error_continue() {
     root.next.push(block_node("after-fail"));
 
     w.add_flow(make_flow_with_on_error("cont-flow", root, "continue"));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("cont-flow", &mut msg);
+    let result = w.execute("cont-flow", &mut msg).await;
 
     // With on_error=continue, the flow proceeds past the error
     assert_eq!(fail_count.load(Ordering::SeqCst), 1);
@@ -747,8 +747,8 @@ fn test_on_error_continue() {
     assert_eq!(String::from_utf8_lossy(&msg.data), "recovered");
 }
 
-#[test]
-fn test_on_error_continue_no_more_nodes() {
+#[tokio::test]
+async fn test_on_error_continue_no_more_nodes() {
     let mut w = Wafer::new();
 
     w.register_block_func("fail-at-end", |_ctx, msg| {
@@ -758,10 +758,10 @@ fn test_on_error_continue_no_more_nodes() {
 
     let root = block_node("fail-at-end");
     w.add_flow(make_flow_with_on_error("cont-end", root, "continue"));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("cont-end", &mut msg);
+    let result = w.execute("cont-end", &mut msg).await;
 
     // on_error=continue with no more nodes means the error is swallowed
     // and the runtime returns Continue
@@ -772,8 +772,8 @@ fn test_on_error_continue_no_more_nodes() {
 // 10. Respond short-circuits the flow
 // ===========================================================================
 
-#[test]
-fn test_respond_short_circuits() {
+#[tokio::test]
+async fn test_respond_short_circuits() {
     let mut w = Wafer::new();
 
     w.register_block_func("early-respond", |_ctx, msg| {
@@ -790,10 +790,10 @@ fn test_respond_short_circuits() {
     root.next.push(block_node("unreachable"));
 
     w.add_flow(make_flow("short-circuit", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("short-circuit", &mut msg);
+    let result = w.execute("short-circuit", &mut msg).await;
 
     assert_eq!(result.action, Action::Respond);
     assert_eq!(result.response.unwrap().data, b"early");
@@ -803,8 +803,8 @@ fn test_respond_short_circuits() {
 // 11. Drop action
 // ===========================================================================
 
-#[test]
-fn test_drop_action() {
+#[tokio::test]
+async fn test_drop_action() {
     let mut w = Wafer::new();
 
     w.register_block_func("dropper", |_ctx, msg| msg.clone().drop_msg());
@@ -819,10 +819,10 @@ fn test_drop_action() {
     root.next.push(block_node("unreachable"));
 
     w.add_flow(make_flow("drop-flow", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
-    let result = w.execute("drop-flow", &mut msg);
+    let result = w.execute("drop-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Drop);
 }
@@ -831,12 +831,12 @@ fn test_drop_action() {
 // 12. Flow not found
 // ===========================================================================
 
-#[test]
-fn test_execute_nonexistent_flow() {
+#[tokio::test]
+async fn test_execute_nonexistent_flow() {
     let w = Wafer::new();
 
     let mut msg = Message::new("test", "data");
-    let result = w.execute("nonexistent", &mut msg);
+    let result = w.execute("nonexistent", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
     assert_eq!(result.error.as_ref().unwrap().code, "flow_not_found");
@@ -846,8 +846,8 @@ fn test_execute_nonexistent_flow() {
 // 13. Block with config
 // ===========================================================================
 
-#[test]
-fn test_block_with_config() {
+#[tokio::test]
+async fn test_block_with_config() {
     let mut w = Wafer::new();
 
     w.register_block_func("configurable", |ctx, msg| {
@@ -864,10 +864,10 @@ fn test_block_with_config() {
     );
 
     w.add_flow(make_flow("config-flow", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "world");
-    let result = w.execute("config-flow", &mut msg);
+    let result = w.execute("config-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Continue);
     assert_eq!(String::from_utf8_lossy(&msg.data), "hello-world");
@@ -935,14 +935,14 @@ fn test_message_methods() {
 // 15. Resolve errors
 // ===========================================================================
 
-#[test]
-fn test_resolve_missing_block() {
+#[tokio::test]
+async fn test_resolve_missing_block() {
     let mut w = Wafer::new();
 
     let root = block_node("unregistered-block");
     w.add_flow(make_flow("broken", root));
 
-    let err = w.resolve().unwrap_err();
+    let err = w.resolve().await.unwrap_err();
     assert!(err.contains("unregistered-block"), "Error: {}", err);
 }
 
@@ -950,8 +950,8 @@ fn test_resolve_missing_block() {
 // 16. FlowDef (JSON-based flow definition)
 // ===========================================================================
 
-#[test]
-fn test_add_flow_def() {
+#[tokio::test]
+async fn test_add_flow_def() {
     let mut w = Wafer::new();
 
     w.register_block_func("echo", |_ctx, msg| msg.clone().cont());
@@ -974,10 +974,10 @@ fn test_add_flow_def() {
     };
 
     w.add_flow_def(&def);
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "hello");
-    let result = w.execute("from-def", &mut msg);
+    let result = w.execute("from-def", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
 }
 
@@ -985,8 +985,8 @@ fn test_add_flow_def() {
 // 17. Panic recovery
 // ===========================================================================
 
-#[test]
-fn test_panic_recovery() {
+#[tokio::test]
+async fn test_panic_recovery() {
     let mut w = Wafer::new();
 
     w.register_block_func("panicker", |_ctx, _msg| {
@@ -995,10 +995,10 @@ fn test_panic_recovery() {
 
     let root = block_node("panicker");
     w.add_flow(make_flow("panic-flow", root));
-    w.resolve().expect("resolve failed");
+    w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("panic-flow", &mut msg);
+    let result = w.execute("panic-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
@@ -1031,8 +1031,8 @@ fn test_flows_info() {
 // 19. Start / Stop lifecycle
 // ===========================================================================
 
-#[test]
-fn test_start_and_stop() {
+#[tokio::test]
+async fn test_start_and_stop() {
     let mut w = Wafer::new();
 
     w.register_block_func("lifecycle-block", |_ctx, msg| msg.clone().cont());
@@ -1041,14 +1041,14 @@ fn test_start_and_stop() {
     w.add_flow(make_flow("lifecycle-test", root));
 
     // Start implicitly resolves if not already resolved
-    w.start_without_bind().expect("start failed");
+    w.start_without_bind().await.expect("start failed");
 
     let mut msg = Message::new("test", "");
-    let result = w.execute("lifecycle-test", &mut msg);
+    let result = w.execute("lifecycle-test", &mut msg).await;
     assert_eq!(result.action, Action::Continue);
 
     // Stop calls lifecycle(Stop) on all resolved blocks
-    w.stop();
+    w.stop().await;
 }
 
 // ===========================================================================
@@ -1073,8 +1073,9 @@ fn test_wafer_error_display() {
 
 struct TestContext;
 
+#[async_trait::async_trait]
 impl Context for TestContext {
-    fn call_block(&self, _block_name: &str, _msg: &mut Message) -> Result_ {
+    async fn call_block(&self, _block_name: &str, _msg: &mut Message) -> Result_ {
         Result_ {
             action: Action::Continue,
             response: None,
@@ -1129,7 +1130,7 @@ mod versioned_block_tests {
 
     #[test]
     fn test_parse_versioned_block_local_name() {
-        assert!(parse_versioned_block("@wafer/auth").is_none());
+        assert!(parse_versioned_block("@wafer/auth-validator").is_none());
     }
 
     #[test]
@@ -1205,7 +1206,7 @@ mod unversioned_block_tests {
     #[test]
     fn test_parse_unversioned_block_local_name() {
         assert!(parse_unversioned_block("my-block").is_none());
-        assert!(parse_unversioned_block("@wafer/auth").is_none());
+        assert!(parse_unversioned_block("@wafer/auth-validator").is_none());
     }
 }
 
@@ -1214,8 +1215,8 @@ mod unversioned_block_tests {
 // ===========================================================================
 
 #[cfg(feature = "wasm")]
-#[test]
-fn test_resolve_versioned_block_download_error() {
+#[tokio::test]
+async fn test_resolve_versioned_block_download_error() {
     use wafer_run::*;
 
     let mut w = Wafer::new();
@@ -1232,7 +1233,7 @@ fn test_resolve_versioned_block_download_error() {
     };
     w.add_flow(flow);
 
-    let err = w.resolve().unwrap_err();
+    let err = w.resolve().await.unwrap_err();
     assert!(
         err.contains("failed to download") || err.contains("failed to load remote block"),
         "Expected download or load error, got: {}",
@@ -1245,8 +1246,8 @@ fn test_resolve_versioned_block_download_error() {
 // ===========================================================================
 
 #[cfg(feature = "wasm")]
-#[test]
-fn test_resolve_unversioned_block_download_error() {
+#[tokio::test]
+async fn test_resolve_unversioned_block_download_error() {
     use wafer_run::*;
 
     let mut w = Wafer::new();
@@ -1263,7 +1264,7 @@ fn test_resolve_unversioned_block_download_error() {
     };
     w.add_flow(flow);
 
-    let err = w.resolve().unwrap_err();
+    let err = w.resolve().await.unwrap_err();
     assert!(
         err.contains("failed to fetch releases") || err.contains("failed to download") || err.contains("HTTP"),
         "Expected download error, got: {}",

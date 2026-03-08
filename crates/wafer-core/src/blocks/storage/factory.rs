@@ -14,6 +14,8 @@ use wafer_run::types::*;
 /// Stub block returned when storage initialization fails.
 struct FailedStorageBlock(String);
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for FailedStorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -29,14 +31,14 @@ impl Block for FailedStorageBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, _msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, _msg: &mut Message) -> Result_ {
         Result_::error(WaferError::new(
             ErrorCode::UNAVAILABLE,
             format!("storage unavailable: {}", self.0),
         ))
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

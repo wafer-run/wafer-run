@@ -11,7 +11,9 @@ pub struct ConfigBlockFactory;
 
 impl BlockFactory for ConfigBlockFactory {
     fn create(&self, _config: Option<&serde_json::Value>) -> Arc<dyn Block> {
-        Arc::new(super::block::ConfigBlock::new(None))
+        Arc::new(super::block::ConfigBlock::new(Some(Arc::new(
+            super::service::EnvConfigService::new(),
+        ))))
     }
 
     fn info(&self) -> BlockInfo {

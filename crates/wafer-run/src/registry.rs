@@ -42,16 +42,18 @@ pub struct FuncBlock {
     pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for FuncBlock {
     fn info(&self) -> BlockInfo {
         self.info.clone()
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         (self.handler)(ctx, msg)
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,

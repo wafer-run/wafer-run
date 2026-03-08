@@ -42,7 +42,7 @@ impl AuthBlock {
     }
 
     /// Validate API key against database.
-    fn validate_api_key(
+    async fn validate_api_key(
         ctx: &dyn Context,
         msg: &mut Message,
         token: &str,
@@ -63,7 +63,7 @@ impl AuthBlock {
             ..Default::default()
         };
 
-        let result = match db::list(ctx, "api_keys", &opts) {
+        let result = match db::list(ctx, "api_keys", &opts).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, "failed to look up API key in database");
@@ -119,7 +119,7 @@ impl AuthBlock {
         }
 
         // Look up user email
-        let email = match db::get(ctx, "auth_users", &user_id) {
+        let email = match db::get(ctx, "auth_users", &user_id).await {
             Ok(user) => user
                 .data
                 .get("email")
@@ -139,7 +139,7 @@ impl AuthBlock {
             ..Default::default()
         };
 
-        let roles: Vec<String> = match db::list(ctx, "iam_user_roles", &role_opts) {
+        let roles: Vec<String> = match db::list(ctx, "iam_user_roles", &role_opts).await {
             Ok(r) => r
                 .records
                 .iter()
@@ -152,13 +152,13 @@ impl AuthBlock {
     }
 
     /// Validate JWT token.
-    fn validate_jwt(
+    async fn validate_jwt(
         ctx: &dyn Context,
         msg: &mut Message,
         token: &str,
     ) -> std::result::Result<(String, String, Vec<String>), Result_> {
         // Verify JWT signature and extract claims
-        let claims_map = match crypto::verify(ctx, token) {
+        let claims_map = match crypto::verify(ctx, token).await {
             Ok(data) => data,
             Err(_) => return Err(auth_error(msg,"Invalid or expired token")),
         };
@@ -205,10 +205,12 @@ impl AuthBlock {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for AuthBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer/auth".to_string(),
+            name: "@wafer/auth-validator".to_string(),
             version: "0.1.0".to_string(),
             interface: "middleware@v1".to_string(),
             summary: "Authentication middleware: JWT, API key, and cookie auth".to_string(),
@@ -223,7 +225,7 @@ impl Block for AuthBlock {
         }
     }
 
-    fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Extract token
         let token = match Self::extract_token(msg) {
             Some(t) => t,
@@ -232,12 +234,12 @@ impl Block for AuthBlock {
 
         // Validate based on token type
         let (user_id, email, roles) = if Self::is_api_key(&token) {
-            match Self::validate_api_key(ctx, msg, &token) {
+            match Self::validate_api_key(ctx, msg, &token).await {
                 Ok(v) => v,
                 Err(r) => return r,
             }
         } else {
-            match Self::validate_jwt(ctx, msg, &token) {
+            match Self::validate_jwt(ctx, msg, &token).await {
                 Ok(v) => v,
                 Err(r) => return r,
             }
@@ -255,7 +257,7 @@ impl Block for AuthBlock {
         msg.clone().cont()
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
@@ -280,6 +282,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
-    w.register_block("@wafer/auth", Arc::new(AuthBlock::new()));
+    w.register_block("@wafer/auth-validator", Arc::new(AuthBlock::new()));
 }

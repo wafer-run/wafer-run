@@ -15,6 +15,8 @@ use wafer_run::{FlowDef, Message, Result_, Wafer, WASMBlock};
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
     inner: Wafer,
+    /// Tokio runtime for bridging async calls at the FFI boundary.
+    rt: tokio::runtime::Runtime,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,10 +75,12 @@ unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 #[no_mangle]
 pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     let result = std::panic::catch_unwind(|| {
-        let rt = WaferRuntime {
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        let wr = WaferRuntime {
             inner: Wafer::new(),
+            rt,
         };
-        Box::into_raw(Box::new(rt))
+        Box::into_raw(Box::new(wr))
     });
     result.unwrap_or(std::ptr::null_mut())
 }
@@ -100,7 +104,7 @@ pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
             Some(r) => r,
             None => return error_json("null runtime pointer"),
         };
-        match rt.inner.resolve() {
+        match rt.rt.block_on(rt.inner.resolve()) {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => error_json(&e),
         }
@@ -117,7 +121,7 @@ pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
             Some(r) => r,
             None => return error_json("null runtime pointer"),
         };
-        match rt.inner.start_without_bind() {
+        match rt.rt.block_on(rt.inner.start_without_bind()) {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => error_json(&e),
         }
@@ -130,7 +134,7 @@ pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
 pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Some(rt) = deref_mut(w) {
-            rt.inner.stop();
+            rt.rt.block_on(rt.inner.stop());
         }
     }));
 }
@@ -201,7 +205,7 @@ pub unsafe extern "C" fn wafer_run(
     message_json: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_ref(w) {
+        let rt = match deref_mut(w) {
             Some(r) => r,
             None => {
                 return to_c_string(
@@ -254,7 +258,7 @@ pub unsafe extern "C" fn wafer_run(
             }
         };
 
-        let result = rt.inner.execute(fid, &mut msg);
+        let result = rt.rt.block_on(rt.inner.execute(fid, &mut msg));
 
         to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
             r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#

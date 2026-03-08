@@ -15,6 +15,7 @@ impl PlaygroundBlock {
     }
 }
 
+#[async_trait::async_trait]
 impl Block for PlaygroundBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
@@ -30,7 +31,7 @@ impl Block for PlaygroundBlock {
         }
     }
 
-    fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
 
@@ -139,7 +140,7 @@ impl Block for PlaygroundBlock {
         }
     }
 
-    fn lifecycle(
+    async fn lifecycle(
         &self,
         _ctx: &dyn Context,
         _event: LifecycleEvent,
