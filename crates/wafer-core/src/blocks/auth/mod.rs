@@ -12,25 +12,25 @@ impl AuthBlock {
         Self
     }
 
-    /// Extract auth token from Cookie header or Authorization header.
+    /// Extract auth token from Authorization header or Cookie.
+    /// Bearer tokens take precedence over cookies — explicit credentials
+    /// should override ambient browser credentials.
     fn extract_token(msg: &Message) -> Option<String> {
-        // 1. Try httpOnly cookie
+        // 1. Try Authorization header first (explicit > ambient)
+        let auth_header = msg.header("Authorization").to_string();
+        if !auth_header.is_empty() {
+            if let Some(token) = auth_header.strip_prefix("Bearer ") {
+                let token = token.trim();
+                if !token.is_empty() {
+                    return Some(token.to_string());
+                }
+            }
+        }
+
+        // 2. Fall back to httpOnly cookie
         let cookie_token = msg.cookie("auth_token");
         if !cookie_token.is_empty() {
             return Some(cookie_token.to_string());
-        }
-
-        // 2. Try Authorization header
-        let auth_header = msg.header("Authorization").to_string();
-        if auth_header.is_empty() {
-            return None;
-        }
-
-        if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            let token = token.trim();
-            if !token.is_empty() {
-                return Some(token.to_string());
-            }
         }
 
         None

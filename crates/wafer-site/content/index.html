@@ -12,13 +12,12 @@
     <style>
         /* Hero */
         .hero {
-            background: linear-gradient(135deg, var(--wafer-cream) 0%, var(--bg-white) 100%);
-            padding: 3rem 1.5rem 2rem; text-align: center;
+            background: linear-gradient(135deg, var(--wafer-cream) 0%, var(--bg-white) 60%, #eef2f7 100%);
+            padding: 5rem 1.5rem 3rem; text-align: center;
         }
         .hero img {
-            max-width: 400px; width: 100%; height: auto;
-            border-radius: 0.5rem;
-            margin-bottom: 2rem;
+            max-width: 200px; width: 100%; height: auto;
+            border-radius: 0.5rem; margin-bottom: 1.5rem;
         }
         .hero h1 {
             font-size: 3.5rem; font-weight: 700;
@@ -26,32 +25,135 @@
         }
         .hero-wafer { color: var(--wafer); }
         .hero-run { color: var(--blue-dark); }
-        .hero p {
-            font-size: 1.25rem; color: var(--text-secondary); max-width: 36rem;
-            margin: 0 auto;
+        .hero-tagline {
+            font-size: 1.4rem; color: var(--text-secondary);
+            max-width: 38rem; margin: 0 auto 1.5rem;
+        }
+        .hero-sub {
+            font-size: 1.05rem; color: var(--text-secondary);
+            max-width: 42rem; margin: 0 auto 2rem; line-height: 1.7;
         }
 
-        /* Features */
-        .features {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 1.5rem; padding: 3rem 1.5rem; max-width: 72rem; margin: 0 auto;
+
+        /* Pillars */
+        .pillars {
+            max-width: 72rem; margin: 0 auto;
+            padding: 3rem 1.5rem 1rem;
         }
-        .feature {
-            background: var(--bg-white); border-radius: 0.75rem; padding: 1.5rem;
-            border: 1px solid var(--border); transition: border-color 0.3s;
+        .pillar {
+            display: grid; grid-template-columns: 1fr 1fr;
+            gap: 3rem; align-items: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border);
         }
-        .feature:hover { border-color: var(--wafer); }
-        .feature h3 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.1rem; }
-        .feature p { color: var(--text-secondary); font-size: 0.95rem; }
+        .pillar:last-child { border-bottom: none; }
+        .pillar.reverse .pillar-text { order: 2; }
+        .pillar.reverse .pillar-visual { order: 1; }
+        .pillar-tag {
+            font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--wafer); margin-bottom: 0.5rem;
+        }
+        .pillar-text h2 {
+            font-size: 1.8rem; color: var(--text); margin-bottom: 0.75rem;
+            line-height: 1.3;
+        }
+        .pillar-text p {
+            font-size: 1rem; color: var(--text-secondary); line-height: 1.7;
+            margin-bottom: 0.75rem;
+        }
+        .pillar-points {
+            list-style: none; padding: 0; margin-top: 1rem;
+        }
+        .pillar-points li {
+            padding: 0.35rem 0; color: var(--text-secondary); font-size: 0.95rem;
+            padding-left: 1.5rem; position: relative;
+        }
+        .pillar-points li::before {
+            content: '\2713'; position: absolute; left: 0;
+            color: var(--wafer); font-weight: 700;
+        }
+        .pillar-visual {
+            background: var(--code-block-bg); border-radius: 0.75rem;
+            padding: 1.5rem; overflow-x: auto;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+        }
+        .pillar-visual pre {
+            margin: 0; background: none; box-shadow: none; padding: 0;
+            font-size: 0.82rem; line-height: 1.7;
+        }
+        .pillar-visual .dim { color: #6b7280; }
+        .pillar-visual .kw { color: #c586c0; }
+        .pillar-visual .fn { color: #dcdcaa; }
+        .pillar-visual .str { color: #ce9178; }
+        .pillar-visual .type { color: #4ec9b0; }
+        .pillar-visual .comment { color: #6a9955; }
+        .pillar-visual .num { color: #b5cea8; }
+        .pillar-visual .attr { color: #9cdcfe; }
+        .pillar-visual .title {
+            font-size: 0.7rem; color: #6b7280; text-transform: uppercase;
+            letter-spacing: 0.05em; margin-bottom: 0.75rem; display: block;
+        }
 
         /* CTA */
-        .cta { text-align: center; padding: 3rem 1.5rem; }
+        .cta { text-align: center; padding: 3rem 1.5rem 4rem; }
+        .cta h2 {
+            font-size: 1.6rem; color: var(--text); margin-bottom: 0.5rem;
+        }
+        .cta p {
+            color: var(--text-secondary); margin-bottom: 1.5rem;
+            max-width: 32rem; margin-left: auto; margin-right: auto;
+        }
+        .cta-buttons {
+            display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;
+        }
+        .social-links {
+            display: flex; justify-content: center; gap: 1.25rem;
+            margin-top: 1.5rem;
+        }
+        .social-links a {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 2.5rem; height: 2.5rem; border-radius: 50%;
+            background: var(--bg-white); border: 1px solid var(--border);
+            color: var(--text-secondary); transition: all 0.2s;
+            text-decoration: none;
+        }
+        .social-links a:hover {
+            border-color: var(--wafer); color: var(--wafer);
+            transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .social-links svg { width: 1.25rem; height: 1.25rem; fill: currentColor; }
+
         .cta a {
-            display: inline-block; background: var(--accent); color: white;
-            padding: 0.75rem 2rem; border-radius: 0.5rem; text-decoration: none;
+            display: inline-block; padding: 0.75rem 2rem;
+            border-radius: 0.5rem; text-decoration: none;
             font-weight: 600; transition: all 0.2s;
         }
-        .cta a:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(30,58,95,0.3); }
+        .cta-primary {
+            background: var(--accent); color: white;
+        }
+        .cta-primary:hover {
+            background: var(--accent-hover); color: white;
+            transform: translateY(-1px); box-shadow: 0 4px 12px rgba(30,58,95,0.3);
+        }
+        .cta-secondary {
+            background: var(--bg-white); color: var(--accent);
+            border: 1px solid var(--border);
+        }
+        .cta-secondary:hover {
+            border-color: var(--wafer); color: var(--accent);
+            transform: translateY(-1px);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.5rem; }
+            .hero-tagline { font-size: 1.15rem; }
+            .pillar {
+                grid-template-columns: 1fr; gap: 1.5rem;
+            }
+            .pillar.reverse .pillar-text { order: 1; }
+            .pillar.reverse .pillar-visual { order: 2; }
+        }
     </style>
 </head>
 <body>
@@ -66,39 +168,157 @@
             </nav>
         </div>
     </div>
+
+    <!-- Hero -->
     <div class="hero">
         <img src="/images/logo.webp" alt="wafer.run">
         <h1><span class="hero-wafer">wafer</span><span class="hero-run">.run</span></h1>
-        <p>a wafer thin runtime</p>
+        <p class="hero-tagline">The wafer thin runtime for tools, apps, and services</p>
+        <p class="hero-sub">
+            Ship secure, sandboxed programs in a single binary. No Docker. No VMs.
+            Just WebAssembly, a tiny runtime, and your code.
+        </p>
     </div>
-    <div class="features">
-        <div class="feature">
-            <h3>Block-Based Architecture</h3>
-            <p>Build your backend from composable blocks. Each block handles a message and returns a result. Connect them together in flows for complex workflows.</p>
+
+    <div class="pillars">
+
+        <!-- Pillar 1: Tools for Developers & AI -->
+        <div class="pillar">
+            <div class="pillar-text">
+                <div class="pillar-tag">For Developers & AI</div>
+                <h2>Create tools that do one thing well</h2>
+                <p>
+                    Build small, focused blocks of logic that developers and AI agents can call.
+                    Each block takes input, runs your code, and returns a result.
+                    Write in Rust, Go, or JavaScript &mdash; compile to WebAssembly and it runs anywhere.
+                </p>
+                <p>
+                    Perfect for AI tool-calling: give an LLM a catalog of blocks
+                    and let it run the best tool for the job. Each block is sandboxed, deterministic,
+                    and designed to be easily testable.
+                </p>
+                <ul class="pillar-points">
+                    <li>Write in Rust, Go, JavaScript, compile to Wasm</li>
+                    <li>Structured input/output via JSON Schema</li>
+                    <li>Database, storage, crypto, network &mdash; all just blocks</li>
+                    <li>Publish to the registry, share across teams</li>
+                </ul>
+            </div>
+            <div class="pillar-visual">
+                <span class="title">my-tool/src/lib.rs</span>
+                <pre><code><span class="kw">use</span> <span class="type">wafer_sdk</span>::*;
+
+<span class="attr">#[block]</span>
+<span class="kw">fn</span> <span class="fn">handle</span>(msg: <span class="type">Message</span>, ctx: &<span class="type">Context</span>) -> <span class="type">Result</span> {
+    <span class="comment">// Read input from the caller</span>
+    <span class="kw">let</span> query = msg.str(<span class="str">"query"</span>);
+
+    <span class="comment">// Use built-in database service</span>
+    <span class="kw">let</span> results = ctx.db()
+        .search(<span class="str">"products"</span>, &query)?;
+
+    <span class="comment">// Return structured data</span>
+    ctx.ok(json!({ <span class="str">"results"</span>: results }))
+}</code></pre>
+            </div>
         </div>
-        <div class="feature">
-            <h3>Multi-Language Blocks</h3>
-            <p>Write blocks in Rust, Go, or JavaScript. Compile to WebAssembly and run them all in the same runtime.</p>
+
+        <!-- Pillar 2: Complete Programs, Single Binary -->
+        <div class="pillar reverse">
+            <div class="pillar-text">
+                <div class="pillar-tag">Single Binary</div>
+                <h2>Run complete programs with zero dependencies</h2>
+                <p>
+                    Wire blocks into flows &mdash; full request pipelines defined in JSON.
+                    Auth, routing, database, file storage, rate limiting, CORS &mdash;
+                    it all ships as one self-contained binary. No runtime to install.
+                    No containers to manage. No infra to provision.
+                </p>
+                <p>
+                    Deploy anywhere: a $5/mo VPS, edge workers, embedded devices,
+                    or your laptop. The same binary runs everywhere, starts instantly,
+                    and uses almost no memory.
+                </p>
+                <ul class="pillar-points">
+                    <li>JSON flow configs wire blocks into full applications</li>
+                    <li>HTTP server, database, storage all built-in</li>
+                    <li>Single binary &mdash; copy it and run</li>
+                    <li>Deploy to any Linux, Mac, Windows, or edge platform</li>
+                </ul>
+            </div>
+            <div class="pillar-visual">
+                <span class="title">app flow definition</span>
+                <pre><code>{
+  <span class="attr">"id"</span>: <span class="str">"my-app"</span>,
+  <span class="attr">"summary"</span>: <span class="str">"Main application flow"</span>,
+  <span class="attr">"root"</span>: {
+    <span class="attr">"block"</span>: <span class="str">"@wafer/router"</span>,
+    <span class="attr">"config"</span>: {
+      <span class="attr">"routes"</span>: [
+        { <span class="attr">"path"</span>: <span class="str">"/api/products/**"</span>,
+          <span class="attr">"block"</span>: <span class="str">"product-tool"</span> },
+        { <span class="attr">"path"</span>: <span class="str">"/api/orders/**"</span>,
+          <span class="attr">"block"</span>: <span class="str">"order-tool"</span> },
+        { <span class="attr">"path"</span>: <span class="str">"/**"</span>,
+          <span class="attr">"block"</span>: <span class="str">"@wafer/web"</span> }
+      ]
+    }
+  }
+}</code></pre>
+            </div>
         </div>
-        <div class="feature">
-            <h3>Built-in Services</h3>
-            <p>Database, storage, crypto, logging, config, and network services are built-in. Blocks access them through a clean service interface.</p>
+
+        <!-- Pillar 3: Secure by Default -->
+        <div class="pillar">
+            <div class="pillar-text">
+                <div class="pillar-tag">Secure by Default</div>
+                <h2>WebAssembly sandboxing without the overhead</h2>
+                <p>
+                    Every block runs inside a WebAssembly sandbox. It cannot access
+                    the filesystem, network, or memory of other blocks unless you
+                    explicitly grant it through the service interface.
+                    No container escapes. No privilege escalation. No CVE treadmill.
+                </p>
+                <p>
+                    Docker images are hundreds of megabytes, take seconds to start,
+                    and need constant patching. A Wasm block is kilobytes, starts
+                    in microseconds, and has a tiny attack surface by design.
+                    Run untrusted code with confidence.
+                </p>
+                <ul class="pillar-points">
+                    <li>Memory-safe sandbox &mdash; no buffer overflows, no escapes</li>
+                    <li>Capability-based security &mdash; blocks only access what you allow</li>
+                    <li>No OS, no kernel, no CVEs to patch</li>
+                    <li>Safe to run user-submitted or AI-generated code</li>
+                </ul>
+            </div>
+            <div class="pillar-visual">
+                <span class="title">Wasm sandbox model</span>
+                <pre><code><span class="comment"># What a Wasm block CAN do:</span>
+<span class="fn">  Compute          pure logic, transforms</span>
+<span class="fn">  Call blocks    db, storage, crypto, network, etc</span>
+<span class="fn">  Return data      structured JSON output</span>
+
+<span class="comment"># What a Wasm block CANNOT do:</span>
+<span class="dim">  Read filesystem  no access</span>
+<span class="dim">  Open sockets     no access</span>
+<span class="dim">  Spawn processes  no access</span>
+
+<span class="comment"># No OS. No kernel. No CVEs to patch.</span>
+<span class="comment"># Just your code in a memory-safe sandbox.</span></code></pre>
+            </div>
         </div>
-        <div class="feature">
-            <h3>Transport Agnostic</h3>
-            <p>The runtime is a pure executor with zero transport knowledge. HTTP, WebSocket, MQTT — each transport is just a bridge in wafer-core or an external adapter.</p>
-        </div>
-        <div class="feature">
-            <h3>Shared Block Ecosystem</h3>
-            <p>Use pre-built blocks from wafer-core: CORS, rate limiting, security headers, auth, monitoring, and more.</p>
-        </div>
-        <div class="feature">
-            <h3>Single Binary Deploy</h3>
-            <p>Compile everything into a single binary. Deploy to Fly.io, Railway, Docker, or bare metal.</p>
-        </div>
+
     </div>
+
+    <!-- CTA -->
     <div class="cta">
-        <a href="/docs">Read the Documentation</a>
+        <h2>Start building in minutes</h2>
+        <p>Install the CLI, create a block, and deploy. No signup, no containers, no config files.</p>
+        <div class="cta-buttons">
+            <a class="cta-primary" href="/docs">Read the Docs</a>
+            <a class="cta-secondary" href="/playground">Try the Playground</a>
+        </div>
     </div>
 </body>
 </html>

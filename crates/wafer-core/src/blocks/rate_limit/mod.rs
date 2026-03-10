@@ -44,10 +44,19 @@ impl Block for RateLimitBlock {
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        // Allow disabling via env var (useful for tests)
+        if std::env::var("RATE_LIMIT_IP").ok().as_deref() == Some("0") {
+            return msg.clone().cont();
+        }
+
         let max = ctx
             .config_get("max_requests")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(self.max_requests);
+
+        if max == 0 {
+            return msg.clone().cont();
+        }
 
         let window_secs = ctx
             .config_get("window_seconds")
