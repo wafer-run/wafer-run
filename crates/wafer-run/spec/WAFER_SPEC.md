@@ -503,6 +503,41 @@ In this example:
 
 ---
 
+## Aliases
+
+Aliases provide indirection for block and flow names. An alias maps a short name (e.g., `@db`) to a concrete block (e.g., `@wafer/database` or `solobase/d1`), allowing blocks to be swapped without changing any flow definitions or `call_block()` calls.
+
+### Configuration
+
+Aliases are defined in `blocks.json` under the top-level `"aliases"` key:
+
+```json
+{
+  "aliases": {
+    "@db": "@wafer/database",
+    "@storage": "@wafer/storage"
+  },
+  "@wafer/database": { "type": "sqlite", "path": "data/app.db" },
+  "@wafer/storage": { "type": "local", "root": "data/storage" }
+}
+```
+
+### Resolution
+
+Aliases are resolved in three places:
+
+1. **`call_block(name)`** — if `name` is an alias, the call is dispatched to the target block.
+2. **Flow node `block` references** — resolved at startup during `resolve()`.
+3. **Flow node `flow` references** — resolved at runtime before flow execution.
+
+Aliases can also be registered programmatically via `wafer.add_alias(alias, target)`.
+
+### Requires enforcement
+
+When a block declares a `requires` list, both the alias name and the resolved target name are checked. A block that requires `"@db"` can call either `@db` or the underlying `@wafer/database`.
+
+---
+
 ## Execution Semantics
 
 ### Sequential Execution (Nested)

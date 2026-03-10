@@ -46,4 +46,14 @@ pub fn register_all(w: &mut wafer_run::Wafer) {
     #[cfg(all(not(feature = "storage-local"), feature = "storage-s3"))]
     register_factory!(w, "@wafer/storage", blocks::storage::factory::StorageBlockFactory);
     blocks::web::register(w);
+
+    // Individual backend blocks (for alias-based routing)
+    #[cfg(feature = "sqlite")]
+    register_factory!(w, "solobase/sqlite", blocks::database::sqlite_factory::SqliteBlockFactory);
+    #[cfg(feature = "postgres")]
+    register_factory!(w, "solobase/postgres", blocks::database::postgres_factory::PostgresBlockFactory);
+    #[cfg(feature = "storage-local")]
+    register_factory!(w, "solobase/local-storage", blocks::storage::local_factory::LocalStorageBlockFactory);
+    #[cfg(feature = "storage-s3")]
+    register_factory!(w, "solobase/s3", blocks::storage::s3_factory::S3BlockFactory);
 }

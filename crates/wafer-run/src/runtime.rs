@@ -125,6 +125,9 @@ pub struct Wafer {
     pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
+    /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`). Alias names
+    /// can be used wherever a block or flow name is expected.
+    pub(crate) aliases: HashMap<String, String>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
@@ -144,6 +147,7 @@ impl Wafer {
             resolved: HashMap::new(),
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
+            aliases: HashMap::new(),
             hooks: ObservabilityBus::new(),
             blocks_snapshot: Arc::new(Vec::new()),
             flow_infos_snapshot: Arc::new(Vec::new()),
@@ -156,6 +160,12 @@ impl Wafer {
     /// Returns all resolved blocks as an Arc for use in contexts.
     fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
         self.all_blocks.clone()
+    }
+
+    /// Register an alias mapping. When `call_block(alias)` is called,
+    /// it resolves to the target block name.
+    pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
+        self.aliases.insert(alias.into(), target.into());
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
@@ -179,6 +189,7 @@ impl Wafer {
             registered_blocks_snapshot: self.blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            aliases: Arc::new(self.aliases.clone()),
             caller_requires: None, // unrestricted by default; overridden per-block in execute_node
         }
     }
@@ -189,6 +200,12 @@ impl Wafer {
         let mut map = HashMap::new();
         for (name, block) in &self.resolved {
             map.insert(name.clone(), block.clone());
+        }
+        // Insert alias entries — alias names point to the same Arc<dyn Block>
+        for (alias, target) in &self.aliases {
+            if let Some(block) = self.resolved.get(target) {
+                map.insert(alias.clone(), block.clone());
+            }
         }
         self.all_blocks = Arc::new(map);
     }
@@ -217,8 +234,19 @@ impl Wafer {
 
         let expanded = expand_env_vars(&data);
 
-        let map: HashMap<String, serde_json::Value> = serde_json::from_str(&expanded)
+        let mut map: HashMap<String, serde_json::Value> = serde_json::from_str(&expanded)
             .map_err(|e| format!("parse blocks.json: {}", e))?;
+
+        // Extract alias definitions before processing block configs
+        if let Some(aliases_val) = map.remove("aliases") {
+            if let Some(aliases_obj) = aliases_val.as_object() {
+                for (alias, target) in aliases_obj {
+                    if let Some(target_str) = target.as_str() {
+                        self.aliases.insert(alias.clone(), target_str.to_string());
+                    }
+                }
+            }
+        }
 
         for (name, config) in map {
             self.block_configs.insert(name, config);
@@ -311,9 +339,11 @@ impl Wafer {
         }
 
         for (target, contrib) in contributions {
+            // Resolve alias: if the target is an alias, merge into the real block
+            let resolved_target = self.aliases.get(&target).cloned().unwrap_or(target);
             let entry = self
                 .block_configs
-                .entry(target)
+                .entry(resolved_target)
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             deep_merge(entry, &contrib);
         }
@@ -428,6 +458,11 @@ impl Wafer {
             }
 
             if !node.block.is_empty() {
+                // Resolve alias to actual block name
+                if let Some(target) = self.aliases.get(&node.block) {
+                    node.block = target.clone();
+                }
+
                 if let Some(block) = self.resolved.get(&node.block) {
                     node.resolved_block = Some(block.clone());
                 } else if let Some(factory) = self.registry.get(&node.block) {
@@ -969,27 +1004,32 @@ impl Wafer {
         visited_flows: &'a mut HashSet<String>,
     ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
         Box::pin(async move {
+            // Resolve flow alias
+            let flow_name = self.aliases.get(&node.flow)
+                .map(|s| s.as_str())
+                .unwrap_or(&node.flow);
+
             // Circular flow reference detection
-            if visited_flows.contains(&node.flow) {
+            if visited_flows.contains(flow_name) {
                 return Result_ {
                     action: Action::Error,
                     error: Some(WaferError::new(
                         "circular_flow",
-                        format!("circular flow reference detected: {}", node.flow),
+                        format!("circular flow reference detected: {}", flow_name),
                     )),
                     response: None,
                     message: None,
                 };
             }
 
-            let target = match self.flows.get(&node.flow) {
+            let target = match self.flows.get(flow_name) {
                 Some(c) => c,
                 None => {
                     return Result_ {
                         action: Action::Error,
                         error: Some(WaferError::new(
                             "not_found",
-                            format!("referenced flow not found: {}", node.flow),
+                            format!("referenced flow not found: {}", flow_name),
                         )),
                         response: None,
                         message: None,
@@ -997,9 +1037,10 @@ impl Wafer {
                 }
             };
 
-            visited_flows.insert(node.flow.clone());
+            let flow_name_owned = flow_name.to_string();
+            visited_flows.insert(flow_name_owned.clone());
             let result = self.execute_node(&target.root, msg, &target.id, &target.config.on_error, cancelled, deadline, visited_flows, "root").await;
-            visited_flows.remove(&node.flow);
+            visited_flows.remove(&flow_name_owned);
 
             if result.action == Action::Continue && !node.next.is_empty() {
                 return self.execute_first_match(

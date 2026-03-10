@@ -53,6 +53,8 @@ pub struct RuntimeContext {
     pub flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
+    /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
+    pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
     /// `None` means unrestricted. `Some(list)` enforces the allowlist.
     pub caller_requires: Option<Vec<String>>,
@@ -98,8 +100,12 @@ impl Context for RuntimeContext {
         }
 
         // Enforce requires: if the caller declared a requires list, check it
+        // Resolve alias to target name so both alias and canonical name match
+        let resolved_name = self.aliases.get(block_name)
+            .map(|s| s.as_str())
+            .unwrap_or(block_name);
         if let Some(ref requires) = self.caller_requires {
-            if !requires.iter().any(|r| r == block_name) {
+            if !requires.iter().any(|r| r == block_name || r == resolved_name) {
                 self.call_depth
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 return err_result(
@@ -148,6 +154,7 @@ impl Context for RuntimeContext {
             registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            aliases: self.aliases.clone(),
             caller_requires: called_requires,
         };
 

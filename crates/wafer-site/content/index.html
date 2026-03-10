@@ -144,6 +144,47 @@
             transform: translateY(-1px);
         }
 
+        /* Footer */
+        .footer {
+            background: var(--blue-dark); color: #94a3b8; padding: 3rem 1.5rem 2rem;
+        }
+        .footer-inner {
+            max-width: 72rem; margin: 0 auto;
+            display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 3rem;
+        }
+        .footer-brand {
+            font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem;
+        }
+        .footer-brand .brand-wafer { color: var(--wafer); }
+        .footer-brand .brand-run { color: #e2e8f0; }
+        .footer-about {
+            font-size: 0.9rem; line-height: 1.7; max-width: 24rem;
+        }
+        .footer h4 {
+            color: #e2e8f0; font-size: 0.85rem; text-transform: uppercase;
+            letter-spacing: 0.08em; margin-bottom: 0.75rem;
+        }
+        .footer-links { list-style: none; }
+        .footer-links li { margin-bottom: 0.5rem; }
+        .footer-links a {
+            color: #94a3b8; text-decoration: none; font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        .footer-links a:hover { color: var(--wafer); }
+        .footer-bottom {
+            max-width: 72rem; margin: 2rem auto 0;
+            padding-top: 1.5rem; border-top: 1px solid #334155;
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 0.8rem;
+        }
+        .footer-social { display: flex; gap: 1rem; }
+        .footer-social a {
+            color: #94a3b8; transition: color 0.2s; text-decoration: none;
+            display: inline-flex;
+        }
+        .footer-social a:hover { color: var(--wafer); }
+        .footer-social svg { width: 1.25rem; height: 1.25rem; fill: currentColor; }
+
         /* Responsive */
         @media (max-width: 768px) {
             .hero h1 { font-size: 2.5rem; }
@@ -153,6 +194,8 @@
             }
             .pillar.reverse .pillar-text { order: 1; }
             .pillar.reverse .pillar-visual { order: 2; }
+            .footer-inner { grid-template-columns: 1fr; gap: 2rem; }
+            .footer-bottom { flex-direction: column; gap: 1rem; text-align: center; }
         }
     </style>
 </head>
@@ -178,6 +221,14 @@
             Ship secure, sandboxed programs in a single binary. No Docker. No VMs.
             Just WebAssembly, a tiny runtime, and your code.
         </p>
+        <div class="social-links">
+            <a href="https://github.com/wafer-run/wafer-run" target="_blank" rel="noopener" aria-label="GitHub">
+                <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            </a>
+            <a href="https://x.com/jorissup" target="_blank" rel="noopener" aria-label="X / Twitter">
+                <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            </a>
+        </div>
     </div>
 
     <div class="pillars">
@@ -200,25 +251,26 @@
                 <ul class="pillar-points">
                     <li>Write in Rust, Go, JavaScript, compile to Wasm</li>
                     <li>Structured input/output via JSON Schema</li>
-                    <li>Database, storage, crypto, network &mdash; all just blocks</li>
+                    <li>Compose blocks &mdash; call other blocks for storage, crypto, network</li>
                     <li>Publish to the registry, share across teams</li>
                 </ul>
             </div>
             <div class="pillar-visual">
-                <span class="title">my-tool/src/lib.rs</span>
+                <span class="title">deep-thought/src/lib.rs</span>
                 <pre><code><span class="kw">use</span> <span class="type">wafer_sdk</span>::*;
 
 <span class="attr">#[block]</span>
 <span class="kw">fn</span> <span class="fn">handle</span>(msg: <span class="type">Message</span>, ctx: &<span class="type">Context</span>) -> <span class="type">Result</span> {
-    <span class="comment">// Read input from the caller</span>
-    <span class="kw">let</span> query = msg.str(<span class="str">"query"</span>);
+    <span class="kw">let</span> question = msg.str(<span class="str">"question"</span>);
 
-    <span class="comment">// Use built-in database service</span>
-    <span class="kw">let</span> results = ctx.db()
-        .search(<span class="str">"products"</span>, &query)?;
+    <span class="comment">// Very important calculations</span>
+    <span class="kw">let</span> a = (<span class="num">6</span> * <span class="num">9</span>) - question.len() + <span class="num">15</span>;
+    <span class="kw">let</span> b = a % <span class="num">100</span> / <span class="num">2</span> + <span class="num">1</span>;
 
-    <span class="comment">// Return structured data</span>
-    ctx.ok(json!({ <span class="str">"results"</span>: results }))
+    <span class="comment">// The answer is always 42</span>
+    ctx.ok(json!({
+        <span class="str">"answer"</span>: <span class="num">42</span>,
+    }))
 }</code></pre>
             </div>
         </div>
@@ -320,5 +372,46 @@
             <a class="cta-secondary" href="/playground">Try the Playground</a>
         </div>
     </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-inner">
+            <div>
+                <div class="footer-brand">
+                    <span class="brand-wafer">wafer</span><span class="brand-run">.run</span>
+                </div>
+                <p class="footer-about">
+                    The wafer thin runtime for tools, apps, and services.
+                    Ship secure, sandboxed programs in a single binary.
+                </p>
+            </div>
+            <div>
+                <h4>Product</h4>
+                <ul class="footer-links">
+                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="/registry">Registry</a></li>
+                    <li><a href="/playground">Playground</a></li>
+                </ul>
+            </div>
+            <div>
+                <h4>Community</h4>
+                <ul class="footer-links">
+                    <li><a href="https://github.com/wafer-run/wafer-run" target="_blank" rel="noopener">GitHub</a></li>
+                    <li><a href="https://x.com/jorissup" target="_blank" rel="noopener">X / Twitter</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <span>&copy; 2026 wafer.run</span>
+            <div class="footer-social">
+                <a href="https://github.com/wafer-run/wafer-run" target="_blank" rel="noopener" aria-label="GitHub">
+                    <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                </a>
+                <a href="https://x.com/jorissup" target="_blank" rel="noopener" aria-label="X / Twitter">
+                    <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                </a>
+            </div>
+        </div>
+    </footer>
 </body>
 </html>
