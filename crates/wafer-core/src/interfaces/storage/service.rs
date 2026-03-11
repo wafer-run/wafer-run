@@ -13,9 +13,11 @@ pub enum StorageError {
 }
 
 /// Service provides file/object storage operations organized by folders.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait StorageService: Send + Sync {
     /// Put stores an object in a folder.
-    fn put(
+    async fn put(
         &self,
         folder: &str,
         key: &str,
@@ -24,22 +26,22 @@ pub trait StorageService: Send + Sync {
     ) -> Result<(), StorageError>;
 
     /// Get retrieves an object and its metadata from a folder.
-    fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError>;
+    async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError>;
 
     /// Delete removes an object from a folder.
-    fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError>;
+    async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError>;
 
     /// List returns objects in a folder with optional pagination.
-    fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError>;
+    async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError>;
 
     /// CreateFolder creates a new storage folder.
-    fn create_folder(&self, name: &str, public: bool) -> Result<(), StorageError>;
+    async fn create_folder(&self, name: &str, public: bool) -> Result<(), StorageError>;
 
     /// DeleteFolder removes a storage folder and all its contents.
-    fn delete_folder(&self, name: &str) -> Result<(), StorageError>;
+    async fn delete_folder(&self, name: &str) -> Result<(), StorageError>;
 
     /// ListFolders returns all storage folders.
-    fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError>;
+    async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError>;
 }
 
 /// ObjectInfo contains metadata about a stored object.

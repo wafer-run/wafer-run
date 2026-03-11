@@ -1,43 +1,26 @@
 use std::sync::{Arc, Mutex};
 
-use wasmi::{Store, Engine, Module, Config, Linker, Caller, Instance};
+use wasmi::{Store, Engine, Module, Config, Linker, Caller, Instance, Val, ResumableCall};
 
 use crate::block::{Block, BlockInfo};
 use crate::common::ErrorCode;
 use crate::context::Context;
 use crate::types::*;
 use super::capabilities::BlockCapabilities;
-use super::host::{self, HostState};
+use super::host::{self, HostState, PendingCall};
 
-/// Poll a future exactly once, expecting it to resolve immediately.
-///
-/// This exists ONLY for the wasmi host function boundary: wasmi host imports
-/// are synchronous callbacks, so `call_block` (which is async) must be polled
-/// here. All other code paths use proper `.await`.
-fn poll_once_sync<F: std::future::Future>(fut: F) -> F::Output {
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+/// Marker error used to trap WASM execution when call_block needs async work.
+/// The actual request data is stored in HostState.pending_call.
+#[derive(Debug)]
+struct CallBlockTrap;
 
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |p| RawWaker::new(p, &VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut cx = Context::from_waker(&waker);
-
-    let mut fut = fut;
-    let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
-
-    match pinned.as_mut().poll(&mut cx) {
-        Poll::Ready(val) => val,
-        Poll::Pending => panic!(
-            "poll_once_sync: future returned Pending in wasmi host function — \
-             the called block must not perform real async I/O from WASM context"
-        ),
+impl std::fmt::Display for CallBlockTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("call_block")
     }
 }
+
+impl wasmi::core::HostError for CallBlockTrap {}
 
 /// Default fuel budget for WASM execution (~100M instructions).
 const DEFAULT_FUEL: u64 = 100_000_000;
@@ -62,7 +45,8 @@ fn fuel_engine() -> Engine {
 /// Host imports (namespace `wafer`):
 /// - `wafer.is_cancelled() -> i32` — 1 if cancelled, 0 otherwise
 /// - `wafer.log(level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32)` — log a message
-/// - `wafer.call_block(name_ptr: i32, name_len: i32, msg_ptr: i32, msg_len: i32) -> i64` — call another block
+/// - `wafer.call_block(name_ptr: i32, name_len: i32, msg_ptr: i32, msg_len: i32) -> i32` — call another block (traps for async, returns result_len on resume)
+/// - `wafer.read_result(dest_ptr: i32, dest_len: i32) -> i32` — copy last call_block result into guest memory
 pub struct WASMBlock {
     engine: Engine,
     module: Module,
@@ -118,6 +102,8 @@ impl WASMBlock {
             HostState {
                 context: ctx,
                 capabilities: self.capabilities.clone(),
+                pending_call: None,
+                pending_result: None,
             },
         );
         store.set_fuel(fuel).map_err(|e| format!("setting fuel: {e}"))?;
@@ -175,7 +161,12 @@ impl WASMBlock {
             )
             .map_err(|e| format!("linking log: {e}"))?;
 
-        // wafer.call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
+        // wafer.call_block(name_ptr, name_len, msg_ptr, msg_len) -> i32
+        //
+        // Traps to signal the host that an async call_block is needed.
+        // The request is stored in HostState.pending_call before trapping.
+        // After the host performs the async call and stores the result in
+        // HostState.pending_result, it resumes WASM with the result length.
         linker
             .func_wrap(
                 "wafer",
@@ -185,53 +176,116 @@ impl WASMBlock {
                  name_len: i32,
                  msg_ptr: i32,
                  msg_len: i32|
-                 -> i64 {
+                 -> Result<i32, wasmi::Error> {
                     // Read block name
                     let name_bytes =
-                        match host::mem_read_caller(&caller, name_ptr as u32, name_len as u32) {
-                            Ok(b) => b,
-                            Err(_) => return 0,
-                        };
+                        host::mem_read_caller(&caller, name_ptr as u32, name_len as u32)
+                            .map_err(|e| wasmi::Error::new(format!("reading block name: {e}")))?;
                     let block_name = String::from_utf8_lossy(&name_bytes).to_string();
 
                     // Read message JSON
                     let msg_bytes =
-                        match host::mem_read_caller(&caller, msg_ptr as u32, msg_len as u32) {
-                            Ok(b) => b,
-                            Err(_) => return 0,
-                        };
+                        host::mem_read_caller(&caller, msg_ptr as u32, msg_len as u32)
+                            .map_err(|e| wasmi::Error::new(format!("reading message: {e}")))?;
 
                     // Deserialize message
-                    let mut internal_msg: Message = match serde_json::from_slice(&msg_bytes) {
-                        Ok(m) => m,
-                        Err(_) => return 0,
-                    };
+                    let message: Message = serde_json::from_slice(&msg_bytes)
+                        .map_err(|e| wasmi::Error::new(format!("deserializing message: {e}")))?;
 
-                    // Call through context (sync bridge — wasmi host functions are inherently sync)
-                    let result = {
-                        let ctx = match &caller.data().context {
-                            Some(ctx) => ctx.clone(),
-                            None => return 0,
-                        };
-                        poll_once_sync(ctx.call_block(&block_name, &mut internal_msg))
-                    };
+                    // Store the request in host state
+                    caller.data_mut().pending_call = Some(PendingCall {
+                        block_name,
+                        message,
+                    });
 
-                    // Serialize result
-                    let result_json = match serde_json::to_vec(&result) {
-                        Ok(j) => j,
-                        Err(_) => return 0,
-                    };
-
-                    // Write result into guest memory
-                    match host::mem_write(&mut caller, &result_json) {
-                        Ok((ptr, len)) => host::pack_ptr_len(ptr, len),
-                        Err(_) => 0,
-                    }
+                    // Trap with a host error — the resumable loop will handle this async
+                    Err(wasmi::Error::host(CallBlockTrap))
                 },
             )
             .map_err(|e| format!("linking call_block: {e}"))?;
 
+        // wafer.read_result(dest_ptr, dest_len) -> i32
+        //
+        // Copies the result of the last call_block from host memory into
+        // guest memory at dest_ptr. Returns the number of bytes copied.
+        linker
+            .func_wrap(
+                "wafer",
+                "read_result",
+                |mut caller: Caller<'_, HostState>,
+                 dest_ptr: i32,
+                 dest_len: i32|
+                 -> i32 {
+                    let result_bytes = match caller.data_mut().pending_result.take() {
+                        Some(b) => b,
+                        None => return 0,
+                    };
+
+                    let copy_len = std::cmp::min(result_bytes.len(), dest_len as usize);
+
+                    let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        Some(m) => m,
+                        None => return 0,
+                    };
+
+                    let mem_data = memory.data_mut(&mut caller);
+                    let start = dest_ptr as usize;
+                    let end = start + copy_len;
+                    if end > mem_data.len() {
+                        return 0;
+                    }
+                    mem_data[start..end].copy_from_slice(&result_bytes[..copy_len]);
+
+                    copy_len as i32
+                },
+            )
+            .map_err(|e| format!("linking read_result: {e}"))?;
+
         Ok(())
+    }
+
+    /// Drive a resumable WASM call, handling call_block traps by awaiting
+    /// the async operation and resuming WASM execution with the result.
+    async fn drive_resumable(
+        store: &mut Store<HostState>,
+        mut call: ResumableCall,
+        results: &mut [Val],
+    ) -> Result<(), String> {
+        loop {
+            match call {
+                ResumableCall::Finished => return Ok(()),
+                ResumableCall::Resumable(invocation) => {
+                    // Take the pending call request from host state
+                    let pending = store
+                        .data_mut()
+                        .pending_call
+                        .take()
+                        .ok_or_else(|| "resumable trap without pending_call".to_string())?;
+
+                    // Perform the actual async call_block
+                    let ctx = store
+                        .data()
+                        .context
+                        .as_ref()
+                        .ok_or_else(|| "no context for call_block".to_string())?
+                        .clone();
+
+                    let mut msg = pending.message;
+                    let result = ctx.call_block(&pending.block_name, &mut msg).await;
+
+                    // Serialize and store the result for read_result
+                    let result_bytes = serde_json::to_vec(&result)
+                        .map_err(|e| format!("serializing call_block result: {e}"))?;
+                    let result_len = result_bytes.len() as i32;
+                    store.data_mut().pending_result = Some(result_bytes);
+
+                    // Resume WASM with the result length as the return value of call_block
+                    call = invocation
+                        .resume(&mut *store, &[Val::I32(result_len)], results)
+                        .map_err(|e| format!("resuming WASM after call_block: {e}"))?;
+                }
+            }
+        }
     }
 }
 
@@ -308,10 +362,18 @@ impl Block for WASMBlock {
             }
         };
 
-        // Get guest allocator and handle function
-        let alloc_fn = match instance
-            .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
-        {
+        // Get the handle function (untyped Func for resumable call support)
+        let handle_fn = match instance.get_func(&store, "__wafer_handle") {
+            Some(f) => f,
+            None => {
+                return msg
+                    .clone()
+                    .err(WaferError::new(ErrorCode::INTERNAL, "missing __wafer_handle"));
+            }
+        };
+
+        // Allocate and write message into guest memory
+        let alloc_fn = match instance.get_typed_func::<i32, i32>(&store, "__wafer_alloc") {
             Ok(f) => f,
             Err(e) => {
                 return msg
@@ -320,18 +382,6 @@ impl Block for WASMBlock {
             }
         };
 
-        let handle_fn = match instance
-            .get_typed_func::<(i32, i32), i64>(&store, "__wafer_handle")
-        {
-            Ok(f) => f,
-            Err(e) => {
-                return msg
-                    .clone()
-                    .err(WaferError::new(ErrorCode::INTERNAL, format!("missing __wafer_handle: {e}")));
-            }
-        };
-
-        // Allocate and write message into guest memory
         let msg_len = msg_json.len() as i32;
         let msg_ptr = match alloc_fn.call(&mut store, msg_len) {
             Ok(ptr) => ptr,
@@ -362,9 +412,10 @@ impl Block for WASMBlock {
         }
         mem_data[start..end].copy_from_slice(&msg_json);
 
-        // Call handle
-        let packed = match handle_fn.call(&mut store, (msg_ptr, msg_len)) {
-            Ok(v) => v,
+        // Call handle using resumable call
+        let mut results = [Val::I64(0)];
+        let call = match handle_fn.call_resumable(&mut store, &[Val::I32(msg_ptr), Val::I32(msg_len)], &mut results) {
+            Ok(c) => c,
             Err(e) => {
                 return msg.clone().err(WaferError::new(
                     ErrorCode::INTERNAL,
@@ -373,8 +424,32 @@ impl Block for WASMBlock {
             }
         };
 
-        // Read result
+        // Drive the resumable call loop (handles call_block traps)
+        if let Err(e) = Self::drive_resumable(&mut store, call, &mut results).await {
+            return msg.clone().err(WaferError::new(ErrorCode::INTERNAL, e));
+        }
+
+        // Read result from the packed i64 return value
+        let packed = match results[0] {
+            Val::I64(v) => v,
+            _ => {
+                return msg.clone().err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    "__wafer_handle returned non-i64",
+                ));
+            }
+        };
+
         let (rptr, rlen) = host::unpack_ptr_len(packed);
+        let memory = match instance.get_memory(&store, "memory") {
+            Some(m) => m,
+            None => {
+                return msg.clone().err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    "guest has no exported memory",
+                ));
+            }
+        };
         let result_bytes = match host::mem_read(&store, &memory, rptr, rlen) {
             Ok(b) => b,
             Err(e) => {
@@ -421,8 +496,8 @@ impl Block for WASMBlock {
             .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("missing __wafer_alloc: {e}")))?;
 
         let lifecycle_fn = instance
-            .get_typed_func::<(i32, i32), i64>(&store, "__wafer_lifecycle")
-            .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("missing __wafer_lifecycle: {e}")))?;
+            .get_func(&store, "__wafer_lifecycle")
+            .ok_or_else(|| WaferError::new(ErrorCode::INTERNAL, "missing __wafer_lifecycle"))?;
 
         // Allocate and write event into guest memory
         let event_len = event_json.len() as i32;
@@ -442,12 +517,22 @@ impl Block for WASMBlock {
         }
         mem_data[start..end].copy_from_slice(&event_json);
 
-        // Call lifecycle
-        let packed = lifecycle_fn
-            .call(&mut store, (event_ptr, event_len))
+        // Call lifecycle using resumable call
+        let mut results = [Val::I64(0)];
+        let call = lifecycle_fn
+            .call_resumable(&mut store, &[Val::I32(event_ptr), Val::I32(event_len)], &mut results)
             .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("calling __wafer_lifecycle: {e}")))?;
 
+        // Drive the resumable call loop
+        Self::drive_resumable(&mut store, call, &mut results)
+            .await
+            .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e))?;
+
         // Read result (empty JSON = ok, or error JSON)
+        let packed = match results[0] {
+            Val::I64(v) => v,
+            _ => return Ok(()),
+        };
         let (rptr, rlen) = host::unpack_ptr_len(packed);
         if rlen == 0 {
             return Ok(());

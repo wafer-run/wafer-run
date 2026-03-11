@@ -1,0 +1,13 @@
+[package]
+name = "wafer-block"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types, traits, and macros for WAFER block authors"
+repository = "https://github.com/wafer-run/wafer-run"
+keywords = ["wafer", "blocks", "types", "sdk"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wafer-block-macro = { path = "../wafer-block-macro" }

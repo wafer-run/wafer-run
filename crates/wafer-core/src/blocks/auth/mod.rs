@@ -217,7 +217,7 @@ impl Block for AuthBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
+            runtime: wafer_run::types::BlockRuntime::Both,
             requires: vec![
                 "@wafer/crypto".to_string(),
                 "@wafer/database".to_string(),

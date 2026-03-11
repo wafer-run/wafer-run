@@ -7,12 +7,12 @@ use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
 // Re-export the data types so callers can use `clients::database::Record` etc.
-pub use crate::blocks::database::service::{
+pub use crate::interfaces::database::service::{
     Filter, FilterOp, ListOptions, Record, RecordList, SortField,
 };
 
 // Re-export schema types for declarative table management.
-pub use crate::blocks::database::service::{
+pub use crate::interfaces::database::service::{
     Table, Column, DataType, Index, Reference, DefaultValue, DefaultVal,
     pk, pk_int, col_string, col_text, col_int, col_int64, col_float,
     col_bool, col_datetime, col_json, col_blob, timestamps, schema_soft_delete,

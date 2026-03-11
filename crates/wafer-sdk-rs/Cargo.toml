@@ -11,5 +11,6 @@ keywords = ["wafer", "wasm", "guest", "blocks", "pipeline"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+wafer-block = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

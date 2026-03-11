@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/wafer-block",
+    "crates/wafer-block-macro",
     "crates/wafer-run",
     "crates/wafer-core",
     "crates/wafer-ffi",
@@ -17,6 +19,7 @@ license = "MIT"
 
 [workspace.dependencies]
 # Internal crates
+wafer-block = { path = "crates/wafer-block" }
 wafer-run = { path = "crates/wafer-run", features = ["full"] }
 wafer-core = { path = "crates/wafer-core" }
 
@@ -47,7 +50,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 wasmi = "0.44"
 
 # Crypto
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
 jsonwebtoken = "9"
 sha2 = "0.10"
 

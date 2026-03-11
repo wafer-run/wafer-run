@@ -32,7 +32,7 @@ impl Block for CorsBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
+            runtime: wafer_run::types::BlockRuntime::Both,
             requires: Vec::new(),
         }
     }

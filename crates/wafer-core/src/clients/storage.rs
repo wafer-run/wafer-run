@@ -5,8 +5,8 @@ use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
 // Re-export data types used by callers.
-pub use crate::blocks::storage::service::{FolderInfo, ObjectInfo, ObjectList};
-pub use crate::blocks::storage::service::ListOptions;
+pub use crate::interfaces::storage::service::{FolderInfo, ObjectInfo, ObjectList};
+pub use crate::interfaces::storage::service::ListOptions;
 
 use super::{call_service, decode};
 

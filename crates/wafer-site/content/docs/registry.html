@@ -14,6 +14,8 @@ END_EXTRA_STYLES_INLINE
 <p>The <a href="/registry">package registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks, flows, and interfaces. Like Go modules, there is no registration step — just push your code to GitHub, tag a release, and the registry indexes it automatically the first time someone looks it up.</p>
 
 <h3>Publishing a Block</h3>
+<p>Blocks can be published as <strong>WASM</strong> (cross-language, sandboxed) or <strong>native Rust crates</strong> (zero-overhead, full access). Both use the same shared types from <code>wafer-block</code>.</p>
+<h4>WASM blocks</h4>
 <p>Publishing is three steps — all on GitHub, nothing to do on wafer.run:</p>
 <ol>
     <li><strong>Push your block</strong> to a public GitHub repository</li>
@@ -67,6 +69,19 @@ git push origin v0.1.0
     </div>
 </div>
 <p>That's it. The registry will auto-index your package (name, description, versions) from GitHub the first time anyone requests it. Download counts are tracked automatically.</p>
+
+<h4>Native Rust blocks</h4>
+<p>Native blocks are published as regular Rust crates. Add them as Cargo dependencies and register at startup:</p>
+<pre><code># Cargo.toml
+[dependencies]
+wafer-run = "0.1"
+my-auth-block = { git = "https://github.com/acme/auth-block", tag = "v1.0.0" }</code></pre>
+<pre><code>// main.rs
+use my_auth_block::AuthBlock;
+
+let mut w = Wafer::new();
+w.register_block("@acme/auth", Arc::new(AuthBlock::new()));</code></pre>
+<p>Native blocks compile into your binary — no runtime download, no sandbox overhead. They have full access to the host and can use async Rust directly.</p>
 
 <h3>Publishing a Flow</h3>
 <p>Publishing a flow follows the same workflow — no registration, just GitHub:</p>

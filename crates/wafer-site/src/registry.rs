@@ -43,6 +43,10 @@ struct GitHubRelease {
     #[serde(default)]
     wasm_download_url: Option<String>,
     #[serde(default)]
+    has_native_asset: bool,
+    #[serde(default)]
+    native_download_url: Option<String>,
+    #[serde(default)]
     has_chain_asset: bool,
     #[serde(default)]
     chain_download_url: Option<String>,
@@ -126,8 +130,10 @@ impl RegistryBlock {
             if record.data.get("package_type").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 let versions = Self::fetch_versions_cached(ctx, name).await;
                 let pkg_type = Self::detect_package_type(&versions);
+                let runtime_type = Self::detect_runtime_type(&versions);
                 let mut update = HashMap::new();
                 update.insert("package_type".to_string(), serde_json::Value::String(pkg_type));
+                update.insert("runtime_type".to_string(), serde_json::Value::String(runtime_type));
                 let _ = db::update(ctx, "packages", &record.id, update).await;
             }
             return Ok(record);
@@ -146,7 +152,9 @@ impl RegistryBlock {
         record.insert("download_count".to_string(), serde_json::Value::Number(0.into()));
         let versions = Self::fetch_versions_cached(ctx, name).await;
         let pkg_type = Self::detect_package_type(&versions);
+        let runtime_type = Self::detect_runtime_type(&versions);
         record.insert("package_type".to_string(), serde_json::Value::String(pkg_type));
+        record.insert("runtime_type".to_string(), serde_json::Value::String(runtime_type));
         db::create(ctx, "packages", record).await.map_err(|e| format!("Failed to index package: {}", e))
     }
 
@@ -275,13 +283,22 @@ impl RegistryBlock {
             let wasm_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".wasm")).unwrap_or(false));
             let has_wasm_asset = wasm_asset.is_some();
             let wasm_download_url = wasm_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            // Native assets: .so, .dylib, .dll, or .tar.gz (Rust crate archives)
+            let native_asset = assets.iter().find(|a| {
+                a.get("name").and_then(|v| v.as_str()).map(|n| {
+                    n.ends_with(".so") || n.ends_with(".dylib") || n.ends_with(".dll")
+                        || n.ends_with(".tar.gz") || n.ends_with(".crate")
+                }).unwrap_or(false)
+            });
+            let has_native_asset = native_asset.is_some();
+            let native_download_url = native_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
             let chain_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".flow.json")).unwrap_or(false));
             let has_chain_asset = chain_asset.is_some();
             let chain_download_url = chain_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
             let interface_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".interface.json")).unwrap_or(false));
             let has_interface_asset = interface_asset.is_some();
             let interface_download_url = interface_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            GitHubRelease { tag_name, has_wasm_asset, wasm_download_url, has_chain_asset, chain_download_url, has_interface_asset, interface_download_url, published_at }
+            GitHubRelease { tag_name, has_wasm_asset, wasm_download_url, has_native_asset, native_download_url, has_chain_asset, chain_download_url, has_interface_asset, interface_download_url, published_at }
         }).collect()
     }
 
@@ -294,6 +311,18 @@ impl RegistryBlock {
         if has_chain { types.push("flow"); }
         if has_interface { types.push("interface"); }
         if types.is_empty() { "block".to_string() } else { types.join(",") }
+    }
+
+    /// Detect the runtime type (native, wasm, or both) from release assets.
+    fn detect_runtime_type(releases: &[GitHubRelease]) -> String {
+        let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
+        let has_native = releases.iter().any(|r| r.has_native_asset);
+        match (has_native, has_wasm) {
+            (true, true) => "both".to_string(),
+            (true, false) => "native".to_string(),
+            (false, true) => "wasm".to_string(),
+            (false, false) => "wasm".to_string(), // default assumption
+        }
     }
 
     fn return_stale_cache(cached: &Option<Record>) -> Vec<GitHubRelease> {

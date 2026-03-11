@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Creating a Block</h2>
-<p>There are two ways to create blocks: native Rust blocks that compile into your binary, or WASM blocks written in any supported language and loaded at runtime.</p>
+<p>There are two ways to create blocks: native Rust blocks that compile into your binary, or WASM blocks written in any supported language and loaded at runtime. Both share the same <code>wafer-block</code> types (Message, BlockResult, BlockInfo, etc.).</p>
 
 <h2>Native Blocks (Rust)</h2>
 <p>A native block is a Rust struct that implements the <code>Block</code> trait. No CLI or SDK needed — just write Rust and import it directly.</p>
@@ -19,6 +19,7 @@ use wafer_run::*;
 
 pub struct GreetBlock;
 
+#[async_trait::async_trait]
 impl Block for GreetBlock {
     fn info(&amp;self) -&gt; BlockInfo {
         BlockInfo {
@@ -29,14 +30,16 @@ impl Block for GreetBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
+            runtime: BlockRuntime::Native,
+            requires: Vec::new(),
         }
     }
 
-    fn handle(&amp;self, _ctx: &amp;dyn Context, msg: &amp;mut Message) -&gt; Result_ {
+    async fn handle(&amp;self, _ctx: &amp;dyn Context, msg: &amp;mut Message) -&gt; Result_ {
         json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
     }
 
-    fn lifecycle(&amp;self, _ctx: &amp;dyn Context, _event: LifecycleEvent)
+    async fn lifecycle(&amp;self, _ctx: &amp;dyn Context, _event: LifecycleEvent)
         -&gt; std::result::Result&lt;(), WaferError&gt; { Ok(()) }
 }</code></pre>
 
@@ -150,33 +153,23 @@ func main() {
 }</code></pre>
     </div>
     <div class="tab-panel" data-lang="rust" style="display:none">
-<pre><code>// blocks/greet/index.rs
+<pre><code>// blocks/greet/src/lib.rs
 use wafer_sdk::*;
 
 struct GreetBlock;
 
-impl Default for GreetBlock {
-    fn default() -&gt; Self { Self }
-}
-
-impl Block for GreetBlock {
-    fn info(&amp;self) -&gt; BlockInfo {
-        BlockInfo {
-            name: "greet".into(),
-            version: "1.0.0".into(),
-            interface: "handler@v1".into(),
-            summary: "Returns a greeting".into(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: vec![],
-        }
+#[wafer_block(
+    name = "greet",
+    version = "1.0.0",
+    interface = "handler@v1",
+    summary = "Returns a greeting",
+    instance_mode = "singleton"
+)]
+impl GreetBlock {
+    fn handle(msg: Message) -&gt; BlockResult {
+        json_respond(&amp;msg, &amp;serde_json::json!({"greeting": "hi there"}))
     }
-
-    fn handle(&amp;self, _ctx: &amp;Context, msg: &amp;mut Message) -&gt; Result_ {
-        json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
-    }
-}
-
-wafer_sdk::export!(GreetBlock);</code></pre>
+}</code></pre>
     </div>
 </div>
 

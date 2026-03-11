@@ -14,7 +14,6 @@ pub mod manifest;
 pub mod meta;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod observability;
-pub mod registry;
 pub mod router;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
@@ -35,13 +34,13 @@ pub use context::RuntimeContext;
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 pub use helpers::{
     err_bad_request, err_conflict, err_forbidden, err_internal, err_not_found, err_unauthorized,
-    err_validation, error, expand_env_vars, json_respond, new_response, respond,
-    sha256_hex, ResponseBuilder,
+    err_validation, error, expand_env_vars, json_respond, new_response, respond, respond_empty,
+    respond_json, sha256_hex, ResponseBuilder,
 };
 pub use meta::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use observability::{ObservabilityBus, ObservabilityContext};
-pub use registry::{BlockFactory, FuncBlock, Registry};
+pub use block::FuncBlock;
 pub use router::Router;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{RuntimeHandle, Wafer};
@@ -50,8 +49,8 @@ pub use runtime::{
     parse_unversioned_block, parse_versioned_block, RemoteBlockRef, UnversionedRemoteBlockRef,
 };
 pub use types::{
-    Action, InstanceMode, LifecycleEvent, LifecycleType, Message, RequestAction, Response,
-    Result_, WaferError,
+    Action, BlockResult, BlockRuntime, InstanceMode, LifecycleEvent, LifecycleType, Message,
+    RequestAction, Response, Result_, WaferError,
 };
 
 #[cfg(feature = "wasm")]

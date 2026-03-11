@@ -50,7 +50,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wafer-sdk = "0.1"
+wafer-sdk = "0.1"   # includes wafer-block types + proc macro
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -62,7 +62,7 @@ strip = true</code></pre>
 </div>
 
 <h3>Writing a Block</h3>
-<p>Implement the Block interface and register it. The SDK generates the four WASM exports (<code>malloc</code>, <code>info</code>, <code>handle</code>, <code>lifecycle</code>) that the runtime calls.</p>
+<p>Implement the Block interface. In Rust, use the <code>#[wafer_block]</code> proc macro to generate the <code>WaferBlock</code> trait and WASM ABI exports automatically. For other languages, implement the Block interface and register it. The SDK generates the four WASM exports (<code>malloc</code>, <code>info</code>, <code>handle</code>, <code>lifecycle</code>) that the runtime calls.</p>
 
 <div class="lang-tabs">
     <div class="tab-bar">
@@ -137,28 +137,17 @@ func main() {
 
 struct MyBlock;
 
-impl Default for MyBlock {
-    fn default() -&gt; Self { Self }
-}
-
-impl Block for MyBlock {
-    fn info(&amp;self) -&gt; BlockInfo {
-        BlockInfo {
-            name: "@app/my-block".into(),
-            version: "1.0.0".into(),
-            interface: "processor@v1".into(),
-            summary: "Processes incoming messages".into(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: vec![],
-        }
+#[wafer_block(
+    name = "@app/my-block",
+    version = "1.0.0",
+    interface = "processor@v1",
+    summary = "Processes incoming messages"
+)]
+impl MyBlock {
+    fn handle(msg: Message) -&gt; BlockResult {
+        msg.cont()
     }
-
-    fn handle(&amp;self, ctx: &amp;Context, msg: &amp;mut Message) -&gt; Result_ {
-        msg.clone().cont()
-    }
-}
-
-wafer_sdk::export!(MyBlock);</code></pre>
+}</code></pre>
     </div>
 </div>
 

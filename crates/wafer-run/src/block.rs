@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 use crate::context::Context;
 use crate::types::*;
 use crate::wasm::capabilities::BlockCapabilities;
+
+// Re-export BlockInfo and AdminUIInfo from wafer-block.
+pub use wafer_block::{AdminUIInfo, BlockInfo};
 
 /// Block is the core interface every WAFER block must implement.
 ///
@@ -28,41 +29,28 @@ pub trait Block: Send + Sync {
     }
 }
 
-/// AdminUIInfo declares that a block provides an admin UI page.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdminUIInfo {
-    pub path: String,
-    pub icon: String,
-    pub title: String,
+/// FuncBlock wraps a handler function as a Block.
+pub struct FuncBlock {
+    pub info: BlockInfo,
+    pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
 }
 
-/// BlockInfo declares a block's identity and capabilities.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockInfo {
-    pub name: String,
-    pub version: String,
-    pub interface: String,
-    pub summary: String,
-    pub instance_mode: InstanceMode,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_modes: Vec<InstanceMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admin_ui: Option<AdminUIInfo>,
-    /// Where this block executes: native (host) or wasm (sandbox).
-    #[serde(default)]
-    pub runtime: BlockRuntime,
-    /// Block names this block is allowed to call via `call_block()`.
-    /// Empty means unrestricted (can call any block).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requires: Vec<String>,
-}
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl Block for FuncBlock {
+    fn info(&self) -> BlockInfo {
+        self.info.clone()
+    }
 
-impl BlockInfo {
-    /// AllowsMode returns true if the block supports the given instance mode.
-    pub fn allows_mode(&self, mode: InstanceMode) -> bool {
-        if self.allowed_modes.is_empty() {
-            return true;
-        }
-        self.allowed_modes.contains(&mode)
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        (self.handler)(ctx, msg)
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        Ok(())
     }
 }

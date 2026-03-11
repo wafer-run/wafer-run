@@ -23,7 +23,7 @@ ACTIVE: core-concepts
 </ul>
 
 <h3>Blocks</h3>
-<p>A <strong>Block</strong> is any struct that implements the <code>Block</code> trait. Blocks are the fundamental unit of logic — they receive a message, do work, and return a result. Blocks can be native Rust code compiled into the binary, or WASM modules loaded at runtime.</p>
+<p>A <strong>Block</strong> is the fundamental unit of logic — it receives a message, does work, and returns a result. Blocks can be <strong>native</strong> (Rust struct implementing the <code>Block</code> trait) or <strong>WASM</strong> (compiled from Rust, Go, or TypeScript using the guest SDK). Both share the same types from <code>wafer-block</code>: Message, BlockResult, BlockInfo, etc.</p>
 
 <h3>Context</h3>
 <p>The <code>Context</code> is passed to every block's <code>handle()</code> method. It provides:</p>

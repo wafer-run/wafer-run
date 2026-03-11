@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -9,7 +9,6 @@ use parking_lot::Mutex;
 use wafer_run::block::{Block, BlockInfo};
 use wafer_run::common::ErrorCode;
 use wafer_run::meta::*;
-use wafer_run::registry::BlockFactory;
 use wafer_run::runtime::RuntimeHandle;
 use wafer_run::types::*;
 
@@ -330,10 +329,22 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
 ///   "listen": "0.0.0.0:8090"
 /// }
 /// ```
+/// `@wafer/http-listener` — initialized during `lifecycle(Init)` from config
+/// (reads `flow` and `listen` keys).
 pub struct HttpListenerBlock {
-    flow: String,
-    listen: String,
+    flow: OnceLock<String>,
+    listen: OnceLock<String>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl HttpListenerBlock {
+    pub fn new() -> Self {
+        Self {
+            flow: OnceLock::new(),
+            listen: OnceLock::new(),
+            shutdown_tx: Mutex::new(None),
+        }
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -363,6 +374,30 @@ impl Block for HttpListenerBlock {
         _ctx: &dyn wafer_run::context::Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init && self.flow.get().is_none() {
+            let config: Option<serde_json::Value> = if !event.data.is_empty() {
+                serde_json::from_slice(&event.data).ok()
+            } else {
+                None
+            };
+
+            let flow = config
+                .as_ref()
+                .and_then(|c| c.get("flow"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let listen = config
+                .as_ref()
+                .and_then(|c| c.get("listen"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            self.flow.set(flow).ok();
+            self.listen.set(listen).ok();
+        }
+
         if event.event_type == LifecycleType::Stop {
             if let Some(tx) = self.shutdown_tx.lock().take() {
                 let _ = tx.send(());
@@ -372,12 +407,11 @@ impl Block for HttpListenerBlock {
     }
 
     fn bind(&self, handle: RuntimeHandle) {
-        if self.flow.is_empty() || self.listen.is_empty() {
+        let flow = self.flow.get().cloned().unwrap_or_default();
+        let listen = self.listen.get().cloned().unwrap_or_default();
+        if flow.is_empty() || listen.is_empty() {
             return;
         }
-
-        let flow = self.flow.clone();
-        let listen = self.listen.clone();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.lock() = Some(tx);
@@ -456,51 +490,10 @@ impl Block for HttpListenerBlock {
 }
 
 // ---------------------------------------------------------------------------
-// Factory + registration
+// Registration
 // ---------------------------------------------------------------------------
-
-pub struct HttpListenerBlockFactory;
-
-impl BlockFactory for HttpListenerBlockFactory {
-    fn create(&self, config: Option<&serde_json::Value>) -> Arc<dyn Block> {
-        let flow = config
-            .and_then(|c| c.get("flow"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let listen = config
-            .and_then(|c| c.get("listen"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        Arc::new(HttpListenerBlock {
-            flow,
-            listen,
-            shutdown_tx: Mutex::new(None),
-        })
-    }
-
-    fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "@wafer/http-listener".to_string(),
-            version: "0.1.0".to_string(),
-            interface: "http-listener@v1".to_string(),
-            summary: "HTTP transport — listens for HTTP requests and converts to messages"
-                .to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Native,
-            requires: Vec::new(),
-        }
-    }
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut wafer_run::Wafer) {
-    w.registry()
-        .register("@wafer/http-listener", Arc::new(HttpListenerBlockFactory))
-        .ok();
+    w.register_block("@wafer/http-listener", Arc::new(HttpListenerBlock::new()));
 }

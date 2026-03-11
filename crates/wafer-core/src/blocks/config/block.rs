@@ -53,7 +53,7 @@ impl Block for ConfigBlock {
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
+            runtime: wafer_run::types::BlockRuntime::Both,
             requires: Vec::new(),
         }
     }

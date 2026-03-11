@@ -49,8 +49,24 @@ async fn main() {
         tracing::warn!("could not load {}: {} — using defaults", blocks_json, e);
     }
 
-    // 4. Register wafer-core infrastructure blocks
-    wafer_core::register_all(&mut wafer);
+    // 4. Register blocks explicitly (no register_all — runtime is minimal)
+    wafer_core::blocks::auth::register(&mut wafer);
+    wafer_core::blocks::cors::register(&mut wafer);
+    wafer_core::blocks::iam::register(&mut wafer);
+    wafer_core::blocks::inspector::register(&mut wafer);
+    wafer_core::blocks::monitoring::register(&mut wafer);
+    wafer_core::blocks::rate_limit::register(&mut wafer);
+    wafer_core::blocks::readonly_guard::register(&mut wafer);
+    wafer_core::blocks::router::register(&mut wafer);
+    wafer_core::blocks::security_headers::register(&mut wafer);
+    wafer_core::blocks::web::register(&mut wafer);
+    wafer_core::blocks::config::register(&mut wafer);
+    wafer_core::blocks::logger::register(&mut wafer);
+    wafer_core::blocks::crypto::register(&mut wafer);
+    wafer_core::blocks::network::register(&mut wafer);
+    wafer_core::blocks::http::register(&mut wafer);
+    wafer_core::blocks::sqlite::register(&mut wafer);
+    wafer_core::blocks::local_storage::register(&mut wafer);
     tracing::info!("infrastructure blocks registered");
 
     // 5. Register solobase feature blocks (env-var-driven)

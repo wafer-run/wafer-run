@@ -12,6 +12,9 @@ wasm = ["dep:wasmi", "dep:reqwest"]
 full = ["wasm", "dep:tokio", "dep:tracing-subscriber"]
 
 [dependencies]
+# Shared block types
+wafer-block = { workspace = true }
+
 # Core
 serde = { workspace = true }
 serde_json = { workspace = true }

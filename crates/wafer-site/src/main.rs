@@ -19,7 +19,7 @@ async fn main() {
     let mut w = Wafer::new();
 
     // Configure infrastructure blocks
-    w.add_block_config("@wafer/database", serde_json::json!({"type": "sqlite", "path": "data/wafer-site.db"}));
+    w.add_block_config("@wafer/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
     w.add_block_config("@wafer/network", serde_json::json!({}));
     w.add_block_config("@wafer/logger", serde_json::json!({}));
 
@@ -30,15 +30,50 @@ async fn main() {
         "listen": format!("0.0.0.0:{}", port),
     }));
 
-    // Register wafer-core blocks
-    wafer_core::register_all(&mut w);
+    // Configure router routes
+    w.add_block_config("@wafer/router", serde_json::json!({
+        "routes": [
+            { "path": "/_inspector/**", "block": "@wafer/inspector" },
+            { "path": "/_inspector", "block": "@wafer/inspector" },
+            { "path": "/api/**", "block": "@wafer-site/api" },
+            { "path": "/playground/**", "block": "@wafer-site/playground" },
+            { "path": "/playground", "block": "@wafer-site/playground" },
+            { "path": "/registry/**", "block": "@wafer-site/registry" },
+            { "path": "/registry", "block": "@wafer-site/registry" },
+            { "path": "/docs/**", "block": "@wafer-site/docs" },
+            { "path": "/docs", "block": "@wafer-site/docs" },
+            { "path": "/**", "block": "@wafer-site/docs" }
+        ]
+    }));
+
+    // Register wafer-core infrastructure blocks
+    wafer_core::blocks::auth::register(&mut w);
+    wafer_core::blocks::cors::register(&mut w);
+    wafer_core::blocks::iam::register(&mut w);
+    wafer_core::blocks::inspector::register(&mut w);
+    wafer_core::blocks::monitoring::register(&mut w);
+    wafer_core::blocks::rate_limit::register(&mut w);
+    wafer_core::blocks::readonly_guard::register(&mut w);
+    wafer_core::blocks::router::register(&mut w);
+    wafer_core::blocks::security_headers::register(&mut w);
+    wafer_core::blocks::web::register(&mut w);
+    wafer_core::blocks::http::register(&mut w);
+    wafer_core::blocks::config::register(&mut w);
+    wafer_core::blocks::logger::register(&mut w);
+    wafer_core::blocks::crypto::register(&mut w);
+    wafer_core::blocks::network::register(&mut w);
+
+    // Database: wafer-site always uses SQLite
+    wafer_core::blocks::sqlite::register(&mut w);
+    // Alias @wafer/database → @wafer/sqlite for backward compat
+    w.add_alias("@wafer/database", "@wafer/sqlite");
 
     // Register site-specific blocks
     register_site_blocks(&mut w);
     playground::register(&mut w);
     registry::register(&mut w);
 
-    // Add flows — infra → @wafer/router (route matching)
+    // Add flows — simplified since routes are now in block config
     let site_flow: FlowDef = serde_json::from_str(r#"{
         "id": "site-main",
         "summary": "Website main flow",
@@ -46,21 +81,7 @@ async fn main() {
         "root": {
             "flow": "@wafer/infra",
             "next": [{
-                "block": "@wafer/router",
-                "config": {
-                    "routes": [
-                        { "path": "/_inspector/**", "block": "@wafer/inspector" },
-                        { "path": "/_inspector", "block": "@wafer/inspector" },
-                        { "path": "/api/**", "block": "@wafer-site/api" },
-                        { "path": "/playground/**", "block": "@wafer-site/playground" },
-                        { "path": "/playground", "block": "@wafer-site/playground" },
-                        { "path": "/registry/**", "block": "@wafer-site/registry" },
-                        { "path": "/registry", "block": "@wafer-site/registry" },
-                        { "path": "/docs/**", "block": "@wafer-site/docs" },
-                        { "path": "/docs", "block": "@wafer-site/docs" },
-                        { "path": "/**", "block": "@wafer-site/docs" }
-                    ]
-                }
+                "block": "@wafer/router"
             }]
         }
     }"#).expect("invalid flow JSON");

@@ -17,6 +17,7 @@ wasm = ["wafer-run/wasm"]
 wafer-run = { path = "../wafer-run", features = ["full"] }
 wafer-core = { path = "../wafer-core", features = ["full"] }
 solobase = { path = "../../../solobase/crates/solobase" }
+solobase-core = { path = "../../../solobase/crates/solobase-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -13,10 +13,10 @@ use crate::context::RuntimeContext;
 
 /// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
 const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
+use crate::block::FuncBlock;
 use crate::executor::{matches_pattern, extract_path_vars};
 use crate::helpers::expand_env_vars;
 use crate::observability::{ObservabilityBus, ObservabilityContext};
-use crate::registry::{Registry, StructBlockFactory};
 use crate::types::*;
 
 /// A parsed reference to a remote block on GitHub, e.g.
@@ -111,12 +111,11 @@ impl RuntimeHandle {
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {
-    pub(crate) registry: Registry,
+    pub(crate) blocks: HashMap<String, Arc<dyn Block>>,
     pub(crate) flows: HashMap<String, Flow>,
-    pub(crate) resolved: HashMap<String, Arc<dyn Block>>,
     /// Block configurations loaded from blocks.json (name → config JSON).
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
-    /// All registered blocks, shared with contexts.
+    /// All registered blocks + aliases, shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
     /// Snapshot of registered block info (populated at start time).
@@ -125,7 +124,7 @@ pub struct Wafer {
     pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
-    /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`). Alias names
+    /// Alias mappings (e.g. `"@db"` → `"@wafer/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: HashMap<String, String>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
@@ -135,16 +134,10 @@ pub struct Wafer {
 
 impl Wafer {
     /// Create a new Wafer runtime.
-    ///
-    /// Block factories are no longer auto-registered here. Call
-    /// `wafer_core::register_all(&mut wafer)` to register all blocks.
     pub fn new() -> Self {
-        let registry = Registry::new();
-
         Self {
-            registry,
+            blocks: HashMap::new(),
             flows: HashMap::new(),
-            resolved: HashMap::new(),
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
             aliases: HashMap::new(),
@@ -194,25 +187,20 @@ impl Wafer {
         }
     }
 
-    /// Rebuild the all_blocks map from the resolved blocks.
+    /// Rebuild the all_blocks map from registered blocks + aliases.
     /// Call this after resolve() completes.
     pub fn rebuild_all_blocks(&mut self) {
         let mut map = HashMap::new();
-        for (name, block) in &self.resolved {
+        for (name, block) in &self.blocks {
             map.insert(name.clone(), block.clone());
         }
         // Insert alias entries — alias names point to the same Arc<dyn Block>
         for (alias, target) in &self.aliases {
-            if let Some(block) = self.resolved.get(target) {
+            if let Some(block) = self.blocks.get(target) {
                 map.insert(alias.clone(), block.clone());
             }
         }
         self.all_blocks = Arc::new(map);
-    }
-
-    /// Registry returns the block registry.
-    pub fn registry(&self) -> &Registry {
-        &self.registry
     }
 
     /// Load block configurations from a JSON file.
@@ -262,25 +250,18 @@ impl Wafer {
 
     /// HasBlock returns true if a block with the given type name is registered.
     pub fn has_block(&self, type_name: &str) -> bool {
-        self.registry.has(type_name)
+        self.blocks.contains_key(type_name)
     }
 
     /// RegisterBlock registers a block instance under the given type name.
     /// The instance is also pre-resolved so it is available via `call_block()`
     /// even when it is not referenced as a flow node.
+    ///
+    /// The block's `lifecycle(Init)` will be called during `start()` with
+    /// config data from `add_block_config()` (if any) or empty data.
     pub fn register_block(&mut self, type_name: impl Into<String>, block: Arc<dyn Block>) {
         let name = type_name.into();
-        let block_clone = block.clone();
-        let name_clone = name.clone();
-        if let Err(e) = self.registry.register(
-            name_clone,
-            Arc::new(StructBlockFactory {
-                new_func: move || block_clone.clone(),
-            }),
-        ) {
-            tracing::warn!(block = %name, error = %e, "registry registration failed for block");
-        }
-        self.resolved.insert(name, block);
+        self.blocks.insert(name, block);
     }
 
     /// RegisterBlockFunc registers an inline handler function as a block.
@@ -290,19 +271,23 @@ impl Wafer {
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
     ) {
+        use crate::block::BlockInfo;
         let name = type_name.into();
-        match self.registry.register_func(&name, handler) {
-            Ok(()) => {
-                // Pre-resolve: create an instance so call_block() can find it
-                if let Some(factory) = self.registry.get(&name) {
-                    let block = factory.create(None);
-                    self.resolved.insert(name, block);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(block = %name, error = %e, "registry registration failed for block func");
-            }
-        }
+        let block: Arc<dyn Block> = Arc::new(FuncBlock {
+            info: BlockInfo {
+                name: name.clone(),
+                version: "0.0.0".to_string(),
+                interface: "inline".to_string(),
+                summary: "Inline function block".to_string(),
+                instance_mode: InstanceMode::PerNode,
+                allowed_modes: Vec::new(),
+                admin_ui: None,
+                runtime: BlockRuntime::default(),
+                requires: Vec::new(),
+            },
+            handler: Box::new(handler),
+        });
+        self.register_block(name, block);
     }
 
     /// AddFlow adds a programmatically-built flow to the runtime.
@@ -358,31 +343,28 @@ impl Wafer {
 
     /// Resolve walks all flow trees and resolves block references.
     ///
-    /// Before resolving flows, creates block instances from `block_configs`
-    /// (loaded via `load_blocks_json` or `add_block_config`). Blocks that
-    /// are already in `resolved` (from explicit `register_block` calls) are
-    /// skipped.
+    /// Before resolving flows, initializes all registered blocks via
+    /// `lifecycle(Init)`. Blocks with configs (from `load_blocks_json` or
+    /// `add_block_config`) are initialized first (infrastructure), then
+    /// remaining blocks are initialized (features that may depend on infra).
     pub async fn resolve(&mut self) -> Result<(), String> {
-        // Gather uses contributions before creating blocks
+        // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
 
-        // Resolve blocks from block_configs
         let configs: Vec<(String, serde_json::Value)> =
             self.block_configs.drain().collect();
 
-        // Collect names of pre-registered blocks so we can init them after
-        // all infrastructure blocks (database, etc.) are resolved.
-        let pre_registered: Vec<String> = self.resolved.keys().cloned().collect();
+        // Collect names of all pre-registered blocks for phase 2 ordering.
+        let pre_registered: Vec<String> = self.blocks.keys().cloned().collect();
 
-        for (name, config) in configs {
-            if self.resolved.contains_key(&name) {
-                // Explicit register_block takes precedence
-                continue;
-            }
-            if let Some(factory) = self.registry.get(&name) {
-                let block = factory.create(Some(&config));
+        // Track which blocks were initialized with config data.
+        let config_names: std::collections::HashSet<String> =
+            configs.iter().map(|(n, _)| n.clone()).collect();
 
-                // Run lifecycle Init
+        // Phase 1: Initialize blocks that have configs (infrastructure blocks).
+        // These are initialized first so feature blocks can depend on them.
+        for (name, config) in &configs {
+            if let Some(block) = self.blocks.get(name) {
                 let ctx = self.make_context(
                     String::new(),
                     String::new(),
@@ -396,27 +378,27 @@ impl Wafer {
                         &ctx,
                         LifecycleEvent {
                             event_type: LifecycleType::Init,
-                            data: serde_json::to_vec(&config).unwrap_or_default(),
+                            data: serde_json::to_vec(config).unwrap_or_default(),
                         },
                     )
                     .await
                     .map_err(|e| format!("init block {:?}: {}", name, e))?;
-
-                self.resolved.insert(name.clone(), block);
             } else {
-                tracing::warn!(block = %name, "block config present but no factory registered — skipping");
+                tracing::warn!(block = %name, "block config present but no block registered — skipping");
             }
         }
 
-        // Now that all block_configs are resolved (database, crypto, etc.),
-        // rebuild the all_blocks snapshot so lifecycle contexts can find them.
+        // Rebuild the all_blocks snapshot so lifecycle contexts can find
+        // infrastructure blocks during phase 2.
         self.rebuild_all_blocks();
 
-        // Run lifecycle Init for blocks that were explicitly registered via
-        // register_block() — they were skipped above because they were already
-        // in resolved. Now they can safely call into infrastructure blocks.
+        // Phase 2: Initialize remaining pre-registered blocks (no config).
+        // These can safely call into infrastructure blocks initialized above.
         for name in &pre_registered {
-            if let Some(block) = self.resolved.get(name) {
+            if config_names.contains(name) {
+                continue; // Already initialized in phase 1
+            }
+            if let Some(block) = self.blocks.get(name) {
                 let ctx = self.make_context(
                     String::new(),
                     String::new(),
@@ -437,9 +419,9 @@ impl Wafer {
             }
         }
 
+        // Phase 3: Resolve flow nodes.
         let flow_ids: Vec<String> = self.flows.keys().cloned().collect();
         for flow_id in flow_ids {
-            // Take flow out temporarily
             let mut flow = self.flows.remove(&flow_id).expect("BUG: flow disappeared during iteration");
             self.resolve_node(&mut flow.root).await?;
             self.flows.insert(flow_id.clone(), flow);
@@ -463,39 +445,10 @@ impl Wafer {
                     node.block = target.clone();
                 }
 
-                if let Some(block) = self.resolved.get(&node.block) {
+                if let Some(block) = self.blocks.get(&node.block) {
                     node.resolved_block = Some(block.clone());
-                } else if let Some(factory) = self.registry.get(&node.block) {
-                    let block = factory.create(node.config.as_ref());
-
-                    // Initialize block
-                    let ctx = self.make_context(
-                        String::new(),
-                        String::new(),
-                        node.config_map.clone(),
-                        Arc::new(AtomicBool::new(false)),
-                        None,
-                    );
-
-                    block
-                        .lifecycle(
-                            &ctx,
-                            LifecycleEvent {
-                                event_type: LifecycleType::Init,
-                                data: node
-                                    .config
-                                    .as_ref()
-                                    .map(|c| serde_json::to_vec(c).unwrap_or_default())
-                                    .unwrap_or_default(),
-                            },
-                        )
-                        .await
-                        .map_err(|e| format!("init block {:?}: {}", node.block, e))?;
-
-                    self.resolved.insert(node.block.clone(), block.clone());
-                    node.resolved_block = Some(block);
                 } else {
-                    // Try remote block download (wasm feature only)
+                    // Block not in resolved — try remote WASM download
                     #[cfg(feature = "wasm")]
                     {
                         let block = if let Some(remote_ref) = parse_versioned_block(&node.block) {
@@ -529,7 +482,7 @@ impl Wafer {
                             .await
                             .map_err(|e| format!("init remote block {:?}: {}", node.block, e))?;
 
-                        self.resolved.insert(node.block.clone(), block.clone());
+                        self.blocks.insert(node.block.clone(), block.clone());
                         node.resolved_block = Some(block);
                     }
 
@@ -731,7 +684,7 @@ impl Wafer {
         self.rebuild_all_blocks();
 
         // Snapshot introspection data for contexts
-        self.blocks_snapshot = Arc::new(self.registry.list());
+        self.blocks_snapshot = Arc::new(self.blocks.values().map(|b| b.info()).collect());
         self.flow_infos_snapshot = Arc::new(self.flows_info());
         self.flow_defs_snapshot = Arc::new(self.flow_defs());
 
@@ -754,7 +707,7 @@ impl Wafer {
             Arc::new(AtomicBool::new(false)),
             None,
         );
-        for block in self.resolved.values() {
+        for block in self.blocks.values() {
             let _ = block.lifecycle(
                 &ctx,
                 LifecycleEvent {
@@ -771,7 +724,7 @@ impl Wafer {
         let handle = RuntimeHandle {
             inner: arc_self.clone(),
         };
-        for (_, block) in &arc_self.resolved {
+        for (_, block) in &arc_self.blocks {
             block.bind(handle.clone());
         }
 
@@ -788,7 +741,7 @@ impl Wafer {
             Arc::new(AtomicBool::new(false)),
             None,
         );
-        for block in self.resolved.values() {
+        for block in self.blocks.values() {
             let _ = block.lifecycle(
                 &ctx,
                 LifecycleEvent {
@@ -810,7 +763,7 @@ impl Wafer {
             Arc::new(AtomicBool::new(false)),
             None,
         );
-        for block in self.resolved.values() {
+        for block in self.blocks.values() {
             let _ = block.lifecycle(
                 &ctx,
                 LifecycleEvent {

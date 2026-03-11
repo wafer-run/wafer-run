@@ -1,6 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use wafer_run::block::{Block, BlockInfo};
-use wafer_run::registry::BlockFactory;
 use wafer_run::*;
 
 /// Normalize a value to a standard action. Accepts both action names
@@ -23,11 +22,46 @@ struct Route {
     block: String,
 }
 
+/// Parse routes from a JSON config value.
+fn parse_routes(config: Option<&serde_json::Value>) -> Vec<Route> {
+    config
+        .and_then(|c| c.get("routes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let path = entry.get("path")?.as_str()?.to_string();
+                    let block = entry.get("block")?.as_str()?.to_string();
+                    // Accept "actions" or "methods" — both are normalized
+                    let raw = entry
+                        .get("actions")
+                        .or_else(|| entry.get("methods"))
+                        .and_then(|m| m.as_array());
+                    let actions = raw
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(normalize_action))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(Route {
+                        path,
+                        actions,
+                        block,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `@wafer/router` matches incoming messages against configured routes
 /// using standard message properties (`req.action`, `req.resource`) and
 /// dispatches to the appropriate handler block via `ctx.call_block()`.
 ///
 /// Transport-agnostic — works with any message that has standard meta.
+///
+/// Initialized during `lifecycle(Init)` from config (reads `routes` array).
 ///
 /// Route config accepts either `"actions"` or `"methods"`:
 /// ```json
@@ -36,7 +70,15 @@ struct Route {
 /// ```
 /// HTTP methods are automatically mapped to actions (GET → retrieve, etc.).
 pub struct RouterBlock {
-    routes: Vec<Route>,
+    routes: OnceLock<Vec<Route>>,
+}
+
+impl RouterBlock {
+    pub fn new() -> Self {
+        Self {
+            routes: OnceLock::new(),
+        }
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -51,16 +93,17 @@ impl Block for RouterBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
+            runtime: wafer_run::types::BlockRuntime::Both,
             requires: Vec::new(),
         }
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        let routes = self.routes.get().map(|r| r.as_slice()).unwrap_or(&[]);
         let action = msg.action().to_string();
         let path = msg.path().to_string();
 
-        for route in &self.routes {
+        for route in routes {
             // Check action match (empty list matches any action)
             if !route.actions.is_empty()
                 && !route.actions.iter().any(|a| *a == action)
@@ -87,72 +130,26 @@ impl Block for RouterBlock {
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init && self.routes.get().is_none() {
+            let config: Option<serde_json::Value> = if !event.data.is_empty() {
+                serde_json::from_slice(&event.data).ok()
+            } else {
+                None
+            };
+
+            let routes = parse_routes(config.as_ref());
+            if routes.is_empty() {
+                tracing::debug!("@wafer/router initialized with no routes");
+            }
+            self.routes.set(routes).ok();
+        }
         Ok(())
-    }
-}
-
-/// Factory that parses the routes config array and creates a RouterBlock.
-pub struct RouterBlockFactory;
-
-impl BlockFactory for RouterBlockFactory {
-    fn create(&self, config: Option<&serde_json::Value>) -> Arc<dyn Block> {
-        let routes: Vec<Route> = config
-            .and_then(|c| c.get("routes"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entry| {
-                        let path = entry.get("path")?.as_str()?.to_string();
-                        let block = entry.get("block")?.as_str()?.to_string();
-                        // Accept "actions" or "methods" — both are normalized
-                        let raw = entry
-                            .get("actions")
-                            .or_else(|| entry.get("methods"))
-                            .and_then(|m| m.as_array());
-                        let actions = raw
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(normalize_action))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        Some(Route {
-                            path,
-                            actions,
-                            block,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if routes.is_empty() {
-            tracing::warn!("@wafer/router created with no routes");
-        }
-
-        Arc::new(RouterBlock { routes })
-    }
-
-    fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "@wafer/router".to_string(),
-            version: "0.1.0".to_string(),
-            interface: "router@v1".to_string(),
-            summary: "Config-driven router that dispatches to handler blocks".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
-            requires: Vec::new(),
-        }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn register(w: &mut Wafer) {
-    w.registry()
-        .register("@wafer/router", Arc::new(RouterBlockFactory))
-        .ok();
+    w.register_block("@wafer/router", Arc::new(RouterBlock::new()));
 }

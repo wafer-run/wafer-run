@@ -22,22 +22,24 @@ pub enum DatabaseError {
 }
 
 /// Service provides generic CRUD operations on collections.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait DatabaseService: Send + Sync {
     /// Get retrieves a single record by ID from a collection.
-    fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError>;
+    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError>;
 
     /// List retrieves records with optional filtering, sorting, and pagination.
-    fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError>;
+    async fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError>;
 
     /// Create inserts a new record into a collection.
-    fn create(
+    async fn create(
         &self,
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError>;
 
     /// Update modifies an existing record by ID.
-    fn update(
+    async fn update(
         &self,
         collection: &str,
         id: &str,
@@ -45,13 +47,13 @@ pub trait DatabaseService: Send + Sync {
     ) -> Result<Record, DatabaseError>;
 
     /// Delete removes a record by ID.
-    fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError>;
+    async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError>;
 
     /// Count returns the number of records matching the filters.
-    fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError>;
+    async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError>;
 
     /// Sum returns the sum of a numeric field for matching records.
-    fn sum(
+    async fn sum(
         &self,
         collection: &str,
         field: &str,
@@ -59,21 +61,21 @@ pub trait DatabaseService: Send + Sync {
     ) -> Result<f64, DatabaseError>;
 
     /// QueryRaw executes a raw SELECT query.
-    fn query_raw(
+    async fn query_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// ExecRaw executes a raw non-SELECT statement.
-    fn exec_raw(
+    async fn exec_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError>;
 
     /// Bulk-delete all records matching filters in a single query.
-    fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
+    async fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
         // Default implementation falls back to record-by-record deletion.
         // Loops until all matching records are deleted.
         loop {
@@ -84,19 +86,19 @@ pub trait DatabaseService: Send + Sync {
                     limit: 10000,
                     ..Default::default()
                 },
-            )?;
+            ).await?;
             if records.records.is_empty() {
                 break;
             }
             for r in records.records {
-                self.delete(collection, &r.id)?;
+                self.delete(collection, &r.id).await?;
             }
         }
         Ok(())
     }
 
     /// Bulk-update all records matching filters in a single query.
-    fn update_where(
+    async fn update_where(
         &self,
         collection: &str,
         filters: &[Filter],
@@ -112,12 +114,12 @@ pub trait DatabaseService: Send + Sync {
                     limit: 10000,
                     ..Default::default()
                 },
-            )?;
+            ).await?;
             if records.records.is_empty() {
                 break;
             }
             for r in records.records {
-                self.update(collection, &r.id, data.clone())?;
+                self.update(collection, &r.id, data.clone()).await?;
             }
         }
         Ok(())
@@ -127,24 +129,24 @@ pub trait DatabaseService: Send + Sync {
 
     /// Ensure a table exists matching the given schema definition.
     /// Creates the table if it doesn't exist and adds any missing columns.
-    fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError>;
+    async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError>;
 
     /// Ensure multiple tables exist matching the given schema definitions.
-    fn ensure_schema_tables(&self, tables: &[Table]) -> Result<(), DatabaseError> {
+    async fn ensure_schema_tables(&self, tables: &[Table]) -> Result<(), DatabaseError> {
         for t in tables {
-            self.ensure_schema_table(t)?;
+            self.ensure_schema_table(t).await?;
         }
         Ok(())
     }
 
     /// Check whether a table exists in the database.
-    fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError>;
+    async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError>;
 
     /// Drop a table if it exists.
-    fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError>;
+    async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError>;
 
     /// Add a column to an existing table.
-    fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
+    async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
 }
 
 /// Record represents a single database record.
@@ -217,156 +219,4 @@ impl FilterOp {
 pub struct SortField {
     pub field: String,
     pub desc: bool,
-}
-
-// --- Helper functions ---
-
-/// GetByField retrieves a single record where field equals value.
-pub fn get_by_field(
-    db: &dyn DatabaseService,
-    collection: &str,
-    field: &str,
-    value: serde_json::Value,
-) -> Result<Record, DatabaseError> {
-    let result = db.list(
-        collection,
-        &ListOptions {
-            filters: vec![Filter {
-                field: field.to_string(),
-                operator: FilterOp::Equal,
-                value,
-            }],
-            limit: 1,
-            ..Default::default()
-        },
-    )?;
-    result
-        .records
-        .into_iter()
-        .next()
-        .ok_or(DatabaseError::NotFound)
-}
-
-/// Upsert creates or updates a record based on a field match.
-pub fn upsert(
-    db: &dyn DatabaseService,
-    collection: &str,
-    field: &str,
-    value: serde_json::Value,
-    data: HashMap<String, serde_json::Value>,
-) -> Result<Record, DatabaseError> {
-    match get_by_field(db, collection, field, value) {
-        Ok(existing) => db.update(collection, &existing.id, data),
-        Err(DatabaseError::NotFound) => db.create(collection, data),
-        Err(e) => Err(e),
-    }
-}
-
-/// ListAll retrieves all records from a collection with optional filters.
-/// Note: capped at 100,000 records to prevent OOM. For larger datasets, use
-/// paginated_list() with explicit pagination.
-pub fn list_all(
-    db: &dyn DatabaseService,
-    collection: &str,
-    filters: Vec<Filter>,
-) -> Result<Vec<Record>, DatabaseError> {
-    let result = db.list(
-        collection,
-        &ListOptions {
-            filters,
-            limit: 100_000,
-            ..Default::default()
-        },
-    )?;
-    Ok(result.records)
-}
-
-/// PaginatedList retrieves a page of records.
-pub fn paginated_list(
-    db: &dyn DatabaseService,
-    collection: &str,
-    page: i64,
-    page_size: i64,
-    filters: Vec<Filter>,
-    sort: Vec<SortField>,
-) -> Result<RecordList, DatabaseError> {
-    let page = if page < 1 { 1 } else { page };
-    let page_size = if page_size < 1 { 20 } else { page_size };
-    db.list(
-        collection,
-        &ListOptions {
-            filters,
-            sort,
-            limit: page_size,
-            offset: (page - 1) * page_size,
-        },
-    )
-}
-
-/// SoftDelete sets deleted_at on a record using the current UTC timestamp.
-pub fn soft_delete(
-    db: &dyn DatabaseService,
-    collection: &str,
-    id: &str,
-) -> Result<Record, DatabaseError> {
-    let mut data = HashMap::new();
-    data.insert(
-        "deleted_at".to_string(),
-        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-    );
-    db.update(collection, id, data)
-}
-
-/// DeleteByField deletes all records where field equals value.
-pub fn delete_by_field(
-    db: &dyn DatabaseService,
-    collection: &str,
-    field: &str,
-    value: serde_json::Value,
-) -> Result<(), DatabaseError> {
-    delete_by_filters(
-        db,
-        collection,
-        vec![Filter {
-            field: field.to_string(),
-            operator: FilterOp::Equal,
-            value,
-        }],
-    )
-}
-
-/// CountByField counts records where field equals value.
-pub fn count_by_field(
-    db: &dyn DatabaseService,
-    collection: &str,
-    field: &str,
-    value: serde_json::Value,
-) -> Result<i64, DatabaseError> {
-    db.count(
-        collection,
-        &[Filter {
-            field: field.to_string(),
-            operator: FilterOp::Equal,
-            value,
-        }],
-    )
-}
-
-/// DeleteByFilters deletes all records matching filters using a single bulk query.
-pub fn delete_by_filters(
-    db: &dyn DatabaseService,
-    collection: &str,
-    filters: Vec<Filter>,
-) -> Result<(), DatabaseError> {
-    db.delete_where(collection, &filters)
-}
-
-/// UpdateByFilters updates all records matching filters using a single bulk query.
-pub fn update_by_filters(
-    db: &dyn DatabaseService,
-    collection: &str,
-    filters: Vec<Filter>,
-    data: HashMap<String, serde_json::Value>,
-) -> Result<(), DatabaseError> {
-    db.update_where(collection, &filters, data)
 }

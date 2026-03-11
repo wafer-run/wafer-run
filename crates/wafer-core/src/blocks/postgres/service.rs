@@ -2,13 +2,11 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
-use super::service::*;
+use crate::interfaces::database::service::*;
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
-/// Uses `sqlx` with connection pooling. The trait methods are synchronous but
-/// the underlying driver is async; we bridge with `tokio::task::block_in_place`
-/// so we never block the async runtime's worker threads.
+/// Uses `sqlx` with connection pooling.
 pub struct PostgresDatabaseService {
     pool: PgPool,
 }
@@ -648,97 +646,85 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Trait implementation — sync bridge
+// Trait implementation — direct async
 // ---------------------------------------------------------------------------
 
+#[async_trait::async_trait]
 impl DatabaseService for PostgresDatabaseService {
-    fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.get_async(collection, id)))
+    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
+        self.get_async(collection, id).await
     }
 
-    fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.list_async(collection, opts)))
+    async fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
+        self.list_async(collection, opts).await
     }
 
-    fn create(
+    async fn create(
         &self,
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.create_async(collection, data)))
+        self.create_async(collection, data).await
     }
 
-    fn update(
+    async fn update(
         &self,
         collection: &str,
         id: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.update_async(collection, id, data)))
+        self.update_async(collection, id, data).await
     }
 
-    fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.delete_async(collection, id)))
+    async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
+        self.delete_async(collection, id).await
     }
 
-    fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.count_async(collection, filters)))
+    async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
+        self.count_async(collection, filters).await
     }
 
-    fn sum(
+    async fn sum(
         &self,
         collection: &str,
         field: &str,
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.sum_async(collection, field, filters)))
+        self.sum_async(collection, field, filters).await
     }
 
-    fn query_raw(
+    async fn query_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.query_raw_async(query, args)))
+        self.query_raw_async(query, args).await
     }
 
-    fn exec_raw(
+    async fn exec_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.exec_raw_async(query, args)))
+        self.exec_raw_async(query, args).await
     }
 
     // --- Schema management ---
 
-    fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.schema_ensure_table_async(table)))
+    async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
+        self.schema_ensure_table_async(table).await
     }
 
-    fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.table_exists_async(name)))
+    async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
+        self.table_exists_async(name).await
     }
 
-    fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.schema_drop_table_async(name)))
+    async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
+        self.schema_drop_table_async(name).await
     }
 
-    fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        let rt = tokio::runtime::Handle::current();
-        tokio::task::block_in_place(|| rt.block_on(self.schema_add_column_async(table, column)))
+    async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
+        self.schema_add_column_async(table, column).await
     }
 }
 

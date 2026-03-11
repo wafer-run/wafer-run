@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -12,13 +12,23 @@ use wafer_run::types::*;
 use wafer_run::helpers::respond_json;
 
 /// CryptoBlock wraps a CryptoService and exposes it as a Block.
+///
+/// The service is initialized during `lifecycle(Init)` from config
+/// (reads `JWT_SECRET` env var or `jwt_secret` config key).
 pub struct CryptoBlock {
-    service: Arc<dyn CryptoService>,
+    service: OnceLock<Arc<dyn CryptoService>>,
 }
 
 impl CryptoBlock {
-    pub fn new(service: Arc<dyn CryptoService>) -> Self {
-        Self { service }
+    pub fn new() -> Self {
+        Self { service: OnceLock::new() }
+    }
+
+    fn svc(&self) -> &dyn CryptoService {
+        self.service
+            .get()
+            .expect("@wafer/crypto: not initialized — call lifecycle(Init) first")
+            .as_ref()
     }
 }
 
@@ -134,7 +144,7 @@ impl Block for CryptoBlock {
                         ))
                     }
                 };
-                match self.service.hash(&req.password) {
+                match self.svc().hash(&req.password) {
                     Ok(hash) => respond_json(msg, &HashResponse { hash }),
                     Err(e) => Result_::error(crypto_error_to_wafer(e)),
                 }
@@ -149,7 +159,7 @@ impl Block for CryptoBlock {
                         ))
                     }
                 };
-                match self.service.compare_hash(&req.password, &req.hash) {
+                match self.svc().compare_hash(&req.password, &req.hash) {
                     Ok(()) => respond_json(msg, &CompareHashResponse { matches: true }),
                     Err(CryptoError::PasswordMismatch) => {
                         respond_json(msg, &CompareHashResponse { matches: false })
@@ -168,7 +178,7 @@ impl Block for CryptoBlock {
                     }
                 };
                 let expiry = Duration::from_secs(req.expiry_secs);
-                match self.service.sign(req.claims, expiry) {
+                match self.svc().sign(req.claims, expiry) {
                     Ok(token) => respond_json(msg, &SignResponse { token }),
                     Err(e) => Result_::error(crypto_error_to_wafer(e)),
                 }
@@ -183,7 +193,7 @@ impl Block for CryptoBlock {
                         ))
                     }
                 };
-                match self.service.verify(&req.token) {
+                match self.svc().verify(&req.token) {
                     Ok(claims) => respond_json(msg, &VerifyResponse { claims }),
                     Err(e) => Result_::error(crypto_error_to_wafer(e)),
                 }
@@ -206,7 +216,7 @@ impl Block for CryptoBlock {
                         format!("random_bytes n={} exceeds maximum of {}", req.n, MAX_RANDOM_BYTES),
                     ));
                 }
-                match self.service.random_bytes(req.n) {
+                match self.svc().random_bytes(req.n) {
                     Ok(bytes) => respond_json(msg, &RandomBytesResponse { bytes }),
                     Err(e) => Result_::error(crypto_error_to_wafer(e)),
                 }
@@ -221,8 +231,43 @@ impl Block for CryptoBlock {
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init && self.service.get().is_none() {
+            let config: Option<serde_json::Value> = if !event.data.is_empty() {
+                serde_json::from_slice(&event.data).ok()
+            } else {
+                None
+            };
+
+            let jwt_secret = crate::blocks::env_or_config_str(
+                "JWT_SECRET",
+                config.as_ref(),
+                "jwt_secret",
+            )
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let mode = std::env::var("WAFER_ENV").unwrap_or_default();
+                if mode == "production" || mode == "prod" {
+                    tracing::error!(
+                        "JWT_SECRET not set in production — set JWT_SECRET environment variable. \
+                         Using auto-generated secret; tokens will NOT survive restarts."
+                    );
+                } else {
+                    tracing::warn!(
+                        "JWT_SECRET not set — generating a random secret (tokens will not survive restarts)"
+                    );
+                }
+                format!(
+                    "wafer-auto-{}{}",
+                    uuid::Uuid::new_v4().as_simple(),
+                    uuid::Uuid::new_v4().as_simple(),
+                )
+            });
+
+            let svc = super::service::Argon2JwtCryptoService::new(jwt_secret);
+            self.service.set(Arc::new(svc)).ok();
+        }
         Ok(())
     }
 }

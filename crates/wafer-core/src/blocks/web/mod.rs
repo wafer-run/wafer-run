@@ -265,7 +265,7 @@ impl Block for WebBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: vec![InstanceMode::PerNode],
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Wasm,
+            runtime: wafer_run::types::BlockRuntime::Native,
             requires: Vec::new(),
         }
     }

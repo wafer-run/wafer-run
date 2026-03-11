@@ -1,14 +1,19 @@
 /// Host-imported runtime utilities.
 
 interface runtime {
-    use types.{message, block-result};
+    use types.{message};
 
     /// Check whether the current execution context has been cancelled.
     is-cancelled: func() -> bool;
 
-    /// Call another block by name, passing a message and receiving its result.
-    /// Any block can call any other block — no distinction between system and application blocks.
-    call-block: func(block-name: string, msg: message) -> block-result;
+    /// Call another block by name. Traps to the host for async execution.
+    /// Returns the byte length of the serialized result.
+    /// Use read-result to copy the result into guest memory.
+    call-block: func(block-name: string, msg: message) -> s32;
+
+    /// Copy the result of the last call-block into a guest-allocated buffer.
+    /// Returns the number of bytes actually copied.
+    read-result: func(dest-ptr: s32, dest-len: s32) -> s32;
 
     /// Emit a log message at the given level (debug, info, warn, error).
     log: func(level: string, msg: string);

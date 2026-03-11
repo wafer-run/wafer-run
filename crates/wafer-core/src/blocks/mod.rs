@@ -1,35 +1,43 @@
 pub mod auth;
 pub mod config;
 pub mod cors;
+#[cfg(feature = "crypto")]
 pub mod crypto;
-pub mod database;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod iam;
 pub mod inspector;
 pub mod logger;
+#[cfg(feature = "storage-local")]
+pub mod local_storage;
 pub mod monitoring;
+#[cfg(feature = "network")]
 pub mod network;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod rate_limit;
 pub mod readonly_guard;
 pub mod router;
+#[cfg(feature = "storage-s3")]
+pub mod s3_storage;
 pub mod security_headers;
-pub mod storage;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod web;
 
 pub use config::ConfigBlock;
+#[cfg(feature = "crypto")]
 pub use crypto::CryptoBlock;
-pub use database::DatabaseBlock;
 pub use logger::LoggerBlock;
+#[cfg(feature = "network")]
 pub use network::NetworkBlock;
-pub use storage::StorageBlock;
 
 // ---------------------------------------------------------------------------
 // Helpers (used by block factories)
 // ---------------------------------------------------------------------------
 
 /// Read a config value, with env var override taking precedence.
-pub(crate) fn env_or_config_str(
+pub fn env_or_config_str(
     env_var: &str,
     config: Option<&serde_json::Value>,
     key: &str,
