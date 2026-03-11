@@ -105,22 +105,23 @@ pub trait DatabaseService: Send + Sync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         // Default implementation falls back to record-by-record updates.
-        // Loops until all matching records are updated.
-        loop {
-            let records = self.list(
-                collection,
-                &ListOptions {
-                    filters: filters.to_vec(),
-                    limit: 10000,
-                    ..Default::default()
-                },
-            ).await?;
-            if records.records.is_empty() {
-                break;
+        let records = self.list(
+            collection,
+            &ListOptions {
+                filters: filters.to_vec(),
+                limit: 10000,
+                ..Default::default()
+            },
+        ).await?;
+
+        let mut ids: Vec<String> = records.records.into_iter().map(|r| r.id).collect();
+        if let Some(last_id) = ids.pop() {
+            // Clone data for all but the last record.
+            for id in &ids {
+                self.update(collection, id, data.clone()).await?;
             }
-            for r in records.records {
-                self.update(collection, &r.id, data.clone()).await?;
-            }
+            // Move data into the final update to avoid an extra clone.
+            self.update(collection, &last_id, data).await?;
         }
         Ok(())
     }

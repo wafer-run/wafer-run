@@ -52,7 +52,7 @@ impl Block for SecurityHeadersBlock {
             "camera=(), microphone=(), geolocation=()",
         );
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

@@ -366,7 +366,7 @@ impl Block for HttpListenerBlock {
     }
 
     async fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

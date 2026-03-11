@@ -142,43 +142,7 @@ fn clean_path(p: &str) -> String {
 }
 
 fn mime_for_ext(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    match ext.as_str() {
-        "html" | "htm" => "text/html; charset=utf-8".to_string(),
-        "css" => "text/css; charset=utf-8".to_string(),
-        "js" | "mjs" => "application/javascript; charset=utf-8".to_string(),
-        "json" => "application/json; charset=utf-8".to_string(),
-        "xml" => "application/xml; charset=utf-8".to_string(),
-        "svg" => "image/svg+xml".to_string(),
-        "png" => "image/png".to_string(),
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "gif" => "image/gif".to_string(),
-        "webp" => "image/webp".to_string(),
-        "avif" => "image/avif".to_string(),
-        "ico" => "image/x-icon".to_string(),
-        "woff" => "font/woff".to_string(),
-        "woff2" => "font/woff2".to_string(),
-        "ttf" => "font/ttf".to_string(),
-        "otf" => "font/otf".to_string(),
-        "eot" => "application/vnd.ms-fontobject".to_string(),
-        "pdf" => "application/pdf".to_string(),
-        "zip" => "application/zip".to_string(),
-        "wasm" => "application/wasm".to_string(),
-        "map" => "application/json".to_string(),
-        "txt" => "text/plain; charset=utf-8".to_string(),
-        "md" => "text/markdown; charset=utf-8".to_string(),
-        "csv" => "text/csv; charset=utf-8".to_string(),
-        "mp4" => "video/mp4".to_string(),
-        "webm" => "video/webm".to_string(),
-        "mp3" => "audio/mpeg".to_string(),
-        "ogg" => "audio/ogg".to_string(),
-        _ => "application/octet-stream".to_string(),
-    }
+    crate::mime::mime_for_ext(path).to_string()
 }
 
 fn is_hashed_asset(path: &Path) -> bool {

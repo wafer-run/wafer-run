@@ -46,7 +46,7 @@ impl Block for RateLimitBlock {
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Allow disabling via env var (useful for tests)
         if std::env::var("RATE_LIMIT_IP").ok().as_deref() == Some("0") {
-            return msg.clone().cont();
+            return msg.cont_ref();
         }
 
         let max = ctx
@@ -55,7 +55,7 @@ impl Block for RateLimitBlock {
             .unwrap_or(self.max_requests);
 
         if max == 0 {
-            return msg.clone().cont();
+            return msg.cont_ref();
         }
 
         let window_secs = ctx
@@ -122,7 +122,7 @@ impl Block for RateLimitBlock {
             &remaining.to_string(),
         );
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

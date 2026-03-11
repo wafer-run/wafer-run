@@ -91,6 +91,19 @@ impl Message {
         }
     }
 
+    /// Continue (by reference) — avoids cloning when the caller only has `&mut Message`.
+    ///
+    /// The runtime updates its copy of the message from `result.message` anyway,
+    /// so this clones once into the result instead of clone-then-move.
+    pub fn cont_ref(&self) -> Result_ {
+        Result_ {
+            action: Action::Continue,
+            response: None,
+            error: None,
+            message: Some(self.clone()),
+        }
+    }
+
     /// Respond returns a Result that short-circuits the flow with a response.
     pub fn respond(self, r: Response) -> Result_ {
         Result_ {
@@ -108,6 +121,16 @@ impl Message {
             response: None,
             error: None,
             message: Some(self),
+        }
+    }
+
+    /// Drop (by reference) — avoids a separate clone when the caller only has `&mut Message`.
+    pub fn drop_msg_ref(&self) -> Result_ {
+        Result_ {
+            action: Action::Drop,
+            response: None,
+            error: None,
+            message: Some(self.clone()),
         }
     }
 

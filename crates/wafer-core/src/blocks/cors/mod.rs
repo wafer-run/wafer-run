@@ -79,10 +79,10 @@ impl Block for CorsBlock {
 
         // Handle OPTIONS preflight
         if msg.get_meta("http.method") == "OPTIONS" {
-            return msg.clone().drop_msg();
+            return msg.drop_msg_ref();
         }
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

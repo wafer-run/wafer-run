@@ -36,7 +36,7 @@ impl Block for ReadonlyGuardBlock {
             .unwrap_or(self.enabled);
 
         if !readonly {
-            return msg.clone().cont();
+            return msg.cont_ref();
         }
 
         let action = msg.action();
@@ -47,7 +47,7 @@ impl Block for ReadonlyGuardBlock {
             );
         }
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

@@ -40,7 +40,7 @@ pub use helpers::{
 pub use meta::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use observability::{ObservabilityBus, ObservabilityContext};
-pub use block::FuncBlock;
+pub use block::{AsyncFuncBlock, FuncBlock};
 pub use router::Router;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{RuntimeHandle, Wafer};

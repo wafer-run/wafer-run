@@ -48,14 +48,37 @@ pub trait WaferBlock {
 #[macro_export]
 macro_rules! register_block {
     ($block_ty:ty) => {
+        /// Convert a `Vec<u8>` into a leaked `(ptr, len)` packed as i64.
+        ///
+        /// Uses `Box::into_raw` on a boxed slice so the allocation is
+        /// recoverable by the host via `__wafer_free` instead of leaking
+        /// on every call (which `mem::forget` did).
+        #[inline]
+        fn __wafer_leak_vec(v: Vec<u8>) -> i64 {
+            let boxed = v.into_boxed_slice();
+            let len = boxed.len() as i64;
+            let ptr = Box::into_raw(boxed) as *mut u8 as i64;
+            (ptr << 32) | len
+        }
+
+        /// Free an allocation previously returned by `__wafer_leak_vec`.
+        ///
+        /// The host runtime calls this after reading the returned bytes.
+        #[no_mangle]
+        pub unsafe extern "C" fn __wafer_free(ptr: i32, len: i32) {
+            if ptr != 0 && len > 0 {
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                    ptr as *mut u8,
+                    len as usize,
+                ));
+            }
+        }
+
         #[no_mangle]
         pub extern "C" fn __wafer_info() -> i64 {
             let info = <$block_ty as $crate::WaferBlock>::info();
             let json = $crate::_serde_json::to_vec(&info).unwrap_or_default();
-            let ptr = json.as_ptr() as i64;
-            let len = json.len() as i64;
-            std::mem::forget(json);
-            (ptr << 32) | len
+            __wafer_leak_vec(json)
         }
 
         #[no_mangle]
@@ -75,19 +98,13 @@ macro_rules! register_block {
                         message: None,
                     };
                     let json = $crate::_serde_json::to_vec(&err).unwrap_or_default();
-                    let ptr = json.as_ptr() as i64;
-                    let len = json.len() as i64;
-                    std::mem::forget(json);
-                    return (ptr << 32) | len;
+                    return __wafer_leak_vec(json);
                 }
             };
 
             let result = <$block_ty as $crate::WaferBlock>::handle(msg);
             let json = $crate::_serde_json::to_vec(&result).unwrap_or_default();
-            let ptr = json.as_ptr() as i64;
-            let len = json.len() as i64;
-            std::mem::forget(json);
-            (ptr << 32) | len
+            __wafer_leak_vec(json)
         }
 
         #[no_mangle]
@@ -102,10 +119,7 @@ macro_rules! register_block {
                         meta: Default::default(),
                     };
                     let json = $crate::_serde_json::to_vec(&err).unwrap_or_default();
-                    let ptr = json.as_ptr() as i64;
-                    let len = json.len() as i64;
-                    std::mem::forget(json);
-                    return (ptr << 32) | len;
+                    return __wafer_leak_vec(json);
                 }
             };
 
@@ -113,10 +127,7 @@ macro_rules! register_block {
                 Ok(()) => 0i64,
                 Err(err) => {
                     let json = $crate::_serde_json::to_vec(&err).unwrap_or_default();
-                    let ptr = json.as_ptr() as i64;
-                    let len = json.len() as i64;
-                    std::mem::forget(json);
-                    (ptr << 32) | len
+                    __wafer_leak_vec(json)
                 }
             }
         }

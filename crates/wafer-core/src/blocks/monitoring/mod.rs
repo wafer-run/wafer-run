@@ -103,7 +103,7 @@ impl Block for MonitoringBlock {
             }
         }
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

@@ -6,7 +6,6 @@ members = [
     "crates/wafer-run",
     "crates/wafer-core",
     "crates/wafer-ffi",
-    "crates/wafer-local",
     "crates/wafer-run-node",
     "crates/wafer-sdk-rs",
     "crates/wafer-site",

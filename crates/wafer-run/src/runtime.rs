@@ -264,8 +264,10 @@ impl Wafer {
         self.blocks.insert(name, block);
     }
 
-    /// RegisterBlockFunc registers an inline handler function as a block.
+    /// RegisterBlockFunc registers a synchronous inline handler function as a block.
     /// The block is also pre-resolved so it is available via `call_block()`.
+    ///
+    /// For handlers that need to perform async work, use `register_block_func_async`.
     pub fn register_block_func(
         &mut self,
         type_name: impl Into<String>,
@@ -286,6 +288,38 @@ impl Wafer {
                 requires: Vec::new(),
             },
             handler: Box::new(handler),
+        });
+        self.register_block(name, block);
+    }
+
+    /// RegisterBlockFuncAsync registers an async inline handler function as a block.
+    /// The block is also pre-resolved so it is available via `call_block()`.
+    ///
+    /// The handler receives a context and mutable message reference, and returns
+    /// a future that resolves to a `Result_`.
+    pub fn register_block_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result_> + Send + 'static,
+    {
+        use crate::block::{AsyncFuncBlock, BlockInfo};
+        let name = type_name.into();
+        let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
+            info: BlockInfo {
+                name: name.clone(),
+                version: "0.0.0".to_string(),
+                interface: "inline-async".to_string(),
+                summary: "Inline async function block".to_string(),
+                instance_mode: InstanceMode::PerNode,
+                allowed_modes: Vec::new(),
+                admin_ui: None,
+                runtime: BlockRuntime::default(),
+                requires: Vec::new(),
+            },
+            handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
         self.register_block(name, block);
     }

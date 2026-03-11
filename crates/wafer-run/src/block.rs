@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::context::Context;
 use crate::types::*;
 use crate::wasm::capabilities::BlockCapabilities;
@@ -29,7 +32,29 @@ pub trait Block: Send + Sync {
     }
 }
 
-/// FuncBlock wraps a handler function as a Block.
+/// The async handler type used by `AsyncFuncBlock`.
+#[cfg(not(target_arch = "wasm32"))]
+type AsyncHandler = Box<
+    dyn for<'a> Fn(
+            &'a dyn Context,
+            &'a mut Message,
+        ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(target_arch = "wasm32")]
+type AsyncHandler = Box<
+    dyn for<'a> Fn(
+            &'a dyn Context,
+            &'a mut Message,
+        ) -> Pin<Box<dyn Future<Output = Result_> + 'a>>
+        + Sync,
+>;
+
+/// FuncBlock wraps a synchronous handler function as a Block.
+///
+/// For handlers that need to perform async work, use `AsyncFuncBlock` instead.
 pub struct FuncBlock {
     pub info: BlockInfo,
     pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
@@ -44,6 +69,35 @@ impl Block for FuncBlock {
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         (self.handler)(ctx, msg)
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        Ok(())
+    }
+}
+
+/// AsyncFuncBlock wraps an async handler function as a Block.
+///
+/// Use this when the handler needs to perform async operations such as
+/// calling other blocks or performing I/O.
+pub struct AsyncFuncBlock {
+    pub info: BlockInfo,
+    pub handler: AsyncHandler,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl Block for AsyncFuncBlock {
+    fn info(&self) -> BlockInfo {
+        self.info.clone()
+    }
+
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        (self.handler)(ctx, msg).await
     }
 
     async fn lifecycle(

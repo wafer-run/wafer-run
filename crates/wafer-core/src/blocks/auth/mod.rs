@@ -254,7 +254,7 @@ impl Block for AuthBlock {
             msg.set_meta("auth.user_roles", &roles.join(","));
         }
 
-        msg.clone().cont()
+        msg.cont_ref()
     }
 
     async fn lifecycle(

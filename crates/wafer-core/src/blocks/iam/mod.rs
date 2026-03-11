@@ -86,7 +86,7 @@ impl Block for IAMBlock {
         };
 
         if has_role {
-            msg.clone().cont()
+            msg.cont_ref()
         } else {
             err_forbidden(msg, &format!("Requires '{}' role", required_role))
         }

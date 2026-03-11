@@ -100,7 +100,7 @@ impl Router {
 
         // Default execute handling (e.g. CORS preflight): drop if no explicit handler
         if action == RequestAction::Execute.as_str() {
-            return msg.clone().drop_msg();
+            return msg.drop_msg_ref();
         }
 
         helpers::error(

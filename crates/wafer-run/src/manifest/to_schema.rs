@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::schema::types::*;
 use super::types::*;
 
-/// Convert a map of collection definitions directly to schema Table definitions.
+/// Convert a map of collection definitions to schema Table definitions.
 /// Tables are sorted by name for deterministic creation order (important for
 /// foreign key references between tables).
 pub fn collections_to_tables(collections: &HashMap<String, CollectionDef>) -> Vec<Table> {
@@ -13,17 +13,6 @@ pub fn collections_to_tables(collections: &HashMap<String, CollectionDef>) -> Ve
         .iter()
         .map(|name| collection_to_table(name, &collections[*name]))
         .collect()
-}
-
-/// Convert a block manifest's database collections to schema Table definitions.
-/// Reads from top-level `collections` first, falling back to legacy `services.database.collections`.
-pub fn to_schema_tables(m: &BlockManifest) -> Vec<Table> {
-    let collections = m.all_collections();
-    if collections.is_empty() {
-        return Vec::new();
-    }
-
-    collections_to_tables(&collections)
 }
 
 fn collection_to_table(name: &str, coll: &CollectionDef) -> Table {

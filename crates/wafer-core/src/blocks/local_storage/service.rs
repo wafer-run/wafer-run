@@ -57,39 +57,7 @@ impl LocalStorageService {
     }
 
     fn guess_content_type(key: &str) -> String {
-        let ext = Path::new(key)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        match ext {
-            "html" | "htm" => "text/html",
-            "css" => "text/css",
-            "js" | "mjs" => "application/javascript",
-            "json" => "application/json",
-            "xml" => "application/xml",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            "webp" => "image/webp",
-            "ico" => "image/x-icon",
-            "pdf" => "application/pdf",
-            "zip" => "application/zip",
-            "wasm" => "application/wasm",
-            "txt" => "text/plain",
-            "md" => "text/markdown",
-            "csv" => "text/csv",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "ttf" => "font/ttf",
-            "otf" => "font/otf",
-            "mp4" => "video/mp4",
-            "webm" => "video/webm",
-            "mp3" => "audio/mpeg",
-            "ogg" => "audio/ogg",
-            _ => "application/octet-stream",
-        }
-        .to_string()
+        crate::mime::mime_for_ext(Path::new(key)).to_string()
     }
 }
 
