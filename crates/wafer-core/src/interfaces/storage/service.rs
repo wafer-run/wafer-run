@@ -15,7 +15,7 @@ pub enum StorageError {
 /// Service provides file/object storage operations organized by folders.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait StorageService: Send + Sync {
+pub trait StorageService: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Put stores an object in a folder.
     async fn put(
         &self,

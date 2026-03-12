@@ -2,7 +2,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 
 /// Service provides key-value configuration access.
-pub trait ConfigService: Send + Sync {
+pub trait ConfigService: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Get retrieves a config value by key.
     fn get(&self, key: &str) -> Option<String>;
 

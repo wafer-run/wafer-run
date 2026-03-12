@@ -25,9 +25,11 @@ pub mod security_headers;
 pub mod sqlite;
 pub mod web;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use config::ConfigBlock;
 #[cfg(feature = "crypto")]
 pub use crypto::CryptoBlock;
+#[cfg(not(target_arch = "wasm32"))]
 pub use logger::LoggerBlock;
 #[cfg(feature = "network")]
 pub use network::NetworkBlock;

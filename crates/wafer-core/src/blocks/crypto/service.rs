@@ -17,7 +17,7 @@ pub enum CryptoError {
 }
 
 /// Service provides cryptographic operations.
-pub trait CryptoService: Send + Sync {
+pub trait CryptoService: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Hash produces a one-way hash of a password.
     fn hash(&self, password: &str) -> Result<String, CryptoError>;
 

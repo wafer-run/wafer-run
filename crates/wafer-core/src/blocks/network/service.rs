@@ -10,7 +10,7 @@ pub enum NetworkError {
 }
 
 /// Service provides outbound network connectivity.
-pub trait NetworkService: Send + Sync {
+pub trait NetworkService: wafer_run::MaybeSend + wafer_run::MaybeSync {
     fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;
 }
 

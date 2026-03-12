@@ -649,7 +649,8 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
 // Trait implementation — direct async
 // ---------------------------------------------------------------------------
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DatabaseService for PostgresDatabaseService {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
         self.get_async(collection, id).await

@@ -12,7 +12,7 @@ use crate::common::ErrorCode;
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait Context: Send + Sync {
+pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// Call another block by name.
     async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
 
@@ -73,7 +73,8 @@ fn err_result(code: impl Into<String>, message: impl Into<String>) -> Result_ {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
     async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
         // Recursion depth check

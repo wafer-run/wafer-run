@@ -437,7 +437,8 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
     sql
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DatabaseService for SQLiteDatabaseService {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
         let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;

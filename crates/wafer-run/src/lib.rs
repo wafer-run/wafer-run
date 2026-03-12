@@ -6,6 +6,7 @@
 
 pub mod block;
 pub mod common;
+pub mod compat;
 pub mod config;
 pub mod context;
 pub mod executor;
@@ -52,6 +53,7 @@ pub use types::{
     Action, BlockResult, BlockRuntime, InstanceMode, LifecycleEvent, LifecycleType, Message,
     RequestAction, Response, Result_, WaferError,
 };
+pub use compat::{MaybeSend, MaybeSync};
 
 #[cfg(feature = "wasm")]
 pub use wasm::WASMBlock;
