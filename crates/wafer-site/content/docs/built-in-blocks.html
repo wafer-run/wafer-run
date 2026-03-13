@@ -4,13 +4,31 @@ ACTIVE: built-in-blocks
 -->
 
 <h2>Built-in Blocks</h2>
-<p>wafer ships with ready-to-use blocks in the <code>@wafer</code> namespace. All are registered automatically when you call <code>wafer_core::register_all()</code>.</p>
+<p>wafer ships with ready-to-use blocks in the <code>@wafer</code> namespace.</p>
 
-<h3>@wafer/http-listener</h3>
-<p>HTTP transport block that listens for HTTP requests, converts them to standard WAFER messages, and converts results back to HTTP responses. Configured as a block config (not a flow node) — it spawns its own TCP listener on startup.</p>
+<h3>@wafer/http-server</h3>
+<p>Batteries-included HTTP server. Registers a flow that chains security-headers, CORS, readonly-guard, rate-limiting, monitoring, and the config-driven router — plus the HTTP listener that binds to a port. One call to set up a complete server:</p>
+<pre><code>wafer_core::flows::http_server::register(&amp;mut w, json!({
+    "listen": "0.0.0.0:8080",
+    "routes": [
+        { "path": "/api/users", "actions": ["retrieve"], "block": "list-users" },
+        { "path": "/api/users/{id}", "block": "get-user" },
+        { "path": "/**", "block": "@wafer/web" }
+    ]
+}));</code></pre>
 <p>Config:</p>
 <ul>
-    <li><code>flow</code> — the flow ID to execute for each request</li>
+    <li><code>listen</code> — the address to listen on (default: <code>"0.0.0.0:8080"</code>)</li>
+    <li><code>routes</code> — route array passed to <code>@wafer/router</code> (see below)</li>
+</ul>
+<p>The config is automatically split and distributed to the underlying blocks. You can still override individual block configs (e.g. <code>@wafer/cors</code>) separately.</p>
+
+<h3>@wafer/http-listener</h3>
+<p>Low-level HTTP transport block that listens for HTTP requests, converts them to standard WAFER messages, and converts results back to HTTP responses. Most users should use <code>@wafer/http-server</code> instead. Configured as a block config (not a flow node) — it spawns its own TCP listener on startup.</p>
+<p>Config:</p>
+<ul>
+    <li><code>flow</code> — the flow ID to execute for each request (mutually exclusive with <code>block</code>)</li>
+    <li><code>block</code> — a single block to dispatch to (mutually exclusive with <code>flow</code>)</li>
     <li><code>listen</code> — the address to listen on (e.g. <code>"0.0.0.0:8090"</code>)</li>
 </ul>
 <pre><code>w.add_block_config("@wafer/http-listener", json!({
@@ -99,24 +117,20 @@ ACTIVE: built-in-blocks
 </ul>
 
 <h2>Pre-built Flows</h2>
-<p>wafer-core also registers three flow templates you can reference by ID:</p>
-<ul>
-    <li><code>@wafer/infra</code> — security-headers &rarr; cors &rarr; readonly-guard &rarr; ip-rate-limit &rarr; monitoring</li>
-    <li><code>@wafer/auth-pipe</code> — infra &rarr; auth-validator (requires authentication)</li>
-    <li><code>@wafer/admin-pipe</code> — infra &rarr; auth-validator &rarr; iam-guard[role=admin] (requires admin role)</li>
-</ul>
-<p>Reference them in your flow config with <code>"flow": "@wafer/infra"</code>:</p>
+<p>The <code>@wafer/http-server</code> flow chains all infrastructure blocks (security-headers &rarr; cors &rarr; readonly-guard &rarr; ip-rate-limit &rarr; monitoring &rarr; router) and is the recommended starting point for HTTP servers. Register it with <code>wafer_core::flows::http_server::register(&amp;mut w, config)</code>.</p>
+<p>For custom flows, compose blocks directly in your flow definition:</p>
 <pre><code>{
-    "id": "api",
+    "id": "my-flow",
     "root": {
-        "flow": "@wafer/infra",
+        "block": "@wafer/security-headers",
         "next": [{
-            "block": "@wafer/router",
-            "config": {
-                "routes": [
-                    { "path": "/api/hello", "methods": ["GET"], "block": "hello" }
-                ]
-            }
+            "block": "@wafer/cors",
+            "next": [{
+                "block": "@wafer/auth-validator",
+                "next": [{
+                    "block": "my-handler"
+                }]
+            }]
         }]
     }
 }</code></pre>

@@ -4,25 +4,31 @@ ACTIVE: http-bridge
 -->
 
 <h2>HTTP Bridge</h2>
-<p>The <code>@wafer/http-listener</code> block converts incoming HTTP requests into wafer messages and dispatches them to flows. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). Configure it as a block — the runtime spawns the HTTP server automatically on <code>start()</code>.</p>
+<p>The <code>@wafer/http-listener</code> block converts incoming HTTP requests into wafer messages and dispatches them to flows or blocks. It is built on <a href="https://docs.rs/axum">axum</a> and lives in the <code>wafer-core</code> crate (enable the <code>http</code> feature). The runtime spawns the HTTP server automatically on <code>start()</code>.</p>
 
 <h3>Setup</h3>
-<p>Enable the <code>http</code> feature in your <code>Cargo.toml</code>:</p>
+<p>The easiest way to get an HTTP server with security headers, CORS, rate limiting, monitoring, and routing is <code>@wafer/http-server</code>:</p>
 <pre><code>[dependencies]
 wafer-core = { version = "0.1", features = ["http"] }</code></pre>
-<p>Add the HTTP listener block config and start the runtime:</p>
 <pre><code>let mut w = Wafer::new();
-wafer_core::register_all(&amp;mut w);
+wafer_core::flows::http_server::register(&amp;mut w, serde_json::json!({
+    "listen": "0.0.0.0:8080",
+    "routes": [{ "path": "/**", "block": "my-handler" }]
+}));
 
-w.add_block_config("@wafer/http-listener", serde_json::json!({
+let w = w.start().await.unwrap();
+tokio::signal::ctrl_c().await.unwrap();
+w.shutdown().await;</code></pre>
+<p>For advanced use, configure <code>@wafer/http-listener</code> directly with a custom flow or single block target:</p>
+<pre><code>w.add_block_config("@wafer/http-listener", serde_json::json!({
     "flow": "my-flow",
     "listen": "0.0.0.0:8080",
 }));
-
-// ... add flows ...
-let w = w.start().unwrap();
-tokio::signal::ctrl_c().await.unwrap();
-w.shutdown();</code></pre>
+// or dispatch to a single block:
+w.add_block_config("@wafer/http-listener", serde_json::json!({
+    "block": "@wafer/web",
+    "listen": "0.0.0.0:8080",
+}));</code></pre>
 
 <h3>Method to Action Mapping</h3>
 <p>Each HTTP method is mapped to a semantic action stored in <code>req.action</code>:</p>

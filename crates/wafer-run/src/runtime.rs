@@ -377,6 +377,27 @@ impl Wafer {
         self.register_block(name, block);
     }
 
+    /// Shorthand for [`register_block_func`](Self::register_block_func).
+    pub fn register_func(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
+        self.register_block_func(type_name, handler);
+    }
+
+    /// Shorthand for [`register_block_func_async`](Self::register_block_func_async).
+    pub fn register_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result_> + Send + 'static,
+    {
+        self.register_block_func_async(type_name, handler);
+    }
+
     /// AddFlow adds a programmatically-built flow to the runtime.
     pub fn add_flow(&mut self, flow: Flow) {
         self.flows.insert(flow.id.clone(), flow);

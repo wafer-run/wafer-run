@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Running a Block</h2>
-<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides an <a href="/docs/http-bridge"><code>@wafer/http-listener</code> block</a> (enable the <code>http</code> feature) that converts HTTP requests into messages and dispatches them to flows. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
+<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides <a href="/docs/built-in-blocks"><code>@wafer/http-server</code></a> (enable the <code>http</code> feature) — a batteries-included flow with security headers, CORS, rate limiting, monitoring, and routing built in. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
 
 <h3>Install</h3>
 
@@ -138,29 +138,22 @@ func main() {
 #[tokio::main]
 async fn main() {
     let mut w = Wafer::new();
-    wafer_core::register_all(&amp;mut w);
+
+    // Register the HTTP server (infra + router)
+    wafer_core::flows::http_server::register(&amp;mut w, serde_json::json!({
+        "listen": "0.0.0.0:8080",
+        "routes": [{ "path": "/**", "block": "hello" }]
+    }));
 
     // Rust can define blocks inline — no .wasm needed
-    w.register_block_func("hello", |_ctx, msg| {
+    w.register_func("hello", |_ctx, msg| {
         json_respond(msg, &amp;serde_json::json!({"hello": "world"}))
     });
 
-    // Configure the HTTP listener block
-    w.add_block_config("@wafer/http-listener", serde_json::json!({
-        "flow": "main",
-        "listen": "0.0.0.0:8080",
-    }));
-
-    let flow: FlowDef = serde_json::from_str(r#"{
-        "id": "main",
-        "root": { "block": "hello" }
-    }"#).unwrap();
-    w.add_flow_def(&amp;flow);
-
-    let w = w.start().unwrap();
+    let w = w.start().await.unwrap();
     println!("listening on :8080");
     tokio::signal::ctrl_c().await.unwrap();
-    w.shutdown();
+    w.shutdown().await;
 }</code></pre>
     </div>
 </div>

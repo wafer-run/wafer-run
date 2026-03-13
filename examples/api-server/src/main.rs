@@ -22,16 +22,13 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_core::blocks::http_server::register(&mut wafer);
-    wafer_core::blocks::sqlite::register(&mut wafer);
-    wafer_core::blocks::logger::register(&mut wafer);
-    wafer.register_block("api-handler", Arc::new(NotesHandler));
-
-    // --- Config ---
-    wafer.add_block_config("@wafer/http-server", serde_json::json!({
+    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/api/**", "block": "api-handler" }]
     }));
+    wafer_core::blocks::sqlite::register(&mut wafer);
+    wafer_core::blocks::logger::register(&mut wafer);
+    wafer.register_block("api-handler", Arc::new(NotesHandler));
     wafer.add_block_config("@wafer/sqlite", serde_json::json!({
         "type": "sqlite",
         "path": "data/notes.db"

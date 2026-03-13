@@ -16,14 +16,11 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_core::blocks::http_server::register(&mut wafer);
-    wafer_core::blocks::web::register(&mut wafer);
-
-    // --- Config ---
-    wafer.add_block_config("@wafer/http-server", serde_json::json!({
+    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/**", "block": "@wafer/web" }]
     }));
+    wafer_core::blocks::web::register(&mut wafer);
     wafer.add_block_config("@wafer/web", serde_json::json!({
         "web_root": "./public"
     }));

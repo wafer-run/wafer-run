@@ -18,9 +18,12 @@ END_EXTRA_STYLES_INLINE
     <tr><th>Method</th><th>Description</th></tr>
     <tr><td><code>Wafer::new()</code></td><td>Create a new runtime instance</td></tr>
     <tr><td><code>register_block(name, block)</code></td><td>Register a native block instance</td></tr>
-    <tr><td><code>register_block_func(name, handler)</code></td><td>Register an inline handler function as a block (Rust only)</td></tr>
+    <tr><td><code>register_func(name, handler)</code></td><td>Register an inline handler function as a block (Rust only)</td></tr>
     <tr><td><code>add_flow(flow)</code></td><td>Add a programmatic flow</td></tr>
     <tr><td><code>add_flow_def(def)</code></td><td>Add a flow from a JSON <code>FlowDef</code></td></tr>
+    <tr><td><code>add_block_config(name, json)</code></td><td>Set configuration for a block (delivered during Init lifecycle)</td></tr>
+    <tr><td><code>add_config_expander(name, fn)</code></td><td>Register a function that splits a composite config into individual block configs</td></tr>
+    <tr><td><code>add_alias(alias, target)</code></td><td>Create a name alias (usable wherever a block or flow name is expected)</td></tr>
     <tr><td><code>resolve()</code></td><td>Resolve all flow block references</td></tr>
     <tr><td><code>has_block(type_name) &rarr; bool</code></td><td>Check if a block type is registered</td></tr>
     <tr><td><code>registry() &rarr; &amp;Registry</code></td><td>Access the block registry</td></tr>

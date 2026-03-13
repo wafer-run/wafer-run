@@ -7,7 +7,6 @@ export interface FlowDef {
   id: string;
   root: NodeDef;
   nodes?: Record<string, NodeDef>;
-  http?: { routes: { path: string; path_prefix?: boolean }[] };
 }
 
 export interface BlockEntry {

@@ -14,16 +14,13 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // Register the HTTP server (infra + router)
-    wafer_core::blocks::http_server::register(&mut wafer);
-
-    // Configure the HTTP server
-    wafer.add_block_config("@wafer/http-server", serde_json::json!({
+    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/**", "block": "hello" }]
     }));
 
     // Register a simple inline block that responds with JSON
-    wafer.register_block_func("hello", |_ctx, msg| {
+    wafer.register_func("hello", |_ctx, msg| {
         json_respond(msg, &serde_json::json!({
             "message": "Hello, World!",
             "path": msg.path(),

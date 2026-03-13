@@ -2,12 +2,11 @@
 //!
 //! Registers a flow that chains the standard infrastructure blocks
 //! (security-headers, CORS, readonly-guard, rate-limiting, monitoring)
-//! followed by the config-driven router. Pair with `@wafer/http-listener`
-//! to get a fully working HTTP server from a single config:
+//! followed by the config-driven router. A single call sets up a
+//! fully working HTTP server:
 //!
 //! ```rust,ignore
-//! wafer_core::blocks::http_server::register(&mut wafer);
-//! wafer.add_block_config("@wafer/http-server", serde_json::json!({
+//! wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
 //!     "listen": "0.0.0.0:8080",
 //!     "routes": [{ "path": "/", "actions": ["retrieve"], "block": "hello" }]
 //! }));
@@ -39,37 +38,36 @@ const FLOW_JSON: &str = r#"{
     }
 }"#;
 
-/// Register the `@wafer/http-server` flow and all its block dependencies.
+/// Register the `@wafer/http-server` flow, all block dependencies, and config.
 ///
-/// After calling this, configure with:
 /// ```rust,ignore
-/// wafer.add_block_config("@wafer/http-server", json!({
+/// wafer_core::flows::http_server::register(&mut wafer, json!({
 ///     "listen": "0.0.0.0:8080",
 ///     "routes": [{ "path": "/hello", "block": "my-block" }]
 /// }));
 /// ```
-pub fn register(w: &mut wafer_run::Wafer) {
+pub fn register(w: &mut wafer_run::Wafer, config: serde_json::Value) {
     // Register blocks (idempotent — skips if already registered)
     if !w.has_block("@wafer/security-headers") {
-        super::security_headers::register(w);
+        crate::blocks::security_headers::register(w);
     }
     if !w.has_block("@wafer/cors") {
-        super::cors::register(w);
+        crate::blocks::cors::register(w);
     }
     if !w.has_block("@wafer/readonly-guard") {
-        super::readonly_guard::register(w);
+        crate::blocks::readonly_guard::register(w);
     }
     if !w.has_block("@wafer/ip-rate-limit") {
-        super::ip_rate_limit::register(w);
+        crate::blocks::ip_rate_limit::register(w);
     }
     if !w.has_block("@wafer/monitoring") {
-        super::monitoring::register(w);
+        crate::blocks::monitoring::register(w);
     }
     if !w.has_block("@wafer/router") {
-        super::router::register(w);
+        crate::blocks::router::register(w);
     }
     if !w.has_block("@wafer/http-listener") {
-        super::http_listener::register(w);
+        crate::blocks::http_listener::register(w);
     }
 
     // Register flow
@@ -104,4 +102,7 @@ pub fn register(w: &mut wafer_run::Wafer) {
 
         results
     });
+
+    // Set config
+    w.add_block_config("@wafer/http-server", config);
 }

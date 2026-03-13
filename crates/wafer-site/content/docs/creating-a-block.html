@@ -53,7 +53,7 @@ w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
 <p>Native blocks compile directly into your binary — no <code>.wasm</code> file, no runtime loading, zero overhead.</p>
 
 <p>For simple blocks you can skip the struct entirely and register an inline handler:</p>
-<pre><code>w.register_block_func("greet", |_ctx, msg| {
+<pre><code>w.register_func("greet", |_ctx, msg| {
     json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
 });</code></pre>
 

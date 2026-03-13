@@ -18,9 +18,9 @@ async fn main() {
     // Create WAFER runtime
     let mut w = Wafer::new();
 
-    // Configure HTTP server (infra + router)
+    // Register HTTP server (infra + router)
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
-    w.add_block_config("@wafer/http-server", serde_json::json!({
+    wafer_core::flows::http_server::register(&mut w, serde_json::json!({
         "listen": format!("0.0.0.0:{}", port),
         "routes": [
             { "path": "/_inspector/**", "block": "@wafer/inspector" },
@@ -38,9 +38,6 @@ async fn main() {
     w.add_block_config("@wafer/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
     w.add_block_config("@wafer/network", serde_json::json!({}));
     w.add_block_config("@wafer/logger", serde_json::json!({}));
-
-    // Register blocks
-    wafer_core::blocks::http_server::register(&mut w);
     wafer_core::blocks::auth_validator::register(&mut w);
     wafer_core::blocks::iam_guard::register(&mut w);
     wafer_core::blocks::inspector::register(&mut w);

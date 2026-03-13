@@ -6,5 +6,7 @@
 
 pub mod blocks;
 pub mod clients;
+#[cfg(feature = "http")]
+pub mod flows;
 pub mod interfaces;
 pub mod mime;

@@ -5,8 +5,6 @@ pub mod cors;
 pub mod crypto;
 #[cfg(feature = "http")]
 pub mod http_listener;
-#[cfg(feature = "http")]
-pub mod http_server;
 pub mod iam_guard;
 pub mod inspector;
 pub mod logger;

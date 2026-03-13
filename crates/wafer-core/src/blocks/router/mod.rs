@@ -63,6 +63,14 @@ fn parse_routes(config: &wafer_run::BlockConfig) -> Vec<Route> {
 ///
 /// Initialized during `lifecycle(Init)` from config (reads `routes` array).
 ///
+/// Route paths support exact matches, `/**` wildcard suffixes, and `{var}`
+/// path parameters:
+/// ```json
+/// { "path": "/users",       "block": "list-users" }
+/// { "path": "/users/{id}",  "block": "get-user" }
+/// { "path": "/static/**",   "block": "file-server" }
+/// ```
+///
 /// Route config accepts either `"actions"` or `"methods"`:
 /// ```json
 /// { "path": "/users", "actions": ["retrieve"], "block": "list-users" }

@@ -81,7 +81,12 @@ pub fn extract_path_vars(pattern: &str, path: &str, msg: &mut Message) {
     }
 }
 
-/// matchPath checks if msgPath matches patternPath with ** wildcard and {var} support.
+/// Match a request path against a route pattern.
+///
+/// Supports three matching modes:
+/// - **Exact**: `/users` matches only `/users`
+/// - **Wildcard suffix** (`/**`): `/api/**` matches `/api`, `/api/users`, `/api/users/123`, etc.
+/// - **Path parameters** (`{var}`): `/users/{id}` matches `/users/123` but not `/users/123/edit`
 pub fn match_path(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;

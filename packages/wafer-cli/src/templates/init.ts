@@ -21,9 +21,6 @@ export function mainFlowTemplate(): FlowDef {
   return {
     id: "main",
     root: { block: "hello" },
-    http: {
-      routes: [{ path: "/", path_prefix: true }],
-    },
   };
 }
 
