@@ -143,7 +143,11 @@ impl RegistryBlock {
         }
         let description = Self::fetch_repo_description(ctx, name).await
             .ok_or_else(|| format!("Repository '{}' not found on GitHub", name))?;
-        let repo_url = format!("https://{}", name);
+        // repo_url always points to the GitHub repo (not the block sub-path)
+        let repo_url = match Self::parse_owner_repo(name) {
+            Some((owner, repo, _)) => format!("https://github.com/{}/{}", owner, repo),
+            None => format!("https://{}", name),
+        };
         let mut record = HashMap::new();
         record.insert("name".to_string(), serde_json::Value::String(name.to_string()));
         record.insert("description".to_string(), serde_json::Value::String(description));
@@ -159,7 +163,7 @@ impl RegistryBlock {
     }
 
     async fn fetch_repo_description(ctx: &dyn Context, name: &str) -> Option<String> {
-        let (owner, repo) = Self::parse_owner_repo(name)?;
+        let (owner, repo, _block_name) = Self::parse_owner_repo(name)?;
         let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
         let mut headers = HashMap::new();
         headers.insert("User-Agent".to_string(), "wafer-registry/0.1".to_string());
@@ -194,38 +198,40 @@ impl RegistryBlock {
         if let Err(e) = Self::ensure_package(ctx, name).await {
             return err_not_found(msg, &e);
         }
-        let (owner, repo) = match Self::parse_owner_repo(name) {
-            Some(pair) => pair,
+        let (owner, repo, block_name) = match Self::parse_owner_repo(name) {
+            Some(triple) => triple,
             None => return err_bad_request(msg, "Invalid package name"),
         };
+        // For multi-block repos use the block name as asset prefix, otherwise the repo name
+        let asset_base = block_name.as_deref().unwrap_or(&repo);
         let asset_type = msg.query("type").to_string();
         let versions = Self::fetch_versions_cached(ctx, name).await;
         let asset_url = match asset_type.as_str() {
             "flow" => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.chain_download_url.clone())
-                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.flow.json", owner, repo, version, repo)),
-            "interface" => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.interface_download_url.clone())
-                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.interface.json", owner, repo, version, repo)),
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.flow.json", owner, repo, version, asset_base)),
+            "manifest" | "interface" => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.interface_download_url.clone())
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.block.json", owner, repo, version, asset_base)),
             _ => versions.iter().find(|r| r.tag_name == version).and_then(|r| r.wasm_download_url.clone())
-                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.wasm", owner, repo, version, repo)),
+                .unwrap_or_else(|| format!("https://github.com/{}/{}/releases/download/{}/{}.wasm", owner, repo, version, asset_base)),
         };
         let _ = db::exec_raw(ctx, "UPDATE packages SET download_count = download_count + 1 WHERE name = ?", &[serde_json::Value::String(name.to_string())]).await;
         ResponseBuilder::new(msg).status(302).set_header("Location", &asset_url).body(vec![], "text/plain")
     }
 
     async fn fetch_versions_cached(ctx: &dyn Context, name: &str) -> Vec<GitHubRelease> {
-        let (owner, repo) = match Self::parse_owner_repo(name) {
-            Some(pair) => pair,
+        let (owner, repo, block_name) = match Self::parse_owner_repo(name) {
+            Some(triple) => triple,
             None => return Vec::new(),
         };
         let ttl = cache_ttl_secs();
-        let cached = db::get_by_field(ctx, "github_tag_cache", "package_name", serde_json::Value::String(name.to_string())).await.ok();
+        // Cache at repo level so all blocks in a multi-block repo share one GitHub API call
+        let repo_cache_key = format!("github.com/{}/{}", owner, repo);
+        let cached = db::get_by_field(ctx, "github_tag_cache", "package_name", serde_json::Value::String(repo_cache_key.clone())).await.ok();
         if let Some(ref cache_record) = cached {
             let fetched_at = cache_record.data.get("fetched_at").and_then(|v| v.as_str()).unwrap_or("");
             if Self::is_cache_fresh(fetched_at, ttl) {
-                if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
-                    if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
-                        return releases;
-                    }
+                if let Some(raw_json) = cache_record.data.get("raw_json").and_then(|v| v.as_str()) {
+                    return Self::parse_github_releases(raw_json.as_bytes(), block_name.as_deref());
                 }
             }
         }
@@ -247,31 +253,33 @@ impl RegistryBlock {
                         let mut update = HashMap::new();
                         update.insert("fetched_at".to_string(), serde_json::Value::String(Self::now_timestamp()));
                         let _ = db::update(ctx, "github_tag_cache", &cache_record.id, update).await;
-                        if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
-                            if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
-                                return releases;
-                            }
+                        if let Some(raw_json) = cache_record.data.get("raw_json").and_then(|v| v.as_str()) {
+                            return Self::parse_github_releases(raw_json.as_bytes(), block_name.as_deref());
                         }
                     }
                     return Vec::new();
                 }
-                if response.status_code != 200 { return Self::return_stale_cache(&cached); }
-                let releases = Self::parse_github_releases(&response.body, &repo);
+                if response.status_code != 200 { return Self::return_stale_cache(&cached, block_name.as_deref()); }
+                let releases = Self::parse_github_releases(&response.body, block_name.as_deref());
                 let new_etag = response.headers.get("etag").and_then(|v| v.first()).cloned().unwrap_or_default();
-                let tags_json = serde_json::to_string(&releases).unwrap_or_default();
+                // Store raw GitHub response at repo level for shared caching
+                let raw_json = String::from_utf8_lossy(&response.body).to_string();
                 let mut cache_data = HashMap::new();
-                cache_data.insert("package_name".to_string(), serde_json::Value::String(name.to_string()));
-                cache_data.insert("tags_json".to_string(), serde_json::Value::String(tags_json));
+                cache_data.insert("package_name".to_string(), serde_json::Value::String(repo_cache_key.clone()));
+                cache_data.insert("raw_json".to_string(), serde_json::Value::String(raw_json));
                 cache_data.insert("fetched_at".to_string(), serde_json::Value::String(Self::now_timestamp()));
                 cache_data.insert("etag".to_string(), serde_json::Value::String(new_etag));
-                let _ = db::upsert(ctx, "github_tag_cache", "package_name", serde_json::Value::String(name.to_string()), cache_data).await;
+                let _ = db::upsert(ctx, "github_tag_cache", "package_name", serde_json::Value::String(repo_cache_key), cache_data).await;
                 releases
             }
-            Err(_) => Self::return_stale_cache(&cached),
+            Err(_) => Self::return_stale_cache(&cached, block_name.as_deref()),
         }
     }
 
-    fn parse_github_releases(body: &[u8], _repo: &str) -> Vec<GitHubRelease> {
+    /// Parse GitHub releases JSON. When `block_name` is `Some`, only match
+    /// assets named exactly `{block_name}.wasm`, `{block_name}.flow.json`, etc.
+    /// When `None`, match any asset with the right extension (single-block repo).
+    fn parse_github_releases(body: &[u8], block_name: Option<&str>) -> Vec<GitHubRelease> {
         let raw: Vec<serde_json::Value> = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(_) => return Vec::new(),
@@ -280,22 +288,38 @@ impl RegistryBlock {
             let tag_name = release.get("tag_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let published_at = release.get("published_at").and_then(|v| v.as_str()).map(|s| s.to_string());
             let assets = release.get("assets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let wasm_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".wasm")).unwrap_or(false));
+
+            // Asset matching helper: exact name match for multi-block, suffix match for single-block
+            let asset_matches = |asset_name: &str, ext: &str| -> bool {
+                match block_name {
+                    Some(bn) => asset_name == format!("{}.{}", bn, ext),
+                    None => asset_name.ends_with(&format!(".{}", ext)),
+                }
+            };
+
+            let wasm_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| asset_matches(n, "wasm")).unwrap_or(false));
             let has_wasm_asset = wasm_asset.is_some();
             let wasm_download_url = wasm_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            // Native assets: .so, .dylib, .dll, or .tar.gz (Rust crate archives)
             let native_asset = assets.iter().find(|a| {
                 a.get("name").and_then(|v| v.as_str()).map(|n| {
-                    n.ends_with(".so") || n.ends_with(".dylib") || n.ends_with(".dll")
-                        || n.ends_with(".tar.gz") || n.ends_with(".crate")
+                    match block_name {
+                        Some(bn) => {
+                            let base = format!("{}.", bn);
+                            (n.starts_with(&base)) && (n.ends_with(".so") || n.ends_with(".dylib") || n.ends_with(".dll")
+                                || n.ends_with(".tar.gz") || n.ends_with(".crate"))
+                        }
+                        None => n.ends_with(".so") || n.ends_with(".dylib") || n.ends_with(".dll")
+                            || n.ends_with(".tar.gz") || n.ends_with(".crate"),
+                    }
                 }).unwrap_or(false)
             });
             let has_native_asset = native_asset.is_some();
             let native_download_url = native_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let chain_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".flow.json")).unwrap_or(false));
+            let chain_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| asset_matches(n, "flow.json")).unwrap_or(false));
             let has_chain_asset = chain_asset.is_some();
             let chain_download_url = chain_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let interface_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| n.ends_with(".interface.json")).unwrap_or(false));
+            // Block manifest: .block.json (preferred) or legacy .interface.json
+            let interface_asset = assets.iter().find(|a| a.get("name").and_then(|v| v.as_str()).map(|n| asset_matches(n, "block.json") || asset_matches(n, "interface.json")).unwrap_or(false));
             let has_interface_asset = interface_asset.is_some();
             let interface_download_url = interface_asset.and_then(|a| a.get("browser_download_url")).and_then(|v| v.as_str()).map(|s| s.to_string());
             GitHubRelease { tag_name, has_wasm_asset, wasm_download_url, has_native_asset, native_download_url, has_chain_asset, chain_download_url, has_interface_asset, interface_download_url, published_at }
@@ -305,11 +329,11 @@ impl RegistryBlock {
     fn detect_package_type(releases: &[GitHubRelease]) -> String {
         let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
         let has_chain = releases.iter().any(|r| r.has_chain_asset);
-        let has_interface = releases.iter().any(|r| r.has_interface_asset);
+        let has_manifest = releases.iter().any(|r| r.has_interface_asset);
         let mut types = Vec::new();
-        if has_wasm { types.push("block"); }
+        // A .block.json manifest or .wasm asset both indicate a block
+        if has_wasm || has_manifest { types.push("block"); }
         if has_chain { types.push("flow"); }
-        if has_interface { types.push("interface"); }
         if types.is_empty() { "block".to_string() } else { types.join(",") }
     }
 
@@ -317,20 +341,21 @@ impl RegistryBlock {
     fn detect_runtime_type(releases: &[GitHubRelease]) -> String {
         let has_wasm = releases.iter().any(|r| r.has_wasm_asset);
         let has_native = releases.iter().any(|r| r.has_native_asset);
+        let has_manifest = releases.iter().any(|r| r.has_interface_asset);
         match (has_native, has_wasm) {
             (true, true) => "both".to_string(),
             (true, false) => "native".to_string(),
             (false, true) => "wasm".to_string(),
-            (false, false) => "wasm".to_string(), // default assumption
+            // Manifest without .wasm means native-only block
+            (false, false) if has_manifest => "native".to_string(),
+            (false, false) => "wasm".to_string(),
         }
     }
 
-    fn return_stale_cache(cached: &Option<Record>) -> Vec<GitHubRelease> {
+    fn return_stale_cache(cached: &Option<Record>, block_name: Option<&str>) -> Vec<GitHubRelease> {
         if let Some(ref cache_record) = cached {
-            if let Some(tags_json) = cache_record.data.get("tags_json").and_then(|v| v.as_str()) {
-                if let Ok(releases) = serde_json::from_str::<Vec<GitHubRelease>>(tags_json) {
-                    return releases;
-                }
+            if let Some(raw_json) = cache_record.data.get("raw_json").and_then(|v| v.as_str()) {
+                return Self::parse_github_releases(raw_json.as_bytes(), block_name);
             }
         }
         Vec::new()
@@ -363,15 +388,25 @@ impl RegistryBlock {
 
     fn validate_package_name(name: &str) -> bool {
         let parts: Vec<&str> = name.split('/').collect();
-        if parts.len() != 3 || parts[0] != "github.com" { return false; }
+        if parts[0] != "github.com" { return false; }
+        if parts.len() != 3 && parts.len() != 4 { return false; }
         let valid_segment = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.');
-        valid_segment(parts[1]) && valid_segment(parts[2])
+        if !parts[1..].iter().all(|s| valid_segment(s)) { return false; }
+        // "versions" and "download" are reserved by URL routing
+        if parts.len() == 4 && (parts[3] == "versions" || parts[3] == "download") { return false; }
+        true
     }
 
-    fn parse_owner_repo(name: &str) -> Option<(String, String)> {
+    /// Parse a package name into (owner, repo, optional block_name).
+    /// Accepts both `github.com/owner/repo` and `github.com/owner/repo/block`.
+    fn parse_owner_repo(name: &str) -> Option<(String, String, Option<String>)> {
         let parts: Vec<&str> = name.split('/').collect();
-        if parts.len() != 3 || parts[0] != "github.com" { return None; }
-        Some((parts[1].to_string(), parts[2].to_string()))
+        if parts[0] != "github.com" { return None; }
+        match parts.len() {
+            3 => Some((parts[1].to_string(), parts[2].to_string(), None)),
+            4 => Some((parts[1].to_string(), parts[2].to_string(), Some(parts[3].to_string()))),
+            _ => None,
+        }
     }
 
     fn is_cache_fresh(fetched_at: &str, ttl_secs: u64) -> bool {

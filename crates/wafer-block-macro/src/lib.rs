@@ -83,8 +83,8 @@ impl Args {
 
 /// Derive a WASM block from an impl block.
 ///
-/// Generates the `WaferBlock` trait implementation (with `info()` from the
-/// attribute arguments) and the WASM ABI export functions.
+/// Generates the WIT `Guest` trait implementation (with `info()` from the
+/// attribute arguments) and the WASM Component Model exports.
 ///
 /// # Required attributes
 /// - `name` — block name (e.g. `"my-block"`)
@@ -99,7 +99,7 @@ impl Args {
 /// # Example
 ///
 /// ```rust,ignore
-/// use wafer_block::prelude::*;
+/// use wafer_block::*;
 ///
 /// struct MyBlock;
 ///
@@ -138,7 +138,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
     let instance_mode_str = args
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
-    let requires = args.get_str_list("requires");
+    let _requires = args.get_str_list("requires");
 
     let struct_ty = &input.self_ty;
 
@@ -168,8 +168,6 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         "per-execution" => quote! { wafer_block::InstanceMode::PerExecution },
         other => panic!("#[wafer_block]: unknown instance_mode '{}'", other),
     };
-
-    let requires_tokens: Vec<_> = requires.iter().map(|r| quote! { #r.to_string() }).collect();
 
     let handle_sig = &handle_fn.sig;
     let handle_block = &handle_fn.block;
@@ -202,21 +200,19 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate the WIT Guest trait impl and Component Model exports.
     let expanded = quote! {
         #other_impl
 
-        impl wafer_block::WaferBlock for #struct_ty {
-            fn info() -> wafer_block::BlockInfo {
-                wafer_block::BlockInfo {
+        impl wafer_block::Guest for #struct_ty {
+            fn info() -> wafer_block::wafer::block_world::types::BlockInfo {
+                wafer_block::wafer::block_world::types::BlockInfo {
                     name: #name.to_string(),
                     version: #version.to_string(),
                     interface: #interface.to_string(),
                     summary: #summary.to_string(),
                     instance_mode: #instance_mode_tokens,
                     allowed_modes: ::std::vec::Vec::new(),
-                    admin_ui: None,
-                    runtime: wafer_block::BlockRuntime::Wasm,
-                    requires: ::std::vec![#(#requires_tokens),*],
                 }
             }
 
@@ -226,7 +222,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             #lifecycle_impl
         }
 
-        wafer_block::register_block!(#struct_ty);
+        wafer_block::export_wafer_block!(#struct_ty);
     };
 
     expanded.into()

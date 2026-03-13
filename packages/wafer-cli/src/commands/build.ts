@@ -1,31 +1,37 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { readWaferConfig } from "../config/wafer-json.js";
+import type { BlockEntry } from "../config/types.js";
 import { compileBlock } from "../build/compiler.js";
 import { log } from "../util/logger.js";
 
-export async function buildCommand(): Promise<void> {
+/**
+ * Build blocks to WASM. When called with no arguments, builds all blocks
+ * from wafer.json. When `only` is provided, builds only those blocks.
+ */
+export async function buildCommand(only?: BlockEntry[]): Promise<void> {
   const cwd = process.cwd();
   const config = await readWaferConfig(cwd);
+  const blocks = only ?? config.blocks;
 
-  if (config.blocks.length === 0) {
-    log.warn("No blocks defined in wafer.json");
+  if (blocks.length === 0) {
+    log.warn("No blocks to build");
     return;
   }
 
   await mkdir(join(cwd, "dist"), { recursive: true });
 
-  log.info(`Building ${config.blocks.length} block(s)...`);
+  log.info(`Building ${blocks.length} block(s)...`);
 
   const results = await Promise.allSettled(
-    config.blocks.map((block) => compileBlock(block, cwd)),
+    blocks.map((block) => compileBlock(block, cwd)),
   );
 
   let failed = 0;
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     if (result.status === "rejected") {
-      log.error(`Block "${config.blocks[i].name}" failed: ${result.reason}`);
+      log.error(`Block "${blocks[i].name}" failed: ${result.reason}`);
       failed++;
     }
   }
@@ -34,6 +40,6 @@ export async function buildCommand(): Promise<void> {
     log.error(`${failed} block(s) failed to build`);
     process.exitCode = 1;
   } else {
-    log.success(`All ${config.blocks.length} block(s) built`);
+    log.success(`All ${blocks.length} block(s) built`);
   }
 }

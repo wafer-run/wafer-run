@@ -27,6 +27,8 @@
         .package-card h3 { color: var(--accent); margin-bottom: 0.25rem; }
         .package-card h3 a { color: inherit; text-decoration: none; }
         .package-card h3 a:hover { text-decoration: underline; }
+        .package-card h3 .block-name { color: var(--text); font-weight: 700; }
+        .package-card h3 .repo-path { color: var(--text-secondary); font-weight: 400; font-size: 0.85em; }
         .package-card .description { margin-top: 0.5rem; color: var(--text-secondary); }
         .package-card .meta { margin-top: 0.75rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
         .badge {
@@ -43,6 +45,10 @@
         .badge-flow      { background: #fdf4ff; color: #86198f; }
         .badge-interface { background: #f0fdf4; color: #166534; }
         .badge-both      { background: #fefce8; color: #854d0e; }
+
+        /* Runtime badges */
+        .badge-native { background: #fef3c7; color: #92400e; }
+        .badge-wasm   { background: #dbeafe; color: #1e40af; }
 
         /* Filter tabs */
         .filter-tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
@@ -142,6 +148,16 @@
             }).join(' ');
         }
 
+        function formatPackageName(name) {
+            var parts = name.split('/');
+            if (parts.length === 4 && parts[0] === 'github.com') {
+                // Multi-block repo: highlight the block name
+                return '<span class="repo-path">' + esc(parts[0] + '/' + parts[1] + '/' + parts[2]) + ' / </span>'
+                    + '<span class="block-name">' + esc(parts[3]) + '</span>';
+            }
+            return esc(name);
+        }
+
         function renderPackages(packages) {
             const list = document.getElementById('packages');
             if (packages.length === 0) {
@@ -162,12 +178,14 @@
                 const downloads = data.download_count || '0';
                 const repoUrl = data.repo_url || ('https://' + name);
                 const pkgType = data.package_type || 'block';
+                const runtimeType = data.runtime_type || '';
 
                 return '<li class="package-card">'
-                    + '<h3><a href="' + esc(repoUrl) + '" target="_blank" rel="noopener">' + esc(name) + '</a></h3>'
+                    + '<h3><a href="' + esc(repoUrl) + '" target="_blank" rel="noopener">' + formatPackageName(name) + '</a></h3>'
                     + '<p class="description">' + esc(desc) + '</p>'
                     + '<div class="meta">'
                     + typeBadge(pkgType)
+                    + (runtimeType ? '<span class="badge badge-' + esc(runtimeType) + '">' + esc(runtimeType) + '</span>' : '')
                     + '<span class="badge badge-downloads">' + formatDownloads(downloads) + ' downloads</span>'
                     + '<a class="repo-link" href="' + esc(repoUrl) + '" target="_blank" rel="noopener">View on GitHub</a>'
                     + '</div>'

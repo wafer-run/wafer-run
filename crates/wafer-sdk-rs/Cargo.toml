@@ -3,7 +3,7 @@ name = "wafer-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "WAFER SDK for writing blocks compiled to WebAssembly (thin ABI)"
+description = "WAFER SDK for writing blocks compiled to WebAssembly (Component Model)"
 repository = "https://github.com/wafer-run/wafer-run"
 keywords = ["wafer", "wasm", "guest", "blocks", "pipeline"]
 
@@ -12,5 +12,3 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wafer-block = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }

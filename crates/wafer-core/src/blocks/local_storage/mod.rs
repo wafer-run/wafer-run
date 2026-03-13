@@ -61,13 +61,9 @@ impl Block for LocalStorageBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let root = crate::blocks::env_or_config_str("STORAGE_ROOT", config.as_ref(), "root")
+            let root = config.env_or("STORAGE_ROOT", "root")
                 .unwrap_or_else(|| "data/storage".to_string());
 
             let svc = LocalStorageService::new(&root)

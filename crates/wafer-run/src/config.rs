@@ -1,7 +1,68 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::types::InstanceMode;
+use crate::types::{InstanceMode, LifecycleEvent};
+
+// ---------------------------------------------------------------------------
+// BlockConfig — common config accessor for blocks
+// ---------------------------------------------------------------------------
+
+/// Parsed block configuration from lifecycle event data.
+///
+/// Provides typed accessors so blocks don't need to repeat the
+/// `event.data → serde_json → get(key) → as_str` boilerplate.
+pub struct BlockConfig {
+    inner: Option<serde_json::Value>,
+}
+
+impl BlockConfig {
+    /// Parse config from lifecycle event data.
+    pub fn from_event(event: &LifecycleEvent) -> Self {
+        let inner = if !event.data.is_empty() {
+            serde_json::from_slice(&event.data).ok()
+        } else {
+            None
+        };
+        Self { inner }
+    }
+
+    /// Get a string config value (empty string if missing).
+    pub fn str(&self, key: &str) -> &str {
+        self.inner
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    }
+
+    /// Get a raw JSON value by key.
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.inner.as_ref().and_then(|c| c.get(key))
+    }
+
+    /// Get a string value with env var override taking precedence.
+    pub fn env_or(&self, env_var: &str, key: &str) -> Option<String> {
+        if let Ok(val) = std::env::var(env_var) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+        self.inner
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Parse a dispatch target (`"block"` or `"flow"`) from config.
+    pub fn dispatch_target(&self) -> Option<DispatchTarget> {
+        DispatchTarget::from_config(self.inner.as_ref())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flow & Node definitions
+// ---------------------------------------------------------------------------
 
 /// FlowDef defines a flow in JSON configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +232,7 @@ fn node_def_to_node(def: &NodeDef) -> Node {
         instance: if def.instance.is_empty() {
             None
         } else {
-            InstanceMode::parse(&def.instance)
+            Some(InstanceMode::parse(&def.instance))
         },
         next: def.next.iter().map(|n| Box::new(node_def_to_node(n))).collect(),
         resolved_block: None,
@@ -205,6 +266,37 @@ fn node_to_node_def(n: &Node) -> NodeDef {
         config: n.config.clone(),
         instance: n.instance.map(|m| m.to_string()).unwrap_or_default(),
         next: n.next.iter().map(|child| node_to_node_def(child)).collect(),
+    }
+}
+
+/// A dispatch target: either a flow or a single block.
+/// This is the same `block` XOR `flow` pattern used in `NodeDef`.
+#[derive(Debug, Clone)]
+pub enum DispatchTarget {
+    Flow(String),
+    Block(String),
+}
+
+impl DispatchTarget {
+    /// Parse a dispatch target from a JSON config object.
+    /// Checks `"block"` first; falls back to `"flow"`.
+    /// Returns `None` if neither is present or both are empty.
+    pub fn from_config(config: Option<&serde_json::Value>) -> Option<Self> {
+        let block = config
+            .and_then(|c| c.get("block"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !block.is_empty() {
+            return Some(DispatchTarget::Block(block.to_string()));
+        }
+        let flow = config
+            .and_then(|c| c.get("flow"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !flow.is_empty() {
+            return Some(DispatchTarget::Flow(flow.to_string()));
+        }
+        None
     }
 }
 

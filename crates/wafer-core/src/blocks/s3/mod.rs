@@ -61,24 +61,16 @@ impl Block for S3StorageBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let bucket =
-                crate::blocks::env_or_config_str("STORAGE_BUCKET", config.as_ref(), "bucket")
-                    .unwrap_or_else(|| "solobase".to_string());
-            let prefix =
-                crate::blocks::env_or_config_str("STORAGE_PREFIX", config.as_ref(), "prefix")
-                    .unwrap_or_default();
-            let endpoint =
-                crate::blocks::env_or_config_str("STORAGE_ENDPOINT", config.as_ref(), "endpoint")
-                    .unwrap_or_default();
-            let region =
-                crate::blocks::env_or_config_str("STORAGE_REGION", config.as_ref(), "region")
-                    .unwrap_or_else(|| "us-east-1".to_string());
+            let bucket = config.env_or("STORAGE_BUCKET", "bucket")
+                .unwrap_or_else(|| "solobase".to_string());
+            let prefix = config.env_or("STORAGE_PREFIX", "prefix")
+                .unwrap_or_default();
+            let endpoint = config.env_or("STORAGE_ENDPOINT", "endpoint")
+                .unwrap_or_default();
+            let region = config.env_or("STORAGE_REGION", "region")
+                .unwrap_or_else(|| "us-east-1".to_string());
 
             let svc = if endpoint.is_empty() {
                 S3StorageService::new(&bucket, &prefix).await

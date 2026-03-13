@@ -6,6 +6,5 @@
 
 pub mod blocks;
 pub mod clients;
-pub mod flows;
 pub mod interfaces;
 pub mod mime;

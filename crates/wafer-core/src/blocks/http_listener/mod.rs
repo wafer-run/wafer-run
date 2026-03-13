@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use axum::body::Body;
@@ -9,7 +8,6 @@ use parking_lot::Mutex;
 use wafer_run::block::{Block, BlockInfo};
 use wafer_run::common::ErrorCode;
 use wafer_run::meta::*;
-use wafer_run::runtime::RuntimeHandle;
 use wafer_run::types::*;
 
 // ---------------------------------------------------------------------------
@@ -35,50 +33,44 @@ pub fn http_to_message(
     remote_addr: &str,
     body: Vec<u8>,
 ) -> Message {
-    let mut meta = HashMap::new();
+    let mut msg = Message::new(format!("{}:{}", method, uri_path), body);
 
     // HTTP-specific meta
-    meta.insert("http.method".to_string(), method.to_string());
-    meta.insert("http.path".to_string(), uri_path.to_string());
-    meta.insert("http.raw_query".to_string(), raw_query.to_string());
-    meta.insert("http.remote_addr".to_string(), remote_addr.to_string());
-    meta.insert(
-        "http.content_type".to_string(),
+    msg.set_meta("http.method", method.to_string());
+    msg.set_meta("http.path", uri_path);
+    msg.set_meta("http.raw_query", raw_query);
+    msg.set_meta("http.remote_addr", remote_addr);
+    msg.set_meta(
+        "http.content_type",
         headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string(),
+            .unwrap_or(""),
     );
-    meta.insert(
-        "http.host".to_string(),
+    msg.set_meta(
+        "http.host",
         headers
             .get("host")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string(),
+            .unwrap_or(""),
     );
 
     // Normalized request meta
-    meta.insert(
-        META_REQ_ACTION.to_string(),
-        http_method_to_action(&method).to_string(),
-    );
-    meta.insert(META_REQ_RESOURCE.to_string(), uri_path.to_string());
-    meta.insert(META_REQ_CLIENT_IP.to_string(), remote_addr.to_string());
-    meta.insert(
-        META_REQ_CONTENT_TYPE.to_string(),
+    msg.set_meta(META_REQ_ACTION, http_method_to_action(&method));
+    msg.set_meta(META_REQ_RESOURCE, uri_path);
+    msg.set_meta(META_REQ_CLIENT_IP, remote_addr);
+    msg.set_meta(
+        META_REQ_CONTENT_TYPE,
         headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string(),
+            .unwrap_or(""),
     );
 
     // Copy headers to meta
     for (name, value) in headers {
         if let Ok(v) = value.to_str() {
-            meta.insert(format!("http.header.{}", name), v.to_string());
+            msg.set_meta(format!("http.header.{}", name), v);
         }
     }
 
@@ -88,17 +80,13 @@ pub fn http_to_message(
             let mut parts = pair.splitn(2, '=');
             if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
                 let decoded_val = urlencoding_decode(val);
-                meta.insert(format!("http.query.{}", key), decoded_val.clone());
-                meta.insert(format!("{}{}", META_REQ_QUERY_PREFIX, key), decoded_val);
+                msg.set_meta(format!("http.query.{}", key), decoded_val.clone());
+                msg.set_meta(format!("{}{}", META_REQ_QUERY_PREFIX, key), decoded_val);
             }
         }
     }
 
-    Message {
-        kind: format!("{}:{}", method, uri_path),
-        data: body,
-        meta,
-    }
+    msg
 }
 
 fn urlencoding_decode(s: &str) -> String {
@@ -122,11 +110,13 @@ fn urlencoding_decode(s: &str) -> String {
 
 fn apply_response_meta(
     builder: axum::http::response::Builder,
-    meta: &HashMap<String, String>,
+    meta: &[MetaEntry],
 ) -> axum::http::response::Builder {
     let mut builder = builder;
-    for (k, v) in meta {
-        match k.as_str() {
+    for entry in meta {
+        let k = entry.key.as_str();
+        let v = &entry.value;
+        match k {
             k if k == META_RESP_STATUS || k == "http.status" => continue,
             k if k.starts_with(META_RESP_COOKIE_PREFIX)
                 || k.starts_with("http.resp.set-cookie.") =>
@@ -151,36 +141,36 @@ fn apply_response_meta(
 }
 
 /// Map a semantic error code to an HTTP status code.
-fn error_code_to_http_status(code: &str) -> u16 {
+fn error_code_to_http_status(code: &ErrorCode) -> u16 {
     match code {
-        ErrorCode::OK => 200,
-        ErrorCode::CANCELLED => 499,
-        ErrorCode::INVALID_ARGUMENT => 400,
-        ErrorCode::DEADLINE_EXCEEDED => 504,
-        ErrorCode::NOT_FOUND => 404,
-        ErrorCode::ALREADY_EXISTS => 409,
-        ErrorCode::PERMISSION_DENIED => 403,
-        ErrorCode::RESOURCE_EXHAUSTED => 429,
-        ErrorCode::FAILED_PRECONDITION => 412,
-        ErrorCode::ABORTED => 409,
-        ErrorCode::OUT_OF_RANGE => 400,
-        ErrorCode::UNIMPLEMENTED => 501,
-        ErrorCode::INTERNAL => 500,
-        ErrorCode::UNAVAILABLE => 503,
-        ErrorCode::DATA_LOSS => 500,
-        ErrorCode::UNAUTHENTICATED => 401,
+        ErrorCode::Ok => 200,
+        ErrorCode::Cancelled => 499,
+        ErrorCode::InvalidArgument => 400,
+        ErrorCode::DeadlineExceeded => 504,
+        ErrorCode::NotFound => 404,
+        ErrorCode::AlreadyExists => 409,
+        ErrorCode::PermissionDenied => 403,
+        ErrorCode::ResourceExhausted => 429,
+        ErrorCode::FailedPrecondition => 412,
+        ErrorCode::Aborted => 409,
+        ErrorCode::OutOfRange => 400,
+        ErrorCode::Unimplemented => 501,
+        ErrorCode::Internal => 500,
+        ErrorCode::Unavailable => 503,
+        ErrorCode::DataLoss => 500,
+        ErrorCode::Unauthenticated => 401,
         _ => 500,
     }
 }
 
-fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
+fn get_status_code(meta: &[MetaEntry], default_code: u16) -> u16 {
     // Explicit override takes precedence
-    if let Some(code) = meta.get(META_RESP_STATUS) {
+    if let Some(code) = MetaAccess::get(meta, META_RESP_STATUS) {
         if let Ok(n) = code.parse::<u16>() {
             return n;
         }
     }
-    if let Some(code) = meta.get("http.status") {
+    if let Some(code) = MetaAccess::get(meta, "http.status") {
         if let Ok(n) = code.parse::<u16>() {
             return n;
         }
@@ -188,7 +178,7 @@ fn get_status_code(meta: &HashMap<String, String>, default_code: u16) -> u16 {
     default_code
 }
 
-fn get_error_status_code(error: Option<&WaferError>, meta: &HashMap<String, String>) -> u16 {
+fn get_error_status_code(error: Option<&WaferError>, meta: &[MetaEntry]) -> u16 {
     // Explicit override in meta takes precedence
     let from_meta = get_status_code(meta, 0);
     if from_meta > 0 {
@@ -205,11 +195,11 @@ fn get_error_status_code(error: Option<&WaferError>, meta: &HashMap<String, Stri
 pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
     match result.action {
         Action::Respond => {
-            let empty_meta = HashMap::new();
+            let empty_meta: Vec<MetaEntry> = Vec::new();
             let resp_meta = result
                 .response
                 .as_ref()
-                .map(|r| &r.meta)
+                .map(|r| r.meta.as_slice())
                 .unwrap_or(&empty_meta);
 
             let status_code = get_status_code(resp_meta, 200);
@@ -222,8 +212,8 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
                 builder = apply_response_meta(builder, &msg.meta);
             }
 
-            let has_ct = resp_meta.contains_key(META_RESP_CONTENT_TYPE)
-                || resp_meta.contains_key("Content-Type");
+            let has_ct = MetaAccess::contains_key(resp_meta, META_RESP_CONTENT_TYPE)
+                || MetaAccess::contains_key(resp_meta, "Content-Type");
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
@@ -239,11 +229,11 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
         }
 
         Action::Error => {
-            let empty_meta = HashMap::new();
+            let empty_meta: Vec<MetaEntry> = Vec::new();
             let err_meta = result
                 .error
                 .as_ref()
-                .map(|e| &e.meta)
+                .map(|e| e.meta.as_slice())
                 .unwrap_or(&empty_meta);
 
             let status_code = get_error_status_code(result.error.as_ref(), err_meta);
@@ -318,21 +308,10 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
 // @wafer/http-listener block
 // ---------------------------------------------------------------------------
 
-/// `@wafer/http-listener` handles only the HTTP transport layer: TCP
-/// listening, HTTP→Message conversion, and Result→Response conversion.
-/// It never appears as a node in a flow.
-///
-/// **Config:**
-/// ```json
-/// {
-///   "flow": "site-main",
-///   "listen": "0.0.0.0:8090"
-/// }
-/// ```
-/// `@wafer/http-listener` — initialized during `lifecycle(Init)` from config
-/// (reads `flow` and `listen` keys).
+use wafer_run::config::DispatchTarget;
+
 pub struct HttpListenerBlock {
-    flow: OnceLock<String>,
+    target: OnceLock<DispatchTarget>,
     listen: OnceLock<String>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
@@ -340,7 +319,7 @@ pub struct HttpListenerBlock {
 impl HttpListenerBlock {
     pub fn new() -> Self {
         Self {
-            flow: OnceLock::new(),
+            target: OnceLock::new(),
             listen: OnceLock::new(),
             shutdown_tx: Mutex::new(None),
         }
@@ -374,28 +353,13 @@ impl Block for HttpListenerBlock {
         _ctx: &dyn wafer_run::context::Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if event.event_type == LifecycleType::Init && self.flow.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+        if event.event_type == LifecycleType::Init && self.target.get().is_none() {
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let flow = config
-                .as_ref()
-                .and_then(|c| c.get("flow"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let listen = config
-                .as_ref()
-                .and_then(|c| c.get("listen"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            self.flow.set(flow).ok();
-            self.listen.set(listen).ok();
+            if let Some(t) = config.dispatch_target() {
+                self.target.set(t).ok();
+            }
+            self.listen.set(config.str("listen").to_string()).ok();
         }
 
         if event.event_type == LifecycleType::Stop {
@@ -406,10 +370,13 @@ impl Block for HttpListenerBlock {
         Ok(())
     }
 
-    fn bind(&self, handle: RuntimeHandle) {
-        let flow = self.flow.get().cloned().unwrap_or_default();
+    fn bind(&self, handle: wafer_run::runtime::RuntimeHandle) {
+        let target = match self.target.get().cloned() {
+            Some(t) => t,
+            None => return,
+        };
         let listen = self.listen.get().cloned().unwrap_or_default();
-        if flow.is_empty() || listen.is_empty() {
+        if listen.is_empty() {
             return;
         }
 
@@ -419,10 +386,10 @@ impl Block for HttpListenerBlock {
         tokio::spawn(async move {
             let handler = {
                 let h = handle.clone();
-                let fid = flow.clone();
+                let target = target.clone();
                 axum::routing::any(move |req: Request| {
                     let h = h.clone();
-                    let fid = fid.clone();
+                    let target = target.clone();
                     async move {
                         let (parts, body) = req.into_parts();
                         const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
@@ -457,7 +424,10 @@ impl Block for HttpListenerBlock {
                             body_bytes,
                         );
 
-                        let result = h.execute(&fid, &mut msg).await;
+                        let result = match &target {
+                            DispatchTarget::Flow(fid) => h.execute(fid, &mut msg).await,
+                            DispatchTarget::Block(name) => h.execute_block(name, &mut msg).await,
+                        };
                         wafer_result_to_response(result)
                     }
                 })

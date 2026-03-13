@@ -1,0 +1,16 @@
+[package]
+name = "static-site"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+# In your own project, use git deps:
+#   wafer-run  = { git = "https://github.com/wafer-run/wafer-run", features = ["full"] }
+#   wafer-core = { git = "https://github.com/wafer-run/wafer-run", features = ["http"] }
+wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
+wafer-core = { path = "../../crates/wafer-core", features = ["http"] }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"

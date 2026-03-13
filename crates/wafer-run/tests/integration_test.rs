@@ -2,6 +2,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use wafer_block::helpers::MessageExt;
+use wafer_block::types::MetaAccess;
+use wafer_run::types::ErrorCode;
 use wafer_run::*;
 
 // ---------------------------------------------------------------------------
@@ -341,7 +344,7 @@ fn test_router_not_found() {
 
     let result = router.route(&ctx, &mut msg);
     assert_eq!(result.action, Action::Error);
-    assert_eq!(result.error.as_ref().unwrap().code, "not_found");
+    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::NotFound);
 }
 
 #[test]
@@ -401,7 +404,7 @@ fn test_error_helper() {
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
-    assert_eq!(err.code, "bad_request");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert_eq!(err.message, "missing field");
 }
 
@@ -432,31 +435,31 @@ fn test_json_respond_helper() {
 fn test_standard_error_helpers() {
     let msg = Message::new("test", "");
     let r = err_bad_request(&msg, "bad");
-    assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::InvalidArgument);
 
     let msg = Message::new("test", "");
     let r = err_unauthorized(&msg, "no auth");
-    assert_eq!(r.error.as_ref().unwrap().code, "unauthenticated");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Unauthenticated);
 
     let msg = Message::new("test", "");
     let r = err_forbidden(&msg, "denied");
-    assert_eq!(r.error.as_ref().unwrap().code, "permission_denied");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::PermissionDenied);
 
     let msg = Message::new("test", "");
     let r = err_not_found(&msg, "gone");
-    assert_eq!(r.error.as_ref().unwrap().code, "not_found");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::NotFound);
 
     let msg = Message::new("test", "");
     let r = err_conflict(&msg, "exists");
-    assert_eq!(r.error.as_ref().unwrap().code, "already_exists");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::AlreadyExists);
 
     let msg = Message::new("test", "");
     let r = err_validation(&msg, "invalid");
-    assert_eq!(r.error.as_ref().unwrap().code, "invalid_argument");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::InvalidArgument);
 
     let msg = Message::new("test", "");
     let r = err_internal(&msg, "oops");
-    assert_eq!(r.error.as_ref().unwrap().code, "internal");
+    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Internal);
 }
 
 #[test]
@@ -708,7 +711,8 @@ async fn test_on_error_stop() {
     let result = w.execute("stop-flow", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
-    assert_eq!(result.error.as_ref().unwrap().code, "test_error");
+    // "test_error" is not a known ErrorCode variant, maps to Unknown
+    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::Unknown);
     // "after-fail" should NOT have run
     assert_ne!(String::from_utf8_lossy(&msg.data), "should-not-run");
 }
@@ -839,7 +843,8 @@ async fn test_execute_nonexistent_flow() {
     let result = w.execute("nonexistent", &mut msg).await;
 
     assert_eq!(result.action, Action::Error);
-    assert_eq!(result.error.as_ref().unwrap().code, "flow_not_found");
+    // "flow_not_found" is not a known ErrorCode variant, maps to Unknown
+    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::Unknown);
 }
 
 // ===========================================================================
@@ -889,17 +894,20 @@ fn test_message_methods() {
     msg.set_meta("auth.user_email", "alice@example.com");
     msg.set_meta("auth.user_roles", "admin,editor");
     msg.set_meta("req.client.ip", "127.0.0.1");
-    msg.set_meta("http.header.Cookie", "session=abc; theme=dark");
+    msg.set_meta("http.header.cookie", "session=abc; theme=dark");
 
     assert_eq!(msg.action(), "create");
     assert_eq!(msg.path(), "/users");
     assert_eq!(msg.var("id"), "42");
     assert_eq!(msg.query("page"), "2");
-    assert_eq!(msg.content_type(), "application/json");
+    assert_eq!(msg.get_meta("req.content_type"), "application/json");
     assert_eq!(msg.user_id(), "user-1");
-    assert_eq!(msg.user_email(), "alice@example.com");
-    assert_eq!(msg.user_roles(), vec!["admin", "editor"]);
-    assert!(msg.is_admin());
+    assert_eq!(msg.get_meta("auth.user_email"), "alice@example.com");
+    // user_roles: split comma-separated roles
+    let roles: Vec<&str> = msg.get_meta("auth.user_roles").split(',').collect();
+    assert_eq!(roles, vec!["admin", "editor"]);
+    // is_admin: check if roles contain "admin"
+    assert!(roles.contains(&"admin"));
     assert_eq!(msg.remote_addr(), "127.0.0.1");
     assert_eq!(msg.cookie("session"), "abc");
     assert_eq!(msg.cookie("theme"), "dark");
@@ -1002,7 +1010,8 @@ async fn test_panic_recovery() {
 
     assert_eq!(result.action, Action::Error);
     let err = result.error.unwrap();
-    assert_eq!(err.code, "panic");
+    // "panic" is not a known ErrorCode variant, maps to Unknown
+    assert_eq!(err.code, ErrorCode::Unknown);
     assert!(err.message.contains("block went wrong"));
 }
 
@@ -1056,12 +1065,13 @@ async fn test_start_and_stop() {
 // ===========================================================================
 
 #[test]
-fn test_wafer_error_display() {
-    let err = WaferError::new("not_found", "user not found")
-        .with_meta("resource", "users")
-        .with_meta("id", "42");
+fn test_wafer_error_meta() {
+    let mut err = WaferError::new("not_found", "user not found");
+    err.meta.set("resource".to_string(), "users".to_string());
+    err.meta.set("id".to_string(), "42".to_string());
 
-    assert_eq!(err.to_string(), "not_found: user not found");
+    assert_eq!(err.code, ErrorCode::NotFound);
+    assert_eq!(err.message, "user not found");
     assert_eq!(err.meta.get("resource").unwrap(), "users");
     assert_eq!(err.meta.get("id").unwrap(), "42");
 }
@@ -1111,6 +1121,7 @@ mod versioned_block_tests {
         assert_eq!(r.owner, "acme");
         assert_eq!(r.repo, "auth-block");
         assert_eq!(r.version, "v1.0.0");
+        assert_eq!(r.block_name, None);
     }
 
     #[test]
@@ -1137,8 +1148,17 @@ mod versioned_block_tests {
     fn test_parse_versioned_block_wrong_segments() {
         // Only 2 segments (missing repo)
         assert!(parse_versioned_block("github.com/acme@v1.0.0").is_none());
-        // 4 segments (too many)
-        assert!(parse_versioned_block("github.com/acme/auth/extra@v1.0.0").is_none());
+        // 5 segments (too many)
+        assert!(parse_versioned_block("github.com/acme/auth/extra/deep@v1.0.0").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_block_multi_block_repo() {
+        let r = parse_versioned_block("github.com/wafer-run/wafer-run-blocks/auth@v1.0.0").unwrap();
+        assert_eq!(r.owner, "wafer-run");
+        assert_eq!(r.repo, "wafer-run-blocks");
+        assert_eq!(r.version, "v1.0.0");
+        assert_eq!(r.block_name, Some("auth".to_string()));
     }
 
     #[test]
@@ -1152,6 +1172,7 @@ mod versioned_block_tests {
         assert_eq!(r.owner, "acme");
         assert_eq!(r.repo, "auth-block");
         assert_eq!(r.version, "v2.0.0-rc.1");
+        assert_eq!(r.block_name, None);
     }
 }
 
@@ -1168,6 +1189,7 @@ mod unversioned_block_tests {
         let r = parse_unversioned_block("github.com/acme/auth-block").unwrap();
         assert_eq!(r.owner, "acme");
         assert_eq!(r.repo, "auth-block");
+        assert_eq!(r.block_name, None);
     }
 
     #[test]
@@ -1184,10 +1206,26 @@ mod unversioned_block_tests {
     fn test_parse_unversioned_block_wrong_segments() {
         // Only 2 segments (missing repo)
         assert!(parse_unversioned_block("github.com/acme").is_none());
-        // 4 segments (too many)
-        assert!(parse_unversioned_block("github.com/acme/auth/extra").is_none());
+        // 5 segments (too many)
+        assert!(parse_unversioned_block("github.com/acme/auth/extra/deep").is_none());
         // 1 segment
         assert!(parse_unversioned_block("github.com").is_none());
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_multi_block_repo() {
+        let r = parse_unversioned_block("github.com/wafer-run/wafer-run-blocks/auth").unwrap();
+        assert_eq!(r.owner, "wafer-run");
+        assert_eq!(r.repo, "wafer-run-blocks");
+        assert_eq!(r.block_name, Some("auth".to_string()));
+    }
+
+    #[test]
+    fn test_parse_unversioned_block_multi_block_at_latest() {
+        let r = parse_unversioned_block("github.com/wafer-run/wafer-run-blocks/auth@latest").unwrap();
+        assert_eq!(r.owner, "wafer-run");
+        assert_eq!(r.repo, "wafer-run-blocks");
+        assert_eq!(r.block_name, Some("auth".to_string()));
     }
 
     #[test]
@@ -1195,6 +1233,7 @@ mod unversioned_block_tests {
         let r = parse_unversioned_block("github.com/acme/auth-block@latest").unwrap();
         assert_eq!(r.owner, "acme");
         assert_eq!(r.repo, "auth-block");
+        assert_eq!(r.block_name, None);
     }
 
     #[test]

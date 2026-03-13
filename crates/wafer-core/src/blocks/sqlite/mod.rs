@@ -66,13 +66,9 @@ impl Block for SqliteDatabaseBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let tables = match config.as_ref().and_then(|c| c.get("collections")) {
+            let tables = match config.get("collections") {
                 Some(v) => {
                     match serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()) {
                         Ok(colls) => collections_to_tables(&colls),
@@ -89,7 +85,7 @@ impl Block for SqliteDatabaseBlock {
             };
             self.tables.set(tables).ok();
 
-            let path = crate::blocks::env_or_config_str("DB_PATH", config.as_ref(), "path")
+            let path = config.env_or("DB_PATH", "path")
                 .unwrap_or_else(|| "data/solobase.db".to_string());
 
             if let Some(parent) = std::path::Path::new(&path).parent() {

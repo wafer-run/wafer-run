@@ -22,10 +22,10 @@ struct Route {
     block: String,
 }
 
-/// Parse routes from a JSON config value.
-fn parse_routes(config: Option<&serde_json::Value>) -> Vec<Route> {
+/// Parse routes from block config.
+fn parse_routes(config: &wafer_run::BlockConfig) -> Vec<Route> {
     config
-        .and_then(|c| c.get("routes"))
+        .get("routes")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -133,13 +133,9 @@ impl Block for RouterBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.routes.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let routes = parse_routes(config.as_ref());
+            let routes = parse_routes(&config);
             if routes.is_empty() {
                 tracing::debug!("@wafer/router initialized with no routes");
             }

@@ -7,11 +7,20 @@ export interface FlowDef {
   id: string;
   root: NodeDef;
   nodes?: Record<string, NodeDef>;
+  http?: { routes: { path: string; path_prefix?: boolean }[] };
 }
 
 export interface BlockEntry {
   name: string;
   source: string;
+  /** Interface identifier, e.g. "database@v1". Used for .block.json generation. */
+  interface?: string;
+  /** Human-readable description. */
+  summary?: string;
+  /** Runtime type: "native", "wasm", or "both". Defaults to "wasm". */
+  runtime?: "native" | "wasm" | "both";
+  /** Build/install instructions. The "type" field discriminates (e.g. "cargo", "npm"). */
+  build?: Record<string, unknown>;
 }
 
 export interface PublishConfig {

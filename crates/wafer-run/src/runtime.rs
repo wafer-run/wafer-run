@@ -27,6 +27,9 @@ pub struct RemoteBlockRef {
     pub owner: String,
     pub repo: String,
     pub version: String,
+    /// Optional block name within a multi-block repo, e.g. `"auth"` in
+    /// `github.com/wafer-run/wafer-run-blocks/auth@v1.0.0`.
+    pub block_name: Option<String>,
 }
 
 /// Parse a block name into a `RemoteBlockRef` if it matches the
@@ -45,15 +48,25 @@ pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
     }
 
     let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 3 || segments[0] != "github.com" {
+    if segments[0] != "github.com" {
         return None;
     }
 
-    Some(RemoteBlockRef {
-        owner: segments[1].to_string(),
-        repo: segments[2].to_string(),
-        version: version.to_string(),
-    })
+    match segments.len() {
+        3 => Some(RemoteBlockRef {
+            owner: segments[1].to_string(),
+            repo: segments[2].to_string(),
+            version: version.to_string(),
+            block_name: None,
+        }),
+        4 => Some(RemoteBlockRef {
+            owner: segments[1].to_string(),
+            repo: segments[2].to_string(),
+            version: version.to_string(),
+            block_name: Some(segments[3].to_string()),
+        }),
+        _ => None,
+    }
 }
 
 /// A parsed reference to a remote block on GitHub without a version, e.g.
@@ -64,6 +77,8 @@ pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
 pub struct UnversionedRemoteBlockRef {
     pub owner: String,
     pub repo: String,
+    /// Optional block name within a multi-block repo.
+    pub block_name: Option<String>,
 }
 
 /// Parse a block name into an `UnversionedRemoteBlockRef` if it matches the
@@ -73,7 +88,7 @@ pub struct UnversionedRemoteBlockRef {
 /// `github.com/`, or has the wrong number of segments.
 #[cfg(feature = "wasm")]
 pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> {
-    // Accept bare `github.com/owner/repo` or `github.com/owner/repo@latest`
+    // Accept bare `github.com/owner/repo[/block]` or with `@latest` suffix
     let name = name.strip_suffix("@latest").unwrap_or(name);
 
     if name.contains('@') {
@@ -81,18 +96,33 @@ pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> 
     }
 
     let segments: Vec<&str> = name.split('/').collect();
-    if segments.len() != 3 || segments[0] != "github.com" {
+    if segments[0] != "github.com" {
         return None;
     }
 
-    if segments[1].is_empty() || segments[2].is_empty() {
-        return None;
+    match segments.len() {
+        3 => {
+            if segments[1].is_empty() || segments[2].is_empty() {
+                return None;
+            }
+            Some(UnversionedRemoteBlockRef {
+                owner: segments[1].to_string(),
+                repo: segments[2].to_string(),
+                block_name: None,
+            })
+        }
+        4 => {
+            if segments[1].is_empty() || segments[2].is_empty() || segments[3].is_empty() {
+                return None;
+            }
+            Some(UnversionedRemoteBlockRef {
+                owner: segments[1].to_string(),
+                repo: segments[2].to_string(),
+                block_name: Some(segments[3].to_string()),
+            })
+        }
+        _ => None,
     }
-
-    Some(UnversionedRemoteBlockRef {
-        owner: segments[1].to_string(),
-        repo: segments[2].to_string(),
-    })
 }
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
@@ -105,6 +135,11 @@ impl RuntimeHandle {
     /// Execute a flow by ID.
     pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
         self.inner.execute(flow_id, msg).await
+    }
+
+    /// Execute a single block by name (bypasses flows).
+    pub async fn execute_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+        self.inner.execute_block(block_name, msg).await
     }
 }
 
@@ -127,9 +162,15 @@ pub struct Wafer {
     /// Alias mappings (e.g. `"@db"` → `"@wafer/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: HashMap<String, String>,
+    /// Config expanders: registered functions that split a composite config
+    /// (e.g. `@wafer/http-server`) into configs for individual blocks.
+    pub(crate) config_expanders: HashMap<
+        String,
+        Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>,
+    >,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
-    pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
+    pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
 }
 
 impl Wafer {
@@ -141,6 +182,7 @@ impl Wafer {
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
             aliases: HashMap::new(),
+            config_expanders: HashMap::new(),
             hooks: ObservabilityBus::new(),
             blocks_snapshot: Arc::new(Vec::new()),
             flow_infos_snapshot: Arc::new(Vec::new()),
@@ -248,6 +290,17 @@ impl Wafer {
         self.block_configs.insert(name.into(), config);
     }
 
+    /// Register a config expander that splits a composite config into
+    /// individual block configs. Called during `resolve()` before configs
+    /// are distributed to blocks.
+    pub fn add_config_expander(
+        &mut self,
+        name: impl Into<String>,
+        expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync + 'static,
+    ) {
+        self.config_expanders.insert(name.into(), Box::new(expander));
+    }
+
     /// HasBlock returns true if a block with the given type name is registered.
     pub fn has_block(&self, type_name: &str) -> bool {
         self.blocks.contains_key(type_name)
@@ -345,6 +398,31 @@ impl Wafer {
     /// - For non-object values, the target block's own value wins (dependents
     ///   can contribute new keys but not override the infra block's own config).
     /// - If the target block has no config entry yet, one is created.
+    /// Run config expanders: remove composite configs from `block_configs`,
+    /// invoke their expander, and deep-merge the results into the target blocks.
+    fn expand_composite_configs(&mut self) {
+        let keys: Vec<String> = self
+            .block_configs
+            .keys()
+            .filter(|k| self.config_expanders.contains_key(k.as_str()))
+            .cloned()
+            .collect();
+
+        for key in keys {
+            if let Some(config) = self.block_configs.remove(&key) {
+                if let Some(expander) = self.config_expanders.get(&key) {
+                    for (name, val) in expander(config) {
+                        let entry = self
+                            .block_configs
+                            .entry(name)
+                            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                        deep_merge(entry, &val);
+                    }
+                }
+            }
+        }
+    }
+
     fn gather_uses_configs(&mut self) {
         // Collect all (target, contribution) pairs first to avoid borrow conflicts.
         let mut contributions: Vec<(String, serde_json::Value)> = Vec::new();
@@ -382,6 +460,8 @@ impl Wafer {
     /// `add_block_config`) are initialized first (infrastructure), then
     /// remaining blocks are initialized (features that may depend on infra).
     pub async fn resolve(&mut self) -> Result<(), String> {
+        // Expand composite configs (e.g. @wafer/http-server → http-listener + router)
+        self.expand_composite_configs();
         // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
 
@@ -395,10 +475,51 @@ impl Wafer {
         let config_names: std::collections::HashSet<String> =
             configs.iter().map(|(n, _)| n.clone()).collect();
 
-        // Phase 1: Initialize blocks that have configs (infrastructure blocks).
-        // These are initialized first so feature blocks can depend on them.
-        for (name, config) in &configs {
-            if let Some(block) = self.blocks.get(name) {
+        // Sort configs: @wafer/* infrastructure blocks first, then everything else.
+        // Infrastructure blocks (database, config, crypto, etc.) must be initialized
+        // before feature blocks that depend on them during lifecycle init.
+        let mut infra_configs = Vec::new();
+        let mut feature_configs = Vec::new();
+        for entry in &configs {
+            if entry.0.starts_with("@wafer/") {
+                infra_configs.push(entry);
+            } else {
+                feature_configs.push(entry);
+            }
+        }
+
+        // Phase 1a: Initialize infrastructure blocks (@wafer/*) with configs.
+        self.rebuild_all_blocks();
+        for (name, config) in &infra_configs {
+            if let Some(block) = self.blocks.get(name.as_str()) {
+                let ctx = self.make_context(
+                    String::new(),
+                    String::new(),
+                    HashMap::new(),
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                );
+
+                block
+                    .lifecycle(
+                        &ctx,
+                        LifecycleEvent {
+                            event_type: LifecycleType::Init,
+                            data: serde_json::to_vec(config).unwrap_or_default(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+            } else {
+                tracing::warn!(block = %name, "block config present but no block registered — skipping");
+            }
+        }
+
+        // Phase 1b: Initialize feature blocks with configs.
+        // Infrastructure is now ready, so these can use @wafer/database etc.
+        self.rebuild_all_blocks();
+        for (name, config) in &feature_configs {
+            if let Some(block) = self.blocks.get(name.as_str()) {
                 let ctx = self.make_context(
                     String::new(),
                     String::new(),
@@ -423,7 +544,7 @@ impl Wafer {
         }
 
         // Rebuild the all_blocks snapshot so lifecycle contexts can find
-        // infrastructure blocks during phase 2.
+        // all blocks during phase 2.
         self.rebuild_all_blocks();
 
         // Phase 2: Initialize remaining pre-registered blocks (no config).
@@ -534,15 +655,17 @@ impl Wafer {
 
     /// Download a remote block from GitHub Releases and load it as a sandboxed
     /// WASM block. The `.wasm` asset is expected at:
-    /// `https://github.com/{owner}/{repo}/releases/download/{version}/{repo}.wasm`
+    /// - Single-block repo: `…/{version}/{repo}.wasm`
+    /// - Multi-block repo:  `…/{version}/{block_name}.wasm`
     #[cfg(feature = "wasm")]
     async fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
         use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
 
+        let asset_name = r.block_name.as_deref().unwrap_or(&r.repo);
         let url = format!(
             "https://github.com/{}/{}/releases/download/{}/{}.wasm",
-            r.owner, r.repo, r.version, r.repo
+            r.owner, r.repo, r.version, asset_name
         );
 
         let client = reqwest::Client::builder()
@@ -634,10 +757,16 @@ impl Wafer {
             .map_err(|e| format!("failed to parse releases JSON for {}/{}: {}", r.owner, r.repo, e))?;
 
         // 3. Find first release with a .wasm asset
+        //    For multi-block repos, match exactly "{block_name}.wasm".
+        //    For single-block repos, match any ".wasm" file.
         let mut wasm_url: Option<String> = None;
         for release in &releases {
             for asset in &release.assets {
-                if asset.name.ends_with(".wasm") {
+                let matches = match &r.block_name {
+                    Some(bn) => asset.name == format!("{}.wasm", bn),
+                    None => asset.name.ends_with(".wasm"),
+                };
+                if matches {
                     wasm_url = Some(asset.browser_download_url.clone());
                     break;
                 }
@@ -648,10 +777,16 @@ impl Wafer {
         }
 
         let wasm_url = wasm_url.ok_or_else(|| {
-            format!(
-                "no release with a .wasm asset found for {}/{}",
-                r.owner, r.repo
-            )
+            match &r.block_name {
+                Some(bn) => format!(
+                    "no release with a {}.wasm asset found for {}/{}",
+                    bn, r.owner, r.repo
+                ),
+                None => format!(
+                    "no release with a .wasm asset found for {}/{}",
+                    r.owner, r.repo
+                ),
+            }
         })?;
 
         // 4. Download the .wasm asset
@@ -697,11 +832,14 @@ impl Wafer {
 
     /// Get or create the shared WASM engine with fuel metering.
     #[cfg(feature = "wasm")]
-    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, String> {
+    pub fn wasm_engine(&mut self) -> Result<&wasmtime::Engine, String> {
         if self.wasm_engine.is_none() {
-            let mut config = wasmi::Config::default();
+            let mut config = wasmtime::Config::default();
             config.consume_fuel(true);
-            let engine = wasmi::Engine::new(&config);
+            config.wasm_component_model(true);
+            config.async_support(true);
+            let engine = wasmtime::Engine::new(&config)
+                .map_err(|e| format!("failed to create wasmtime engine: {}", e))?;
             self.wasm_engine = Some(Arc::new(engine));
         }
         Ok(self.wasm_engine.as_ref().unwrap())
@@ -860,6 +998,75 @@ impl Wafer {
 
         // Observability: flow end
         self.hooks.fire_flow_end(flow_id, &result, start.elapsed());
+
+        result
+    }
+
+    /// Execute a single block by name, bypassing flows.
+    pub async fn execute_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+        // Resolve alias
+        let resolved = self.aliases.get(block_name)
+            .map(|s| s.as_str())
+            .unwrap_or(block_name);
+
+        let block = match self.all_blocks.get(resolved).or_else(|| self.all_blocks.get(block_name)) {
+            Some(b) => b.clone(),
+            None => {
+                return Result_ {
+                    action: Action::Error,
+                    error: Some(WaferError::new(
+                        "block_not_found",
+                        format!("block not found: {}", block_name),
+                    )),
+                    response: None,
+                    message: None,
+                };
+            }
+        };
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let caller_requires = {
+            let info = block.info();
+            if info.requires.is_empty() { None } else { Some(info.requires) }
+        };
+        let mut ctx = self.make_context(block_name, "root", HashMap::new(), cancelled, None);
+        ctx.caller_requires = caller_requires;
+
+        // Observability
+        let obs_ctx = ObservabilityContext {
+            flow_id: String::new(),
+            node_path: "root".to_string(),
+            block_name: block_name.to_string(),
+            trace_id: msg.get_meta("trace_id").to_string(),
+            message: Some(msg.clone()),
+        };
+        self.hooks.fire_block_start(&obs_ctx);
+        let start = Instant::now();
+
+        let result = std::panic::AssertUnwindSafe(block.handle(&ctx, msg))
+            .catch_unwind()
+            .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(panic_info) => {
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                Result_ {
+                    action: Action::Error,
+                    error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
+                    response: None,
+                    message: Some(msg.clone()),
+                }
+            }
+        };
+
+        self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
 
         result
     }

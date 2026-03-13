@@ -26,7 +26,7 @@ pub mod wasm;
 // Re-exports for convenience
 pub use block::{AdminUIInfo, Block, BlockInfo};
 pub use config::{
-    Flow, FlowConfig, FlowConfigDef, FlowDef, FlowInfo, Node,
+    BlockConfig, DispatchTarget, Flow, FlowConfig, FlowConfigDef, FlowDef, FlowInfo, Node,
     NodeDef,
 };
 pub use context::Context;

@@ -11,3 +11,4 @@ keywords = ["wafer", "blocks", "types", "sdk"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
+wit-bindgen = { workspace = true }

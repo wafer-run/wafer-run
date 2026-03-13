@@ -1,4 +1,6 @@
 // Re-export all types from wafer-block.
-// This preserves backwards compatibility for code using `crate::types::*`.
-pub use wafer_block::types::*;
-pub use wafer_block::BlockResult;
+pub use wafer_block::{
+    Action, BlockResult, BlockRuntime, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType,
+    Message, MetaEntry, RequestAction, Response, Result_, WaferError,
+};
+pub use wafer_block::types::MetaAccess;

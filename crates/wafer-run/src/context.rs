@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::block::Block;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::common::ErrorCode;
 
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -63,7 +61,7 @@ pub struct RuntimeContext {
 // --- Result helpers (used by RuntimeContext impl) ---
 
 #[cfg(not(target_arch = "wasm32"))]
-fn err_result(code: impl Into<String>, message: impl Into<String>) -> Result_ {
+fn err_result(code: ErrorCode, message: impl Into<String>) -> Result_ {
     Result_ {
         action: Action::Error,
         response: None,

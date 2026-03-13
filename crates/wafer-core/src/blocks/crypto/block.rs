@@ -234,17 +234,9 @@ impl Block for CryptoBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config: Option<serde_json::Value> = if !event.data.is_empty() {
-                serde_json::from_slice(&event.data).ok()
-            } else {
-                None
-            };
+            let config = wafer_run::BlockConfig::from_event(&event);
 
-            let jwt_secret = crate::blocks::env_or_config_str(
-                "JWT_SECRET",
-                config.as_ref(),
-                "jwt_secret",
-            )
+            let jwt_secret = config.env_or("JWT_SECRET", "jwt_secret")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
                 let mode = std::env::var("WAFER_ENV").unwrap_or_default();

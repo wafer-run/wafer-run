@@ -9,6 +9,9 @@ members = [
     "crates/wafer-run-node",
     "crates/wafer-sdk-rs",
     "crates/wafer-site",
+    "examples/hello-world",
+    "examples/static-site",
+    "examples/api-server",
 ]
 
 [workspace.package]
@@ -46,7 +49,8 @@ hyper = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM
-wasmi = "0.44"
+wasmtime = { version = "25", features = ["component-model"] }
+wit-bindgen = "0.32"
 
 # Crypto
 argon2 = { version = "0.5", features = ["std"] }

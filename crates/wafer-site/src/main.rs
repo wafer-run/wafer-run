@@ -18,20 +18,10 @@ async fn main() {
     // Create WAFER runtime
     let mut w = Wafer::new();
 
-    // Configure infrastructure blocks
-    w.add_block_config("@wafer/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
-    w.add_block_config("@wafer/network", serde_json::json!({}));
-    w.add_block_config("@wafer/logger", serde_json::json!({}));
-
-    // Configure the HTTP listener — owns TCP listen + HTTP↔Message conversion
+    // Configure HTTP server (infra + router)
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
-    w.add_block_config("@wafer/http-listener", serde_json::json!({
-        "flow": "site-main",
+    w.add_block_config("@wafer/http-server", serde_json::json!({
         "listen": format!("0.0.0.0:{}", port),
-    }));
-
-    // Configure router routes
-    w.add_block_config("@wafer/router", serde_json::json!({
         "routes": [
             { "path": "/_inspector/**", "block": "@wafer/inspector" },
             { "path": "/_inspector", "block": "@wafer/inspector" },
@@ -45,19 +35,16 @@ async fn main() {
             { "path": "/**", "block": "@wafer-site/docs" }
         ]
     }));
+    w.add_block_config("@wafer/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
+    w.add_block_config("@wafer/network", serde_json::json!({}));
+    w.add_block_config("@wafer/logger", serde_json::json!({}));
 
-    // Register wafer-core infrastructure blocks
-    wafer_core::blocks::auth::register(&mut w);
-    wafer_core::blocks::cors::register(&mut w);
-    wafer_core::blocks::iam::register(&mut w);
+    // Register blocks
+    wafer_core::blocks::http_server::register(&mut w);
+    wafer_core::blocks::auth_validator::register(&mut w);
+    wafer_core::blocks::iam_guard::register(&mut w);
     wafer_core::blocks::inspector::register(&mut w);
-    wafer_core::blocks::monitoring::register(&mut w);
-    wafer_core::blocks::rate_limit::register(&mut w);
-    wafer_core::blocks::readonly_guard::register(&mut w);
-    wafer_core::blocks::router::register(&mut w);
-    wafer_core::blocks::security_headers::register(&mut w);
     wafer_core::blocks::web::register(&mut w);
-    wafer_core::blocks::http::register(&mut w);
     wafer_core::blocks::config::register(&mut w);
     wafer_core::blocks::logger::register(&mut w);
     wafer_core::blocks::crypto::register(&mut w);
@@ -65,32 +52,12 @@ async fn main() {
 
     // Database: wafer-site always uses SQLite
     wafer_core::blocks::sqlite::register(&mut w);
-    // Alias @wafer/database → @wafer/sqlite for backward compat
     w.add_alias("@wafer/database", "@wafer/sqlite");
 
     // Register site-specific blocks
     register_site_blocks(&mut w);
     playground::register(&mut w);
     registry::register(&mut w);
-
-    // Add flows — simplified since routes are now in block config
-    let site_flow: FlowDef = serde_json::from_str(r#"{
-        "id": "site-main",
-        "summary": "Website main flow",
-        "config": { "on_error": "stop", "timeout": "30s" },
-        "root": {
-            "flow": "@wafer/infra",
-            "next": [{
-                "block": "@wafer/router"
-            }]
-        }
-    }"#).expect("invalid flow JSON");
-
-    wafer_core::flows::register_flows(&mut w).unwrap_or_else(|e| {
-        tracing::error!("Failed to register core flows: {}", e);
-        std::process::exit(1);
-    });
-    w.add_flow_def(&site_flow);
 
     // Start — the @wafer/http-listener block spawns the Axum listener internally
     let w = w.start().await.unwrap_or_else(|e| {
