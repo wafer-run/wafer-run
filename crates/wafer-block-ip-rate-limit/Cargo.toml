@@ -1,0 +1,11 @@
+[package]
+name = "wafer-block-ip-rate-limit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: per-IP rate limiting"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }

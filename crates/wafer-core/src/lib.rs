@@ -1,12 +1,10 @@
-//! wafer-core — Shared reusable WAFER blocks and flow templates.
+//! wafer-core — Shared interfaces, clients, and utilities for WAFER blocks.
 //!
-//! This crate provides all WAFER blocks and the client API layer.
-//! wafer-run is a pure runtime engine; wafer-core owns the block library.
-//! Consumers register blocks explicitly — there is no `register_all`.
+//! This crate provides:
+//! - `interfaces/` — DatabaseService, StorageService traits + shared handlers
+//! - `clients/` — RPC wrappers for calling blocks (database, storage, crypto, etc.)
+//! - `mime` — MIME type detection utility
 
-pub mod blocks;
 pub mod clients;
-#[cfg(feature = "http")]
-pub mod flows;
 pub mod interfaces;
 pub mod mime;

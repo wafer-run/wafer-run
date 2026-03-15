@@ -20,43 +20,43 @@ async fn main() {
 
     // Register HTTP server (infra + router)
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
-    wafer_core::flows::http_server::register(&mut w, serde_json::json!({
+    wafer_flow_http_server::register(&mut w, serde_json::json!({
         "listen": format!("0.0.0.0:{}", port),
         "routes": [
-            { "path": "/_inspector/**", "block": "@wafer/inspector" },
-            { "path": "/_inspector", "block": "@wafer/inspector" },
-            { "path": "/api/**", "block": "@wafer-site/api" },
-            { "path": "/playground/**", "block": "@wafer-site/playground" },
-            { "path": "/playground", "block": "@wafer-site/playground" },
-            { "path": "/registry/**", "block": "@wafer-site/registry" },
-            { "path": "/registry", "block": "@wafer-site/registry" },
-            { "path": "/docs/**", "block": "@wafer-site/docs" },
-            { "path": "/docs", "block": "@wafer-site/docs" },
-            { "path": "/**", "block": "@wafer-site/docs" }
+            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+            { "path": "/_inspector", "block": "wafer-run/inspector" },
+            { "path": "/api/**", "block": "wafer-site/api" },
+            { "path": "/playground/**", "block": "wafer-site/playground" },
+            { "path": "/playground", "block": "wafer-site/playground" },
+            { "path": "/registry/**", "block": "wafer-site/registry" },
+            { "path": "/registry", "block": "wafer-site/registry" },
+            { "path": "/docs/**", "block": "wafer-site/docs" },
+            { "path": "/docs", "block": "wafer-site/docs" },
+            { "path": "/**", "block": "wafer-site/docs" }
         ]
     }));
-    w.add_block_config("@wafer/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
-    w.add_block_config("@wafer/network", serde_json::json!({}));
-    w.add_block_config("@wafer/logger", serde_json::json!({}));
-    wafer_core::blocks::auth_validator::register(&mut w);
-    wafer_core::blocks::iam_guard::register(&mut w);
-    wafer_core::blocks::inspector::register(&mut w);
-    wafer_core::blocks::web::register(&mut w);
-    wafer_core::blocks::config::register(&mut w);
-    wafer_core::blocks::logger::register(&mut w);
-    wafer_core::blocks::crypto::register(&mut w);
-    wafer_core::blocks::network::register(&mut w);
+    w.add_block_config("wafer-run/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
+    w.add_block_config("wafer-run/network", serde_json::json!({}));
+    w.add_block_config("wafer-run/logger", serde_json::json!({}));
+    wafer_block_auth_validator::register(&mut w);
+    wafer_block_iam_guard::register(&mut w);
+    wafer_block_inspector::register(&mut w);
+    wafer_block_web::register(&mut w);
+    wafer_block_config::register(&mut w);
+    wafer_block_logger::register(&mut w);
+    wafer_block_crypto::register(&mut w);
+    wafer_block_network::register(&mut w);
 
     // Database: wafer-site always uses SQLite
-    wafer_core::blocks::sqlite::register(&mut w);
-    w.add_alias("@wafer/database", "@wafer/sqlite");
+    wafer_block_sqlite::register(&mut w);
+    w.add_alias("wafer-run/database", "wafer-run/sqlite");
 
     // Register site-specific blocks
     register_site_blocks(&mut w);
     playground::register(&mut w);
     registry::register(&mut w);
 
-    // Start — the @wafer/http-listener block spawns the Axum listener internally
+    // Start — the wafer-run/http-listener block spawns the Axum listener internally
     let w = w.start().await.unwrap_or_else(|e| {
         tracing::error!("Failed to start: {}", e);
         std::process::exit(1);
@@ -72,7 +72,7 @@ async fn main() {
 
 fn register_site_blocks(w: &mut Wafer) {
     // Documentation block — serves HTML pages
-    w.register_block_func("@wafer-site/docs", |_ctx, msg| {
+    w.register_block_func("wafer-site/docs", |_ctx, msg| {
         let path = msg.path();
 
         // Serve static assets
@@ -128,7 +128,7 @@ fn register_site_blocks(w: &mut Wafer) {
     });
 
     // API block — JSON endpoints
-    w.register_block_func("@wafer-site/api", |_ctx, msg| {
+    w.register_block_func("wafer-site/api", |_ctx, msg| {
         let path = msg.path();
         match path {
             "/api/health" => json_respond(
@@ -139,16 +139,16 @@ fn register_site_blocks(w: &mut Wafer) {
                 msg,
                 &serde_json::json!({
                     "blocks": [
-                        {"name": "@wafer/http-listener", "version": "0.1.0"},
-                        {"name": "@wafer/router", "version": "0.1.0"},
-                        {"name": "@wafer/security-headers", "version": "0.1.0"},
-                        {"name": "@wafer/cors", "version": "0.1.0"},
-                        {"name": "@wafer/ip-rate-limit", "version": "0.1.0"},
-                        {"name": "@wafer/readonly-guard", "version": "0.1.0"},
-                        {"name": "@wafer/monitoring", "version": "0.1.0"},
-                        {"name": "@wafer/auth-validator", "version": "0.1.0"},
-                        {"name": "@wafer/iam-guard", "version": "0.1.0"},
-                        {"name": "@wafer/web", "version": "0.1.0"}
+                        {"name": "wafer-run/http-listener", "version": "0.1.0"},
+                        {"name": "wafer-run/router", "version": "0.1.0"},
+                        {"name": "wafer-run/security-headers", "version": "0.1.0"},
+                        {"name": "wafer-run/cors", "version": "0.1.0"},
+                        {"name": "wafer-run/ip-rate-limit", "version": "0.1.0"},
+                        {"name": "wafer-run/readonly-guard", "version": "0.1.0"},
+                        {"name": "wafer-run/monitoring", "version": "0.1.0"},
+                        {"name": "wafer-run/auth-validator", "version": "0.1.0"},
+                        {"name": "wafer-run/iam-guard", "version": "0.1.0"},
+                        {"name": "wafer-run/web", "version": "0.1.0"}
                     ]
                 }),
             ),

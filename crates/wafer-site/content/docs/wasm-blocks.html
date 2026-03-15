@@ -205,7 +205,7 @@ impl MyBlock {
 BlockInfo {
     name: "@app/my-block",
     runtime: Wasm,
-    requires: ["@wafer/database", "@wafer/crypto"],
+    requires: ["wafer-run/database", "wafer-run/crypto"],
     ...
 }</code></pre>
 <p>This complements the fine-grained <code>BlockCapabilities</code> sandbox (allowed collections, storage folders, network URLs) that the host can impose on WASM blocks.</p>

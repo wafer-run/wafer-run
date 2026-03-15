@@ -1,0 +1,11 @@
+[package]
+name = "wafer-block-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: config-driven router that dispatches to handler blocks"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }
+tracing = { workspace = true }

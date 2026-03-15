@@ -49,7 +49,7 @@ func DatabaseGetCtx(ctx wafer.Context, collection, id string) (Record, error) {
 	msg := wafer.NewMessage("database.get", nil)
 	msg.SetMeta("collection", collection)
 	msg.SetMeta("id", id)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return Record{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -79,7 +79,7 @@ func DatabaseListCtx(ctx wafer.Context, collection string, opts ListOptions) (Re
 	}
 	msg := wafer.NewMessage("database.list", optsJSON)
 	msg.SetMeta("collection", collection)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return RecordList{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -108,7 +108,7 @@ func DatabaseCreateCtx(ctx wafer.Context, collection string, data any) (Record, 
 	}
 	msg := wafer.NewMessage("database.create", jsonData)
 	msg.SetMeta("collection", collection)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return Record{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -132,7 +132,7 @@ func DatabaseUpdateCtx(ctx wafer.Context, collection, id string, data any) (Reco
 	msg := wafer.NewMessage("database.update", jsonData)
 	msg.SetMeta("collection", collection)
 	msg.SetMeta("id", id)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return Record{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -148,7 +148,7 @@ func DatabaseDeleteCtx(ctx wafer.Context, collection, id string) error {
 	msg := wafer.NewMessage("database.delete", nil)
 	msg.SetMeta("collection", collection)
 	msg.SetMeta("id", id)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -164,7 +164,7 @@ func DatabaseCountCtx(ctx wafer.Context, collection string, filters []Filter) (i
 	}
 	msg := wafer.NewMessage("database.count", filtersJSON)
 	msg.SetMeta("collection", collection)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return 0, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -210,7 +210,7 @@ func DatabaseQueryRawCtx(ctx wafer.Context, query string, args ...any) ([]Record
 	}
 	msg := wafer.NewMessage("database.query_raw", argsJSON)
 	msg.SetMeta("query", query)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return nil, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -233,7 +233,7 @@ func DatabaseExecRawCtx(ctx wafer.Context, query string, args ...any) (int64, er
 	}
 	msg := wafer.NewMessage("database.exec_raw", argsJSON)
 	msg.SetMeta("query", query)
-	result := ctx.CallBlock("@wafer/database", msg)
+	result := ctx.CallBlock("wafer-run/database", msg)
 	if result.Error != nil {
 		return 0, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -247,7 +247,7 @@ func DatabaseExecRawCtx(ctx wafer.Context, query string, args ...any) (int64, er
 // --- Legacy direct-import implementations (backward compatible) ---
 
 // DatabaseGet retrieves a single record by collection and ID.
-// When CallBlock is available, it routes through the "@wafer/database" block.
+// When CallBlock is available, it routes through the "wafer-run/database" block.
 func DatabaseGet(collection, id string) (Record, error) {
 	if wafer.HasCallBlock() {
 		return DatabaseGetCtx(wafer.NewContext(), collection, id)

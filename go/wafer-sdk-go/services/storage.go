@@ -29,7 +29,7 @@ func StoragePutCtx(ctx wafer.Context, folder, key string, data []byte, contentTy
 	msg.SetMeta("folder", folder)
 	msg.SetMeta("key", key)
 	msg.SetMeta("content_type", contentType)
-	result := ctx.CallBlock("@wafer/storage", msg)
+	result := ctx.CallBlock("wafer-run/storage", msg)
 	if result.Error != nil {
 		return fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -42,7 +42,7 @@ func StorageGetCtx(ctx wafer.Context, folder, key string) ([]byte, ObjectInfo, e
 	msg := wafer.NewMessage("storage.get", nil)
 	msg.SetMeta("folder", folder)
 	msg.SetMeta("key", key)
-	result := ctx.CallBlock("@wafer/storage", msg)
+	result := ctx.CallBlock("wafer-run/storage", msg)
 	if result.Error != nil {
 		return nil, ObjectInfo{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -58,7 +58,7 @@ func StorageDeleteCtx(ctx wafer.Context, folder, key string) error {
 	msg := wafer.NewMessage("storage.delete", nil)
 	msg.SetMeta("folder", folder)
 	msg.SetMeta("key", key)
-	result := ctx.CallBlock("@wafer/storage", msg)
+	result := ctx.CallBlock("wafer-run/storage", msg)
 	if result.Error != nil {
 		return fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -73,7 +73,7 @@ func StorageListCtx(ctx wafer.Context, folder, prefix string, limit, offset int6
 	msg.SetMeta("prefix", prefix)
 	msg.SetMeta("limit", strconv.FormatInt(limit, 10))
 	msg.SetMeta("offset", strconv.FormatInt(offset, 10))
-	result := ctx.CallBlock("@wafer/storage", msg)
+	result := ctx.CallBlock("wafer-run/storage", msg)
 	if result.Error != nil {
 		return ObjectList{}, fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -92,7 +92,7 @@ func StorageListAllCtx(ctx wafer.Context, folder string) (ObjectList, error) {
 // --- Legacy direct-import implementations (backward compatible) ---
 
 // StoragePut stores content in a folder under the given key.
-// When CallBlock is available, it routes through the "@wafer/storage" block.
+// When CallBlock is available, it routes through the "wafer-run/storage" block.
 func StoragePut(folder, key string, data []byte, contentType string) error {
 	if wafer.HasCallBlock() {
 		return StoragePutCtx(wafer.NewContext(), folder, key, data, contentType)

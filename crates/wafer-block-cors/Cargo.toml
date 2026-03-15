@@ -1,0 +1,11 @@
+[package]
+name = "wafer-block-cors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: CORS preflight handler and header injection"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }
+tracing = { workspace = true }

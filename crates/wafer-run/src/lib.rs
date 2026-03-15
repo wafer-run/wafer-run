@@ -26,8 +26,8 @@ pub mod wasm;
 // Re-exports for convenience
 pub use block::{AdminUIInfo, Block, BlockInfo};
 pub use config::{
-    BlockConfig, DispatchTarget, Flow, FlowConfig, FlowConfigDef, FlowDef, FlowInfo, Node,
-    NodeDef,
+    BlockConfig, ConfigMapEntry, DispatchTarget, Flow, FlowConfig, FlowConfigDef, FlowDef,
+    FlowInfo, Node, NodeDef,
 };
 pub use context::Context;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,7 +47,7 @@ pub use router::Router;
 pub use runtime::{RuntimeHandle, Wafer};
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use runtime::{
-    parse_unversioned_block, parse_versioned_block, RemoteBlockRef, UnversionedRemoteBlockRef,
+    parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION,
 };
 pub use types::{
     Action, BlockResult, BlockRuntime, InstanceMode, LifecycleEvent, LifecycleType, Message,

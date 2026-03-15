@@ -8,7 +8,7 @@ use wafer_run::types::WaferError;
 
 use super::{call_service, decode};
 
-const BLOCK: &str = "@wafer/crypto";
+const BLOCK: &str = "wafer-run/crypto";
 
 // --- Wire-format types ---
 

@@ -3,13 +3,20 @@ import { join } from "node:path";
 import type { BlockEntry } from "../config/types.js";
 import { log } from "../util/logger.js";
 
-export interface BlockManifest {
+/** Published block manifest (stored as .block.json in GitHub releases). */
+interface BlockManifest {
   name: string;
   version: string;
   interface: string;
   summary: string;
-  runtime: string;
-  build?: Record<string, unknown>;
+  runtime: "native" | "wasm" | "both";
+  build?: {
+    type: string;
+    crate: string;
+    git: string;
+    register: string;
+    feature?: string;
+  };
 }
 
 /**
@@ -40,7 +47,7 @@ export async function generateInterfaces(
     };
 
     if (block.build) {
-      manifest.build = block.build;
+      manifest.build = block.build as BlockManifest["build"];
     }
 
     const filename = `${block.name}.block.json`;

@@ -19,110 +19,82 @@ use crate::helpers::expand_env_vars;
 use crate::observability::{ObservabilityBus, ObservabilityContext};
 use crate::types::*;
 
-/// A parsed reference to a remote block on GitHub, e.g.
-/// `"github.com/acme/auth-block@v1.0.0"`.
+/// ABI version for WASM block compatibility.
+pub const ABI_VERSION: u32 = 1;
+
+/// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
 #[cfg(feature = "wasm")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteBlockRef {
-    pub owner: String,
-    pub repo: String,
+    pub org: String,
+    pub block: String,
     pub version: String,
-    /// Optional block name within a multi-block repo, e.g. `"auth"` in
-    /// `github.com/wafer-run/wafer-run-blocks/auth@v1.0.0`.
-    pub block_name: Option<String>,
 }
 
-/// Parse a block name into a `RemoteBlockRef` if it matches the
-/// `github.com/{owner}/{repo}@{version}` convention.
+/// Parse a block name into a versioned `RemoteBlockRef` if it matches the
+/// `{org}/{block}@{version}` convention.
 ///
-/// Returns `None` for local block names (no `@`, doesn't start with
-/// `github.com/`, wrong number of segments, or empty version).
+/// Returns `None` for local block names (no `/`, no version,
+/// wrong number of segments, or empty version).
 #[cfg(feature = "wasm")]
 pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
-    let at_pos = name.find('@')?;
+    let at_pos = name.rfind('@')?;
     let path = &name[..at_pos];
     let version = &name[at_pos + 1..];
-
     if version.is_empty() || version == "latest" {
         return None;
     }
-
     let segments: Vec<&str> = path.split('/').collect();
-    if segments[0] != "github.com" {
+    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
         return None;
     }
-
-    match segments.len() {
-        3 => Some(RemoteBlockRef {
-            owner: segments[1].to_string(),
-            repo: segments[2].to_string(),
-            version: version.to_string(),
-            block_name: None,
-        }),
-        4 => Some(RemoteBlockRef {
-            owner: segments[1].to_string(),
-            repo: segments[2].to_string(),
-            version: version.to_string(),
-            block_name: Some(segments[3].to_string()),
-        }),
-        _ => None,
-    }
+    Some(RemoteBlockRef {
+        org: segments[0].to_string(),
+        block: segments[1].to_string(),
+        version: version.to_string(),
+    })
 }
 
-/// A parsed reference to a remote block on GitHub without a version, e.g.
-/// `"github.com/acme/auth-block"`. The runtime resolves the latest release
-/// that has a `.wasm` asset.
-#[cfg(feature = "wasm")]
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnversionedRemoteBlockRef {
-    pub owner: String,
-    pub repo: String,
-    /// Optional block name within a multi-block repo.
-    pub block_name: Option<String>,
-}
-
-/// Parse a block name into an `UnversionedRemoteBlockRef` if it matches the
-/// `github.com/{owner}/{repo}` convention (no `@version` suffix).
+/// Parse a block name into an unversioned `RemoteBlockRef` if it matches the
+/// `{org}/{block}` convention. No `@version` suffix.
 ///
-/// Returns `None` when the name contains `@`, doesn't start with
-/// `github.com/`, or has the wrong number of segments.
+/// Returns `None` when the name has a version, no `/`, or wrong
+/// number of segments.
 #[cfg(feature = "wasm")]
-pub fn parse_unversioned_block(name: &str) -> Option<UnversionedRemoteBlockRef> {
-    // Accept bare `github.com/owner/repo[/block]` or with `@latest` suffix
+pub fn parse_unversioned_block(name: &str) -> Option<RemoteBlockRef> {
+    // Strip optional @latest suffix
     let name = name.strip_suffix("@latest").unwrap_or(name);
-
     if name.contains('@') {
         return None;
     }
-
     let segments: Vec<&str> = name.split('/').collect();
-    if segments[0] != "github.com" {
+    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
         return None;
     }
+    Some(RemoteBlockRef {
+        org: segments[0].to_string(),
+        block: segments[1].to_string(),
+        version: "latest".to_string(),
+    })
+}
 
-    match segments.len() {
-        3 => {
-            if segments[1].is_empty() || segments[2].is_empty() {
-                return None;
-            }
-            Some(UnversionedRemoteBlockRef {
-                owner: segments[1].to_string(),
-                repo: segments[2].to_string(),
-                block_name: None,
-            })
-        }
-        4 => {
-            if segments[1].is_empty() || segments[2].is_empty() || segments[3].is_empty() {
-                return None;
-            }
-            Some(UnversionedRemoteBlockRef {
-                owner: segments[1].to_string(),
-                repo: segments[2].to_string(),
-                block_name: Some(segments[3].to_string()),
-            })
-        }
-        _ => None,
-    }
+/// Registry manifest format for resolving remote blocks.
+#[cfg(feature = "wasm")]
+#[derive(serde::Deserialize)]
+struct RegistryManifest {
+    #[allow(dead_code)]
+    name: String,
+    latest: String,
+    versions: HashMap<String, VersionEntry>,
+}
+
+/// A single version entry in a registry manifest.
+#[cfg(feature = "wasm")]
+#[derive(serde::Deserialize)]
+struct VersionEntry {
+    abi: u32,
+    wasm_url: Option<String>,
+    flow_url: Option<String>,
 }
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
@@ -143,6 +115,10 @@ impl RuntimeHandle {
     }
 }
 
+/// A registrar function that registers a block or flow with config.
+/// Called by [`Wafer::register`] when the name matches.
+pub type RegistrarFn = Box<dyn Fn(&mut Wafer, serde_json::Value) + Send + Sync>;
+
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {
@@ -159,15 +135,19 @@ pub struct Wafer {
     pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
-    /// Alias mappings (e.g. `"@db"` → `"@wafer/sqlite"`). Alias names
+    /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: HashMap<String, String>,
     /// Config expanders: registered functions that split a composite config
-    /// (e.g. `@wafer/http-server`) into configs for individual blocks.
+    /// (e.g. `wafer-run/http-server`) into configs for individual blocks.
     pub(crate) config_expanders: HashMap<
         String,
         Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>,
     >,
+    /// Named registrars: functions that register blocks/flows by name.
+    /// Populated by crate consumers (e.g. wafer-core) so that
+    /// `wafer.register("wafer-run/http-server", config)` works.
+    pub(crate) registrars: HashMap<String, RegistrarFn>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
@@ -183,6 +163,7 @@ impl Wafer {
             all_blocks: Arc::new(HashMap::new()),
             aliases: HashMap::new(),
             config_expanders: HashMap::new(),
+            registrars: HashMap::new(),
             hooks: ObservabilityBus::new(),
             blocks_snapshot: Arc::new(Vec::new()),
             flow_infos_snapshot: Arc::new(Vec::new()),
@@ -201,6 +182,43 @@ impl Wafer {
     /// it resolves to the target block name.
     pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
         self.aliases.insert(alias.into(), target.into());
+    }
+
+    /// Add a named registrar function. Registrars are called by
+    /// [`register`](Self::register) to set up blocks, flows, and config
+    /// by name.
+    ///
+    /// Typically called by crate consumers (e.g. wafer-core) to make
+    /// their blocks available via `wafer.register("wafer-run/...", config)`.
+    pub fn add_registrar(
+        &mut self,
+        name: impl Into<String>,
+        f: impl Fn(&mut Wafer, serde_json::Value) + Send + Sync + 'static,
+    ) {
+        self.registrars.insert(name.into(), Box::new(f));
+    }
+
+    /// Register a block or flow by name with the given config.
+    ///
+    /// If a registrar was previously added via [`add_registrar`](Self::add_registrar),
+    /// it is called immediately. Otherwise, for names matching the
+    /// `{org}/{block}` convention, the config is stored and the
+    /// block or flow will be resolved during [`resolve()`](Self::resolve)
+    /// (downloading `.flow.json` or `.wasm` via the registry).
+    pub fn register(&mut self, name: &str, config: serde_json::Value) {
+        if let Some(registrar) = self.registrars.remove(name) {
+            registrar(self, config);
+            self.registrars.insert(name.to_string(), registrar);
+            return;
+        }
+
+        // No registrar — store config for deferred resolution during resolve().
+        // The name must look like a remote ref (org/block).
+        if !name.contains('/') {
+            panic!("no registrar found for {:?} and name is not a remote ref", name);
+        }
+        tracing::debug!(name = %name, "no registrar found, deferring to resolve()");
+        self.add_block_config(name, config);
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
@@ -253,9 +271,9 @@ impl Wafer {
     /// Example:
     /// ```json
     /// {
-    ///     "@wafer/database": { "type": "sqlite", "path": "data/app.db" },
-    ///     "@wafer/crypto": { "jwt_secret": "${JWT_SECRET}" },
-    ///     "@wafer/logger": {}
+    ///     "wafer-run/database": { "type": "sqlite", "path": "data/app.db" },
+    ///     "wafer-run/crypto": { "jwt_secret": "${JWT_SECRET}" },
+    ///     "wafer-run/logger": {}
     /// }
     /// ```
     pub fn load_blocks_json(&mut self, path: &str) -> Result<(), String> {
@@ -444,6 +462,59 @@ impl Wafer {
         }
     }
 
+    /// Expand declarative `config_map` and `config_defaults` from flows.
+    ///
+    /// For each flow that has a non-empty `config_map` and a matching entry in
+    /// `block_configs`, the flow's config is removed and routed to target blocks:
+    /// 1. `config_defaults` are deep-merged into target block configs first.
+    /// 2. Each `config_map` key found in the flow config is placed into the
+    ///    target block's config under the mapped key (deep-merge).
+    fn expand_declarative_flow_configs(&mut self) {
+        // Collect flow ids that have config_map entries and matching block_configs.
+        let eligible: Vec<(
+            String,
+            HashMap<String, ConfigMapEntry>,
+            HashMap<String, serde_json::Value>,
+        )> = self
+            .flows
+            .values()
+            .filter(|f| !f.config_map.is_empty())
+            .filter(|f| self.block_configs.contains_key(&f.id))
+            .map(|f| (f.id.clone(), f.config_map.clone(), f.config_defaults.clone()))
+            .collect();
+
+        for (flow_id, config_map, config_defaults) in eligible {
+            let flow_config = match self.block_configs.remove(&flow_id) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // 1. Apply config_defaults to target blocks
+            for (target, defaults) in &config_defaults {
+                let entry = self
+                    .block_configs
+                    .entry(target.clone())
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                deep_merge(entry, defaults);
+            }
+
+            // 2. Route config_map keys to target blocks
+            if let Some(obj) = flow_config.as_object() {
+                for (user_key, mapping) in &config_map {
+                    if let Some(value) = obj.get(user_key) {
+                        let entry = self
+                            .block_configs
+                            .entry(mapping.target.clone())
+                            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                        let contribution =
+                            serde_json::json!({ mapping.key.clone(): value.clone() });
+                        deep_merge(entry, &contribution);
+                    }
+                }
+            }
+        }
+    }
+
     fn gather_uses_configs(&mut self) {
         // Collect all (target, contribution) pairs first to avoid borrow conflicts.
         let mut contributions: Vec<(String, serde_json::Value)> = Vec::new();
@@ -481,8 +552,14 @@ impl Wafer {
     /// `add_block_config`) are initialized first (infrastructure), then
     /// remaining blocks are initialized (features that may depend on infra).
     pub async fn resolve(&mut self) -> Result<(), String> {
-        // Expand composite configs (e.g. @wafer/http-server → http-listener + router)
+        // Resolve remote entries: download .flow.json / .wasm for deferred registrations
+        #[cfg(feature = "wasm")]
+        self.resolve_remote_entries().await?;
+
+        // Expand composite configs (e.g. wafer-run/http-server → http-listener + router)
         self.expand_composite_configs();
+        // Expand declarative flow config_map / config_defaults
+        self.expand_declarative_flow_configs();
         // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
 
@@ -496,20 +573,20 @@ impl Wafer {
         let config_names: std::collections::HashSet<String> =
             configs.iter().map(|(n, _)| n.clone()).collect();
 
-        // Sort configs: @wafer/* infrastructure blocks first, then everything else.
+        // Sort configs: wafer-run/* infrastructure blocks first, then everything else.
         // Infrastructure blocks (database, config, crypto, etc.) must be initialized
         // before feature blocks that depend on them during lifecycle init.
         let mut infra_configs = Vec::new();
         let mut feature_configs = Vec::new();
         for entry in &configs {
-            if entry.0.starts_with("@wafer/") {
+            if entry.0.starts_with("wafer-run/") {
                 infra_configs.push(entry);
             } else {
                 feature_configs.push(entry);
             }
         }
 
-        // Phase 1a: Initialize infrastructure blocks (@wafer/*) with configs.
+        // Phase 1a: Initialize infrastructure blocks (wafer-run/*) with configs.
         self.rebuild_all_blocks();
         for (name, config) in &infra_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
@@ -537,7 +614,7 @@ impl Wafer {
         }
 
         // Phase 1b: Initialize feature blocks with configs.
-        // Infrastructure is now ready, so these can use @wafer/database etc.
+        // Infrastructure is now ready, so these can use wafer-run/database etc.
         self.rebuild_all_blocks();
         for (name, config) in &feature_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
@@ -605,6 +682,294 @@ impl Wafer {
         Ok(())
     }
 
+    /// Resolve remote blocks for deferred registrations via the registry.
+    ///
+    /// For each entry in `block_configs` that matches the `{org}/{block}`
+    /// naming convention and has no corresponding flow or block already
+    /// registered:
+    /// 1. Fetch the registry manifest from
+    ///    `raw.githubusercontent.com/wafer-run/registry/main/{org}/{block}/manifest.json`.
+    /// 2. Check ABI compatibility and resolve the version.
+    /// 3. If the manifest has a `flow_url`, download and register as a flow,
+    ///    then pre-resolve block dependencies.
+    /// 4. If the manifest has a `wasm_url`, download and register as a WASM block.
+    #[cfg(feature = "wasm")]
+    async fn resolve_remote_entries(&mut self) -> Result<(), String> {
+        // Collect config entries that look like remote refs and aren't already
+        // registered as a flow or block.
+        let candidates: Vec<String> = self
+            .block_configs
+            .keys()
+            .filter(|name| name.contains('/'))
+            .filter(|name| !self.flows.contains_key(name.as_str()))
+            .filter(|name| !self.blocks.contains_key(name.as_str()))
+            .filter(|name| {
+                parse_unversioned_block(name).is_some() || parse_versioned_block(name).is_some()
+            })
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+
+        for name in candidates {
+            let remote_ref = parse_versioned_block(&name)
+                .or_else(|| parse_unversioned_block(&name));
+            let remote_ref = match remote_ref {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Fetch registry manifest
+            let manifest_url = format!(
+                "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
+                remote_ref.org, remote_ref.block
+            );
+
+            let resp = client
+                .get(&manifest_url)
+                .header("User-Agent", "wafer-run/0.1.0")
+                .send()
+                .await
+                .map_err(|e| format!("failed to fetch registry manifest for {}: {}", name, e))?;
+
+            if resp.status().as_u16() == 404 {
+                // Not in registry — might be a locally-registered block.
+                // Leave in block_configs for config expanders or node resolution.
+                continue;
+            }
+            if resp.status().as_u16() != 200 {
+                return Err(format!(
+                    "failed to fetch registry manifest for {}: HTTP {}",
+                    name, resp.status().as_u16()
+                ));
+            }
+
+            let manifest_bytes = resp.bytes().await
+                .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
+            let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
+
+            // Resolve version
+            let version = if remote_ref.version == "latest" {
+                manifest.latest.clone()
+            } else {
+                remote_ref.version.clone()
+            };
+
+            let entry = manifest.versions.get(&version).ok_or_else(|| {
+                format!("version {} not found in registry for {}", version, name)
+            })?;
+
+            // Check ABI compatibility
+            if entry.abi != ABI_VERSION {
+                return Err(format!(
+                    "block {} version {} requires ABI {} but runtime supports ABI {}",
+                    name, version, entry.abi, ABI_VERSION
+                ));
+            }
+
+            // Download flow or WASM
+            if let Some(flow_url) = &entry.flow_url {
+                let flow_def = self.download_flow_from_url(&client, flow_url, &name).await?;
+
+                // Pre-resolve block dependencies from the flow's blocks array
+                let blocks_to_resolve: Vec<String> = flow_def
+                    .blocks
+                    .iter()
+                    .filter(|b| !self.blocks.contains_key(b.as_str()))
+                    .cloned()
+                    .collect();
+
+                self.add_flow_def(&flow_def);
+
+                for block_name in &blocks_to_resolve {
+                    if self.blocks.contains_key(block_name.as_str()) {
+                        continue;
+                    }
+                    match self.resolve_remote_block(&client, block_name).await {
+                        Ok(Some(block)) => {
+                            tracing::info!(block = %block_name, "downloaded remote block");
+                            self.blocks.insert(block_name.clone(), block);
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                block = %block_name,
+                                "block not found in registry, will resolve during node resolution"
+                            );
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "failed to download block dependency {:?} for flow {:?}: {}",
+                                block_name, name, e
+                            ));
+                        }
+                    }
+                }
+            } else if let Some(wasm_url) = &entry.wasm_url {
+                let block = self.download_wasm_from_url(&client, wasm_url, &name).await?;
+                tracing::info!(block = %name, "downloaded remote WASM block from registry");
+                self.blocks.insert(name.clone(), block);
+            }
+            // If neither flow_url nor wasm_url, it's a native-only block.
+            // Leave in block_configs for node resolution to report the error.
+        }
+
+        Ok(())
+    }
+
+    /// Download a `.flow.json` from a direct URL.
+    #[cfg(feature = "wasm")]
+    async fn download_flow_from_url(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+        name: &str,
+    ) -> Result<FlowDef, String> {
+        let resp = client
+            .get(url)
+            .header("User-Agent", "wafer-run/0.1.0")
+            .send()
+            .await
+            .map_err(|e| format!("failed to download flow for {}: {}", name, e))?;
+
+        if resp.status().as_u16() != 200 {
+            return Err(format!(
+                "failed to download flow for {}: HTTP {}",
+                name, resp.status().as_u16()
+            ));
+        }
+
+        let body = resp.bytes().await
+            .map_err(|e| format!("failed to read flow body for {}: {}", name, e))?;
+
+        let def: FlowDef = serde_json::from_slice(&body)
+            .map_err(|e| format!("failed to parse flow JSON for {}: {}", name, e))?;
+
+        tracing::info!(flow = %def.id, url = %url, "downloaded remote flow definition");
+        Ok(def)
+    }
+
+    /// Download a `.wasm` block from a direct URL.
+    #[cfg(feature = "wasm")]
+    async fn download_wasm_from_url(
+        &mut self,
+        client: &reqwest::Client,
+        url: &str,
+        name: &str,
+    ) -> Result<Arc<dyn Block>, String> {
+        use crate::wasm::WASMBlock;
+        use crate::wasm::capabilities::BlockCapabilities;
+
+        let resp = client
+            .get(url)
+            .header("User-Agent", "wafer-run/0.1.0")
+            .send()
+            .await
+            .map_err(|e| format!("failed to download WASM for {}: {}", name, e))?;
+
+        let status = resp.status().as_u16();
+        if status != 200 {
+            return Err(format!("failed to download WASM for {}: HTTP {}", name, status));
+        }
+
+        let body = resp.bytes().await
+            .map_err(|e| format!("failed to read WASM body for {}: {}", name, e))?;
+
+        if body.is_empty() {
+            return Err(format!("failed to download WASM for {}: empty response body", name));
+        }
+
+        let engine = self.wasm_engine()?.clone();
+        let block = WASMBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
+            .map_err(|e| format!("failed to load remote block {}: {}", name, e))?;
+
+        Ok(Arc::new(block))
+    }
+
+    /// Resolve a remote block via the registry. Returns `Ok(None)` if the block
+    /// is not found in the registry.
+    #[cfg(feature = "wasm")]
+    async fn resolve_remote_block(
+        &mut self,
+        client: &reqwest::Client,
+        name: &str,
+    ) -> Result<Option<Arc<dyn Block>>, String> {
+        let remote_ref = parse_versioned_block(name)
+            .or_else(|| parse_unversioned_block(name));
+        let remote_ref = match remote_ref {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let manifest_url = format!(
+            "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
+            remote_ref.org, remote_ref.block
+        );
+
+        let resp = client
+            .get(&manifest_url)
+            .header("User-Agent", "wafer-run/0.1.0")
+            .send()
+            .await
+            .map_err(|e| format!("failed to fetch registry manifest for {}: {}", name, e))?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if resp.status().as_u16() != 200 {
+            return Err(format!(
+                "failed to fetch registry manifest for {}: HTTP {}",
+                name, resp.status().as_u16()
+            ));
+        }
+
+        let manifest_bytes = resp.bytes().await
+            .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
+        let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
+
+        let version = if remote_ref.version == "latest" {
+            manifest.latest.clone()
+        } else {
+            remote_ref.version.clone()
+        };
+
+        let entry = manifest.versions.get(&version).ok_or_else(|| {
+            format!("version {} not found in registry for {}", version, name)
+        })?;
+
+        if entry.abi != ABI_VERSION {
+            return Err(format!(
+                "block {} version {} requires ABI {} but runtime supports ABI {}",
+                name, version, entry.abi, ABI_VERSION
+            ));
+        }
+
+        if let Some(wasm_url) = &entry.wasm_url {
+            let block = self.download_wasm_from_url(client, wasm_url, name).await?;
+            Ok(Some(block))
+        } else if let Some(flow_url) = &entry.flow_url {
+            // Flows are handled at a higher level; return None here
+            tracing::debug!(block = %name, flow_url = %flow_url, "block is a flow, not a WASM block");
+            Ok(None)
+        } else {
+            // Native-only block
+            let crate_name = format!("wafer-block-{}", remote_ref.block);
+            Err(format!(
+                "Block \"{}\" is native-only and must be compiled in.\n\
+                 Add it with: cargo add {}",
+                name, crate_name
+            ))
+        }
+    }
+
     fn resolve_node<'a>(
         &'a mut self,
         node: &'a mut Node,
@@ -624,15 +989,16 @@ impl Wafer {
                 if let Some(block) = self.blocks.get(&node.block) {
                     node.resolved_block = Some(block.clone());
                 } else {
-                    // Block not in resolved — try remote WASM download
+                    // Block not in resolved — try registry-based WASM download
                     #[cfg(feature = "wasm")]
                     {
-                        let block = if let Some(remote_ref) = parse_versioned_block(&node.block) {
-                            self.download_remote_block(&remote_ref).await?
-                        } else if let Some(remote_ref) = parse_unversioned_block(&node.block) {
-                            self.resolve_latest_wasm_release(&remote_ref).await?
-                        } else {
-                            return Err(format!("block type not found: {}", node.block));
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .build()
+                            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+                        let block = match self.resolve_remote_block(&client, &node.block).await? {
+                            Some(b) => b,
+                            None => return Err(format!("block type not found: {}", node.block)),
                         };
 
                         let ctx = self.make_context(
@@ -674,183 +1040,6 @@ impl Wafer {
         })
     }
 
-    /// Download a remote block from GitHub Releases and load it as a sandboxed
-    /// WASM block. The `.wasm` asset is expected at:
-    /// - Single-block repo: `…/{version}/{repo}.wasm`
-    /// - Multi-block repo:  `…/{version}/{block_name}.wasm`
-    #[cfg(feature = "wasm")]
-    async fn download_remote_block(&mut self, r: &RemoteBlockRef) -> Result<Arc<dyn Block>, String> {
-        use crate::wasm::WASMBlock;
-        use crate::wasm::capabilities::BlockCapabilities;
-
-        let asset_name = r.block_name.as_deref().unwrap_or(&r.repo);
-        let url = format!(
-            "https://github.com/{}/{}/releases/download/{}/{}.wasm",
-            r.owner, r.repo, r.version, asset_name
-        );
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("failed to download {}: {}", url, e))?;
-
-        let status = resp.status().as_u16();
-        if status != 200 {
-            return Err(format!("failed to download {}: HTTP {}", url, status));
-        }
-
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read body from {}: {}", url, e))?;
-
-        if body.is_empty() {
-            return Err(format!("failed to download {}: empty response body", url));
-        }
-
-        let engine = self.wasm_engine()?.clone();
-        let block = WASMBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
-            .map_err(|e| format!("failed to load remote block {}: {}", url, e))?;
-
-        Ok(Arc::new(block))
-    }
-
-    /// Resolve the latest GitHub Release that has a `.wasm` asset and load it
-    /// as a sandboxed WASM block.
-    #[cfg(feature = "wasm")]
-    async fn resolve_latest_wasm_release(
-        &mut self,
-        r: &UnversionedRemoteBlockRef,
-    ) -> Result<Arc<dyn Block>, String> {
-        use crate::wasm::WASMBlock;
-        use crate::wasm::capabilities::BlockCapabilities;
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-
-        // 1. Fetch recent releases from the GitHub API
-        let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page=10",
-            r.owner, r.repo
-        );
-
-        let api_resp = client
-            .get(&api_url)
-            .header("User-Agent", "wafer-run/0.1.0")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await
-            .map_err(|e| format!("failed to fetch releases for {}/{}: {}", r.owner, r.repo, e))?;
-
-        let api_status = api_resp.status().as_u16();
-        if api_status != 200 {
-            return Err(format!(
-                "failed to fetch releases for {}/{}: HTTP {}",
-                r.owner, r.repo, api_status
-            ));
-        }
-
-        let api_body = api_resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read releases response: {}", e))?;
-
-        // 2. Parse the JSON response
-        #[derive(serde::Deserialize)]
-        struct GhAsset {
-            name: String,
-            browser_download_url: String,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct GhRelease {
-            assets: Vec<GhAsset>,
-        }
-
-        let releases: Vec<GhRelease> = serde_json::from_slice(&api_body)
-            .map_err(|e| format!("failed to parse releases JSON for {}/{}: {}", r.owner, r.repo, e))?;
-
-        // 3. Find first release with a .wasm asset
-        //    For multi-block repos, match exactly "{block_name}.wasm".
-        //    For single-block repos, match any ".wasm" file.
-        let mut wasm_url: Option<String> = None;
-        for release in &releases {
-            for asset in &release.assets {
-                let matches = match &r.block_name {
-                    Some(bn) => asset.name == format!("{}.wasm", bn),
-                    None => asset.name.ends_with(".wasm"),
-                };
-                if matches {
-                    wasm_url = Some(asset.browser_download_url.clone());
-                    break;
-                }
-            }
-            if wasm_url.is_some() {
-                break;
-            }
-        }
-
-        let wasm_url = wasm_url.ok_or_else(|| {
-            match &r.block_name {
-                Some(bn) => format!(
-                    "no release with a {}.wasm asset found for {}/{}",
-                    bn, r.owner, r.repo
-                ),
-                None => format!(
-                    "no release with a .wasm asset found for {}/{}",
-                    r.owner, r.repo
-                ),
-            }
-        })?;
-
-        // 4. Download the .wasm asset
-        let dl_resp = client
-            .get(&wasm_url)
-            .send()
-            .await
-            .map_err(|e| format!("failed to download {}: {}", wasm_url, e))?;
-
-        let dl_status = dl_resp.status().as_u16();
-        if dl_status != 200 {
-            return Err(format!(
-                "failed to download {}: HTTP {}",
-                wasm_url, dl_status
-            ));
-        }
-
-        let dl_body = dl_resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read body from {}: {}", wasm_url, e))?;
-
-        if dl_body.is_empty() {
-            return Err(format!(
-                "failed to download {}: empty response body",
-                wasm_url
-            ));
-        }
-
-        // 5. Load via WASM engine
-        let engine = self.wasm_engine()?.clone();
-        let block =
-            WASMBlock::load_with_engine(&engine, &dl_body, BlockCapabilities::none())
-                .map_err(|e| {
-                    format!(
-                        "failed to load remote block {}/{}: {}",
-                        r.owner, r.repo, e
-                    )
-                })?;
-
-        Ok(Arc::new(block))
-    }
-
     /// Get or create the shared WASM engine with fuel metering.
     #[cfg(feature = "wasm")]
     pub fn wasm_engine(&mut self) -> Result<&wasmtime::Engine, String> {
@@ -887,7 +1076,7 @@ impl Wafer {
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
     ///
     /// This is the primary entry point for applications that want blocks
-    /// (like `@wafer/http`) to spawn their own async tasks.
+    /// (like `wafer-run/http-listener`) to spawn their own async tasks.
     pub async fn start(mut self) -> Result<Arc<Self>, String> {
         // 1. All mutable work
         self.start_without_bind().await?;

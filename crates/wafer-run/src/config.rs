@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::types::{InstanceMode, LifecycleEvent};
@@ -64,6 +65,14 @@ impl BlockConfig {
 // Flow & Node definitions
 // ---------------------------------------------------------------------------
 
+/// A declarative config routing entry: maps a user-facing config key
+/// to a target block and key within that block's config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigMapEntry {
+    pub target: String,
+    pub key: String,
+}
+
 /// FlowDef defines a flow in JSON configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowDef {
@@ -73,6 +82,15 @@ pub struct FlowDef {
     #[serde(default)]
     pub config: FlowConfigDef,
     pub root: NodeDef,
+    /// Block dependencies — the runtime ensures these exist before resolving.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
+    /// Declarative config expansion: maps user-facing config keys to target block configs.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config_map: HashMap<String, ConfigMapEntry>,
+    /// Static config values always injected into target block configs.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config_defaults: HashMap<String, serde_json::Value>,
 }
 
 /// FlowConfigDef holds flow-level configuration.
@@ -107,6 +125,12 @@ pub struct Flow {
     pub summary: String,
     pub config: FlowConfig,
     pub root: Box<Node>,
+    /// Block dependencies.
+    pub blocks: Vec<String>,
+    /// Declarative config expansion map.
+    pub config_map: HashMap<String, ConfigMapEntry>,
+    /// Static config defaults for target blocks.
+    pub config_defaults: HashMap<String, serde_json::Value>,
 }
 
 /// FlowConfig holds runtime flow configuration.
@@ -219,6 +243,9 @@ pub fn flow_def_to_flow(def: &FlowDef) -> Flow {
             timeout: parse_duration(&def.config.timeout),
         },
         root: Box::new(node_def_to_node(&def.root)),
+        blocks: def.blocks.clone(),
+        config_map: def.config_map.clone(),
+        config_defaults: def.config_defaults.clone(),
     }
 }
 
@@ -254,6 +281,9 @@ pub fn flow_to_flow_def(c: &Flow) -> FlowDef {
             },
         },
         root: node_to_node_def(&c.root),
+        blocks: c.blocks.clone(),
+        config_map: c.config_map.clone(),
+        config_defaults: c.config_defaults.clone(),
     }
 }
 

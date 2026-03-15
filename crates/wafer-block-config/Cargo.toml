@@ -1,0 +1,18 @@
+[package]
+name = "wafer-block-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: configuration key-value access"
+
+[features]
+toml = ["dep:toml"]
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+toml = { workspace = true, optional = true }

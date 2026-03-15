@@ -295,7 +295,7 @@ func (m *Message) Drop() Result
 func (m *Message) Error(e Error) Result
 
 type BlockInfo struct {
-    Name         string         // e.g., "@wafer/sqlite"
+    Name         string         // e.g., "wafer-run/sqlite"
     Version      string         // e.g., "2.1.0" (semver)
     Interface    string         // e.g., "database@v1" (required)
     Summary      string         // Brief description of this implementation
@@ -835,7 +835,7 @@ type SQLiteBlock struct {
 
 func (b *SQLiteBlock) Info() wafer.BlockInfo {
     return wafer.BlockInfo{
-        Name:         "@wafer/sqlite",
+        Name:         "wafer-run/sqlite",
         Version:      "2.1.0",
         Interface:    "database@v1",
         Summary:      "SQLite database using local file storage. Supports query, insert, update, delete.",

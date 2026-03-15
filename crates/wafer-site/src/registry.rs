@@ -386,25 +386,28 @@ impl RegistryBlock {
         false
     }
 
+    /// Validate a package name: `@owner/repo[/block]`.
     fn validate_package_name(name: &str) -> bool {
-        let parts: Vec<&str> = name.split('/').collect();
-        if parts[0] != "github.com" { return false; }
-        if parts.len() != 3 && parts.len() != 4 { return false; }
+        let stripped = match name.strip_prefix('@') {
+            Some(s) => s,
+            None => return false,
+        };
         let valid_segment = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.');
-        if !parts[1..].iter().all(|s| valid_segment(s)) { return false; }
-        // "versions" and "download" are reserved by URL routing
-        if parts.len() == 4 && (parts[3] == "versions" || parts[3] == "download") { return false; }
+        let parts: Vec<&str> = stripped.split('/').collect();
+        if parts.len() != 2 && parts.len() != 3 { return false; }
+        if !parts.iter().all(|s| valid_segment(s)) { return false; }
+        if parts.len() == 3 && (parts[2] == "versions" || parts[2] == "download") { return false; }
         true
     }
 
     /// Parse a package name into (owner, repo, optional block_name).
-    /// Accepts both `github.com/owner/repo` and `github.com/owner/repo/block`.
+    /// Format: `@owner/repo[/block]`.
     fn parse_owner_repo(name: &str) -> Option<(String, String, Option<String>)> {
-        let parts: Vec<&str> = name.split('/').collect();
-        if parts[0] != "github.com" { return None; }
+        let stripped = name.strip_prefix('@')?;
+        let parts: Vec<&str> = stripped.split('/').collect();
         match parts.len() {
-            3 => Some((parts[1].to_string(), parts[2].to_string(), None)),
-            4 => Some((parts[1].to_string(), parts[2].to_string(), Some(parts[3].to_string()))),
+            2 => Some((parts[0].to_string(), parts[1].to_string(), None)),
+            3 => Some((parts[0].to_string(), parts[1].to_string(), Some(parts[2].to_string()))),
             _ => None,
         }
     }
@@ -427,7 +430,7 @@ impl RegistryBlock {
 impl Block for RegistryBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer-site/registry".to_string(),
+            name: "wafer-site/registry".to_string(),
             version: "0.4.0".to_string(),
             interface: "handler@v1".to_string(),
             summary: "Package registry: Go-module-style, GitHub-backed blocks, flows, and interfaces".to_string(),
@@ -471,5 +474,5 @@ impl Block for RegistryBlock {
 }
 
 pub fn register(w: &mut Wafer) {
-    w.register_block("@wafer-site/registry", Arc::new(RegistryBlock::new()));
+    w.register_block("wafer-site/registry", Arc::new(RegistryBlock::new()));
 }

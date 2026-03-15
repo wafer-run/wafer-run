@@ -4,11 +4,13 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-# In your own project, use git deps:
-#   wafer-run  = { git = "https://github.com/wafer-run/wafer-run", features = ["full"] }
-#   wafer-core = { git = "https://github.com/wafer-run/wafer-run", features = ["http"] }
+# In your own project, use crates.io deps:
+#   wafer-run = { version = "0.1", features = ["full"] }
+#   wafer-flow-http-server = "0.1"
+#   wafer-block-web = "0.1"
 wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
-wafer-core = { path = "../../crates/wafer-core", features = ["http"] }
+wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }
+wafer-block-web = { path = "../../crates/wafer-block-web" }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

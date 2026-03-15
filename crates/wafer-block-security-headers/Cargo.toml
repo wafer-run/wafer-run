@@ -1,0 +1,10 @@
+[package]
+name = "wafer-block-security-headers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: adds standard security headers to HTTP responses"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }

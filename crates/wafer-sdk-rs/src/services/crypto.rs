@@ -68,7 +68,7 @@ fn make_msg(kind: &str, data: &impl Serialize) -> Message {
 }
 
 fn call_crypto(msg: &Message) -> Result<Vec<u8>, CryptoError> {
-    let result = call_block("@wafer/crypto", msg);
+    let result = call_block("wafer-run/crypto", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

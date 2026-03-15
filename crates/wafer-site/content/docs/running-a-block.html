@@ -8,7 +8,7 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Running a Block</h2>
-<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides <a href="/docs/built-in-blocks"><code>@wafer/http-server</code></a> (enable the <code>http</code> feature) — a batteries-included flow with security headers, CORS, rate limiting, monitoring, and routing built in. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
+<p>Once you have a block, you need a wafer runtime to host it. The runtime (<code>wafer-run</code>) is a pure block/flow executor with no transport knowledge. For HTTP, the <code>wafer-core</code> crate provides <a href="/docs/built-in-blocks"><code>wafer-run/http-server</code></a> (enable the <code>http</code> feature) — a batteries-included flow with security headers, CORS, rate limiting, monitoring, and routing built in. The Go and Node.js runtimes load pre-built <a href="/docs/wasm-blocks">WASM blocks</a> and expose a <code>run()</code> API you wire into your own HTTP framework.</p>
 
 <h3>Install</h3>
 

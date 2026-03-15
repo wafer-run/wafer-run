@@ -14,7 +14,7 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // Register the HTTP server (infra + router)
-    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
+    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/**", "block": "hello" }]
     }));

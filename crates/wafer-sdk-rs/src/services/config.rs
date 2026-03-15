@@ -28,7 +28,7 @@ struct GetResp {
 /// Retrieve a configuration value by key, returning `None` if not found.
 pub fn get(key: &str) -> Option<String> {
     let msg = Message::new("config.get", serde_json::to_vec(&GetReq { key }).unwrap_or_default());
-    let result = call_block("@wafer/config", &msg);
+    let result = call_block("wafer-run/config", &msg);
     match result.action {
         Action::Error => None,
         _ => {
@@ -50,5 +50,5 @@ pub fn get_default(key: &str, default_value: &str) -> String {
 /// Store a configuration key-value pair.
 pub fn set(key: &str, value: &str) {
     let msg = Message::new("config.set", serde_json::to_vec(&SetReq { key, value }).unwrap_or_default());
-    let _ = call_block("@wafer/config", &msg);
+    let _ = call_block("wafer-run/config", &msg);
 }

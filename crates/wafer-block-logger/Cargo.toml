@@ -1,0 +1,13 @@
+[package]
+name = "wafer-block-logger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: structured logging via tracing"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

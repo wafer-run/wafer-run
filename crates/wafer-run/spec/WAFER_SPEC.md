@@ -505,7 +505,7 @@ In this example:
 
 ## Aliases
 
-Aliases provide indirection for block and flow names. An alias maps a short name (e.g., `@db`) to a concrete block (e.g., `@wafer/database` or `solobase/d1`), allowing blocks to be swapped without changing any flow definitions or `call_block()` calls.
+Aliases provide indirection for block and flow names. An alias maps a short name (e.g., `db`) to a concrete block (e.g., `wafer-run/database` or `solobase/d1`), allowing blocks to be swapped without changing any flow definitions or `call_block()` calls.
 
 ### Configuration
 
@@ -514,11 +514,11 @@ Aliases are defined in `blocks.json` under the top-level `"aliases"` key:
 ```json
 {
   "aliases": {
-    "@db": "@wafer/database",
-    "@storage": "@wafer/storage"
+    "db": "wafer-run/database",
+    "storage": "wafer-run/storage"
   },
-  "@wafer/database": { "type": "sqlite", "path": "data/app.db" },
-  "@wafer/storage": { "type": "local", "root": "data/storage" }
+  "wafer-run/database": { "type": "sqlite", "path": "data/app.db" },
+  "wafer-run/storage": { "type": "local", "root": "data/storage" }
 }
 ```
 
@@ -534,7 +534,7 @@ Aliases can also be registered programmatically via `wafer.add_alias(alias, targ
 
 ### Requires enforcement
 
-When a block declares a `requires` list, both the alias name and the resolved target name are checked. A block that requires `"@db"` can call either `@db` or the underlying `@wafer/database`.
+When a block declares a `requires` list, both the alias name and the resolved target name are checked. A block that requires `"db"` can call either `db` or the underlying `wafer-run/database`.
 
 ---
 

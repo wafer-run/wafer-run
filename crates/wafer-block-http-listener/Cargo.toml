@@ -1,0 +1,16 @@
+[package]
+name = "wafer-block-http-listener"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: HTTP transport — listens for HTTP requests and converts to messages"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+axum = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+hyper = { workspace = true }

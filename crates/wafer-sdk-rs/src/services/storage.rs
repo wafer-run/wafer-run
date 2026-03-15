@@ -84,7 +84,7 @@ fn make_msg(kind: &str, data: &impl Serialize) -> Message {
 }
 
 fn call_storage(msg: &Message) -> Result<Vec<u8>, StorageError> {
-    let result = call_block("@wafer/storage", msg);
+    let result = call_block("wafer-run/storage", msg);
     match result.action {
         Action::Error => {
             let err_msg = result.error

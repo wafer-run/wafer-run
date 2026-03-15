@@ -10,7 +10,7 @@ pub use crate::interfaces::storage::service::ListOptions;
 
 use super::{call_service, decode};
 
-const BLOCK: &str = "@wafer/storage";
+const BLOCK: &str = "wafer-run/storage";
 
 // --- Wire-format types ---
 

@@ -1,0 +1,12 @@
+[package]
+name = "wafer-block-monitoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: request metrics and monitoring"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }

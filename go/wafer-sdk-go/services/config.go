@@ -14,7 +14,7 @@ import (
 func ConfigGetCtx(ctx wafer.Context, key string) (string, bool) {
 	msg := wafer.NewMessage("config.get", nil)
 	msg.SetMeta("key", key)
-	result := ctx.CallBlock("@wafer/config", msg)
+	result := ctx.CallBlock("wafer-run/config", msg)
 	if result.Error != nil {
 		return "", false
 	}
@@ -38,7 +38,7 @@ func ConfigGetDefaultCtx(ctx wafer.Context, key, defaultValue string) string {
 func ConfigSetCtx(ctx wafer.Context, key, value string) error {
 	msg := wafer.NewMessage("config.set", []byte(value))
 	msg.SetMeta("key", key)
-	result := ctx.CallBlock("@wafer/config", msg)
+	result := ctx.CallBlock("wafer-run/config", msg)
 	if result.Error != nil {
 		return fmt.Errorf("%s: %s", result.Error.Code, result.Error.Message)
 	}
@@ -49,7 +49,7 @@ func ConfigSetCtx(ctx wafer.Context, key, value string) error {
 
 // ConfigGet retrieves a configuration value by key. Returns the value and true
 // if the key exists, or empty string and false if not.
-// When CallBlock is available, it routes through the "@wafer/config" block.
+// When CallBlock is available, it routes through the "wafer-run/config" block.
 func ConfigGet(key string) (string, bool) {
 	if wafer.HasCallBlock() {
 		return ConfigGetCtx(wafer.NewContext(), key)

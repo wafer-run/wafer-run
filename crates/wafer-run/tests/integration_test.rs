@@ -42,6 +42,9 @@ fn make_flow(id: &str, root: Box<Node>) -> Flow {
         summary: format!("Test flow: {}", id),
         config: FlowConfig::default(),
         root,
+        blocks: Vec::new(),
+        config_map: Default::default(),
+        config_defaults: Default::default(),
     }
 }
 
@@ -54,6 +57,9 @@ fn make_flow_with_on_error(id: &str, root: Box<Node>, on_error: &str) -> Flow {
             timeout: Duration::ZERO,
         },
         root,
+        blocks: Vec::new(),
+        config_map: Default::default(),
+        config_defaults: Default::default(),
     }
 }
 
@@ -979,6 +985,9 @@ async fn test_add_flow_def() {
             instance: String::new(),
             next: vec![],
         },
+        blocks: vec![],
+        config_map: Default::default(),
+        config_defaults: Default::default(),
     };
 
     w.add_flow_def(&def);
@@ -1115,64 +1124,59 @@ fn make_test_context() -> TestContext {
 mod versioned_block_tests {
     use wafer_run::parse_versioned_block;
 
+    // --- org/block@version format ---
+
     #[test]
-    fn test_parse_versioned_block_valid() {
-        let r = parse_versioned_block("github.com/acme/auth-block@v1.0.0").unwrap();
-        assert_eq!(r.owner, "acme");
-        assert_eq!(r.repo, "auth-block");
+    fn test_parse_versioned_basic() {
+        let r = parse_versioned_block("acme/auth-block@v1.0.0").unwrap();
+        assert_eq!(r.org, "acme");
+        assert_eq!(r.block, "auth-block");
         assert_eq!(r.version, "v1.0.0");
-        assert_eq!(r.block_name, None);
     }
 
     #[test]
-    fn test_parse_versioned_block_no_version() {
-        assert!(parse_versioned_block("github.com/acme/auth-block").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_block_empty_version() {
-        assert!(parse_versioned_block("github.com/acme/auth-block@").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_block_not_github() {
-        assert!(parse_versioned_block("gitlab.com/acme/auth-block@v1.0.0").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_block_local_name() {
-        assert!(parse_versioned_block("@wafer/auth-validator").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_block_wrong_segments() {
-        // Only 2 segments (missing repo)
-        assert!(parse_versioned_block("github.com/acme@v1.0.0").is_none());
-        // 5 segments (too many)
-        assert!(parse_versioned_block("github.com/acme/auth/extra/deep@v1.0.0").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_block_multi_block_repo() {
-        let r = parse_versioned_block("github.com/wafer-run/wafer-run-blocks/auth@v1.0.0").unwrap();
-        assert_eq!(r.owner, "wafer-run");
-        assert_eq!(r.repo, "wafer-run-blocks");
+    fn test_parse_versioned_wafer_run() {
+        let r = parse_versioned_block("wafer-run/auth@v1.0.0").unwrap();
+        assert_eq!(r.org, "wafer-run");
+        assert_eq!(r.block, "auth");
         assert_eq!(r.version, "v1.0.0");
-        assert_eq!(r.block_name, Some("auth".to_string()));
     }
 
     #[test]
-    fn test_parse_versioned_block_latest_rejected() {
-        assert!(parse_versioned_block("github.com/acme/auth-block@latest").is_none());
+    fn test_parse_versioned_no_version() {
+        // org/block without version → None (not a versioned ref)
+        assert!(parse_versioned_block("wafer-run/sqlite").is_none());
     }
 
     #[test]
-    fn test_parse_versioned_block_prerelease() {
-        let r = parse_versioned_block("github.com/acme/auth-block@v2.0.0-rc.1").unwrap();
-        assert_eq!(r.owner, "acme");
-        assert_eq!(r.repo, "auth-block");
+    fn test_parse_versioned_latest_rejected() {
+        assert!(parse_versioned_block("acme/auth-block@latest").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_empty_version() {
+        assert!(parse_versioned_block("acme/auth-block@").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_prerelease() {
+        let r = parse_versioned_block("acme/auth-block@v2.0.0-rc.1").unwrap();
+        assert_eq!(r.org, "acme");
+        assert_eq!(r.block, "auth-block");
         assert_eq!(r.version, "v2.0.0-rc.1");
-        assert_eq!(r.block_name, None);
+    }
+
+    #[test]
+    fn test_parse_versioned_wrong_segments() {
+        // Only 1 segment (missing block)
+        assert!(parse_versioned_block("acme@v1.0.0").is_none());
+        // 3 segments (too many)
+        assert!(parse_versioned_block("acme/auth/extra@v1.0.0").is_none());
+    }
+
+    #[test]
+    fn test_parse_versioned_plain_name_rejected() {
+        assert!(parse_versioned_block("plain-name").is_none());
     }
 }
 
@@ -1184,68 +1188,62 @@ mod versioned_block_tests {
 mod unversioned_block_tests {
     use wafer_run::parse_unversioned_block;
 
+    // --- org/block format ---
+
     #[test]
-    fn test_parse_unversioned_block_valid() {
-        let r = parse_unversioned_block("github.com/acme/auth-block").unwrap();
-        assert_eq!(r.owner, "acme");
-        assert_eq!(r.repo, "auth-block");
-        assert_eq!(r.block_name, None);
+    fn test_parse_unversioned_basic() {
+        let r = parse_unversioned_block("acme/auth-block").unwrap();
+        assert_eq!(r.org, "acme");
+        assert_eq!(r.block, "auth-block");
+        assert_eq!(r.version, "latest");
     }
 
     #[test]
-    fn test_parse_unversioned_block_with_at_rejected() {
-        assert!(parse_unversioned_block("github.com/acme/auth-block@v1.0.0").is_none());
+    fn test_parse_unversioned_wafer_run() {
+        let r = parse_unversioned_block("wafer-run/sqlite").unwrap();
+        assert_eq!(r.org, "wafer-run");
+        assert_eq!(r.block, "sqlite");
+        assert_eq!(r.version, "latest");
     }
 
     #[test]
-    fn test_parse_unversioned_block_not_github() {
-        assert!(parse_unversioned_block("gitlab.com/acme/auth-block").is_none());
+    fn test_parse_unversioned_at_latest() {
+        let r = parse_unversioned_block("acme/auth-block@latest").unwrap();
+        assert_eq!(r.org, "acme");
+        assert_eq!(r.block, "auth-block");
+        assert_eq!(r.version, "latest");
     }
 
     #[test]
-    fn test_parse_unversioned_block_wrong_segments() {
-        // Only 2 segments (missing repo)
-        assert!(parse_unversioned_block("github.com/acme").is_none());
-        // 5 segments (too many)
-        assert!(parse_unversioned_block("github.com/acme/auth/extra/deep").is_none());
-        // 1 segment
-        assert!(parse_unversioned_block("github.com").is_none());
+    fn test_parse_unversioned_wafer_run_at_latest() {
+        let r = parse_unversioned_block("wafer-run/sqlite@latest").unwrap();
+        assert_eq!(r.org, "wafer-run");
+        assert_eq!(r.block, "sqlite");
+        assert_eq!(r.version, "latest");
     }
 
     #[test]
-    fn test_parse_unversioned_block_multi_block_repo() {
-        let r = parse_unversioned_block("github.com/wafer-run/wafer-run-blocks/auth").unwrap();
-        assert_eq!(r.owner, "wafer-run");
-        assert_eq!(r.repo, "wafer-run-blocks");
-        assert_eq!(r.block_name, Some("auth".to_string()));
+    fn test_parse_unversioned_with_version_rejected() {
+        assert!(parse_unversioned_block("acme/auth-block@v1.0.0").is_none());
     }
 
     #[test]
-    fn test_parse_unversioned_block_multi_block_at_latest() {
-        let r = parse_unversioned_block("github.com/wafer-run/wafer-run-blocks/auth@latest").unwrap();
-        assert_eq!(r.owner, "wafer-run");
-        assert_eq!(r.repo, "wafer-run-blocks");
-        assert_eq!(r.block_name, Some("auth".to_string()));
+    fn test_parse_unversioned_wrong_segments() {
+        // Only 1 segment
+        assert!(parse_unversioned_block("acme").is_none());
+        // 3 segments (too many)
+        assert!(parse_unversioned_block("acme/repo/block").is_none());
     }
 
     #[test]
-    fn test_parse_unversioned_block_at_latest() {
-        let r = parse_unversioned_block("github.com/acme/auth-block@latest").unwrap();
-        assert_eq!(r.owner, "acme");
-        assert_eq!(r.repo, "auth-block");
-        assert_eq!(r.block_name, None);
+    fn test_parse_unversioned_empty_segments() {
+        assert!(parse_unversioned_block("/auth-block").is_none());
+        assert!(parse_unversioned_block("acme/").is_none());
     }
 
     #[test]
-    fn test_parse_unversioned_block_empty_segments() {
-        assert!(parse_unversioned_block("github.com//auth-block").is_none());
-        assert!(parse_unversioned_block("github.com/acme/").is_none());
-    }
-
-    #[test]
-    fn test_parse_unversioned_block_local_name() {
+    fn test_parse_unversioned_plain_name_rejected() {
         assert!(parse_unversioned_block("my-block").is_none());
-        assert!(parse_unversioned_block("@wafer/auth-validator").is_none());
     }
 }
 
@@ -1262,20 +1260,23 @@ async fn test_resolve_versioned_block_download_error() {
 
     let mut root = Node::new();
     // Use a nonexistent repo to trigger a download error
-    root.block = "github.com/acme/nonexistent-block@v1.0.0".to_string();
+    root.block = "acme/nonexistent-block@v1.0.0".to_string();
 
     let flow = Flow {
         id: "remote-test".to_string(),
         summary: "test".to_string(),
         config: FlowConfig::default(),
         root: Box::new(root),
+        blocks: Vec::new(),
+        config_map: Default::default(),
+        config_defaults: Default::default(),
     };
     w.add_flow(flow);
 
     let err = w.resolve().await.unwrap_err();
     assert!(
-        err.contains("failed to download") || err.contains("failed to load remote block"),
-        "Expected download or load error, got: {}",
+        err.contains("block type not found") || err.contains("failed to download") || err.contains("failed to load remote block") || err.contains("failed to fetch registry"),
+        "Expected block-not-found or download error, got: {}",
         err
     );
 }
@@ -1293,20 +1294,23 @@ async fn test_resolve_unversioned_block_download_error() {
 
     let mut root = Node::new();
     // Use a nonexistent repo to trigger a download error
-    root.block = "github.com/acme/nonexistent-block".to_string();
+    root.block = "acme/nonexistent-block".to_string();
 
     let flow = Flow {
         id: "unversioned-test".to_string(),
         summary: "test".to_string(),
         config: FlowConfig::default(),
         root: Box::new(root),
+        blocks: Vec::new(),
+        config_map: Default::default(),
+        config_defaults: Default::default(),
     };
     w.add_flow(flow);
 
     let err = w.resolve().await.unwrap_err();
     assert!(
-        err.contains("failed to fetch releases") || err.contains("failed to download") || err.contains("HTTP"),
-        "Expected download error, got: {}",
+        err.contains("block type not found") || err.contains("failed to fetch releases") || err.contains("failed to download") || err.contains("failed to fetch registry") || err.contains("HTTP"),
+        "Expected block-not-found or download error, got: {}",
         err
     );
 }

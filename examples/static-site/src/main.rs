@@ -1,6 +1,6 @@
 //! Static file server with security headers and CORS.
 //!
-//! Uses @wafer/http-server with @wafer/web for static file serving.
+//! Uses wafer-flow-http-server with wafer-block-web for static file serving.
 //!
 //! Run with: cargo run
 //! Test with: curl -v http://localhost:8080/
@@ -16,12 +16,12 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
+    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
-        "routes": [{ "path": "/**", "block": "@wafer/web" }]
+        "routes": [{ "path": "/**", "block": "wafer-run/web" }]
     }));
-    wafer_core::blocks::web::register(&mut wafer);
-    wafer.add_block_config("@wafer/web", serde_json::json!({
+    wafer_block_web::register(&mut wafer);
+    wafer.add_block_config("wafer-run/web", serde_json::json!({
         "web_root": "./public"
     }));
 
@@ -31,7 +31,7 @@ async fn main() {
         std::fs::create_dir_all(public).ok();
         std::fs::write(
             public.join("index.html"),
-            "<h1>Hello from wafer-run!</h1><p>Served with @wafer/web</p>",
+            "<h1>Hello from wafer-run!</h1><p>Served with wafer-block-web</p>",
         ).ok();
         tracing::info!("created public/index.html");
     }

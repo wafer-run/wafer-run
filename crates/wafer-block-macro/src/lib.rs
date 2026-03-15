@@ -94,7 +94,7 @@ impl Args {
 ///
 /// # Optional attributes
 /// - `instance_mode` — `"per-node"` (default), `"singleton"`, `"per-flow"`, `"per-execution"`
-/// - `requires` — list of block names this block may call (e.g. `["@wafer/database"]`)
+/// - `requires` — list of block names this block may call (e.g. `["wafer-run/database"]`)
 ///
 /// # Example
 ///

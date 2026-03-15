@@ -28,7 +28,7 @@ ACTIVE: core-concepts
 <h3>Context</h3>
 <p>The <code>Context</code> is passed to every block's <code>handle()</code> method. It provides:</p>
 <ul>
-    <li><code>call_block(name, msg)</code> — call another block by name (e.g. <code>@wafer/database</code>, <code>@wafer/crypto</code>). Enforced against the caller's <code>requires</code> list when set.</li>
+    <li><code>call_block(name, msg)</code> — call another block by name (e.g. <code>wafer-run/database</code>, <code>wafer-run/crypto</code>). Enforced against the caller's <code>requires</code> list when set.</li>
     <li><code>config_get(key)</code> — read a configuration value</li>
     <li><code>is_cancelled()</code> — check if the request has timed out or been cancelled</li>
 </ul>

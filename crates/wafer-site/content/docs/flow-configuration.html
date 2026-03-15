@@ -10,11 +10,11 @@ ACTIVE: flow-configuration
     "summary": "API flow",
     "config": { "on_error": "stop" },
     "root": {
-        "block": "@wafer/security-headers",
+        "block": "wafer-run/security-headers",
         "next": [{
-            "block": "@wafer/cors",
+            "block": "wafer-run/cors",
             "next": [{
-                "block": "@wafer/router",
+                "block": "wafer-run/router",
                 "config": {
                     "routes": [
                         { "path": "/api/hello", "actions": ["retrieve"], "block": "hello" },
@@ -27,7 +27,7 @@ ACTIVE: flow-configuration
         }]
     }
 }</code></pre>
-<p>For most apps, use <code>@wafer/http-server</code> which sets up the full infrastructure chain automatically — see <a href="/docs/built-in-blocks">Built-in Blocks</a>. Custom flows let you compose blocks in any order.</p>
+<p>For most apps, use <code>wafer-run/http-server</code> which sets up the full infrastructure chain automatically — see <a href="/docs/built-in-blocks">Built-in Blocks</a>. Custom flows let you compose blocks in any order.</p>
 
 <h3>Match Patterns</h3>
 <p>Flows also support inline <code>match</code> patterns on nodes for lightweight routing without the router block:</p>
@@ -57,7 +57,7 @@ ACTIVE: flow-configuration
 <p>Each node in the flow tree has:</p>
 <ul>
     <li><code>block</code> — the block to execute at this node</li>
-    <li><code>flow</code> — reference to another flow (e.g. <code>"@wafer/http-server"</code>)</li>
+    <li><code>flow</code> — reference to another flow (e.g. <code>"wafer-run/http-server"</code>)</li>
     <li><code>match</code> — the pattern to match against</li>
     <li><code>next</code> — an array of child nodes</li>
     <li><code>config</code> — key-value config passed to the block via <code>ctx.config_get()</code></li>
@@ -66,7 +66,7 @@ ACTIVE: flow-configuration
 <h3>Node Config</h3>
 <p>Pass configuration to a block at a specific node:</p>
 <pre><code>{
-    "block": "@wafer/iam-guard",
+    "block": "wafer-run/iam-guard",
     "config": { "role": "editor" }
 }</code></pre>
 <p>The block reads these values with <code>ctx.config_get("role")</code>.</p>

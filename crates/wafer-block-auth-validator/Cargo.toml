@@ -1,0 +1,18 @@
+[package]
+name = "wafer-block-auth-validator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Authentication middleware block for WAFER"
+
+[dependencies]
+wafer-run = { workspace = true }
+wafer-core = { path = "../wafer-core", default-features = false }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[lib]
+name = "wafer_block_auth_validator"
+path = "src/lib.rs"

@@ -19,7 +19,7 @@ impl PlaygroundBlock {
 impl Block for PlaygroundBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
-            name: "@wafer-site/playground".to_string(),
+            name: "wafer-site/playground".to_string(),
             version: "0.1.0".to_string(),
             interface: "handler@v1".to_string(),
             summary: "Browser-based code editor with live execution".to_string(),
@@ -326,7 +326,7 @@ fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String
 
 pub fn register(w: &mut Wafer) {
     w.register_block(
-        "@wafer-site/playground",
+        "wafer-site/playground",
         Arc::new(PlaygroundBlock::new()),
     );
 }

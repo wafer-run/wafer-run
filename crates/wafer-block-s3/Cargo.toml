@@ -1,0 +1,20 @@
+[package]
+name = "wafer-block-s3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "S3-compatible storage block for WAFER"
+
+[dependencies]
+wafer-run = { workspace = true }
+wafer-core = { path = "../wafer-core", default-features = false }
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[lib]
+name = "wafer_block_s3"
+path = "src/lib.rs"

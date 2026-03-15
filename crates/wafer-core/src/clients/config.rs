@@ -6,7 +6,7 @@ use wafer_run::types::WaferError;
 
 use super::{call_service, decode};
 
-const BLOCK: &str = "@wafer/config";
+const BLOCK: &str = "wafer-run/config";
 
 // --- Wire-format types ---
 

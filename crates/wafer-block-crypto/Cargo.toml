@@ -1,0 +1,18 @@
+[package]
+name = "wafer-block-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: cryptographic operations (hashing, JWT, random bytes)"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }

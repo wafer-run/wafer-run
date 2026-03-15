@@ -1,0 +1,21 @@
+[package]
+name = "wafer-block-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite database block for WAFER"
+
+[dependencies]
+wafer-run = { workspace = true }
+wafer-core = { path = "../wafer-core", default-features = false }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[lib]
+name = "wafer_block_sqlite"
+path = "src/lib.rs"

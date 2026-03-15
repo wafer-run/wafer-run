@@ -1,6 +1,6 @@
 //! REST API server with SQLite, CORS, and security headers.
 //!
-//! Demonstrates using @wafer/sqlite for database, @wafer/cors for CORS,
+//! Demonstrates using wafer-block-sqlite for database, CORS via the HTTP server flow,
 //! and inline blocks for custom API handlers.
 //!
 //! Run with: cargo run
@@ -22,23 +22,23 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_core::flows::http_server::register(&mut wafer, serde_json::json!({
+    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/api/**", "block": "api-handler" }]
     }));
-    wafer_core::blocks::sqlite::register(&mut wafer);
-    wafer_core::blocks::logger::register(&mut wafer);
+    wafer_block_sqlite::register(&mut wafer);
+    wafer_block_logger::register(&mut wafer);
     wafer.register_block("api-handler", Arc::new(NotesHandler));
-    wafer.add_block_config("@wafer/sqlite", serde_json::json!({
+    wafer.add_block_config("wafer-run/sqlite", serde_json::json!({
         "type": "sqlite",
         "path": "data/notes.db"
     }));
-    wafer.add_block_config("@wafer/cors", serde_json::json!({
+    wafer.add_block_config("wafer-run/cors", serde_json::json!({
         "allow_origins": ["*"]
     }));
 
-    // Alias @wafer/sqlite as @wafer/database (the standard database interface)
-    wafer.add_alias("@wafer/database", "@wafer/sqlite");
+    // Alias wafer-run/sqlite as wafer-run/database (the standard database interface)
+    wafer.add_alias("wafer-run/database", "wafer-run/sqlite");
 
     // Ensure data directory exists
     std::fs::create_dir_all("data").ok();

@@ -7,7 +7,17 @@ description = "WAFER website, documentation, playground, and block registry"
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
-wafer-core = { path = "../wafer-core", features = ["full", "http"] }
+wafer-core = { path = "../wafer-core" }
+wafer-flow-http-server = { path = "../wafer-flow-http-server" }
+wafer-block-auth-validator = { path = "../wafer-block-auth-validator" }
+wafer-block-iam-guard = { path = "../wafer-block-iam-guard" }
+wafer-block-inspector = { path = "../wafer-block-inspector" }
+wafer-block-web = { path = "../wafer-block-web" }
+wafer-block-config = { path = "../wafer-block-config" }
+wafer-block-logger = { path = "../wafer-block-logger" }
+wafer-block-crypto = { path = "../wafer-block-crypto" }
+wafer-block-network = { path = "../wafer-block-network" }
+wafer-block-sqlite = { path = "../wafer-block-sqlite" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

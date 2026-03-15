@@ -1,0 +1,10 @@
+[package]
+name = "wafer-block-readonly-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WAFER block: blocks write operations in read-only mode"
+
+[dependencies]
+wafer-run = { path = "../wafer-run" }
+async-trait = { workspace = true }

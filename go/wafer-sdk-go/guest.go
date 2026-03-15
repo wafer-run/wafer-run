@@ -59,7 +59,7 @@ type Block interface {
 // Usage:
 //
 //	func (b *MyBlock) HandleWithContext(ctx wafer.Context, msg *wafer.Message) *wafer.BlockResult {
-//	    result := ctx.CallBlock("@wafer/database", wafer.NewMessage("database.get", nil))
+//	    result := ctx.CallBlock("wafer-run/database", wafer.NewMessage("database.get", nil))
 //	    ...
 //	}
 type ContextBlock interface {
