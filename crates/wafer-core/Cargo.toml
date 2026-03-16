@@ -6,7 +6,7 @@ license.workspace = true
 description = "Shared interfaces, clients, and utilities for WAFER blocks"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+wafer-run = { path = "../wafer-run", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

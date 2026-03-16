@@ -2,6 +2,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::compat::{MaybeSend, MaybeSync};
 use crate::types::*;
 
 /// ObservabilityContext provides metadata for observability hooks.
@@ -14,10 +15,25 @@ pub struct ObservabilityContext {
     pub message: Option<Message>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext)>;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, &Result_, Duration) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, &Result_, Duration)>;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub type FlowStartHandler = Arc<dyn Fn(&str, &Message) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type FlowStartHandler = Arc<dyn Fn(&str, &Message)>;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub type FlowEndHandler = Arc<dyn Fn(&str, &Result_, Duration) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type FlowEndHandler = Arc<dyn Fn(&str, &Result_, Duration)>;
 
 /// ObservabilityBus manages multiple observability hook subscribers.
 pub struct ObservabilityBus {
@@ -37,24 +53,24 @@ impl ObservabilityBus {
         }
     }
 
-    pub fn on_block_start(&self, h: impl Fn(&ObservabilityContext) + Send + Sync + 'static) {
+    pub fn on_block_start(&self, h: impl Fn(&ObservabilityContext) + MaybeSend + MaybeSync + 'static) {
         self.block_start_handlers.write().push(Arc::new(h));
     }
 
     pub fn on_block_end(
         &self,
-        h: impl Fn(&ObservabilityContext, &Result_, Duration) + Send + Sync + 'static,
+        h: impl Fn(&ObservabilityContext, &Result_, Duration) + MaybeSend + MaybeSync + 'static,
     ) {
         self.block_end_handlers.write().push(Arc::new(h));
     }
 
-    pub fn on_flow_start(&self, h: impl Fn(&str, &Message) + Send + Sync + 'static) {
+    pub fn on_flow_start(&self, h: impl Fn(&str, &Message) + MaybeSend + MaybeSync + 'static) {
         self.flow_start_handlers.write().push(Arc::new(h));
     }
 
     pub fn on_flow_end(
         &self,
-        h: impl Fn(&str, &Result_, Duration) + Send + Sync + 'static,
+        h: impl Fn(&str, &Result_, Duration) + MaybeSend + MaybeSync + 'static,
     ) {
         self.flow_end_handlers.write().push(Arc::new(h));
     }

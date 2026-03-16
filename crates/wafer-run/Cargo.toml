@@ -29,6 +29,7 @@ tokio = { workspace = true, optional = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 url = "2"
+web-time = "1"
 
 # WASM (wasmtime Component Model engine)
 wasmtime = { workspace = true, optional = true }

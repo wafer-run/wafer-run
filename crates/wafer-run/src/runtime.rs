@@ -1,21 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 use futures::FutureExt;
 
 use crate::block::Block;
 use crate::config::*;
 use crate::context::RuntimeContext;
+use crate::platform::{BoxFuture, ConfigExpanderFn, Instant, RegistrarFn};
 
 /// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
 const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 use crate::block::FuncBlock;
 use crate::executor::{matches_pattern, extract_path_vars};
-use crate::helpers::expand_env_vars;
 use crate::observability::{ObservabilityBus, ObservabilityContext};
 use crate::types::*;
 
@@ -98,11 +96,14 @@ struct VersionEntry {
 }
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
+/// Native-only: requires `Block::bind()` which is not available on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: Arc<Wafer>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RuntimeHandle {
     /// Execute a flow by ID.
     pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
@@ -114,10 +115,6 @@ impl RuntimeHandle {
         self.inner.execute_block(block_name, msg).await
     }
 }
-
-/// A registrar function that registers a block or flow with config.
-/// Called by [`Wafer::register`] when the name matches.
-pub type RegistrarFn = Box<dyn Fn(&mut Wafer, serde_json::Value) + Send + Sync>;
 
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
@@ -140,10 +137,7 @@ pub struct Wafer {
     pub(crate) aliases: HashMap<String, String>,
     /// Config expanders: registered functions that split a composite config
     /// (e.g. `wafer-run/http-server`) into configs for individual blocks.
-    pub(crate) config_expanders: HashMap<
-        String,
-        Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>,
-    >,
+    pub(crate) config_expanders: HashMap<String, ConfigExpanderFn>,
     /// Named registrars: functions that register blocks/flows by name.
     /// Populated by crate consumers (e.g. wafer-core) so that
     /// `wafer.register("wafer-run/http-server", config)` works.
@@ -190,10 +184,20 @@ impl Wafer {
     ///
     /// Typically called by crate consumers (e.g. wafer-core) to make
     /// their blocks available via `wafer.register("wafer-run/...", config)`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn add_registrar(
         &mut self,
         name: impl Into<String>,
         f: impl Fn(&mut Wafer, serde_json::Value) + Send + Sync + 'static,
+    ) {
+        self.registrars.insert(name.into(), Box::new(f));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn add_registrar(
+        &mut self,
+        name: impl Into<String>,
+        f: impl Fn(&mut Wafer, serde_json::Value) + 'static,
     ) {
         self.registrars.insert(name.into(), Box::new(f));
     }
@@ -268,19 +272,13 @@ impl Wafer {
     /// The file should be a JSON object mapping block names to config objects.
     /// Environment variables in `${VAR}` format are expanded before parsing.
     ///
-    /// Example:
-    /// ```json
-    /// {
-    ///     "wafer-run/database": { "type": "sqlite", "path": "data/app.db" },
-    ///     "wafer-run/crypto": { "jwt_secret": "${JWT_SECRET}" },
-    ///     "wafer-run/logger": {}
-    /// }
-    /// ```
+    /// Native-only: requires filesystem access.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_blocks_json(&mut self, path: &str) -> Result<(), String> {
         let data = std::fs::read_to_string(path)
             .map_err(|e| format!("read blocks.json {}: {}", path, e))?;
 
-        let expanded = expand_env_vars(&data);
+        let expanded = crate::helpers::expand_env_vars(&data);
 
         let mut map: HashMap<String, serde_json::Value> = serde_json::from_str(&expanded)
             .map_err(|e| format!("parse blocks.json: {}", e))?;
@@ -311,10 +309,20 @@ impl Wafer {
     /// Register a config expander that splits a composite config into
     /// individual block configs. Called during `resolve()` before configs
     /// are distributed to blocks.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn add_config_expander(
         &mut self,
         name: impl Into<String>,
         expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync + 'static,
+    ) {
+        self.config_expanders.insert(name.into(), Box::new(expander));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn add_config_expander(
+        &mut self,
+        name: impl Into<String>,
+        expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + 'static,
     ) {
         self.config_expanders.insert(name.into(), Box::new(expander));
     }
@@ -339,6 +347,7 @@ impl Wafer {
     /// The block is also pre-resolved so it is available via `call_block()`.
     ///
     /// For handlers that need to perform async work, use `register_block_func_async`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn register_block_func(
         &mut self,
         type_name: impl Into<String>,
@@ -363,18 +372,70 @@ impl Wafer {
         self.register_block(name, block);
     }
 
+    /// RegisterBlockFunc (wasm32 variant — no Send + Sync bounds).
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_block_func(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
+    ) {
+        use crate::block::BlockInfo;
+        let name = type_name.into();
+        let block: Arc<dyn Block> = Arc::new(FuncBlock {
+            info: BlockInfo {
+                name: name.clone(),
+                version: "0.0.0".to_string(),
+                interface: "inline".to_string(),
+                summary: "Inline function block".to_string(),
+                instance_mode: InstanceMode::PerNode,
+                allowed_modes: Vec::new(),
+                admin_ui: None,
+                runtime: BlockRuntime::default(),
+                requires: Vec::new(),
+            },
+            handler: Box::new(handler),
+        });
+        self.register_block(name, block);
+    }
+
     /// RegisterBlockFuncAsync registers an async inline handler function as a block.
-    /// The block is also pre-resolved so it is available via `call_block()`.
-    ///
-    /// The handler receives a context and mutable message reference, and returns
-    /// a future that resolves to a `Result_`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn register_block_func_async<F, Fut>(
         &mut self,
         type_name: impl Into<String>,
         handler: F,
     ) where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result_> + Send + 'static,
+        Fut: std::future::Future<Output = Result_> + Send + 'static,
+    {
+        use crate::block::{AsyncFuncBlock, BlockInfo};
+        let name = type_name.into();
+        let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
+            info: BlockInfo {
+                name: name.clone(),
+                version: "0.0.0".to_string(),
+                interface: "inline-async".to_string(),
+                summary: "Inline async function block".to_string(),
+                instance_mode: InstanceMode::PerNode,
+                allowed_modes: Vec::new(),
+                admin_ui: None,
+                runtime: BlockRuntime::default(),
+                requires: Vec::new(),
+            },
+            handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
+        });
+        self.register_block(name, block);
+    }
+
+    /// RegisterBlockFuncAsync (wasm32 variant — Sync only, no Send).
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_block_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
+        Fut: std::future::Future<Output = Result_> + 'static,
     {
         use crate::block::{AsyncFuncBlock, BlockInfo};
         let name = type_name.into();
@@ -396,6 +457,7 @@ impl Wafer {
     }
 
     /// Shorthand for [`register_block_func`](Self::register_block_func).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn register_func(
         &mut self,
         type_name: impl Into<String>,
@@ -404,14 +466,36 @@ impl Wafer {
         self.register_block_func(type_name, handler);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_func(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
+    ) {
+        self.register_block_func(type_name, handler);
+    }
+
     /// Shorthand for [`register_block_func_async`](Self::register_block_func_async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn register_func_async<F, Fut>(
         &mut self,
         type_name: impl Into<String>,
         handler: F,
     ) where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result_> + Send + 'static,
+        Fut: std::future::Future<Output = Result_> + Send + 'static,
+    {
+        self.register_block_func_async(type_name, handler);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
+        Fut: std::future::Future<Output = Result_> + 'static,
     {
         self.register_block_func_async(type_name, handler);
     }
@@ -973,7 +1057,7 @@ impl Wafer {
     fn resolve_node<'a>(
         &'a mut self,
         node: &'a mut Node,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             // Parse config map
             if let Some(ref config) = node.config {
@@ -1077,6 +1161,8 @@ impl Wafer {
     ///
     /// This is the primary entry point for applications that want blocks
     /// (like `wafer-run/http-listener`) to spawn their own async tasks.
+    /// Native-only: requires `Block::bind()`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, String> {
         // 1. All mutable work
         self.start_without_bind().await?;
@@ -1253,28 +1339,7 @@ impl Wafer {
         self.hooks.fire_block_start(&obs_ctx);
         let start = Instant::now();
 
-        let result = std::panic::AssertUnwindSafe(block.handle(&ctx, msg))
-            .catch_unwind()
-            .await;
-
-        let result = match result {
-            Ok(r) => r,
-            Err(panic_info) => {
-                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
-                    response: None,
-                    message: Some(msg.clone()),
-                }
-            }
-        };
+        let result = run_block_with_recovery(&*block, &ctx, msg).await;
 
         self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
 
@@ -1291,7 +1356,7 @@ impl Wafer {
         deadline: Option<Instant>,
         visited_flows: &'a mut HashSet<String>,
         node_path: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result_> {
         Box::pin(async move {
             // Handle flow references
             if !node.flow.is_empty() {
@@ -1342,29 +1407,7 @@ impl Wafer {
             self.hooks.fire_block_start(&obs_ctx);
             let start = Instant::now();
 
-            // Execute block with panic recovery
-            let result = std::panic::AssertUnwindSafe(block.handle(&ctx, msg))
-                .catch_unwind()
-                .await;
-
-            let result = match result {
-                Ok(r) => r,
-                Err(panic_info) => {
-                    let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    Result_ {
-                        action: Action::Error,
-                        error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
-                        response: None,
-                        message: Some(msg.clone()),
-                    }
-                }
-            };
+            let result = run_block_with_recovery(&*block, &ctx, msg).await;
 
             // Observability: block end
             self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
@@ -1406,7 +1449,7 @@ impl Wafer {
         cancelled: &'a Arc<AtomicBool>,
         deadline: Option<Instant>,
         visited_flows: &'a mut HashSet<String>,
-    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result_> {
         Box::pin(async move {
             // Resolve flow alias
             let flow_name = self.aliases.get(&node.flow)
@@ -1473,7 +1516,7 @@ impl Wafer {
         deadline: Option<Instant>,
         visited_flows: &'a mut HashSet<String>,
         parent_path: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result_> + Send + 'a>> {
+    ) -> BoxFuture<'a, Result_> {
         Box::pin(async move {
             for (i, child) in nodes.iter().enumerate() {
                 if !matches_pattern(&child.match_pattern, &msg.kind) {
@@ -1527,6 +1570,45 @@ impl Wafer {
 impl Default for Wafer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Execute a block with optional panic recovery.
+/// On native: uses catch_unwind to isolate panics.
+/// On wasm32: panics abort (handled by Workers runtime).
+async fn run_block_with_recovery(
+    block: &dyn Block,
+    ctx: &dyn crate::context::Context,
+    msg: &mut Message,
+) -> Result_ {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let result = std::panic::AssertUnwindSafe(block.handle(ctx, msg))
+            .catch_unwind()
+            .await;
+        match result {
+            Ok(r) => r,
+            Err(panic_info) => {
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                Result_ {
+                    action: Action::Error,
+                    error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
+                    response: None,
+                    message: Some(msg.clone()),
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        block.handle(ctx, msg).await
     }
 }
 

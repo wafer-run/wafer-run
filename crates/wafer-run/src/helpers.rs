@@ -31,6 +31,8 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Expand environment variables in the format $VAR or ${VAR}.
+/// Native-only: requires `std::env::var`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn expand_env_vars(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();

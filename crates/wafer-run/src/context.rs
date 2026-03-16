@@ -1,11 +1,9 @@
-use crate::types::*;
-
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
+
 use crate::block::Block;
+use crate::platform::Instant;
+use crate::types::*;
 
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -31,14 +29,15 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
 }
 
 /// RuntimeContext implements Context for blocks.
-/// Only available on non-wasm32 targets (uses std::time::Instant).
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Compiles on both native and wasm32 targets. Uses `web-time::Instant`
+/// for deadline tracking (zero-cost on native, Performance.now() on wasm32).
 pub struct RuntimeContext {
     pub flow_id: String,
     pub node_id: String,
     pub config: HashMap<String, String>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
-    pub deadline: Option<std::time::Instant>,
+    pub deadline: Option<Instant>,
     /// All registered blocks.
     pub all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     /// Current call depth to prevent infinite recursion.
@@ -60,7 +59,6 @@ pub struct RuntimeContext {
 
 // --- Result helpers (used by RuntimeContext impl) ---
 
-#[cfg(not(target_arch = "wasm32"))]
 fn err_result(code: ErrorCode, message: impl Into<String>) -> Result_ {
     Result_ {
         action: Action::Error,
@@ -70,7 +68,6 @@ fn err_result(code: ErrorCode, message: impl Into<String>) -> Result_ {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
@@ -173,7 +170,7 @@ impl Context for RuntimeContext {
             return true;
         }
         if let Some(deadline) = self.deadline {
-            if std::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 self.cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 return true;
