@@ -12,6 +12,7 @@ wafer-block-auth-validator = { path = "../wafer-block-auth-validator" }
 wafer-block-iam-guard = { path = "../wafer-block-iam-guard" }
 wafer-block-inspector = { path = "../wafer-block-inspector" }
 wafer-block-web = { path = "../wafer-block-web" }
+wafer-block-local-storage = { path = "../wafer-block-local-storage" }
 wafer-block-config = { path = "../wafer-block-config" }
 wafer-block-logger = { path = "../wafer-block-logger" }
 wafer-block-crypto = { path = "../wafer-block-crypto" }

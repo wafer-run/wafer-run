@@ -1,62 +1,31 @@
 mod mime;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+use wafer_core::clients::storage as store;
 use wafer_run::*;
 
-/// WebBlock serves static files with intelligent caching and SPA support.
-/// Configure via node config: {"web_root": "./dist", "web_prefix": "/site", "web_spa": true}
+/// WebBlock serves static files from wafer-run/storage with caching and SPA support.
+///
+/// Configure via `add_block_config("wafer-run/web", json!({...}))`:
+///   - `web_root`: storage folder name (default: "public")
+///   - `web_prefix`: URL prefix to strip (default: "")
+///   - `web_spa`: serve index.html for missing paths (default: false)
+///   - `web_index`: index file name (default: "index.html")
+///   - `cache_max_age`: Cache-Control max-age for static assets (default: 3600)
+///   - `immutable_max_age`: max-age for hashed assets (default: 31536000)
 pub struct WebBlock {
-    default_root: String,
-    default_prefix: String,
-    default_spa: bool,
-    default_index: String,
-    cache_max_age: u32,
-    immutable_max_age: u32,
+    config: OnceLock<WebConfig>,
 }
 
 impl WebBlock {
     pub fn new() -> Self {
         Self {
-            default_root: "./public".to_string(),
-            default_prefix: String::new(),
-            default_spa: false,
-            default_index: "index.html".to_string(),
-            cache_max_age: 3600,
-            immutable_max_age: 31536000,
+            config: OnceLock::new(),
         }
     }
 
-    fn get_config<'a>(&'a self, ctx: &'a dyn Context) -> WebConfig {
-        WebConfig {
-            root: ctx
-                .config_get("web_root")
-                .unwrap_or(&self.default_root)
-                .to_string(),
-            prefix: ctx
-                .config_get("web_prefix")
-                .unwrap_or(&self.default_prefix)
-                .to_string(),
-            spa: ctx
-                .config_get("web_spa")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(self.default_spa),
-            index_file: ctx
-                .config_get("web_index")
-                .unwrap_or(&self.default_index)
-                .to_string(),
-            cache_max_age: ctx
-                .config_get("cache_max_age")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(self.cache_max_age),
-            immutable_max_age: ctx
-                .config_get("immutable_max_age")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(self.immutable_max_age),
-        }
-    }
-
-    fn serve_file(msg: &mut Message, config: &WebConfig) -> Result_ {
+    async fn serve_file(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> Result_ {
         let mut req_path = msg.path().to_string();
 
         // Strip prefix
@@ -82,51 +51,71 @@ impl WebBlock {
             return err_not_found(msg, "Not found");
         }
 
-        // Resolve absolute path
-        let abs_root = match std::fs::canonicalize(&config.root) {
-            Ok(p) => p,
-            Err(_) => return err_not_found(msg, "Web root not found"),
+        // Storage key: strip leading slash
+        let key = clean.trim_start_matches('/');
+
+        // Try the exact key first, then with .html suffix for clean URLs
+        let result = match store::get(ctx, &config.folder, key).await {
+            Ok(r) => Ok(r),
+            Err(_) if !key.is_empty() && Path::new(key).extension().is_none() => {
+                let html_key = format!("{}.html", key);
+                store::get(ctx, &config.folder, &html_key).await
+            }
+            Err(e) => Err(e),
         };
 
-        let file_path = abs_root.join(clean.trim_start_matches('/'));
+        match result {
+            Ok((data, info)) => {
+                // Use content_type from storage metadata, fall back to extension-based detection
+                let content_type = if info.content_type.is_empty()
+                    || info.content_type == "application/octet-stream"
+                {
+                    mime::mime_for_ext(Path::new(key)).to_string()
+                } else {
+                    info.content_type
+                };
 
-        // Resolve symlinks and verify still within root
-        let resolved = match std::fs::canonicalize(&file_path) {
-            Ok(p) => p,
+                let cc = cache_control(key, &content_type, config);
+                msg.set_meta("resp.header.Cache-Control", &cc);
+
+                respond(msg, data, &content_type)
+            }
             Err(_) => {
-                // If SPA mode, serve index.html for non-existent paths
+                // File not found — if SPA mode, serve index
                 if config.spa {
-                    let index_path = abs_root.join(&config.index_file);
-                    return serve_index_spa(msg, &index_path);
+                    return serve_index_spa(ctx, msg, config).await;
                 }
-                return err_not_found(msg, "File not found");
+                err_not_found(msg, "File not found")
             }
-        };
-
-        if !resolved.starts_with(&abs_root) {
-            return err_not_found(msg, "Not found");
         }
-
-        // Handle directories
-        if resolved.is_dir() {
-            let index = resolved.join(&config.index_file);
-            if index.exists() {
-                return serve_static_file(msg, &index, config);
-            }
-            return err_not_found(msg, "Not found");
-        }
-
-        serve_static_file(msg, &resolved, config)
     }
 }
 
+#[derive(Clone)]
 struct WebConfig {
-    root: String,
+    folder: String,
     prefix: String,
     spa: bool,
     index_file: String,
     cache_max_age: u32,
     immutable_max_age: u32,
+}
+
+impl WebConfig {
+    fn from_block_config(config: &BlockConfig) -> Self {
+        let str_or = |key: &str, default: &str| -> String {
+            let v = config.str(key);
+            if v.is_empty() { default.to_string() } else { v.to_string() }
+        };
+        Self {
+            folder: str_or("web_root", "public"),
+            prefix: config.str("web_prefix").to_string(),
+            spa: config.str("web_spa").parse::<bool>().unwrap_or(false),
+            index_file: str_or("web_index", "index.html"),
+            cache_max_age: config.str("cache_max_age").parse().unwrap_or(3600),
+            immutable_max_age: config.str("immutable_max_age").parse().unwrap_or(31536000),
+        }
+    }
 }
 
 fn clean_path(p: &str) -> String {
@@ -143,24 +132,18 @@ fn clean_path(p: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-fn mime_for_ext_path(path: &Path) -> String {
-    mime::mime_for_ext(path).to_string()
-}
-
-fn is_hashed_asset(path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-
+fn is_hashed_asset(key: &str) -> bool {
     // Known hashed-asset directories
     let hashed_dirs = ["/assets/", "/_next/static/", "/static/js/", "/static/css/"];
     for dir in &hashed_dirs {
-        if path_str.contains(dir) {
+        if key.contains(dir) {
             return true;
         }
     }
 
     // Check filename for hash pattern: name.hash.ext or name-hash.ext
+    let path = Path::new(key);
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        // Check if there's a segment that looks like a hash (6-32 hex/alphanum chars)
         for part in stem.split(&['.', '-'][..]) {
             if part.len() >= 6
                 && part.len() <= 32
@@ -176,14 +159,14 @@ fn is_hashed_asset(path: &Path) -> bool {
     false
 }
 
-fn cache_control(path: &Path, content_type: &str, config: &WebConfig) -> String {
+fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
     // HTML: always revalidate
     if content_type.starts_with("text/html") {
         return "no-cache".to_string();
     }
 
     // Hashed assets: immutable
-    if is_hashed_asset(path) {
+    if is_hashed_asset(key) {
         return format!(
             "public, max-age={}, immutable",
             config.immutable_max_age
@@ -194,29 +177,14 @@ fn cache_control(path: &Path, content_type: &str, config: &WebConfig) -> String 
     format!("public, max-age={}", config.cache_max_age)
 }
 
-fn serve_static_file(msg: &mut Message, path: &PathBuf, config: &WebConfig) -> Result_ {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return err_not_found(msg, "File not found"),
-    };
-
-    let content_type = mime_for_ext_path(path);
-    let cc = cache_control(path, &content_type, config);
-
-    msg.set_meta("resp.header.Cache-Control", &cc);
-
-    respond(msg, data, &content_type)
-}
-
-fn serve_index_spa(msg: &mut Message, index_path: &PathBuf) -> Result_ {
-    let data = match std::fs::read(index_path) {
-        Ok(d) => d,
-        Err(_) => return err_not_found(msg, "Index file not found"),
-    };
-
-    msg.set_meta("resp.header.Cache-Control", "no-cache");
-
-    respond(msg, data, "text/html; charset=utf-8")
+async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> Result_ {
+    match store::get(ctx, &config.folder, &config.index_file).await {
+        Ok((data, _)) => {
+            msg.set_meta("resp.header.Cache-Control", "no-cache");
+            respond(msg, data, "text/html; charset=utf-8")
+        }
+        Err(_) => err_not_found(msg, "Index file not found"),
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -225,14 +193,14 @@ impl Block for WebBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/web".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.2.0".to_string(),
             interface: "handler@v1".to_string(),
             summary: "Static file server with caching and SPA support".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: vec![InstanceMode::PerNode],
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Native,
-            requires: Vec::new(),
+            runtime: wafer_run::types::BlockRuntime::Both,
+            requires: vec!["wafer-run/storage".to_string()],
         }
     }
 
@@ -243,24 +211,31 @@ impl Block for WebBlock {
             return error(msg, "unimplemented", "Only retrieve action is supported");
         }
 
-        let config = self.get_config(ctx);
-        Self::serve_file(msg, &config)
+        let config = self.config.get().cloned().unwrap_or_else(|| WebConfig {
+            folder: "public".to_string(),
+            prefix: String::new(),
+            spa: false,
+            index_file: "index.html".to_string(),
+            cache_max_age: 3600,
+            immutable_max_age: 31536000,
+        });
+        Self::serve_file(ctx, msg, &config).await
     }
 
     async fn lifecycle(
         &self,
-        ctx: &dyn Context,
+        _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if matches!(event.event_type, LifecycleType::Start) {
-            // Validate web root exists on startup
-            let root = ctx
-                .config_get("web_root")
-                .unwrap_or(&self.default_root);
-
-            if !Path::new(root).exists() {
-                tracing::warn!("Web root '{}' does not exist", root);
-            }
+        if matches!(event.event_type, LifecycleType::Init) {
+            let block_config = BlockConfig::from_event(&event);
+            let config = WebConfig::from_block_config(&block_config);
+            tracing::info!(
+                folder = %config.folder,
+                spa = config.spa,
+                "wafer-run/web configured"
+            );
+            self.config.set(config).ok();
         }
         Ok(())
     }

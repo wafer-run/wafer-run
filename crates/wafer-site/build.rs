@@ -10,13 +10,24 @@ fn main() {
         .expect("OUT_DIR not set (this should only happen outside cargo)");
 
     let content_dir = Path::new(&manifest_dir).join("content");
+    let public_dir = Path::new(&manifest_dir).join("public");
     let partials_dir = content_dir.join("_partials");
+
+    // Two output targets: OUT_DIR (for include_str!) and dist/ (for web block serving)
     let out_content_dir = Path::new(&out_dir).join("content");
+    let dist_dir = Path::new(&manifest_dir).join("dist");
 
     // Create output directories
-    if let Err(e) = fs::create_dir_all(out_content_dir.join("docs")) {
-        eprintln!("cargo:warning=failed to create output directory: {}", e);
-        return;
+    for dir in [
+        out_content_dir.join("docs"),
+        dist_dir.join("docs"),
+        dist_dir.join("css"),
+        dist_dir.join("images"),
+    ] {
+        if let Err(e) = fs::create_dir_all(&dir) {
+            eprintln!("cargo:warning=failed to create directory {:?}: {}", dir, e);
+            return;
+        }
     }
 
     // Load all partials into a HashMap
@@ -62,28 +73,86 @@ fn main() {
         };
         let assembled = assemble_doc_page(&raw, &doc_head, &doc_foot, &partials);
         if let Ok(rel) = page_path.strip_prefix(&content_dir) {
+            // Write to OUT_DIR (for include_str in playground/registry blocks)
             let out_path = out_content_dir.join(rel);
             if let Some(parent) = out_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = fs::write(&out_path, assembled) {
+            if let Err(e) = fs::write(&out_path, &assembled) {
                 eprintln!("cargo:warning=failed to write {:?}: {}", out_path, e);
+            }
+
+            // Write to dist/ (for web block serving)
+            let dist_path = dist_dir.join(rel);
+            if let Some(parent) = dist_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(&dist_path, &assembled) {
+                eprintln!("cargo:warning=failed to write {:?}: {}", dist_path, e);
             }
         }
     }
 
-    // Copy non-doc pages verbatim
-    for name in &["index.html", "playground.html", "registry.html", "theme.css"] {
+    // Copy non-doc content pages to both OUT_DIR and dist/
+    for name in &["index.html", "theme.css"] {
         let src = content_dir.join(name);
-        let dst = out_content_dir.join(name);
         if src.exists() {
-            if let Err(e) = fs::copy(&src, &dst) {
-                eprintln!("cargo:warning=failed to copy {}: {}", name, e);
-            }
+            // OUT_DIR
+            let _ = fs::copy(&src, out_content_dir.join(name));
+            // dist/ — theme.css goes under css/
+            let dist_dest = if *name == "theme.css" {
+                dist_dir.join("css").join(name)
+            } else {
+                dist_dir.join(name)
+            };
+            let _ = fs::copy(&src, &dist_dest);
         }
+    }
+
+    // playground.html and registry.html only to OUT_DIR (served by their own blocks)
+    for name in &["playground.html", "registry.html"] {
+        let src = content_dir.join(name);
+        if src.exists() {
+            let _ = fs::copy(&src, out_content_dir.join(name));
+        }
+    }
+
+    // Copy public/ assets to dist/
+    copy_dir_recursive(&public_dir, &dist_dir);
+
+    // favicon.ico needs to be at the root (HTML references /favicon.ico)
+    let favicon_src = dist_dir.join("images").join("favicon.ico");
+    if favicon_src.exists() {
+        let _ = fs::copy(&favicon_src, dist_dir.join("favicon.ico"));
     }
 
     println!("cargo:rerun-if-changed=content");
+    println!("cargo:rerun-if-changed=public");
+}
+
+/// Recursively copy a directory, preserving structure.
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    if !src.exists() {
+        return;
+    }
+    let entries = match fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let src_path = entry.path();
+        let rel = src_path.strip_prefix(src).unwrap();
+        let dst_path = dst.join(rel);
+        if src_path.is_dir() {
+            let _ = fs::create_dir_all(&dst_path);
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            if let Some(parent) = dst_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::copy(&src_path, &dst_path);
+        }
+    }
 }
 
 /// Collect all doc page paths: content/docs.html + content/docs/*.html

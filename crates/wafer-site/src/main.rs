@@ -18,8 +18,19 @@ async fn main() {
     // Create WAFER runtime
     let mut w = Wafer::new();
 
-    // Register HTTP server (infra + router)
+    // Default STORAGE_ROOT to the crate directory (where dist/ lives) so the
+    // binary works regardless of CWD. Can be overridden via env var.
+    if std::env::var("STORAGE_ROOT").is_err() {
+        std::env::set_var("STORAGE_ROOT", env!("CARGO_MANIFEST_DIR"));
+    }
     let port = std::env::var("PORT").unwrap_or_else(|_| "8090".to_string());
+
+    // Register HTTP server with routes:
+    //   - /_inspector    → runtime debugger
+    //   - /api           → JSON API endpoints
+    //   - /playground    → code editor + proxy to language playgrounds
+    //   - /registry      → package registry browser + search API
+    //   - /**            → static site content via wafer-run/web (from storage)
     wafer_flow_http_server::register(&mut w, serde_json::json!({
         "listen": format!("0.0.0.0:{}", port),
         "routes": [
@@ -30,22 +41,31 @@ async fn main() {
             { "path": "/playground", "block": "wafer-site/playground" },
             { "path": "/registry/**", "block": "wafer-site/registry" },
             { "path": "/registry", "block": "wafer-site/registry" },
-            { "path": "/docs/**", "block": "wafer-site/docs" },
-            { "path": "/docs", "block": "wafer-site/docs" },
-            { "path": "/**", "block": "wafer-site/docs" }
+            { "path": "/**", "block": "wafer-run/web" }
         ]
     }));
+
+    // Block configs
     w.add_block_config("wafer-run/logger", serde_json::json!({}));
+    w.add_block_config("wafer-run/web", serde_json::json!({
+        "web_root": "dist",
+        "web_spa": "false",
+        "web_index": "index.html"
+    }));
+
+    // Register infrastructure blocks
     wafer_block_auth_validator::register(&mut w);
     wafer_block_iam_guard::register(&mut w);
     wafer_block_inspector::register(&mut w);
+    wafer_block_local_storage::register(&mut w);
+    w.add_alias("wafer-run/storage", "wafer-run/local-storage");
     wafer_block_web::register(&mut w);
     wafer_block_config::register(&mut w);
     wafer_block_logger::register(&mut w);
     wafer_block_crypto::register(&mut w);
 
     // Register site-specific blocks
-    register_site_blocks(&mut w);
+    register_api_block(&mut w);
     playground::register(&mut w);
     registry::register(&mut w);
 
@@ -63,64 +83,7 @@ async fn main() {
     w.shutdown().await;
 }
 
-fn register_site_blocks(w: &mut Wafer) {
-    // Documentation block — serves HTML pages
-    w.register_block_func("wafer-site/docs", |_ctx, msg| {
-        let path = msg.path();
-
-        // Serve static assets
-        if path == "/images/logo.webp" {
-            let bytes = include_bytes!("../public/images/logo.webp");
-            return respond(msg, bytes.to_vec(), "image/webp");
-        }
-        if path == "/favicon.ico" {
-            let bytes = include_bytes!("../public/images/favicon.ico");
-            return respond(msg, bytes.to_vec(), "image/x-icon");
-        }
-        if path == "/css/theme.css" {
-            let css = include_str!(concat!(env!("OUT_DIR"), "/content/theme.css"));
-            return respond(msg, css.as_bytes().to_vec(), "text/css");
-        }
-
-        let content = match path {
-            "/" => include_str!(concat!(env!("OUT_DIR"), "/content/index.html")),
-            "/docs" | "/docs/" => include_str!(concat!(env!("OUT_DIR"), "/content/docs.html")),
-            "/docs/core-concepts" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/core-concepts.html")),
-            "/docs/creating-a-block" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/creating-a-block.html")),
-            "/docs/running-a-block" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/running-a-block.html")),
-            "/docs/cli" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/cli.html")),
-            "/docs/flow-configuration" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/flow-configuration.html")),
-            "/docs/built-in-blocks" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/built-in-blocks.html")),
-            "/docs/services" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/services.html")),
-            "/docs/http-bridge" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/http-bridge.html")),
-            "/docs/wasm-blocks" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/wasm-blocks.html")),
-            "/docs/api-runtime" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-runtime.html")),
-            "/docs/api-services" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-services.html")),
-            "/docs/api-sdk" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-sdk.html")),
-            "/docs/api-types" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/api-types.html")),
-            "/docs/api-reference" => {
-                return ResponseBuilder::new(msg).status(301)
-                    .set_header("Location", "/docs/api-runtime")
-                    .body(b"Redirecting to /docs/api-runtime".to_vec(), "text/plain");
-            }
-            "/docs/registry" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/registry.html")),
-            "/docs/deployment" => include_str!(concat!(env!("OUT_DIR"), "/content/docs/deployment.html")),
-            _ => {
-                return json_respond(
-                    msg,
-                    &serde_json::json!({
-                        "page": "wafer-site",
-                        "path": path,
-                        "message": "Welcome to WAFER"
-                    }),
-                );
-            }
-        };
-
-        respond(msg, content.as_bytes().to_vec(), "text/html")
-    });
-
-    // API block — JSON endpoints
+fn register_api_block(w: &mut Wafer) {
     w.register_block_func("wafer-site/api", |_ctx, msg| {
         let path = msg.path();
         match path {
@@ -141,7 +104,7 @@ fn register_site_blocks(w: &mut Wafer) {
                         {"name": "wafer-run/monitoring", "version": "0.1.0"},
                         {"name": "wafer-run/auth-validator", "version": "0.1.0"},
                         {"name": "wafer-run/iam-guard", "version": "0.1.0"},
-                        {"name": "wafer-run/web", "version": "0.1.0"}
+                        {"name": "wafer-run/web", "version": "0.2.0"}
                     ]
                 }),
             ),

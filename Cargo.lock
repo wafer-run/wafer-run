@@ -4442,6 +4442,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "tracing",
+ "wafer-core",
  "wafer-run",
 ]
 
@@ -4540,6 +4541,7 @@ dependencies = [
  "wafer-block-crypto",
  "wafer-block-iam-guard",
  "wafer-block-inspector",
+ "wafer-block-local-storage",
  "wafer-block-logger",
  "wafer-block-web",
  "wafer-flow-http-server",
