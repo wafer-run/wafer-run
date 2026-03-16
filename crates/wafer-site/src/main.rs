@@ -35,8 +35,6 @@ async fn main() {
             { "path": "/**", "block": "wafer-site/docs" }
         ]
     }));
-    w.add_block_config("wafer-run/sqlite", serde_json::json!({"path": "data/wafer-site.db"}));
-    w.add_block_config("wafer-run/network", serde_json::json!({}));
     w.add_block_config("wafer-run/logger", serde_json::json!({}));
     wafer_block_auth_validator::register(&mut w);
     wafer_block_iam_guard::register(&mut w);
@@ -45,11 +43,6 @@ async fn main() {
     wafer_block_config::register(&mut w);
     wafer_block_logger::register(&mut w);
     wafer_block_crypto::register(&mut w);
-    wafer_block_network::register(&mut w);
-
-    // Database: wafer-site always uses SQLite
-    wafer_block_sqlite::register(&mut w);
-    w.add_alias("wafer-run/database", "wafer-run/sqlite");
 
     // Register site-specific blocks
     register_site_blocks(&mut w);

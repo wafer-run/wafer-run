@@ -11,16 +11,25 @@ END_EXTRA_STYLES_INLINE
 -->
 
 <h2>Package Registry</h2>
-<p>The <a href="/registry">package registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks, flows, and interfaces. Like Go modules, there is no registration step — just push your code to GitHub, tag a release, and the registry indexes it automatically the first time someone looks it up.</p>
+<p>The <a href="/registry">package registry</a> at <code>https://wafer.run/registry</code> is a discovery index for wafer blocks, flows, and interfaces. Block names use the <code>{org}/{block}</code> format (e.g. <code>wafer-run/sqlite</code>, <code>acme/auth</code>). Resolution is backed by a static registry repo at <a href="https://github.com/wafer-run/registry">github.com/wafer-run/registry</a>.</p>
+
+<h3>Block Naming</h3>
+<p>All block names follow the canonical <code>{org}/{block}</code> format &mdash; no <code>@</code> prefix, exactly two segments separated by <code>/</code>. Examples:</p>
+<ul>
+    <li><code>wafer-run/sqlite</code> &mdash; core SQLite block</li>
+    <li><code>acme/auth</code> &mdash; third-party auth block</li>
+    <li><code>db</code>, <code>storage</code> &mdash; aliases (any string without <code>/</code>)</li>
+</ul>
+<p>Versioned references use <code>@version</code> suffix: <code>acme/auth@v1.0.0</code>. Omit the version to resolve <code>latest</code>.</p>
 
 <h3>Publishing a Block</h3>
 <p>Blocks can be published as <strong>WASM</strong> (cross-language, sandboxed) or <strong>native Rust crates</strong> (zero-overhead, full access). Both use the same shared types from <code>wafer-block</code>.</p>
 <h4>WASM blocks</h4>
-<p>Publishing is three steps — all on GitHub, nothing to do on wafer.run:</p>
+<p>Publishing is three steps:</p>
 <ol>
-    <li><strong>Push your block</strong> to a public GitHub repository</li>
-    <li><strong>Build the .wasm file</strong> from your block source</li>
-    <li><strong>Create a GitHub Release</strong> and attach the <code>.wasm</code> as a release asset</li>
+    <li><strong>Build and release</strong> &mdash; push your block to GitHub, build the <code>.wasm</code> file, create a GitHub Release with the <code>.wasm</code> as a release asset</li>
+    <li><strong>Add a registry manifest</strong> &mdash; submit a PR to <a href="https://github.com/wafer-run/registry">wafer-run/registry</a> adding <code>{org}/{block}/manifest.json</code></li>
+    <li><strong>Merge</strong> &mdash; once merged, the block is resolvable by the runtime</li>
 </ol>
 <div class="lang-tabs">
     <div class="tab-bar">
@@ -68,7 +77,27 @@ git push origin v0.1.0
 # Then create a release on GitHub and upload the .wasm file</code></pre>
     </div>
 </div>
-<p>That's it. The registry will auto-index your package (name, description, versions) from GitHub the first time anyone requests it. Download counts are tracked automatically.</p>
+
+<h4>Registry manifest</h4>
+<p>Add a manifest to the <a href="https://github.com/wafer-run/registry">wafer-run/registry</a> repo at <code>{org}/{block}/manifest.json</code>:</p>
+<pre><code>{
+    "name": "acme/auth",
+    "summary": "JWT authentication block",
+    "latest": "0.1.0",
+    "versions": {
+        "0.1.0": {
+            "abi": 1,
+            "wasm_url": "https://github.com/acme/auth-block/releases/download/v0.1.0/auth.wasm"
+        }
+    }
+}</code></pre>
+<p>Fields:</p>
+<ul>
+    <li><code>abi</code> &mdash; integer ABI version for WASM compatibility (currently <code>1</code>)</li>
+    <li><code>wasm_url</code> &mdash; URL to download the <code>.wasm</code> block (omit for native-only blocks)</li>
+    <li><code>flow_url</code> &mdash; URL to download a <code>.flow.json</code> (for flow packages)</li>
+    <li><code>crate</code> &mdash; optional Rust crate name for native compilation</li>
+</ul>
 
 <h4>Native Rust blocks</h4>
 <p>Native blocks are published as regular Rust crates. Add them as Cargo dependencies and register at startup:</p>
@@ -80,27 +109,27 @@ my-auth-block = { git = "https://github.com/acme/auth-block", tag = "v1.0.0" }</
 use my_auth_block::AuthBlock;
 
 let mut w = Wafer::new();
-w.register_block("@acme/auth", Arc::new(AuthBlock::new()));</code></pre>
-<p>Native blocks compile into your binary — no runtime download, no sandbox overhead. They have full access to the host and can use async Rust directly.</p>
+w.register_block("acme/auth", Arc::new(AuthBlock::new()));</code></pre>
+<p>Native blocks compile into your binary &mdash; no runtime download, no sandbox overhead. They have full access to the host and can use async Rust directly.</p>
 
 <h3>Publishing a Flow</h3>
-<p>Publishing a flow follows the same workflow — no registration, just GitHub:</p>
+<p>Publishing a flow follows the same workflow:</p>
 <ol>
-    <li><strong>Push your flow definition</strong> to a public GitHub repository</li>
-    <li><strong>Write a <code>.flow.json</code> file</strong> describing your flow</li>
+    <li><strong>Write a <code>.flow.json</code></strong> describing your flow</li>
     <li><strong>Create a GitHub Release</strong> and attach the <code>.flow.json</code> as a release asset</li>
+    <li><strong>Add a registry manifest</strong> with a <code>flow_url</code> instead of <code>wasm_url</code></li>
 </ol>
 <p>A flow definition is a JSON file that wires blocks together. For example:</p>
 <pre><code>{
+    "id": "acme/my-flow",
     "root": {
-        "block": "github.com/acme/auth-block@v1.0.0",
+        "block": "acme/auth",
         "next": [
-            { "match": "GET:/api/*", "block": "github.com/acme/api-handler@v2.0.0" },
-            { "match": "*", "block": "github.com/acme/static-server@v1.0.0" }
+            { "match": "GET:/api/*", "block": "acme/api-handler" },
+            { "match": "*", "block": "acme/static-server" }
         ]
     }
 }</code></pre>
-<p>Name the file <code>{repo}.flow.json</code> (e.g. <code>my-flow.flow.json</code>) and attach it to your GitHub Release. The registry detects it automatically and indexes the package with type "flow".</p>
 
 <h3>Publishing an Interface</h3>
 <p>Interface packages are reusable JSON Schema type definitions that blocks can reference for their input/output contracts. Publishing follows the same GitHub workflow:</p>
@@ -125,71 +154,48 @@ w.register_block("@acme/auth", Arc::new(AuthBlock::new()));</code></pre>
         "required": ["method", "path"]
     }
 }</code></pre>
-<p>Name the file <code>{repo}.interface.json</code> (e.g. <code>http-request.interface.json</code>) and attach it to your GitHub Release. The registry detects it automatically and indexes the package with type "interface".</p>
-<p>Interfaces are opt-in — blocks can still use inline JSON Schema for their input/output definitions. Interfaces are useful when multiple blocks need to share the same type contract.</p>
+<p>Name the file <code>{block}.interface.json</code> (e.g. <code>http-request.interface.json</code>) and attach it to your GitHub Release.</p>
+<p>Interfaces are opt-in &mdash; blocks can still use inline JSON Schema for their input/output definitions. Interfaces are useful when multiple blocks need to share the same type contract.</p>
 
-<h3>Using an Interface</h3>
-<p>To use a published interface in your block, fetch it locally with the CLI:</p>
-<pre><code>wafer types add github.com/wafer-run/interfaces/http-request@v1.0.0</code></pre>
-<p>This downloads the <code>.interface.json</code> file to <code>.wafer/interfaces/</code> and adds it to your <code>wafer.json</code>. Then reference it in your <code>block.json</code>:</p>
-<pre><code>{
-    "actions": {
-        "POST:/api/data": {
-            "input": "github.com/wafer-run/interfaces/http-request@v1.0.0",
-            "output": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
-        }
-    }
-}</code></pre>
-<p>When the <code>input</code> or <code>output</code> field is a string, it is treated as an interface reference. When it is an object, it is inline JSON Schema. Both coexist naturally — no migration needed.</p>
+<h3>Resolution Order</h3>
+<p>When the runtime encounters a block name, it resolves in this order:</p>
+<ol>
+    <li><strong>Alias</strong> &mdash; resolve to target name, restart</li>
+    <li><strong>Already registered</strong> &mdash; use the native block (it called <code>register()</code>)</li>
+    <li><strong>Registry</strong> &mdash; fetch manifest from <code>raw.githubusercontent.com/wafer-run/registry/main/{org}/{block}/manifest.json</code>, check ABI version, download <code>wasm_url</code> or <code>flow_url</code></li>
+</ol>
+<p>The runtime checks ABI compatibility before loading &mdash; if the manifest's <code>abi</code> field doesn't match the runtime's ABI version, it returns a clear error.</p>
+<p>For native-only blocks (no <code>wasm_url</code> or <code>flow_url</code>), the runtime returns an error with the <code>cargo add</code> command to compile the block in.</p>
 
 <h3>Installing a Block</h3>
-<p>Reference a published block by name in your flow configuration with <code>@version</code> — the runtime will automatically download the <code>.wasm</code> file from the corresponding GitHub Release during startup:</p>
+<p>Reference a published block by name in your flow configuration &mdash; the runtime resolves it via the registry during startup:</p>
 <pre><code>{
     "root": {
-        "block": "github.com/acme/auth-block@v1.0.0",
+        "block": "acme/auth",
         "next": [
             { "match": "GET:/api/data", "block": "my-handler" }
         ]
     }
 }</code></pre>
-<p>The version must match a GitHub Release tag (e.g. <code>v1.0.0</code>, <code>v2.0.0-rc.1</code>). The runtime expects a <code>{repo}.wasm</code> asset attached to the release — in this example, <code>auth-block.wasm</code>.</p>
-
-<p>You can also omit the version to automatically resolve the latest release that has a <code>.wasm</code> asset:</p>
-<pre><code>{ "block": "github.com/acme/auth-block" }</code></pre>
-<p>The runtime queries the GitHub Releases API and picks the first release with a <code>.wasm</code> file attached. This is convenient for development, but pinning a version is recommended for production.</p>
-
-<h3>Installing a Flow</h3>
-<p>Reference a published flow the same way as a block, using <code>@version</code>. To download a flow definition instead of a <code>.wasm</code> file, use the <code>?type=flow</code> query parameter on the download endpoint:</p>
-<pre><code>GET /registry/packages/github.com/acme/my-flow/download/v1.0.0?type=flow</code></pre>
-<p>This redirects to the <code>.flow.json</code> asset from the corresponding GitHub Release.</p>
-
-<h3>Installing an Interface</h3>
-<p>Download an interface definition using the <code>?type=interface</code> query parameter:</p>
-<pre><code>GET /registry/packages/github.com/acme/http-request/download/v1.0.0?type=interface</code></pre>
-<p>This redirects to the <code>.interface.json</code> asset. The CLI <code>wafer types add</code> command does this automatically.</p>
+<p>Pin a version with <code>@version</code> for production: <code>acme/auth@v1.0.0</code>. Without a version, the registry's <code>latest</code> field is used.</p>
 
 <h3>Browsing and Searching</h3>
 <ul>
     <li><a href="/registry">Browse the registry</a> at <code>https://wafer.run/registry</code></li>
     <li>Search via API: <code>GET https://wafer.run/registry/search?q=auth</code></li>
 </ul>
-<p>Only packages that have been looked up at least once appear in search results (just like Go's <code>pkg.go.dev</code>).</p>
 
 <h3>Registry API</h3>
 <p>All endpoints are at <code>https://wafer.run</code>:</p>
 <ul>
-    <li><code>GET /registry/search?q=term&amp;type=block|flow|interface</code> — search indexed packages. The optional <code>type</code> parameter filters results by checking if the type appears in the package's comma-separated type list. Omit to return all types.</li>
-    <li><code>GET /registry/packages/{owner}/{repo}</code> — package details + versions (auto-indexes on first request). Response includes <code>package_type</code> field (comma-separated, e.g. <code>"block"</code>, <code>"flow"</code>, <code>"interface"</code>, <code>"block,interface"</code>).</li>
-    <li><code>GET /registry/packages/{owner}/{repo}/versions</code> — version list from GitHub releases</li>
-    <li><code>GET /registry/packages/{owner}/{repo}/download/{version}?type=block|flow|interface</code> — redirects to the GitHub release asset. Use <code>type=flow</code> for <code>.flow.json</code>, <code>type=interface</code> for <code>.interface.json</code>; defaults to <code>block</code> (<code>.wasm</code>).</li>
+    <li><code>GET /registry/search?q=term&amp;type=block|flow|interface</code> &mdash; search indexed packages. The optional <code>type</code> parameter filters results by package type.</li>
+    <li><code>GET /registry/packages/{org}/{block}</code> &mdash; package details + versions (fetched from the registry manifest)</li>
+    <li><code>GET /registry/packages/{org}/{block}/versions</code> &mdash; version list from the registry manifest</li>
+    <li><code>GET /registry/packages/{org}/{block}/download/{version}?type=block|flow</code> &mdash; redirects to the asset URL from the manifest</li>
 </ul>
 
 <h3>Removing a Package</h3>
-<p>There is no delete API. If you remove your GitHub repository or delete a release, the versions will stop resolving. The package entry will remain in the index but with no available versions.</p>
-
-<h3>Blocking a Package</h3>
-<p>The registry includes an admin-only blocklist to prevent malicious or harmful packages from being indexed or returned in search results. Blocked packages cannot be auto-indexed from GitHub, and already-indexed packages that are later blocked will be filtered from search results and return 404 on direct lookup.</p>
-<p>The blocklist is managed by wafer.run administrators — there is no public API to modify it. Admins can block individual packages (e.g. <code>github.com/baduser/badrepo</code>) or an entire owner's packages using a wildcard pattern (e.g. <code>github.com/baduser/*</code>).</p>
+<p>Remove the manifest from the registry repo. If you also remove your GitHub repository or delete a release, the asset URLs will stop resolving.</p>
 
 <h3>Reporting a Bad Package</h3>
-<p>If you find a package that is malicious, contains malware, or otherwise violates the terms of use, please <a href="https://github.com/wafer-run/wafer-site/issues/new">open a GitHub issue</a> to request an admin review. Include the package name and a description of the problem, and we will investigate and block the package if necessary.</p>
+<p>If you find a package that is malicious, contains malware, or otherwise violates the terms of use, please <a href="https://github.com/wafer-run/wafer-site/issues/new">open a GitHub issue</a> to request an admin review. Include the package name and a description of the problem.</p>

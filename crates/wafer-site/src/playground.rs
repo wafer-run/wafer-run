@@ -149,128 +149,51 @@ impl Block for PlaygroundBlock {
     }
 }
 
-const RUST_TEMPLATE: &str = r#"use std::collections::HashMap;
+const RUST_TEMPLATE: &str = r#"// A wafer block: receives a message, returns a response.
+// In a real block you'd use #[block] from wafer-sdk.
+
+fn handle(name: &str) -> String {
+    format!("{{\n  \"greeting\": \"Hello, {}!\"\n}}", name)
+}
 
 fn main() {
-    println!("=== WAFER Block Example ===\n");
-
-    // Simulate incoming request headers
-    let mut headers = HashMap::new();
-    headers.insert("content-type", "application/json");
-    headers.insert("x-request-id", "req-42");
-    headers.insert("x-wafer-flow", "main");
-
-    println!("Incoming message:");
-    for (key, value) in &headers {
-        println!("  {}: {}", key, value);
-    }
-
-    // Block processing
-    let items: Vec<i32> = (1..=5).map(|x| x * x).collect();
-    println!("\nProcessed: {:?}", items);
-    let sum: i32 = items.iter().sum();
-    println!("Sum of squares: {}", sum);
-
-    // Response
-    println!("\nBlock response:");
-    println!("  {{\"status\": 200, \"hello\": \"world\", \"sum\": {}}}", sum);
+    println!("Input:  {{\"name\": \"world\"}}");
+    let output = handle("world");
+    println!("Output: {}", output);
 }
 "#;
 
-const GO_TEMPLATE: &str = r#"package main
+const GO_TEMPLATE: &str = r#"// A wafer block: receives a message, returns a response.
+// In a real block you'd use the wafer-sdk-go package.
+package main
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "fmt"
 
-type Message struct {
-	Path   string `json:"path"`
-	Method string `json:"method"`
-	Data   string `json:"data"`
-}
-
-type Response struct {
-	Status int         `json:"status"`
-	Body   interface{} `json:"body"`
+func handle(name string) string {
+	return fmt.Sprintf(`{"greeting": "Hello, %s!"}`, name)
 }
 
 func main() {
-	fmt.Println("=== WAFER Block Example ===")
-	fmt.Println()
+	input  := `{"name": "world"}`
+	output := handle("world")
 
-	// Simulate incoming message
-	msg := Message{
-		Path:   "/api/hello",
-		Method: "GET",
-		Data:   "Hello from playground",
-	}
-
-	msgJSON, _ := json.MarshalIndent(msg, "", "  ")
-	fmt.Printf("Incoming message:\n%s\n", string(msgJSON))
-
-	// Process and respond
-	resp := Response{
-		Status: 200,
-		Body: map[string]interface{}{
-			"hello": "world",
-			"items": []int{1, 4, 9, 16, 25},
-		},
-	}
-
-	respJSON, _ := json.MarshalIndent(resp, "", "  ")
-	fmt.Printf("\nBlock response:\n%s\n", string(respJSON))
+	fmt.Println("Input: ", input)
+	fmt.Println("Output:", output)
 }
 "#;
 
-const JS_TEMPLATE: &str = r#"// WAFER Block Example — JavaScript/Node.js
+const JS_TEMPLATE: &str = r#"// A wafer block: receives a message, returns a response.
+// In a real block you'd use the wafer-sdk-ts package.
 
-class HelloBlock {
-    info() {
-        return {
-            name: "hello",
-            version: "1.0.0",
-            interface: "handler@v1",
-            summary: "Says hello",
-        };
-    }
-
-    handle(message) {
-        console.log("=== WAFER Block Example ===\n");
-
-        console.log("Incoming message:");
-        console.log("  path:", message.path);
-        console.log("  method:", message.method);
-        console.log("  data:", message.data);
-
-        // Process
-        const items = [1, 2, 3, 4, 5].map(x => x * x);
-        console.log("\nProcessed:", items);
-        const sum = items.reduce((a, b) => a + b, 0);
-        console.log("Sum of squares:", sum);
-
-        // Respond
-        const response = {
-            status: 200,
-            body: { hello: "world", sum },
-        };
-
-        console.log("\nBlock response:");
-        console.log(JSON.stringify(response, null, 2));
-        return response;
-    }
+function handle(input) {
+    return { greeting: "Hello, " + input.name + "!" };
 }
 
-// Run the block
-const block = new HelloBlock();
-console.log("Block:", JSON.stringify(block.info(), null, 2));
-console.log();
+const input  = { name: "world" };
+const output = handle(input);
 
-block.handle({
-    path: "/api/hello",
-    method: "GET",
-    data: "Hello from playground",
-});
+console.log("Input: ", JSON.stringify(input));
+console.log("Output:", JSON.stringify(output));
 "#;
 
 /// Shared HTTP client for playground proxy requests — avoids per-request TLS setup.

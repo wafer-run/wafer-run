@@ -4541,10 +4541,7 @@ dependencies = [
  "wafer-block-iam-guard",
  "wafer-block-inspector",
  "wafer-block-logger",
- "wafer-block-network",
- "wafer-block-sqlite",
  "wafer-block-web",
- "wafer-core",
  "wafer-flow-http-server",
  "wafer-run",
 ]
