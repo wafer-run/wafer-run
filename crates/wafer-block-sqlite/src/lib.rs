@@ -49,6 +49,7 @@ impl Block for SqliteDatabaseBlock {
             admin_ui: None,
             runtime: BlockRuntime::Native,
             requires: Vec::new(),
+            collections: Vec::new(),
         }
     }
 

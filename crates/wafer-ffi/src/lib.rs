@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
-use wafer_run::{FlowDef, Message, Result_, Wafer, WASMBlock};
+use wafer_run::{Message, Result_, Wafer, WASMBlock};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -178,12 +178,10 @@ pub unsafe extern "C" fn wafer_register(
         } else {
             match std::fs::read_to_string(path_str) {
                 Ok(json) => {
-                    let def: FlowDef = match serde_json::from_str(&json) {
-                        Ok(d) => d,
-                        Err(e) => return error_json(&format!("invalid FlowDef JSON: {}", e)),
-                    };
-                    rt.inner.add_flow_def(&def);
-                    std::ptr::null_mut()
+                    match rt.inner.add_flow_json(&json) {
+                        Ok(()) => std::ptr::null_mut(),
+                        Err(e) => error_json(&format!("invalid WaferFlow JSON: {}", e)),
+                    }
                 }
                 Err(e) => error_json(&format!("failed to read file: {}", e)),
             }
@@ -258,7 +256,7 @@ pub unsafe extern "C" fn wafer_run(
             }
         };
 
-        let result = rt.rt.block_on(rt.inner.execute(fid, &mut msg));
+        let result = rt.rt.block_on(rt.inner.run(fid, &mut msg));
 
         to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
             r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#

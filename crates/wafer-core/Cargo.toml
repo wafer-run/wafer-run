@@ -7,9 +7,10 @@ description = "Shared interfaces, clients, and utilities for WAFER blocks"
 
 [dependencies]
 wafer-run = { path = "../wafer-run", default-features = false }
+wafer-block = { path = "../wafer-block" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

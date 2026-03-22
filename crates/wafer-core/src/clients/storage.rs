@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
+#[cfg(not(target_arch = "wasm32"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -59,9 +60,11 @@ struct DeleteFolderReq<'a> {
     name: &'a str,
 }
 
-// --- Public API ---
+// ===========================================================================
+// Public API — native async
+// ===========================================================================
 
-/// Store an object.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn put(
     ctx: &dyn Context,
     folder: &str,
@@ -83,7 +86,7 @@ pub async fn put(
     Ok(())
 }
 
-/// Retrieve an object and its metadata.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get(
     ctx: &dyn Context,
     folder: &str,
@@ -94,7 +97,7 @@ pub async fn get(
     Ok((resp.data, resp.info))
 }
 
-/// Delete an object.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -105,7 +108,7 @@ pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), Wa
     Ok(())
 }
 
-/// List objects in a folder.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
     let data = call_service(
         ctx,
@@ -121,7 +124,7 @@ pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result
     decode(&data)
 }
 
-/// Create a storage folder.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn create_folder(
     ctx: &dyn Context,
     name: &str,
@@ -136,7 +139,7 @@ pub async fn create_folder(
     Ok(())
 }
 
-/// Delete a storage folder and all its contents.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -147,7 +150,7 @@ pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferErr
     Ok(())
 }
 
-/// List all storage folders.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferError> {
     let data = call_service(
         ctx,
@@ -155,5 +158,97 @@ pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferErr
         ServiceOp::STORAGE_LIST_FOLDERS,
         &serde_json::json!({}),
     ).await?;
+    decode(&data)
+}
+
+// ===========================================================================
+// Public API — WASM sync
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub fn put(
+    folder: &str,
+    key: &str,
+    data: &[u8],
+    content_type: &str,
+) -> Result<(), WaferError> {
+    call_service(
+        BLOCK,
+        ServiceOp::STORAGE_PUT,
+        &PutReq {
+            folder,
+            key,
+            data,
+            content_type,
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn get(
+    folder: &str,
+    key: &str,
+) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
+    let data = call_service(BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key })?;
+    let resp: GetResp = decode(&data)?;
+    Ok((resp.data, resp.info))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
+    call_service(
+        BLOCK,
+        ServiceOp::STORAGE_DELETE,
+        &DeleteReq { folder, key },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn list(folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::STORAGE_LIST,
+        &ListReq {
+            folder,
+            prefix: &opts.prefix,
+            limit: opts.limit,
+            offset: opts.offset,
+        },
+    )?;
+    decode(&data)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn create_folder(
+    name: &str,
+    public: bool,
+) -> Result<(), WaferError> {
+    call_service(
+        BLOCK,
+        ServiceOp::STORAGE_CREATE_FOLDER,
+        &CreateFolderReq { name, public },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn delete_folder(name: &str) -> Result<(), WaferError> {
+    call_service(
+        BLOCK,
+        ServiceOp::STORAGE_DELETE_FOLDER,
+        &DeleteFolderReq { name },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn list_folders() -> Result<Vec<FolderInfo>, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::STORAGE_LIST_FOLDERS,
+        &serde_json::json!({}),
+    )?;
     decode(&data)
 }

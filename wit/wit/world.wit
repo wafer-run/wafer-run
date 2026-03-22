@@ -8,3 +8,11 @@ world wafer-block {
     import runtime;
     export block;
 }
+
+/// Pure Block World — a sandboxed component with no host imports.
+///
+/// Pure blocks are used in WaferFlow steps. They receive JSON input
+/// and return JSON output with no side effects or host calls.
+world wafer-pure-block {
+    export pure-block;
+}

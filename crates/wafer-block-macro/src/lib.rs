@@ -213,6 +213,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
                     summary: #summary.to_string(),
                     instance_mode: #instance_mode_tokens,
                     allowed_modes: ::std::vec::Vec::new(),
+                    collections: ::std::vec::Vec::new(),
                 }
             }
 

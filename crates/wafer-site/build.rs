@@ -266,6 +266,10 @@ fn assemble_doc_page(
         "api-types",
         "registry",
         "deployment",
+        "waferflow",
+        "waferflow-spec",
+        "waferflow-blocks",
+        "waferflow-examples",
     ];
     for item in &sidebar_items {
         let placeholder = format!("{{{{ACTIVE_{}}}}}", item);

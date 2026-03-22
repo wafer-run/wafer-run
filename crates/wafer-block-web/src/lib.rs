@@ -201,6 +201,7 @@ impl Block for WebBlock {
             admin_ui: None,
             runtime: wafer_run::types::BlockRuntime::Both,
             requires: vec!["wafer-run/storage".to_string()],
+            collections: Vec::new(),
         }
     }
 

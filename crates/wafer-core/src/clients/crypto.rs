@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::{ErrorCode, ServiceOp};
+#[cfg(not(target_arch = "wasm32"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -65,17 +66,18 @@ struct RandomBytesResp {
     bytes: Vec<u8>,
 }
 
-// --- Public API ---
+// ===========================================================================
+// Public API — native async
+// ===========================================================================
 
-/// Hash a password (Argon2).
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn hash(ctx: &dyn Context, password: &str) -> Result<String, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password }).await?;
     let resp: HashResp = decode(&data)?;
     Ok(resp.hash)
 }
 
-/// Compare a password against a hash.
-/// Returns `Ok(())` on match, `Err` with `UNAUTHENTICATED` on mismatch.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Result<(), WaferError> {
     let data = call_service(
         ctx,
@@ -94,7 +96,7 @@ pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Resu
     }
 }
 
-/// Sign claims into a JWT with the given expiry.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn sign(
     ctx: &dyn Context,
     claims: &HashMap<String, serde_json::Value>,
@@ -113,7 +115,7 @@ pub async fn sign(
     Ok(resp.token)
 }
 
-/// Verify a JWT and return its claims.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn verify(
     ctx: &dyn Context,
     token: &str,
@@ -123,7 +125,7 @@ pub async fn verify(
     Ok(resp.claims)
 }
 
-/// Generate `n` cryptographically-secure random bytes.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferError> {
     let data = call_service(
         ctx,
@@ -131,6 +133,72 @@ pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferE
         ServiceOp::CRYPTO_RANDOM_BYTES,
         &RandomBytesReq { n },
     ).await?;
+    let resp: RandomBytesResp = decode(&data)?;
+    Ok(resp.bytes)
+}
+
+// ===========================================================================
+// Public API — WASM sync
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub fn hash(password: &str) -> Result<String, WaferError> {
+    let data = call_service(BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password })?;
+    let resp: HashResp = decode(&data)?;
+    Ok(resp.hash)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn compare_hash(password: &str, hash: &str) -> Result<(), WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::CRYPTO_COMPARE_HASH,
+        &CompareHashReq { password, hash },
+    )?;
+    let resp: CompareHashResp = decode(&data)?;
+    if resp.matches {
+        Ok(())
+    } else {
+        Err(WaferError::new(
+            ErrorCode::UNAUTHENTICATED,
+            "password mismatch",
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn sign(
+    claims: &HashMap<String, serde_json::Value>,
+    expiry: std::time::Duration,
+) -> Result<String, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::CRYPTO_SIGN,
+        &SignReq {
+            claims,
+            expiry_secs: expiry.as_secs(),
+        },
+    )?;
+    let resp: SignResp = decode(&data)?;
+    Ok(resp.token)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn verify(
+    token: &str,
+) -> Result<HashMap<String, serde_json::Value>, WaferError> {
+    let data = call_service(BLOCK, ServiceOp::CRYPTO_VERIFY, &VerifyReq { token })?;
+    let resp: VerifyResp = decode(&data)?;
+    Ok(resp.claims)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn random_bytes(n: usize) -> Result<Vec<u8>, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::CRYPTO_RANDOM_BYTES,
+        &RandomBytesReq { n },
+    )?;
     let resp: RandomBytesResp = decode(&data)?;
     Ok(resp.bytes)
 }

@@ -24,5 +24,7 @@
 //! }
 //! ```
 
+pub mod pure;
+
 // Re-export everything from wafer-block (types, traits, helpers, macros).
 pub use wafer_block::*;

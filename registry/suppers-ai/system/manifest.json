@@ -1,0 +1,12 @@
+{
+  "name": "suppers-ai/system",
+  "summary": "System health, debug, and navigation",
+  "latest": "1.0.0",
+  "versions": {
+    "1.0.0": {
+      "abi": 1,
+      "wasm_url": "https://github.com/suppers-ai/solobase/releases/download/v1.0.0/system.component.wasm",
+      "crate": "solobase-core"
+    }
+  }
+}

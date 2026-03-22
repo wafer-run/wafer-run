@@ -7,7 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use wafer_run::{FlowDef, Message, Wafer, WASMBlock};
+use wafer_run::{Message, Wafer, WASMBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
 ///
@@ -60,9 +60,8 @@ impl WaferRuntime {
         } else {
             let json = std::fs::read_to_string(&path)
                 .map_err(|e| Error::from_reason(format!("failed to read file: {}", e)))?;
-            let def: FlowDef = serde_json::from_str(&json)
-                .map_err(|e| Error::from_reason(format!("invalid FlowDef JSON: {}", e)))?;
-            self.inner.add_flow_def(&def);
+            self.inner.add_flow_json(&json)
+                .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {}", e)))?;
         }
         Ok(())
     }
@@ -99,7 +98,7 @@ impl WaferRuntime {
         let mut msg: Message = serde_json::from_str(&message_json)
             .map_err(|e| Error::from_reason(format!("invalid Message JSON: {}", e)))?;
 
-        let result = self.rt.block_on(self.inner.execute(&flow_id, &mut msg));
+        let result = self.rt.block_on(self.inner.run(&flow_id, &mut msg));
 
         serde_json::to_string(&result)
             .map_err(|e| Error::from_reason(format!("failed to serialize result: {}", e)))
@@ -117,5 +116,27 @@ impl WaferRuntime {
     #[napi]
     pub fn has_block(&self, type_name: String) -> bool {
         self.inner.has_block(&type_name)
+    }
+}
+
+/// Validate a WaferFlow JSON definition.
+///
+/// Returns `null` on success, or a string describing validation errors.
+#[napi]
+pub fn validate_waferflow(json: String) -> Result<Option<String>> {
+    let flow = match wafer_flow::parse(&json) {
+        Ok(f) => f,
+        Err(e) => return Ok(Some(format!("parse error: {e}"))),
+    };
+    match wafer_flow::validate(&flow) {
+        Ok(()) => Ok(None),
+        Err(errors) => {
+            let msg = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            Ok(Some(msg))
+        }
     }
 }

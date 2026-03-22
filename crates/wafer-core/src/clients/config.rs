@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
+#[cfg(not(target_arch = "wasm32"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -26,22 +27,46 @@ struct SetReq<'a> {
     value: &'a str,
 }
 
-// --- Public API ---
+// ===========================================================================
+// Public API — native async
+// ===========================================================================
 
-/// Get a config value by key. Returns `Err` with `NOT_FOUND` if the key does not exist.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get(ctx: &dyn Context, key: &str) -> Result<String, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }).await?;
     let resp: GetResp = decode(&data)?;
     Ok(resp.value)
 }
 
-/// Get a config value, returning `default` if the key does not exist.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get_default(ctx: &dyn Context, key: &str, default: &str) -> String {
     get(ctx, key).await.unwrap_or_else(|_| default.to_string())
 }
 
-/// Set a config value.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferError> {
     call_service(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }).await?;
+    Ok(())
+}
+
+// ===========================================================================
+// Public API — WASM sync
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub fn get(key: &str) -> Result<String, WaferError> {
+    let data = call_service(BLOCK, ServiceOp::CONFIG_GET, &GetReq { key })?;
+    let resp: GetResp = decode(&data)?;
+    Ok(resp.value)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn get_default(key: &str, default: &str) -> String {
+    get(key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn set(key: &str, value: &str) -> Result<(), WaferError> {
+    call_service(BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value })?;
     Ok(())
 }

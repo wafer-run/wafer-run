@@ -1,0 +1,84 @@
+<!--
+TITLE: WaferFlow — wafer.run docs
+ACTIVE: waferflow
+-->
+
+<h2>WaferFlow</h2>
+<p>WaferFlow is a declarative, medium-agnostic flow specification. It describes how data moves through a sequence of steps, where each step executes a block and its output is stored in a shared accumulator. Downstream steps reference previous outputs using <code>$.step-id.field</code> expressions.</p>
+
+<h3>Design Philosophy</h3>
+<p>WaferFlow is built on three principles:</p>
+<ul>
+    <li><strong>Blocks are pure functions</strong> &mdash; each block receives input and produces output. No implicit shared state between steps.</li>
+    <li><strong>Data flows through an accumulator</strong> &mdash; every step's output is stored under its <code>id</code>. Later steps reference earlier outputs with <code>$.step-id.field</code> path expressions.</li>
+    <li><strong>The spec is standalone</strong> &mdash; WaferFlow is not tied to wafer-run, HTTP, or any specific runtime. It works for APIs, interactive content, IoT pipelines, form wizards, or anything that can be modeled as data flowing through steps.</li>
+</ul>
+
+<h3>Core Concepts</h3>
+<ul>
+    <li><strong>Flow</strong> &mdash; the top-level definition: an id, name, version, ordered list of steps, and optional input/output schemas.</li>
+    <li><strong>Step</strong> &mdash; a single unit of work. Each step has an <code>id</code>, references a <code>block</code>, and optionally defines its <code>input</code> mapping, <code>next</code> routing, <code>each</code> iteration, or <code>parallel</code> branches.</li>
+    <li><strong>Block</strong> &mdash; the executable logic behind a step. Identified by name (e.g. <code>@wafer-run/wafer-run/sqlite</code>). Blocks are defined separately from flows and can be reused across many flows.</li>
+    <li><strong>Accumulator</strong> &mdash; a key-value store that collects step outputs during execution. The flow's input is available as <code>$.input</code>. Each step's output is available as <code>$.step-id</code>.</li>
+    <li><strong>Expressions</strong> &mdash; <code>$.step-id.field</code> path references used in step inputs and routing conditions. Supports comparisons (<code>==</code>, <code>!=</code>, <code>&gt;</code>, <code>&lt;</code>), logical operators (<code>&amp;&amp;</code>, <code>||</code>), and membership tests (<code>in</code>, <code>not in</code>).</li>
+</ul>
+
+<h3>Quick Example</h3>
+<p>A simple 3-step flow: look up a user, check their role, and return a greeting.</p>
+<pre><code>{
+    "id": "greet-user",
+    "name": "Greet User",
+    "version": "1.0.0",
+    "input": {
+        "type": "object",
+        "properties": {
+            "user_id": { "type": "string" }
+        },
+        "required": ["user_id"]
+    },
+    "steps": [
+        {
+            "id": "find-user",
+            "block": "@wafer-run/wafer-run/sqlite",
+            "input": {
+                "action": "get",
+                "collection": "users",
+                "id": "$.input.user_id"
+            }
+        },
+        {
+            "id": "check-role",
+            "block": "@app/role-checker",
+            "input": {
+                "roles": "$.find-user.roles"
+            }
+        },
+        {
+            "id": "greet",
+            "block": "@app/greeter",
+            "input": {
+                "name": "$.find-user.name",
+                "is_admin": "$.check-role.is_admin"
+            }
+        }
+    ]
+}</code></pre>
+<p>Steps execute sequentially. The accumulator after all three steps contains <code>$.input</code>, <code>$.find-user</code>, <code>$.check-role</code>, and <code>$.greet</code>. The last step's output becomes the flow's result.</p>
+
+<h3>Use Cases</h3>
+<p>Because WaferFlow is medium-agnostic, the same spec format applies across domains:</p>
+<ul>
+    <li><strong>APIs</strong> &mdash; request validation, database queries, response formatting</li>
+    <li><strong>Interactive content</strong> &mdash; rendering scenes, handling user choices, branching narratives</li>
+    <li><strong>IoT</strong> &mdash; reading sensors, validating ranges, triggering alerts</li>
+    <li><strong>Forms</strong> &mdash; multi-step wizards with conditional fields and validation</li>
+</ul>
+<p>See <a href="/docs/waferflow-examples">WaferFlow Examples</a> for complete flows in each domain.</p>
+
+<h3>Further Reading</h3>
+<ul>
+    <li><a href="/docs/waferflow-spec">WaferFlow Spec</a> &mdash; formal type definitions, flow control, and expression syntax</li>
+    <li><a href="/docs/waferflow-blocks">WaferFlow Blocks</a> &mdash; block definitions, naming, runtime types, and packaging</li>
+    <li><a href="/docs/waferflow-examples">WaferFlow Examples</a> &mdash; complete flow definitions for APIs, interactive content, IoT, and forms</li>
+    <li><a href="/schema/waferflow/v0.1.0/flow.schema.json">JSON Schema</a> &mdash; machine-readable schema for validation</li>
+</ul>

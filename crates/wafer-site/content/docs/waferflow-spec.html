@@ -1,0 +1,223 @@
+<!--
+TITLE: WaferFlow Spec — wafer.run docs
+ACTIVE: waferflow-spec
+-->
+
+<h2>WaferFlow Spec</h2>
+<p>This page is the formal specification for WaferFlow v0.1.0. For an introduction, see <a href="/docs/waferflow">WaferFlow Overview</a>.</p>
+
+<h3>Types</h3>
+
+<h4>WaferFlow</h4>
+<p>The top-level flow definition.</p>
+<pre><code>{
+    "id":          string,         // required — unique flow identifier
+    "name":        string,         // required — human-readable name
+    "version":     string,         // required — semver (e.g. "1.0.0")
+    "description": string | null,  // optional
+    "input":       PortSchema | null,  // optional — schema for $.input
+    "output":      PortSchema | null,  // optional — schema for flow output
+    "steps":       Step[],         // required — at least one step
+    "config":      FlowConfig | null   // optional
+}</code></pre>
+
+<h4>Step</h4>
+<p>A single execution unit in the flow.</p>
+<pre><code>{
+    "id":          string,              // required — unique within flow, pattern: [a-zA-Z][a-zA-Z0-9_-]*
+    "block":       string,              // required — block name to execute
+    "input":       object | null,       // optional — input map, values can be expressions
+    "next":        NextEntry[] | null,  // optional — conditional routing
+    "each":        string | null,       // optional — expression resolving to array
+    "parallel":    ParallelBranch[] | null,  // optional — concurrent branches
+    "description": string | null        // optional
+}</code></pre>
+<p>Fields are mutually exclusive where it makes sense: a step with <code>each</code> iterates, a step with <code>parallel</code> fans out, and a step with <code>next</code> routes conditionally after execution.</p>
+
+<h4>NextEntry</h4>
+<p>A conditional routing entry. Evaluated in order; the first match wins.</p>
+<pre><code>{
+    "when": string | null,  // optional — expression; omit for default route
+    "step": string | null,  // target step id (exactly one of step/flow required)
+    "flow": string | null   // target flow id (exactly one of step/flow required)
+}</code></pre>
+<p>If <code>when</code> is omitted, the entry is the default (fallback) route. If no entry matches and there is no default, execution continues to the next step in the array.</p>
+
+<h4>ParallelBranch</h4>
+<p>A branch in a parallel step. All branches execute concurrently.</p>
+<pre><code>{
+    "steps": Step[]  // required — at least one step per branch
+}</code></pre>
+<p>Results from all branches are merged into the accumulator. Each branch's steps write to the same shared accumulator, so step ids must be unique across all branches.</p>
+
+<h4>PortSchema</h4>
+<p>A JSON Schema subset for typed ports.</p>
+<pre><code>{
+    "type":        string | null,       // "object", "array", "string", "number", "integer", "boolean", "null"
+    "properties":  { [key]: PortSchema } | null,
+    "items":       PortSchema | null,   // for array types
+    "required":    string[] | null,
+    "description": string | null,
+    "default":     any | null
+}</code></pre>
+
+<h4>FlowConfig</h4>
+<p>Flow-level execution settings.</p>
+<pre><code>{
+    "timeout_ms": integer | null,  // max execution time in milliseconds
+    "max_steps":  integer | null,  // max step executions (prevents infinite loops)
+    "on_error":   "stop" | "skip" | "retry"  // default: "stop"
+}</code></pre>
+<ul>
+    <li><code>stop</code> &mdash; abort the flow on any step error</li>
+    <li><code>skip</code> &mdash; skip the failed step and continue to the next</li>
+    <li><code>retry</code> &mdash; retry the failed step (implementation-defined retry policy)</li>
+</ul>
+
+<h4>BlockDef</h4>
+<p>Block metadata. Defined separately from flows in a <code>block.json</code> file.</p>
+<pre><code>{
+    "id":          string,              // required — e.g. "@wafer-run/wafer-run/sqlite"
+    "name":        string,              // required — human-readable name
+    "version":     string,              // required — semver
+    "description": string | null,       // optional
+    "input":       PortSchema | null,   // optional — input contract
+    "output":      PortSchema | null,   // optional — output contract
+    "runtime":     "wasm" | "native" | "both" | null  // optional
+}</code></pre>
+
+<h3>Flow Control</h3>
+
+<h4>Sequential (default)</h4>
+<p>Steps execute in array order. Each step's output is added to the accumulator before the next step runs.</p>
+<pre><code>"steps": [
+    { "id": "step-a", "block": "block-a" },
+    { "id": "step-b", "block": "block-b", "input": { "data": "$.step-a.result" } },
+    { "id": "step-c", "block": "block-c", "input": { "data": "$.step-b.result" } }
+]</code></pre>
+
+<h4>Conditional Routing (next)</h4>
+<p>After a step executes, its <code>next</code> array is evaluated. The first <code>NextEntry</code> whose <code>when</code> expression is true (or has no <code>when</code>) determines the next step.</p>
+<pre><code>{
+    "id": "check",
+    "block": "validator",
+    "next": [
+        { "when": "$.check.valid == true", "step": "process" },
+        { "step": "reject" }
+    ]
+}</code></pre>
+<p>If a <code>next</code> entry targets a <code>step</code>, execution jumps to that step id. If it targets a <code>flow</code>, execution transfers to a different flow entirely.</p>
+
+<h4>Iteration (each)</h4>
+<p>When a step has <code>each</code>, it runs once per item in the resolved array. During each iteration, <code>$.each.item</code> is the current element and <code>$.each.index</code> is the zero-based index.</p>
+<pre><code>{
+    "id": "process-items",
+    "block": "item-processor",
+    "each": "$.load-data.items",
+    "input": {
+        "item": "$.each.item",
+        "position": "$.each.index"
+    }
+}</code></pre>
+<p>The step's output in the accumulator is an array of all iteration results.</p>
+
+<h4>Parallel Branches</h4>
+<p>When a step has <code>parallel</code>, all branches execute concurrently. Each branch is an independent sequence of steps.</p>
+<pre><code>{
+    "id": "fan-out",
+    "block": "noop",
+    "parallel": [
+        {
+            "steps": [
+                { "id": "branch-a", "block": "fetch-api-a" }
+            ]
+        },
+        {
+            "steps": [
+                { "id": "branch-b", "block": "fetch-api-b" }
+            ]
+        }
+    ]
+}</code></pre>
+<p>All branch step outputs are merged into the accumulator. Execution continues with the next step in the main array after all branches complete.</p>
+
+<h3>Expression Syntax</h3>
+<p>Expressions are used in step <code>input</code> values and <code>when</code> conditions.</p>
+
+<h4>Path Expressions</h4>
+<p>A path starts with <code>$.</code> and traverses the accumulator using dot-separated segments:</p>
+<ul>
+    <li><code>$.input</code> &mdash; the flow's input data</li>
+    <li><code>$.input.email</code> &mdash; a field on the input</li>
+    <li><code>$.find-user.name</code> &mdash; output of step <code>find-user</code>, field <code>name</code></li>
+    <li><code>$.step1.items.0</code> &mdash; array index access</li>
+    <li><code>$.step1.data.nested.value</code> &mdash; deep nesting</li>
+    <li><code>$.each.item</code> &mdash; current iteration item (inside <code>each</code> loops)</li>
+    <li><code>$.each.index</code> &mdash; current iteration index (inside <code>each</code> loops)</li>
+</ul>
+
+<h4>Literals</h4>
+<ul>
+    <li>Strings: <code>"hello"</code> or <code>'hello'</code></li>
+    <li>Numbers: <code>42</code>, <code>3.14</code></li>
+    <li>Booleans: <code>true</code>, <code>false</code></li>
+    <li>Null: <code>null</code></li>
+    <li>Arrays: <code>["a", "b", "c"]</code> (JSON syntax, used with <code>in</code>/<code>not in</code>)</li>
+</ul>
+
+<h4>Comparison Operators</h4>
+<p>Used in <code>when</code> conditions. Both sides can be paths or literals.</p>
+<ul>
+    <li><code>==</code> &mdash; equal (deep JSON equality)</li>
+    <li><code>!=</code> &mdash; not equal</li>
+    <li><code>&gt;</code> &mdash; greater than (numeric)</li>
+    <li><code>&lt;</code> &mdash; less than (numeric)</li>
+    <li><code>&gt;=</code> &mdash; greater than or equal (numeric)</li>
+    <li><code>&lt;=</code> &mdash; less than or equal (numeric)</li>
+</ul>
+<p>Examples:</p>
+<pre><code>$.check.match == true
+$.step1.count &gt; 5
+$.input.email != null</code></pre>
+
+<h4>Logical Operators</h4>
+<ul>
+    <li><code>&amp;&amp;</code> &mdash; logical AND (short-circuiting)</li>
+    <li><code>||</code> &mdash; logical OR (short-circuiting)</li>
+</ul>
+<p>Example:</p>
+<pre><code>$.input.active == true &amp;&amp; $.check.count &gt; 0</code></pre>
+
+<h4>Membership Operators</h4>
+<ul>
+    <li><code>in</code> &mdash; value is contained in an array</li>
+    <li><code>not in</code> &mdash; value is not contained in an array</li>
+</ul>
+<p>The right side must resolve to an array.</p>
+<pre><code>"admin" in $.find-user.roles
+$.input.status not in ["banned", "suspended"]</code></pre>
+
+<h3>Accumulator Pattern</h3>
+<p>The accumulator is a flat key-value store where keys are step ids and values are step outputs (JSON). It is built up during execution:</p>
+<ol>
+    <li>Before the first step, <code>$.input</code> is set to the flow's input data.</li>
+    <li>After each step executes, its output is stored as <code>$.{step-id}</code>.</li>
+    <li>Step input values that are expression strings (<code>"$.foo.bar"</code>) are resolved against the accumulator before the block runs.</li>
+    <li>For <code>each</code> steps, <code>$.each.item</code> and <code>$.each.index</code> are set for each iteration.</li>
+    <li>For <code>parallel</code> steps, all branch outputs are merged into the same accumulator.</li>
+</ol>
+<p>Non-expression strings and other JSON values in step inputs are passed through as-is.</p>
+
+<h3>Error Handling</h3>
+<p>The <code>config.on_error</code> field controls what happens when a step fails:</p>
+<ul>
+    <li><code>stop</code> (default) &mdash; the flow aborts immediately and returns the error.</li>
+    <li><code>skip</code> &mdash; the failed step is skipped; its output is not written to the accumulator. Execution continues with the next step.</li>
+    <li><code>retry</code> &mdash; the runtime retries the failed step. The retry policy (count, backoff) is implementation-defined.</li>
+</ul>
+<p>The <code>max_steps</code> config prevents infinite loops from <code>next</code> routing that cycles back to earlier steps. When the limit is reached, the flow aborts with an error.</p>
+
+<h3>JSON Schema</h3>
+<p>The machine-readable JSON Schema for WaferFlow is available at:</p>
+<pre><code><a href="/schema/waferflow/v0.1.0/flow.schema.json">/schema/waferflow/v0.1.0/flow.schema.json</a></code></pre>
+<p>Use it for editor autocomplete, validation, and tooling integration.</p>

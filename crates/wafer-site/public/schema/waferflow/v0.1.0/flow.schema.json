@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wafer.run/schema/waferflow/v0.1.0/flow.schema.json",
+  "title": "WaferFlow",
+  "description": "A declarative, medium-agnostic flow specification. Data flows through pure steps via an accumulator pattern — each step receives input, produces output, and downstream steps reference previous outputs with $.step-id.field expressions.",
+  "type": "object",
+  "required": ["id", "name", "version", "steps"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for this flow."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name."
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of this flow definition.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional description of what this flow does."
+    },
+    "input": {
+      "$ref": "#/$defs/PortSchema",
+      "description": "Schema for the flow's input data (available as $.input)."
+    },
+    "output": {
+      "$ref": "#/$defs/PortSchema",
+      "description": "Schema for the flow's output data."
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Step" },
+      "minItems": 1,
+      "description": "Ordered list of steps. Execution follows this order unless overridden by 'next' routing."
+    },
+    "config": {
+      "$ref": "#/$defs/FlowConfig",
+      "description": "Optional flow-level configuration."
+    }
+  },
+  "additionalProperties": false,
+
+  "$defs": {
+    "Step": {
+      "type": "object",
+      "required": ["id", "block"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique step identifier. Used as the key in the accumulator ($.step-id.field).",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
+        },
+        "block": {
+          "type": "string",
+          "description": "Block to execute. References a registered block by name or a BlockDef id."
+        },
+        "input": {
+          "type": "object",
+          "description": "Input map for the block. Values can be literal JSON or expression strings ($.step-id.field).",
+          "additionalProperties": true
+        },
+        "next": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/NextEntry" },
+          "description": "Conditional routing. Evaluated in order; first matching 'when' wins. A NextEntry without 'when' is the default."
+        },
+        "each": {
+          "type": "string",
+          "description": "Expression resolving to an array. The step runs once per item; $.each.item and $.each.index are set."
+        },
+        "parallel": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["steps"],
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/Step" },
+                "minItems": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "Parallel branches. Each branch runs concurrently; results are merged into the accumulator."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional human-readable description of this step."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "NextEntry": {
+      "type": "object",
+      "properties": {
+        "when": {
+          "type": "string",
+          "description": "Expression that must evaluate to true for this route to be taken. Omit for the default route."
+        },
+        "step": {
+          "type": "string",
+          "description": "Target step id within this flow."
+        },
+        "flow": {
+          "type": "string",
+          "description": "Target flow id to transfer execution to."
+        }
+      },
+      "oneOf": [
+        { "required": ["step"] },
+        { "required": ["flow"] }
+      ],
+      "additionalProperties": false
+    },
+
+    "PortSchema": {
+      "type": "object",
+      "description": "JSON Schema subset describing typed input or output ports.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["object", "array", "string", "number", "integer", "boolean", "null"]
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/PortSchema" }
+        },
+        "items": {
+          "$ref": "#/$defs/PortSchema"
+        },
+        "required": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "description": {
+          "type": "string"
+        },
+        "default": {}
+      },
+      "additionalProperties": false
+    },
+
+    "FlowConfig": {
+      "type": "object",
+      "properties": {
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum execution time in milliseconds."
+        },
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of step executions (prevents infinite loops)."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": ["stop", "skip", "retry"],
+          "default": "stop",
+          "description": "Error handling strategy."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "BlockDef": {
+      "type": "object",
+      "required": ["id", "name", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique block identifier (e.g. @org/repo/block)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable block name."
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/PortSchema"
+        },
+        "output": {
+          "$ref": "#/$defs/PortSchema"
+        },
+        "runtime": {
+          "type": "string",
+          "enum": ["wasm", "native", "both"],
+          "description": "Supported runtime targets."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

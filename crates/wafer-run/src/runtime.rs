@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -8,12 +8,11 @@ use futures::FutureExt;
 use crate::block::Block;
 use crate::config::*;
 use crate::context::RuntimeContext;
-use crate::platform::{BoxFuture, ConfigExpanderFn, Instant, RegistrarFn};
+use crate::platform::{ConfigExpanderFn, Instant, RegistrarFn};
 
 /// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
 const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 use crate::block::FuncBlock;
-use crate::executor::{matches_pattern, extract_path_vars};
 use crate::observability::{ObservabilityBus, ObservabilityContext};
 use crate::types::*;
 
@@ -105,14 +104,14 @@ pub struct RuntimeHandle {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl RuntimeHandle {
-    /// Execute a flow by ID.
-    pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
-        self.inner.execute(flow_id, msg).await
+    /// Run a flow by ID.
+    pub async fn run(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+        self.inner.run(flow_id, msg).await
     }
 
-    /// Execute a single block by name (bypasses flows).
-    pub async fn execute_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
-        self.inner.execute_block(block_name, msg).await
+    /// Run a single block by name (bypasses flows).
+    pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+        self.inner.run_block(block_name, msg).await
     }
 }
 
@@ -120,7 +119,7 @@ impl RuntimeHandle {
 /// and execution.
 pub struct Wafer {
     pub(crate) blocks: HashMap<String, Arc<dyn Block>>,
-    pub(crate) flows: HashMap<String, Flow>,
+    pub(crate) flows: HashMap<String, wafer_flow::WaferFlow>,
     /// Block configurations loaded from blocks.json (name → config JSON).
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
     /// All registered blocks + aliases, shared with contexts.
@@ -129,9 +128,9 @@ pub struct Wafer {
     /// Snapshot of registered block info (populated at start time).
     pub(crate) blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
     /// Snapshot of flow info (populated at start time).
-    pub(crate) flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
+    pub(crate) flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
-    pub(crate) flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
+    pub(crate) flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: HashMap<String, String>,
@@ -226,7 +225,7 @@ impl Wafer {
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
-    fn make_context(
+    pub(crate) fn make_context(
         &self,
         flow_id: impl Into<String>,
         node_id: impl Into<String>,
@@ -247,7 +246,7 @@ impl Wafer {
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             aliases: Arc::new(self.aliases.clone()),
-            caller_requires: None, // unrestricted by default; overridden per-block in execute_node
+            caller_requires: None, // unrestricted by default
         }
     }
 
@@ -366,6 +365,7 @@ impl Wafer {
                 admin_ui: None,
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
+                collections: Vec::new(),
             },
             handler: Box::new(handler),
         });
@@ -392,6 +392,7 @@ impl Wafer {
                 admin_ui: None,
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
+                collections: Vec::new(),
             },
             handler: Box::new(handler),
         });
@@ -421,6 +422,7 @@ impl Wafer {
                 admin_ui: None,
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
+                collections: Vec::new(),
             },
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
@@ -450,6 +452,7 @@ impl Wafer {
                 admin_ui: None,
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
+                collections: Vec::new(),
             },
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
@@ -500,29 +503,27 @@ impl Wafer {
         self.register_block_func_async(type_name, handler);
     }
 
-    /// AddFlow adds a programmatically-built flow to the runtime.
-    pub fn add_flow(&mut self, flow: Flow) {
+    /// Register a WaferFlow definition.
+    pub fn add_flow(&mut self, flow: wafer_flow::WaferFlow) {
         self.flows.insert(flow.id.clone(), flow);
     }
 
-    /// AddFlowDef adds a flow from a JSON definition.
-    pub fn add_flow_def(&mut self, def: &FlowDef) {
-        let flow = flow_def_to_flow(def);
+    /// Parse, validate, and register a WaferFlow from a JSON string.
+    pub fn add_flow_json(&mut self, json: &str) -> Result<(), String> {
+        let flow = wafer_flow::parse(json).map_err(|e| e.to_string())?;
+        wafer_flow::validate(&flow).map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
         self.add_flow(flow);
+        Ok(())
     }
 
     /// Gather `"uses"` contributions from all block configs and deep-merge them
     /// into the target infrastructure block configs.
-    ///
-    /// For each block config that has a `"uses"` key (a JSON object mapping
-    /// target block names to contribution objects), the contribution is
-    /// deep-merged into the target block's config. Deep-merge rules:
-    /// - For JSON objects, keys are combined recursively.
-    /// - For non-object values, the target block's own value wins (dependents
-    ///   can contribute new keys but not override the infra block's own config).
-    /// - If the target block has no config entry yet, one is created.
-    /// Run config expanders: remove composite configs from `block_configs`,
-    /// invoke their expander, and deep-merge the results into the target blocks.
     fn expand_composite_configs(&mut self) {
         let keys: Vec<String> = self
             .block_configs
@@ -546,25 +547,24 @@ impl Wafer {
         }
     }
 
-    /// Expand declarative `config_map` and `config_defaults` from flows.
-    ///
-    /// For each flow that has a non-empty `config_map` and a matching entry in
-    /// `block_configs`, the flow's config is removed and routed to target blocks:
-    /// 1. `config_defaults` are deep-merged into target block configs first.
-    /// 2. Each `config_map` key found in the flow config is placed into the
-    ///    target block's config under the mapped key (deep-merge).
+    /// Expand declarative `config_map` and `config_defaults` from WaferFlow definitions.
     fn expand_declarative_flow_configs(&mut self) {
-        // Collect flow ids that have config_map entries and matching block_configs.
         let eligible: Vec<(
             String,
-            HashMap<String, ConfigMapEntry>,
+            HashMap<String, wafer_flow::ConfigMapEntry>,
             HashMap<String, serde_json::Value>,
         )> = self
             .flows
             .values()
-            .filter(|f| !f.config_map.is_empty())
+            .filter(|f| f.config_map.as_ref().map_or(false, |m| !m.is_empty()))
             .filter(|f| self.block_configs.contains_key(&f.id))
-            .map(|f| (f.id.clone(), f.config_map.clone(), f.config_defaults.clone()))
+            .map(|f| {
+                (
+                    f.id.clone(),
+                    f.config_map.clone().unwrap_or_default(),
+                    f.config_defaults.clone().unwrap_or_default(),
+                )
+            })
             .collect();
 
         for (flow_id, config_map, config_defaults) in eligible {
@@ -600,7 +600,6 @@ impl Wafer {
     }
 
     fn gather_uses_configs(&mut self) {
-        // Collect all (target, contribution) pairs first to avoid borrow conflicts.
         let mut contributions: Vec<(String, serde_json::Value)> = Vec::new();
 
         for config in self.block_configs.values() {
@@ -612,7 +611,6 @@ impl Wafer {
         }
 
         for (target, contrib) in contributions {
-            // Resolve alias: if the target is an alias, merge into the real block
             let resolved_target = self.aliases.get(&target).cloned().unwrap_or(target);
             let entry = self
                 .block_configs
@@ -621,7 +619,6 @@ impl Wafer {
             deep_merge(entry, &contrib);
         }
 
-        // Strip `uses` keys from all configs so downstream code doesn't see them.
         for config in self.block_configs.values_mut() {
             if let Some(obj) = config.as_object_mut() {
                 obj.remove("uses");
@@ -629,7 +626,7 @@ impl Wafer {
         }
     }
 
-    /// Resolve walks all flow trees and resolves block references.
+    /// Resolve walks all flows and resolves block references.
     ///
     /// Before resolving flows, initializes all registered blocks via
     /// `lifecycle(Init)`. Blocks with configs (from `load_blocks_json` or
@@ -658,8 +655,6 @@ impl Wafer {
             configs.iter().map(|(n, _)| n.clone()).collect();
 
         // Sort configs: wafer-run/* infrastructure blocks first, then everything else.
-        // Infrastructure blocks (database, config, crypto, etc.) must be initialized
-        // before feature blocks that depend on them during lifecycle init.
         let mut infra_configs = Vec::new();
         let mut feature_configs = Vec::new();
         for entry in &configs {
@@ -698,7 +693,6 @@ impl Wafer {
         }
 
         // Phase 1b: Initialize feature blocks with configs.
-        // Infrastructure is now ready, so these can use wafer-run/database etc.
         self.rebuild_all_blocks();
         for (name, config) in &feature_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
@@ -730,7 +724,6 @@ impl Wafer {
         self.rebuild_all_blocks();
 
         // Phase 2: Initialize remaining pre-registered blocks (no config).
-        // These can safely call into infrastructure blocks initialized above.
         for name in &pre_registered {
             if config_names.contains(name) {
                 continue; // Already initialized in phase 1
@@ -756,31 +749,70 @@ impl Wafer {
             }
         }
 
-        // Phase 3: Resolve flow nodes.
-        let flow_ids: Vec<String> = self.flows.keys().cloned().collect();
-        for flow_id in flow_ids {
-            let mut flow = self.flows.remove(&flow_id).expect("BUG: flow disappeared during iteration");
-            self.resolve_node(&mut flow.root).await?;
-            self.flows.insert(flow_id.clone(), flow);
+        // Phase 3: Verify flow block references exist.
+        // Collect all referenced block names first to avoid borrow conflict.
+        let referenced_blocks: Vec<String> = self
+            .flows
+            .values()
+            .flat_map(|f| f.steps.iter())
+            .map(|step| {
+                self.aliases
+                    .get(&step.block)
+                    .cloned()
+                    .unwrap_or_else(|| step.block.clone())
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for block_name in referenced_blocks {
+            if self.blocks.contains_key(&block_name) {
+                continue;
+            }
+            // Try WASM download
+            #[cfg(feature = "wasm")]
+            {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+                match self.resolve_remote_block(&client, &block_name).await? {
+                    Some(block) => {
+                        tracing::info!(block = %block_name, "downloaded remote block");
+                        let ctx = self.make_context(
+                            String::new(),
+                            String::new(),
+                            HashMap::new(),
+                            Arc::new(AtomicBool::new(false)),
+                            None,
+                        );
+                        block
+                            .lifecycle(
+                                &ctx,
+                                LifecycleEvent {
+                                    event_type: LifecycleType::Init,
+                                    data: Vec::new(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| format!("init remote block {:?}: {}", block_name, e))?;
+                        self.blocks.insert(block_name.clone(), block);
+                    }
+                    None => {
+                        return Err(format!("block type not found: {}", block_name));
+                    }
+                }
+            }
+            #[cfg(not(feature = "wasm"))]
+            return Err(format!("block type not found: {}", block_name));
         }
+
         Ok(())
     }
 
     /// Resolve remote blocks for deferred registrations via the registry.
-    ///
-    /// For each entry in `block_configs` that matches the `{org}/{block}`
-    /// naming convention and has no corresponding flow or block already
-    /// registered:
-    /// 1. Fetch the registry manifest from
-    ///    `raw.githubusercontent.com/wafer-run/registry/main/{org}/{block}/manifest.json`.
-    /// 2. Check ABI compatibility and resolve the version.
-    /// 3. If the manifest has a `flow_url`, download and register as a flow,
-    ///    then pre-resolve block dependencies.
-    /// 4. If the manifest has a `wasm_url`, download and register as a WASM block.
     #[cfg(feature = "wasm")]
     async fn resolve_remote_entries(&mut self) -> Result<(), String> {
-        // Collect config entries that look like remote refs and aren't already
-        // registered as a flow or block.
         let candidates: Vec<String> = self
             .block_configs
             .keys()
@@ -810,7 +842,6 @@ impl Wafer {
                 None => continue,
             };
 
-            // Fetch registry manifest
             let manifest_url = format!(
                 "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
                 remote_ref.org, remote_ref.block
@@ -824,8 +855,6 @@ impl Wafer {
                 .map_err(|e| format!("failed to fetch registry manifest for {}: {}", name, e))?;
 
             if resp.status().as_u16() == 404 {
-                // Not in registry — might be a locally-registered block.
-                // Leave in block_configs for config expanders or node resolution.
                 continue;
             }
             if resp.status().as_u16() != 200 {
@@ -840,7 +869,6 @@ impl Wafer {
             let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
                 .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
 
-            // Resolve version
             let version = if remote_ref.version == "latest" {
                 manifest.latest.clone()
             } else {
@@ -851,7 +879,6 @@ impl Wafer {
                 format!("version {} not found in registry for {}", version, name)
             })?;
 
-            // Check ABI compatibility
             if entry.abi != ABI_VERSION {
                 return Err(format!(
                     "block {} version {} requires ABI {} but runtime supports ABI {}",
@@ -859,19 +886,20 @@ impl Wafer {
                 ));
             }
 
-            // Download flow or WASM
             if let Some(flow_url) = &entry.flow_url {
-                let flow_def = self.download_flow_from_url(&client, flow_url, &name).await?;
+                let flow = self.download_flow_from_url(&client, flow_url, &name).await?;
 
-                // Pre-resolve block dependencies from the flow's blocks array
-                let blocks_to_resolve: Vec<String> = flow_def
+                // Pre-resolve block dependencies from the flow's blocks list
+                let blocks_to_resolve: Vec<String> = flow
                     .blocks
-                    .iter()
-                    .filter(|b| !self.blocks.contains_key(b.as_str()))
-                    .cloned()
-                    .collect();
+                    .as_ref()
+                    .map(|b| b.iter()
+                        .filter(|b| !self.blocks.contains_key(b.as_str()))
+                        .cloned()
+                        .collect())
+                    .unwrap_or_default();
 
-                self.add_flow_def(&flow_def);
+                self.add_flow(flow);
 
                 for block_name in &blocks_to_resolve {
                     if self.blocks.contains_key(block_name.as_str()) {
@@ -885,7 +913,7 @@ impl Wafer {
                         Ok(None) => {
                             tracing::debug!(
                                 block = %block_name,
-                                "block not found in registry, will resolve during node resolution"
+                                "block not found in registry, will resolve during step resolution"
                             );
                         }
                         Err(e) => {
@@ -901,21 +929,19 @@ impl Wafer {
                 tracing::info!(block = %name, "downloaded remote WASM block from registry");
                 self.blocks.insert(name.clone(), block);
             }
-            // If neither flow_url nor wasm_url, it's a native-only block.
-            // Leave in block_configs for node resolution to report the error.
         }
 
         Ok(())
     }
 
-    /// Download a `.flow.json` from a direct URL.
+    /// Download a `.flow.json` from a direct URL and parse as WaferFlow.
     #[cfg(feature = "wasm")]
     async fn download_flow_from_url(
         &self,
         client: &reqwest::Client,
         url: &str,
         name: &str,
-    ) -> Result<FlowDef, String> {
+    ) -> Result<wafer_flow::WaferFlow, String> {
         let resp = client
             .get(url)
             .header("User-Agent", "wafer-run/0.1.0")
@@ -933,11 +959,14 @@ impl Wafer {
         let body = resp.bytes().await
             .map_err(|e| format!("failed to read flow body for {}: {}", name, e))?;
 
-        let def: FlowDef = serde_json::from_slice(&body)
+        let body_str = std::str::from_utf8(&body)
+            .map_err(|e| format!("failed to decode flow body for {}: {}", name, e))?;
+
+        let flow = wafer_flow::parse(body_str)
             .map_err(|e| format!("failed to parse flow JSON for {}: {}", name, e))?;
 
-        tracing::info!(flow = %def.id, url = %url, "downloaded remote flow definition");
-        Ok(def)
+        tracing::info!(flow = %flow.id, url = %url, "downloaded remote flow definition");
+        Ok(flow)
     }
 
     /// Download a `.wasm` block from a direct URL.
@@ -1040,11 +1069,9 @@ impl Wafer {
             let block = self.download_wasm_from_url(client, wasm_url, name).await?;
             Ok(Some(block))
         } else if let Some(flow_url) = &entry.flow_url {
-            // Flows are handled at a higher level; return None here
             tracing::debug!(block = %name, flow_url = %flow_url, "block is a flow, not a WASM block");
             Ok(None)
         } else {
-            // Native-only block
             let crate_name = format!("wafer-block-{}", remote_ref.block);
             Err(format!(
                 "Block \"{}\" is native-only and must be compiled in.\n\
@@ -1052,76 +1079,6 @@ impl Wafer {
                 name, crate_name
             ))
         }
-    }
-
-    fn resolve_node<'a>(
-        &'a mut self,
-        node: &'a mut Node,
-    ) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            // Parse config map
-            if let Some(ref config) = node.config {
-                node.config_map = parse_config_map(config);
-            }
-
-            if !node.block.is_empty() {
-                // Resolve alias to actual block name
-                if let Some(target) = self.aliases.get(&node.block) {
-                    node.block = target.clone();
-                }
-
-                if let Some(block) = self.blocks.get(&node.block) {
-                    node.resolved_block = Some(block.clone());
-                } else {
-                    // Block not in resolved — try registry-based WASM download
-                    #[cfg(feature = "wasm")]
-                    {
-                        let client = reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(30))
-                            .build()
-                            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-                        let block = match self.resolve_remote_block(&client, &node.block).await? {
-                            Some(b) => b,
-                            None => return Err(format!("block type not found: {}", node.block)),
-                        };
-
-                        let ctx = self.make_context(
-                            String::new(),
-                            String::new(),
-                            node.config_map.clone(),
-                            Arc::new(AtomicBool::new(false)),
-                            None,
-                        );
-
-                        block
-                            .lifecycle(
-                                &ctx,
-                                LifecycleEvent {
-                                    event_type: LifecycleType::Init,
-                                    data: node
-                                        .config
-                                        .as_ref()
-                                        .map(|c| serde_json::to_vec(c).unwrap_or_default())
-                                        .unwrap_or_default(),
-                                },
-                            )
-                            .await
-                            .map_err(|e| format!("init remote block {:?}: {}", node.block, e))?;
-
-                        self.blocks.insert(node.block.clone(), block.clone());
-                        node.resolved_block = Some(block);
-                    }
-
-                    #[cfg(not(feature = "wasm"))]
-                    return Err(format!("block type not found: {}", node.block));
-                }
-            }
-
-            for child in &mut node.next {
-                self.resolve_node(child).await?;
-            }
-            Ok(())
-        })
     }
 
     /// Get or create the shared WASM engine with fuel metering.
@@ -1140,9 +1097,6 @@ impl Wafer {
     }
 
     /// Initialize the runtime without calling `bind()` on blocks.
-    ///
-    /// Use this when you don't need the HTTP listener (e.g. wafer-run-node,
-    /// wafer-ffi, or integration tests that manage their own serving).
     pub async fn start_without_bind(&mut self) -> Result<(), String> {
         self.resolve().await?;
 
@@ -1158,16 +1112,10 @@ impl Wafer {
     }
 
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
-    ///
-    /// This is the primary entry point for applications that want blocks
-    /// (like `wafer-run/http-listener`) to spawn their own async tasks.
-    /// Native-only: requires `Block::bind()`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, String> {
-        // 1. All mutable work
         self.start_without_bind().await?;
 
-        // 2. Call lifecycle(Start) on all blocks
         let ctx = self.make_context(
             "startup",
             "startup",
@@ -1185,10 +1133,8 @@ impl Wafer {
             ).await;
         }
 
-        // 3. Wrap in Arc
         let arc_self = Arc::new(self);
 
-        // 4. Call bind(RuntimeHandle) on all blocks
         let handle = RuntimeHandle {
             inner: arc_self.clone(),
         };
@@ -1196,7 +1142,6 @@ impl Wafer {
             block.bind(handle.clone());
         }
 
-        // 5. Return Arc
         Ok(arc_self)
     }
 
@@ -1221,8 +1166,6 @@ impl Wafer {
     }
 
     /// Stop shuts down all resolved block instances (requires `&mut self`).
-    ///
-    /// Prefer `shutdown()` when the runtime is behind an `Arc`.
     pub async fn stop(&mut self) {
         let ctx = self.make_context(
             "shutdown",
@@ -1242,10 +1185,10 @@ impl Wafer {
         }
     }
 
-    /// Execute runs a flow by ID with the given message.
-    pub async fn execute(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+    /// Run a flow by ID with the given message.
+    pub async fn run(&self, flow_id: &str, msg: &mut Message) -> Result_ {
         let flow = match self.flows.get(flow_id) {
-            Some(c) => c,
+            Some(f) => f,
             None => {
                 return Result_ {
                     action: Action::Error,
@@ -1265,17 +1208,19 @@ impl Wafer {
 
         // Set up flow-level timeout via deadline
         let cancelled = Arc::new(AtomicBool::new(false));
-        let timeout = flow.config.timeout;
-        let deadline = if !timeout.is_zero() {
-            Some(Instant::now() + timeout)
-        } else {
-            None
-        };
+        let timeout = flow.config.as_ref().and_then(|c| {
+            // Prefer string timeout, fall back to timeout_ms
+            if let Some(ref t) = c.timeout {
+                let d = parse_duration(t);
+                if !d.is_zero() { return Some(d); }
+            }
+            c.timeout_ms.map(std::time::Duration::from_millis)
+        });
+        let deadline = timeout.and_then(|t| {
+            if !t.is_zero() { Some(Instant::now() + t) } else { None }
+        });
 
-        let mut visited_flows = HashSet::new();
-        visited_flows.insert(flow_id.to_string());
-
-        let result = self.execute_node(&flow.root, msg, flow_id, &flow.config.on_error, &cancelled, deadline, &mut visited_flows, "root").await;
+        let result = crate::waferflow::execute_waferflow(flow, msg, self, &cancelled, deadline).await;
 
         // Check timeout
         let result = if deadline.is_some() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
@@ -1298,8 +1243,8 @@ impl Wafer {
         result
     }
 
-    /// Execute a single block by name, bypassing flows.
-    pub async fn execute_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+    /// Run a single block by name, bypassing flows.
+    pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
         // Resolve alias
         let resolved = self.aliases.get(block_name)
             .map(|s| s.as_str())
@@ -1346,224 +1291,21 @@ impl Wafer {
         result
     }
 
-    fn execute_node<'a>(
-        &'a self,
-        node: &'a Node,
-        msg: &'a mut Message,
-        flow_id: &'a str,
-        on_error: &'a str,
-        cancelled: &'a Arc<AtomicBool>,
-        deadline: Option<Instant>,
-        visited_flows: &'a mut HashSet<String>,
-        node_path: &'a str,
-    ) -> BoxFuture<'a, Result_> {
-        Box::pin(async move {
-            // Handle flow references
-            if !node.flow.is_empty() {
-                return self.execute_flow_ref(node, msg, on_error, cancelled, deadline, visited_flows).await;
-            }
-
-            let block = match &node.resolved_block {
-                Some(b) => b.clone(),
-                None => {
-                    return Result_ {
-                        action: Action::Error,
-                        error: Some(WaferError::new(
-                            "unresolved",
-                            format!("block not resolved: {}", node.block),
-                        )),
-                        response: None,
-                        message: None,
-                    };
-                }
-            };
-
-            // Build context for this node, with requires enforcement
-            let caller_requires = {
-                let info = block.info();
-                if info.requires.is_empty() {
-                    None // unrestricted
-                } else {
-                    Some(info.requires)
-                }
-            };
-            let mut ctx = self.make_context(
-                flow_id,
-                node_path,
-                node.config_map.clone(),
-                cancelled.clone(),
-                deadline,
-            );
-            ctx.caller_requires = caller_requires;
-
-            // Observability: block start
-            let obs_ctx = ObservabilityContext {
-                flow_id: flow_id.to_string(),
-                node_path: node_path.to_string(),
-                block_name: node.block.clone(),
-                trace_id: msg.get_meta("trace_id").to_string(),
-                message: Some(msg.clone()),
-            };
-            self.hooks.fire_block_start(&obs_ctx);
-            let start = Instant::now();
-
-            let result = run_block_with_recovery(&*block, &ctx, msg).await;
-
-            // Observability: block end
-            self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
-
-            // Process result
-            match result.action {
-                Action::Respond | Action::Drop => return result,
-                Action::Error => {
-                    if on_error == "stop" {
-                        return result;
-                    }
-                    // on_error=continue: fall through to children
-                }
-                Action::Continue => {}
-            }
-
-            // Update message from result if available
-            if let Some(ref result_msg) = result.message {
-                *msg = result_msg.clone();
-            }
-
-            if node.next.is_empty() {
-                if result.action == Action::Error {
-                    // on_error=continue with no more nodes: swallow error
-                    return Result_::continue_with(msg.clone());
-                }
-                return result;
-            }
-
-            self.execute_first_match(&node.next, msg, flow_id, on_error, cancelled, deadline, visited_flows, node_path).await
-        })
-    }
-
-    fn execute_flow_ref<'a>(
-        &'a self,
-        node: &'a Node,
-        msg: &'a mut Message,
-        on_error: &'a str,
-        cancelled: &'a Arc<AtomicBool>,
-        deadline: Option<Instant>,
-        visited_flows: &'a mut HashSet<String>,
-    ) -> BoxFuture<'a, Result_> {
-        Box::pin(async move {
-            // Resolve flow alias
-            let flow_name = self.aliases.get(&node.flow)
-                .map(|s| s.as_str())
-                .unwrap_or(&node.flow);
-
-            // Circular flow reference detection
-            if visited_flows.contains(flow_name) {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "circular_flow",
-                        format!("circular flow reference detected: {}", flow_name),
-                    )),
-                    response: None,
-                    message: None,
-                };
-            }
-
-            let target = match self.flows.get(flow_name) {
-                Some(c) => c,
-                None => {
-                    return Result_ {
-                        action: Action::Error,
-                        error: Some(WaferError::new(
-                            "not_found",
-                            format!("referenced flow not found: {}", flow_name),
-                        )),
-                        response: None,
-                        message: None,
-                    };
-                }
-            };
-
-            let flow_name_owned = flow_name.to_string();
-            visited_flows.insert(flow_name_owned.clone());
-            let result = self.execute_node(&target.root, msg, &target.id, &target.config.on_error, cancelled, deadline, visited_flows, "root").await;
-            visited_flows.remove(&flow_name_owned);
-
-            if result.action == Action::Continue && !node.next.is_empty() {
-                return self.execute_first_match(
-                    &node.next,
-                    msg,
-                    &target.id,
-                    on_error,
-                    cancelled,
-                    deadline,
-                    visited_flows,
-                    &format!("ref:{}", node.flow),
-                ).await;
-            }
-
-            result
-        })
-    }
-
-    fn execute_first_match<'a>(
-        &'a self,
-        nodes: &'a [Box<Node>],
-        msg: &'a mut Message,
-        flow_id: &'a str,
-        on_error: &'a str,
-        cancelled: &'a Arc<AtomicBool>,
-        deadline: Option<Instant>,
-        visited_flows: &'a mut HashSet<String>,
-        parent_path: &'a str,
-    ) -> BoxFuture<'a, Result_> {
-        Box::pin(async move {
-            for (i, child) in nodes.iter().enumerate() {
-                if !matches_pattern(&child.match_pattern, &msg.kind) {
-                    continue;
-                }
-                // Extract path variables from HTTP route patterns
-                if !child.match_pattern.is_empty() {
-                    if let Some(idx) = child.match_pattern.find(":/") {
-                        let pattern_path = &child.match_pattern[idx + 1..];
-                        if let Some(msg_idx) = msg.kind.find(":/") {
-                            let msg_path = msg.kind[msg_idx + 1..].to_string();
-                            extract_path_vars(pattern_path, &msg_path, msg);
-                        }
-                    }
-                }
-                let child_path = format!("{}.{}", parent_path, i);
-                return self.execute_node(child, msg, flow_id, on_error, cancelled, deadline, visited_flows, &child_path).await;
-            }
-            Result_::continue_with(msg.clone())
-        })
-    }
-
-    /// GetFlow returns a flow by ID.
-    pub fn get_flow(&self, id: &str) -> Option<&Flow> {
-        self.flows.get(id)
-    }
-
     /// Flows returns info about all loaded flows.
-    pub fn flows_info(&self) -> Vec<FlowInfo> {
+    pub fn flows_info(&self) -> Vec<wafer_flow::FlowInfo> {
         self.flows
             .values()
-            .map(|c| FlowInfo {
-                id: c.id.clone(),
-                summary: c.summary.clone(),
-                on_error: c.config.on_error.clone(),
-                timeout: if c.config.timeout.is_zero() {
-                    String::new()
-                } else {
-                    format!("{}s", c.config.timeout.as_secs())
-                },
+            .map(|f| wafer_flow::FlowInfo {
+                id: f.id.clone(),
+                name: f.name.clone(),
+                description: f.description.clone(),
             })
             .collect()
     }
 
-    /// FlowDefs serializes all runtime flows back to FlowDef format.
-    pub fn flow_defs(&self) -> Vec<FlowDef> {
-        self.flows.values().map(flow_to_flow_def).collect()
+    /// Return all WaferFlow definitions.
+    pub fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
+        self.flows.values().cloned().collect()
     }
 }
 
@@ -1576,7 +1318,7 @@ impl Default for Wafer {
 /// Execute a block with optional panic recovery.
 /// On native: uses catch_unwind to isolate panics.
 /// On wasm32: panics abort (handled by Workers runtime).
-async fn run_block_with_recovery(
+pub async fn run_block_with_recovery(
     block: &dyn Block,
     ctx: &dyn crate::context::Context,
     msg: &mut Message,

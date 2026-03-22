@@ -1,0 +1,13 @@
+[package]
+name = "wafer-flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WaferFlow — parser, validator, and expression evaluator for declarative flow definitions"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

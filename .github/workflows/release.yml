@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+
+  update-registry:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get release version
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate registry manifests
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          VERSION="${VERSION#v}"
+          mkdir -p registry-update/wafer-run
+
+          # Blocks with their crate names and summaries
+          declare -A BLOCKS=(
+            [cors]="wafer-block-cors|CORS preflight and header management"
+            [security-headers]="wafer-block-security-headers|Security headers (CSP, HSTS, X-Frame-Options)"
+            [readonly-guard]="wafer-block-readonly-guard|Block write operations in read-only mode"
+            [ip-rate-limit]="wafer-block-ip-rate-limit|IP-based rate limiting"
+            [monitoring]="wafer-block-monitoring|Request monitoring and stats"
+            [auth-validator]="wafer-block-auth-validator|JWT and API key validation"
+            [iam-guard]="wafer-block-iam-guard|Role-based access control guard"
+            [config]="wafer-block-config|Configuration key-value store"
+            [crypto]="wafer-block-crypto|Cryptographic operations (JWT, hashing)"
+            [logger]="wafer-block-logger|Structured logging"
+            [network]="wafer-block-network|Outbound HTTP requests"
+            [sqlite]="wafer-block-sqlite|SQLite database backend"
+            [postgres]="wafer-block-postgres|PostgreSQL database backend"
+            [local-storage]="wafer-block-local-storage|Local filesystem storage backend"
+            [s3]="wafer-block-s3|S3-compatible object storage backend"
+            [http-listener]="wafer-block-http-listener|HTTP server listener"
+            [router]="wafer-block-router|Request routing and path matching"
+            [web]="wafer-block-web|Static file serving with SPA support"
+            [inspector]="wafer-block-inspector|Runtime introspection API"
+          )
+
+          for block in "${!BLOCKS[@]}"; do
+            IFS='|' read -r crate_name summary <<< "${BLOCKS[$block]}"
+            mkdir -p "registry-update/wafer-run/${block}"
+            cat > "registry-update/wafer-run/${block}/manifest.json" << EOF
+          {
+            "name": "wafer-run/${block}",
+            "summary": "${summary}",
+            "latest": "${VERSION}",
+            "versions": {
+              "${VERSION}": {
+                "abi": 1,
+                "crate": "${crate_name}"
+              }
+            }
+          }
+          EOF
+          done
+
+      - name: Push to registry
+        uses: dmnemec/copy_file_to_another_repo_action@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.REGISTRY_TOKEN }}
+        with:
+          source_file: 'registry-update/wafer-run'
+          destination_repo: 'wafer-run/registry'
+          destination_folder: 'wafer-run'
+          user_email: 'ci@wafer.run'
+          user_name: 'wafer-ci'
+          commit_message: 'chore: update wafer-run block manifests for ${{ steps.version.outputs.tag }}'

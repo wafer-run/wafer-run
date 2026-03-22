@@ -1,0 +1,429 @@
+<!--
+TITLE: WaferFlow Examples — wafer.run docs
+ACTIVE: waferflow-examples
+-->
+
+<h2>WaferFlow Examples</h2>
+<p>Complete flow definitions across four domains. Each example demonstrates different WaferFlow features: conditional routing, iteration, parallel branches, and expression syntax.</p>
+
+<h3>API Login Flow</h3>
+<p>Authenticate a user: look up by email, verify the password hash, branch on match to either create a JWT token or reject the request. Demonstrates <strong>conditional routing</strong> with <code>next</code> and <code>when</code> expressions.</p>
+<pre><code>{
+    "id": "api-login",
+    "name": "API Login",
+    "version": "1.0.0",
+    "input": {
+        "type": "object",
+        "properties": {
+            "email": { "type": "string" },
+            "password": { "type": "string" }
+        },
+        "required": ["email", "password"]
+    },
+    "steps": [
+        {
+            "id": "find-user",
+            "block": "@wafer-run/wafer-run/sqlite",
+            "input": {
+                "action": "list",
+                "collection": "users",
+                "filter": { "email": "$.input.email" },
+                "limit": 1
+            },
+            "description": "Look up user by email"
+        },
+        {
+            "id": "check-password",
+            "block": "@app/password-verifier",
+            "input": {
+                "hash": "$.find-user.data.0.password_hash",
+                "candidate": "$.input.password"
+            },
+            "next": [
+                { "when": "$.check-password.match == true", "step": "create-token" },
+                { "step": "reject" }
+            ],
+            "description": "Verify password against stored hash"
+        },
+        {
+            "id": "create-token",
+            "block": "@app/token-issuer",
+            "input": {
+                "user_id": "$.find-user.data.0.id",
+                "email": "$.find-user.data.0.email",
+                "roles": "$.find-user.data.0.roles"
+            },
+            "description": "Issue JWT token on successful login"
+        },
+        {
+            "id": "reject",
+            "block": "@app/error-responder",
+            "input": {
+                "status": 401,
+                "message": "Invalid email or password"
+            },
+            "description": "Return 401 on failed login"
+        }
+    ],
+    "config": {
+        "timeout_ms": 5000,
+        "on_error": "stop"
+    }
+}</code></pre>
+<p>The <code>check-password</code> step's <code>next</code> array routes to <code>create-token</code> if the password matches, or falls through to the default route (<code>reject</code>). The <code>reject</code> step has no <code>when</code> condition, making it the fallback.</p>
+
+<h3>Interactive Comic</h3>
+<p>Load comic data, render each panel with <code>each</code> iteration, present a choice to the reader, and branch to the next scene. Demonstrates <strong>each loops</strong> and <strong>multi-way routing</strong>.</p>
+<pre><code>{
+    "id": "comic-reader",
+    "name": "Interactive Comic Reader",
+    "version": "1.0.0",
+    "input": {
+        "type": "object",
+        "properties": {
+            "scene_id": { "type": "string" },
+            "choice": { "type": "string" }
+        },
+        "required": ["scene_id"]
+    },
+    "steps": [
+        {
+            "id": "load-scene",
+            "block": "@wafer-run/wafer-run/sqlite",
+            "input": {
+                "action": "get",
+                "collection": "scenes",
+                "id": "$.input.scene_id"
+            },
+            "description": "Fetch scene data including panels and choices"
+        },
+        {
+            "id": "render-panels",
+            "block": "@app/panel-renderer",
+            "each": "$.load-scene.data.panels",
+            "input": {
+                "image_url": "$.each.item.image",
+                "dialogue": "$.each.item.dialogue",
+                "position": "$.each.index",
+                "style": "$.each.item.style"
+            },
+            "description": "Render each panel in the scene"
+        },
+        {
+            "id": "present-choices",
+            "block": "@app/choice-presenter",
+            "input": {
+                "choices": "$.load-scene.data.choices",
+                "selected": "$.input.choice"
+            },
+            "description": "Show available choices, highlight selected"
+        },
+        {
+            "id": "route-choice",
+            "block": "@app/noop",
+            "input": {},
+            "next": [
+                { "when": "$.input.choice == 'fight'", "step": "scene-fight" },
+                { "when": "$.input.choice == 'flee'", "step": "scene-flee" },
+                { "when": "$.input.choice == 'talk'", "step": "scene-talk" },
+                { "step": "scene-default" }
+            ],
+            "description": "Branch based on reader's choice"
+        },
+        {
+            "id": "scene-fight",
+            "block": "@app/scene-loader",
+            "input": { "scene_id": "$.load-scene.data.choices.fight.target" }
+        },
+        {
+            "id": "scene-flee",
+            "block": "@app/scene-loader",
+            "input": { "scene_id": "$.load-scene.data.choices.flee.target" }
+        },
+        {
+            "id": "scene-talk",
+            "block": "@app/scene-loader",
+            "input": { "scene_id": "$.load-scene.data.choices.talk.target" }
+        },
+        {
+            "id": "scene-default",
+            "block": "@app/scene-loader",
+            "input": { "scene_id": "$.load-scene.data.default_next" }
+        }
+    ]
+}</code></pre>
+<p>The <code>render-panels</code> step uses <code>each</code> to iterate over the scene's panel array. Each iteration has access to <code>$.each.item</code> (the panel object) and <code>$.each.index</code> (the panel position). The output of <code>render-panels</code> in the accumulator is an array of all rendered panel results. The <code>route-choice</code> step then branches based on the reader's selected choice.</p>
+
+<h3>IoT Sensor Pipeline</h3>
+<p>Read sensor data, validate the reading is within an expected range, branch on threshold to either send an alert or log normally. Demonstrates <strong>numeric comparisons</strong>, <strong>parallel branches</strong>, and <strong>logical expressions</strong>.</p>
+<pre><code>{
+    "id": "sensor-pipeline",
+    "name": "IoT Sensor Pipeline",
+    "version": "1.0.0",
+    "input": {
+        "type": "object",
+        "properties": {
+            "sensor_id": { "type": "string" },
+            "reading": { "type": "number" },
+            "timestamp": { "type": "string" }
+        },
+        "required": ["sensor_id", "reading", "timestamp"]
+    },
+    "steps": [
+        {
+            "id": "validate",
+            "block": "@app/range-validator",
+            "input": {
+                "value": "$.input.reading",
+                "min": -40,
+                "max": 125,
+                "unit": "celsius"
+            },
+            "description": "Check that the reading is within physical sensor range"
+        },
+        {
+            "id": "enrich",
+            "block": "@wafer-run/wafer-run/sqlite",
+            "input": {
+                "action": "get",
+                "collection": "sensors",
+                "id": "$.input.sensor_id"
+            },
+            "description": "Fetch sensor metadata (location, thresholds)"
+        },
+        {
+            "id": "evaluate",
+            "block": "@app/threshold-evaluator",
+            "input": {
+                "reading": "$.input.reading",
+                "warn_threshold": "$.enrich.data.warn_threshold",
+                "critical_threshold": "$.enrich.data.critical_threshold"
+            },
+            "next": [
+                { "when": "$.evaluate.level == 'critical'", "step": "alert-critical" },
+                { "when": "$.evaluate.level == 'warn'", "step": "alert-warn" },
+                { "step": "log-normal" }
+            ],
+            "description": "Compare reading against configured thresholds"
+        },
+        {
+            "id": "alert-critical",
+            "block": "@app/noop",
+            "parallel": [
+                {
+                    "steps": [
+                        {
+                            "id": "send-sms",
+                            "block": "@app/sms-sender",
+                            "input": {
+                                "to": "$.enrich.data.alert_phone",
+                                "body": "CRITICAL: sensor $.input.sensor_id reading $.input.reading"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "steps": [
+                        {
+                            "id": "send-email",
+                            "block": "@app/email-sender",
+                            "input": {
+                                "to": "$.enrich.data.alert_email",
+                                "subject": "Critical sensor alert",
+                                "body": "Sensor $.input.sensor_id at $.enrich.data.location read $.input.reading at $.input.timestamp"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "steps": [
+                        {
+                            "id": "log-critical",
+                            "block": "@app/event-logger",
+                            "input": {
+                                "level": "critical",
+                                "sensor_id": "$.input.sensor_id",
+                                "reading": "$.input.reading",
+                                "timestamp": "$.input.timestamp"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "description": "Critical: send SMS + email + log in parallel"
+        },
+        {
+            "id": "alert-warn",
+            "block": "@app/event-logger",
+            "input": {
+                "level": "warn",
+                "sensor_id": "$.input.sensor_id",
+                "reading": "$.input.reading",
+                "threshold": "$.enrich.data.warn_threshold",
+                "timestamp": "$.input.timestamp"
+            },
+            "description": "Warning: log the elevated reading"
+        },
+        {
+            "id": "log-normal",
+            "block": "@app/event-logger",
+            "input": {
+                "level": "info",
+                "sensor_id": "$.input.sensor_id",
+                "reading": "$.input.reading",
+                "timestamp": "$.input.timestamp"
+            },
+            "description": "Normal: log the reading"
+        }
+    ],
+    "config": {
+        "timeout_ms": 10000,
+        "on_error": "stop"
+    }
+}</code></pre>
+<p>The <code>evaluate</code> step routes to one of three paths based on the threshold level. The <code>alert-critical</code> step uses <code>parallel</code> to send SMS, email, and log concurrently &mdash; all three branches run at the same time, and execution continues only after all complete.</p>
+
+<h3>Form Wizard</h3>
+<p>A multi-step form: validate the first step, branch based on the selected account type, collect type-specific fields in step 2, then submit. Demonstrates <strong>conditional branching on user input</strong> and <strong>accumulator chaining</strong> across wizard steps.</p>
+<pre><code>{
+    "id": "signup-wizard",
+    "name": "Account Signup Wizard",
+    "version": "1.0.0",
+    "input": {
+        "type": "object",
+        "properties": {
+            "email": { "type": "string" },
+            "password": { "type": "string" },
+            "account_type": { "type": "string", "description": "personal or business" },
+            "full_name": { "type": "string" },
+            "company_name": { "type": "string" },
+            "tax_id": { "type": "string" },
+            "employee_count": { "type": "integer" }
+        },
+        "required": ["email", "password", "account_type", "full_name"]
+    },
+    "steps": [
+        {
+            "id": "validate-base",
+            "block": "@app/form-validator",
+            "input": {
+                "fields": {
+                    "email": "$.input.email",
+                    "password": "$.input.password",
+                    "account_type": "$.input.account_type",
+                    "full_name": "$.input.full_name"
+                },
+                "rules": {
+                    "email": "required|email",
+                    "password": "required|min:8",
+                    "account_type": "required|in:personal,business",
+                    "full_name": "required|min:2"
+                }
+            },
+            "next": [
+                { "when": "$.validate-base.valid == false", "step": "validation-error" },
+                { "when": "$.input.account_type == 'business'", "step": "validate-business" },
+                { "step": "validate-personal" }
+            ],
+            "description": "Validate common fields (step 1 of wizard)"
+        },
+        {
+            "id": "validate-business",
+            "block": "@app/form-validator",
+            "input": {
+                "fields": {
+                    "company_name": "$.input.company_name",
+                    "tax_id": "$.input.tax_id",
+                    "employee_count": "$.input.employee_count"
+                },
+                "rules": {
+                    "company_name": "required|min:2",
+                    "tax_id": "required|pattern:^[A-Z]{2}[0-9]+$",
+                    "employee_count": "required|integer|min:1"
+                }
+            },
+            "next": [
+                { "when": "$.validate-business.valid == false", "step": "validation-error" },
+                { "step": "create-account" }
+            ],
+            "description": "Validate business-specific fields (step 2)"
+        },
+        {
+            "id": "validate-personal",
+            "block": "@app/noop",
+            "input": {},
+            "next": [
+                { "step": "create-account" }
+            ],
+            "description": "Personal accounts skip extra validation"
+        },
+        {
+            "id": "create-account",
+            "block": "@wafer-run/wafer-run/sqlite",
+            "input": {
+                "action": "create",
+                "collection": "accounts",
+                "data": {
+                    "email": "$.input.email",
+                    "full_name": "$.input.full_name",
+                    "account_type": "$.input.account_type",
+                    "company_name": "$.input.company_name",
+                    "tax_id": "$.input.tax_id"
+                }
+            },
+            "description": "Persist the new account"
+        },
+        {
+            "id": "send-welcome",
+            "block": "@app/email-sender",
+            "input": {
+                "to": "$.input.email",
+                "template": "welcome",
+                "vars": {
+                    "name": "$.input.full_name",
+                    "account_type": "$.input.account_type"
+                }
+            },
+            "description": "Send welcome email"
+        },
+        {
+            "id": "respond-success",
+            "block": "@app/json-responder",
+            "input": {
+                "status": 201,
+                "body": {
+                    "account_id": "$.create-account.data.id",
+                    "email": "$.input.email",
+                    "type": "$.input.account_type"
+                }
+            },
+            "description": "Return the created account"
+        },
+        {
+            "id": "validation-error",
+            "block": "@app/json-responder",
+            "input": {
+                "status": 422,
+                "body": {
+                    "errors": "$.validate-base.errors"
+                }
+            },
+            "description": "Return validation errors"
+        }
+    ],
+    "config": {
+        "timeout_ms": 10000,
+        "on_error": "stop",
+        "max_steps": 20
+    }
+}</code></pre>
+<p>The wizard branches after <code>validate-base</code>: if validation fails, it jumps to <code>validation-error</code>. If the account type is <code>business</code>, it routes to <code>validate-business</code> for additional fields. Personal accounts skip straight to <code>create-account</code>. Both paths converge at <code>create-account</code>, which reads accumulated data from <code>$.input</code>. The <code>max_steps</code> config prevents runaway execution.</p>
+
+<h3>Feature Summary</h3>
+<p>Which WaferFlow features each example demonstrates:</p>
+<ul>
+    <li><strong>API Login</strong> &mdash; <code>next</code> conditional routing, <code>when</code> expressions, sequential steps</li>
+    <li><strong>Interactive Comic</strong> &mdash; <code>each</code> iteration, <code>$.each.item</code>/<code>$.each.index</code>, multi-way <code>next</code> routing</li>
+    <li><strong>IoT Sensor</strong> &mdash; <code>parallel</code> branches, numeric comparisons, three-way conditional routing</li>
+    <li><strong>Form Wizard</strong> &mdash; multi-level branching, accumulator chaining, convergent paths, <code>max_steps</code> guard</li>
+</ul>

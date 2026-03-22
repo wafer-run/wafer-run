@@ -44,6 +44,7 @@ impl Block for LocalStorageBlock {
             admin_ui: None,
             runtime: BlockRuntime::Native,
             requires: Vec::new(),
+            collections: Vec::new(),
         }
     }
 

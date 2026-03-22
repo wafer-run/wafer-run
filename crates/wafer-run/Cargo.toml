@@ -14,12 +14,13 @@ full = ["wasm", "dep:tracing-subscriber"]
 [dependencies]
 # Shared block types
 wafer-block = { workspace = true }
+wafer-flow = { workspace = true }
 
 # Core
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-chrono = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }
@@ -29,6 +30,8 @@ tokio = { workspace = true, optional = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 url = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 web-time = "1"
 
 # WASM (wasmtime Component Model engine)

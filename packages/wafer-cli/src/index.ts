@@ -6,6 +6,7 @@ import { buildCommand } from "./commands/build.js";
 import { devCommand } from "./commands/dev.js";
 import { publishCommand } from "./commands/publish.js";
 import { typesAddCommand } from "./commands/types.js";
+import { flowValidateCommand } from "./commands/flow.js";
 
 const program = new Command();
 
@@ -53,6 +54,16 @@ typesCmd
   .argument("<ref>", "interface reference (e.g. github.com/owner/repo@v1.0.0)")
   .description("Fetch an interface package and add it to the project")
   .action(typesAddCommand);
+
+const flowCmd = program
+  .command("flow")
+  .description("WaferFlow tools");
+
+flowCmd
+  .command("validate")
+  .argument("<file>", "path to a WaferFlow JSON file")
+  .description("Parse and validate a WaferFlow definition")
+  .action(flowValidateCommand);
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

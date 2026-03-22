@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
+#[cfg(not(target_arch = "wasm32"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -28,9 +29,11 @@ pub struct NetworkResponse {
     pub body: Vec<u8>,
 }
 
-// --- Public API ---
+// ===========================================================================
+// Public API — native async
+// ===========================================================================
 
-/// Perform an outbound HTTP request.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn do_request(
     ctx: &dyn Context,
     method: &str,
@@ -49,5 +52,29 @@ pub async fn do_request(
             body,
         },
     ).await?;
+    decode(&data)
+}
+
+// ===========================================================================
+// Public API — WASM sync
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub fn do_request(
+    method: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Option<&[u8]>,
+) -> Result<NetworkResponse, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::NETWORK_DO_REQUEST,
+        &DoReq {
+            method,
+            url,
+            headers,
+            body,
+        },
+    )?;
     decode(&data)
 }

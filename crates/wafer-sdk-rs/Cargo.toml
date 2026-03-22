@@ -12,3 +12,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wafer-block = { workspace = true }
+serde_json = { workspace = true }

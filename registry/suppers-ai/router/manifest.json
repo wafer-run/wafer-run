@@ -1,0 +1,11 @@
+{
+  "name": "suppers-ai/router",
+  "summary": "Solobase request router with JWT validation and feature gates",
+  "latest": "1.0.0",
+  "versions": {
+    "1.0.0": {
+      "abi": 1,
+      "crate": "solobase-core"
+    }
+  }
+}

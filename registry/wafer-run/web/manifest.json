@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run/web",
+  "summary": "Static file serving with SPA support",
+  "latest": "0.1.0",
+  "versions": {
+    "0.1.0": {
+      "abi": 1,
+      "crate": "wafer-block-web"
+    }
+  }
+}

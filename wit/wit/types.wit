@@ -72,6 +72,44 @@ interface types {
         per-execution,
     }
 
+    // -----------------------------------------------------------------------
+    // Schema declarations — blocks declare their database collections here.
+    // -----------------------------------------------------------------------
+
+    /// A field (column) in a collection.
+    record field-def {
+        /// Field name (e.g., "email", "price").
+        name: string,
+        /// Type: "string", "text", "int", "int64", "float", "bool", "datetime", "json", "blob".
+        field-type: string,
+        /// Whether this field must have a unique value.
+        unique: bool,
+        /// Whether this field can be NULL.
+        optional: bool,
+        /// JSON-encoded default value, or "" for none.
+        default-value: string,
+        /// Foreign key reference in "table.column" format, or "" for none.
+        reference: string,
+    }
+
+    /// An index on a collection.
+    record index-def {
+        /// Column names in the index.
+        fields: list<string>,
+        /// Whether this is a unique index.
+        unique: bool,
+    }
+
+    /// A database collection (table) declared by a block.
+    record collection-def {
+        /// Collection name (e.g., "auth_users", "block_products_products").
+        name: string,
+        /// Fields in this collection (excludes id, created_at, updated_at which are automatic).
+        fields: list<field-def>,
+        /// Indexes on this collection.
+        indexes: list<index-def>,
+    }
+
     /// Metadata describing a block.
     record block-info {
         name: string,
@@ -80,6 +118,9 @@ interface types {
         summary: string,
         instance-mode: instance-mode,
         allowed-modes: list<instance-mode>,
+        /// Database collections this block requires. The runtime ensures these
+        /// tables exist when the block is registered.
+        collections: list<collection-def>,
     }
 
     /// The kind of lifecycle event.

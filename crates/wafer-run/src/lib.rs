@@ -20,14 +20,12 @@ pub mod runtime;
 pub mod schema;
 pub mod security;
 pub mod types;
+pub mod waferflow;
 pub mod wasm;
 
 // Re-exports for convenience
 pub use block::{AdminUIInfo, Block, BlockInfo};
-pub use config::{
-    BlockConfig, ConfigMapEntry, DispatchTarget, Flow, FlowConfig, FlowConfigDef, FlowDef,
-    FlowInfo, Node, NodeDef,
-};
+pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 pub use helpers::{

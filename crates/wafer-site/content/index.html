@@ -12,26 +12,28 @@
     <style>
         /* Hero */
         .hero {
-            background: linear-gradient(135deg, var(--wafer-cream) 0%, var(--bg-white) 60%, #eef2f7 100%);
-            padding: 5rem 1.5rem 3rem; text-align: center;
-        }
-        .hero img {
-            max-width: 200px; width: 100%; height: auto;
-            border-radius: 0.5rem; margin-bottom: 1.5rem;
+            text-align: center;
+            padding: 4rem 1.5rem 3rem;
+            background: var(--bg-white);
         }
         .hero h1 {
             font-size: 3.5rem; font-weight: 700;
-            letter-spacing: -0.02em; margin-bottom: 0.75rem;
+            letter-spacing: -0.02em; margin-bottom: 0.5rem;
         }
         .hero-wafer { color: var(--wafer); }
         .hero-run { color: var(--blue-dark); }
+        .hero-acronym {
+            font-size: 1rem; color: var(--text-secondary);
+            letter-spacing: 0.03em; margin-bottom: 1rem;
+        }
         .hero-tagline {
-            font-size: 1.4rem; color: var(--text-secondary);
-            max-width: 38rem; margin: 0 auto 1.5rem;
+            font-size: 1.3rem; color: var(--text);
+            max-width: 38rem; margin: 0 auto 0.75rem;
+            font-weight: 600;
         }
         .hero-sub {
             font-size: 1.05rem; color: var(--text-secondary);
-            max-width: 42rem; margin: 0 auto 2rem; line-height: 1.7;
+            max-width: 42rem; margin: 0 auto 1.5rem; line-height: 1.7;
         }
 
 
@@ -188,7 +190,7 @@
         /* Responsive */
         @media (max-width: 768px) {
             .hero h1 { font-size: 2.5rem; }
-            .hero-tagline { font-size: 1.15rem; }
+            .intro-tagline { font-size: 1.15rem; }
             .pillar {
                 grid-template-columns: 1fr; gap: 1.5rem;
             }
@@ -202,7 +204,7 @@
 <body>
     <div class="header">
         <div class="header-inner">
-            <a class="brand" href="/"><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
+            <a class="brand" href="/"><img class="brand-logo" src="/images/logo.webp" alt=""><span class="brand-wafer">wafer</span><span class="brand-run">.run</span></a>
             <nav>
                 <a href="/">Home</a>
                 <a href="/registry">Registry</a>
@@ -214,8 +216,8 @@
 
     <!-- Hero -->
     <div class="hero">
-        <img src="/images/logo.webp" alt="wafer.run">
         <h1><span class="hero-wafer">wafer</span><span class="hero-run">.run</span></h1>
+        <p class="hero-acronym">WebAssembly Architecture for Flow Execution & Routing</p>
         <p class="hero-tagline">The wafer thin runtime for tools, apps, and services</p>
         <p class="hero-sub">
             Ship secure, sandboxed programs in a single binary. No Docker. No VMs.

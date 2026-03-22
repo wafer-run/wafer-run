@@ -4457,6 +4457,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "wafer-block",
  "wafer-run",
 ]
 
@@ -4467,6 +4468,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "wafer-run",
+]
+
+[[package]]
+name = "wafer-flow"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4504,6 +4514,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wafer-block",
+ "wafer-flow",
  "wasmtime",
  "web-time",
 ]
@@ -4516,6 +4527,7 @@ dependencies = [
  "napi-derive",
  "serde_json",
  "tokio",
+ "wafer-flow",
  "wafer-run",
 ]
 
@@ -4523,6 +4535,7 @@ dependencies = [
 name = "wafer-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "wafer-block",
 ]
 

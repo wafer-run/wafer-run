@@ -63,6 +63,7 @@ impl Block for IAMBlock {
             admin_ui: None,
             runtime: wafer_run::types::BlockRuntime::Both,
             requires: vec!["wafer-run/database".to_string()],
+            collections: Vec::new(),
         }
     }
 

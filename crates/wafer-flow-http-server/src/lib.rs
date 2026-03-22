@@ -12,11 +12,19 @@
 //! }));
 //! ```
 
-use wafer_run::FlowDef;
-
 const FLOW_JSON: &str = r#"{
     "id": "wafer-run/http-server",
-    "summary": "HTTP server: security headers, CORS, rate limiting, monitoring, router",
+    "name": "HTTP Server",
+    "version": "0.1.0",
+    "description": "HTTP server: security headers, CORS, rate limiting, monitoring, router",
+    "steps": [
+        { "id": "security-headers", "block": "wafer-run/security-headers" },
+        { "id": "cors", "block": "wafer-run/cors" },
+        { "id": "readonly-guard", "block": "wafer-run/readonly-guard" },
+        { "id": "rate-limit", "block": "wafer-run/ip-rate-limit" },
+        { "id": "monitoring", "block": "wafer-run/monitoring" },
+        { "id": "router", "block": "wafer-run/router" }
+    ],
     "config": { "on_error": "stop" },
     "blocks": [
         "wafer-run/security-headers",
@@ -27,24 +35,6 @@ const FLOW_JSON: &str = r#"{
         "wafer-run/router",
         "wafer-run/http-listener"
     ],
-    "root": {
-        "block": "wafer-run/security-headers",
-        "next": [{
-            "block": "wafer-run/cors",
-            "next": [{
-                "block": "wafer-run/readonly-guard",
-                "next": [{
-                    "block": "wafer-run/ip-rate-limit",
-                    "next": [{
-                        "block": "wafer-run/monitoring",
-                        "next": [{
-                            "block": "wafer-run/router"
-                        }]
-                    }]
-                }]
-            }]
-        }]
-    },
     "config_map": {
         "listen": { "target": "wafer-run/http-listener", "key": "listen" },
         "routes": { "target": "wafer-run/router", "key": "routes" }
@@ -86,10 +76,9 @@ pub fn register(w: &mut wafer_run::Wafer, config: serde_json::Value) {
         wafer_block_http_listener::register(w);
     }
 
-    // Register flow (config_map + config_defaults replace the old config expander)
-    let def: FlowDef = serde_json::from_str(FLOW_JSON)
+    // Register flow
+    w.add_flow_json(FLOW_JSON)
         .expect("invalid wafer-run/http-server flow JSON");
-    w.add_flow_def(&def);
 
     // Set config
     w.add_block_config("wafer-run/http-server", config);

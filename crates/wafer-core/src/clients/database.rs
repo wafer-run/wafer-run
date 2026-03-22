@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use wafer_run::common::{ErrorCode, ServiceOp};
+#[cfg(not(target_arch = "wasm32"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -152,13 +153,17 @@ fn to_sort_defs(sort: &[SortField]) -> Vec<SortDef<'_>> {
         .collect()
 }
 
-// --- Public API: core CRUD ---
+// ===========================================================================
+// Public API: core CRUD — native async
+// ===========================================================================
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get(ctx: &dyn Context, collection: &str, id: &str) -> Result<Record, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id }).await?;
     decode(&data)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
     let data = call_service(
         ctx,
@@ -175,6 +180,7 @@ pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Re
     decode(&data)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn create(
     ctx: &dyn Context,
     collection: &str,
@@ -192,6 +198,7 @@ pub async fn create(
     decode(&resp)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn update(
     ctx: &dyn Context,
     collection: &str,
@@ -211,6 +218,7 @@ pub async fn update(
     decode(&resp)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -221,6 +229,7 @@ pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(),
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
     let data = call_service(
         ctx,
@@ -235,6 +244,7 @@ pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> R
     Ok(resp.count)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn sum(
     ctx: &dyn Context,
     collection: &str,
@@ -255,6 +265,7 @@ pub async fn sum(
     Ok(resp.sum)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn query_raw(
     ctx: &dyn Context,
     query: &str,
@@ -269,6 +280,7 @@ pub async fn query_raw(
     decode(&data)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn exec_raw(
     ctx: &dyn Context,
     query: &str,
@@ -284,9 +296,9 @@ pub async fn exec_raw(
     Ok(resp.rows_affected)
 }
 
-// --- Public API: higher-level helpers ---
+// --- Public API: higher-level helpers (native) ---
 
-/// Retrieve a single record where `field` equals `value`.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -313,7 +325,7 @@ pub async fn get_by_field(
         .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
 }
 
-/// Create or update a record based on a field match.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn upsert(
     ctx: &dyn Context,
     collection: &str,
@@ -328,7 +340,7 @@ pub async fn upsert(
     }
 }
 
-/// Retrieve all records from a collection with optional filters.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn list_all(
     ctx: &dyn Context,
     collection: &str,
@@ -346,7 +358,7 @@ pub async fn list_all(
     Ok(result.records)
 }
 
-/// Retrieve a paginated list of records.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn paginated_list(
     ctx: &dyn Context,
     collection: &str,
@@ -369,7 +381,7 @@ pub async fn paginated_list(
     ).await
 }
 
-/// Set `deleted_at` on a record (soft delete).
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn soft_delete(
     ctx: &dyn Context,
     collection: &str,
@@ -383,7 +395,7 @@ pub async fn soft_delete(
     update(ctx, collection, id, data).await
 }
 
-/// Delete all records where `field` equals `value`.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn delete_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -405,7 +417,7 @@ pub async fn delete_by_field(
     Ok(())
 }
 
-/// Count records where `field` equals `value`.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn count_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -423,7 +435,7 @@ pub async fn count_by_field(
     ).await
 }
 
-/// Delete all records matching filters.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn delete_by_filters(
     ctx: &dyn Context,
     collection: &str,
@@ -436,7 +448,7 @@ pub async fn delete_by_filters(
     Ok(())
 }
 
-/// Update all records matching filters.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn update_by_filters(
     ctx: &dyn Context,
     collection: &str,
@@ -446,6 +458,288 @@ pub async fn update_by_filters(
     let records = list_all(ctx, collection, filters).await?;
     for r in records {
         update(ctx, collection, &r.id, data.clone()).await?;
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Public API: core CRUD — WASM sync (calls WIT runtime::call-block import)
+// ===========================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub fn get(collection: &str, id: &str) -> Result<Record, WaferError> {
+    let data = call_service(BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id })?;
+    decode(&data)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn list(collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_LIST,
+        &ListReq {
+            collection,
+            filters: to_filter_defs(&opts.filters),
+            sort: to_sort_defs(&opts.sort),
+            limit: opts.limit,
+            offset: opts.offset,
+        },
+    )?;
+    decode(&data)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn create(
+    collection: &str,
+    data: HashMap<String, serde_json::Value>,
+) -> Result<Record, WaferError> {
+    let resp = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_CREATE,
+        &CreateReq {
+            collection,
+            data: &data,
+        },
+    )?;
+    decode(&resp)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn update(
+    collection: &str,
+    id: &str,
+    data: HashMap<String, serde_json::Value>,
+) -> Result<Record, WaferError> {
+    let resp = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_UPDATE,
+        &UpdateReq {
+            collection,
+            id,
+            data: &data,
+        },
+    )?;
+    decode(&resp)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn delete(collection: &str, id: &str) -> Result<(), WaferError> {
+    call_service(
+        BLOCK,
+        ServiceOp::DATABASE_DELETE,
+        &DeleteReq { collection, id },
+    )?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn count(collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_COUNT,
+        &CountReq {
+            collection,
+            filters: to_filter_defs(filters),
+        },
+    )?;
+    let resp: CountResp = decode(&data)?;
+    Ok(resp.count)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn sum(
+    collection: &str,
+    field: &str,
+    filters: &[Filter],
+) -> Result<f64, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_SUM,
+        &SumReq {
+            collection,
+            field,
+            filters: to_filter_defs(filters),
+        },
+    )?;
+    let resp: SumResp = decode(&data)?;
+    Ok(resp.sum)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn query_raw(
+    query: &str,
+    args: &[serde_json::Value],
+) -> Result<Vec<Record>, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_QUERY_RAW,
+        &QueryRawReq { query, args },
+    )?;
+    decode(&data)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn exec_raw(
+    query: &str,
+    args: &[serde_json::Value],
+) -> Result<i64, WaferError> {
+    let data = call_service(
+        BLOCK,
+        ServiceOp::DATABASE_EXEC_RAW,
+        &ExecRawReq { query, args },
+    )?;
+    let resp: ExecRawResp = decode(&data)?;
+    Ok(resp.rows_affected)
+}
+
+// --- Public API: higher-level helpers (WASM) ---
+
+#[cfg(target_arch = "wasm32")]
+pub fn get_by_field(
+    collection: &str,
+    field: &str,
+    value: serde_json::Value,
+) -> Result<Record, WaferError> {
+    let result = list(
+        collection,
+        &ListOptions {
+            filters: vec![Filter {
+                field: field.to_string(),
+                operator: FilterOp::Equal,
+                value,
+            }],
+            limit: 1,
+            ..Default::default()
+        },
+    )?;
+    result
+        .records
+        .into_iter()
+        .next()
+        .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn upsert(
+    collection: &str,
+    field: &str,
+    value: serde_json::Value,
+    data: HashMap<String, serde_json::Value>,
+) -> Result<Record, WaferError> {
+    match get_by_field(collection, field, value) {
+        Ok(existing) => update(collection, &existing.id, data),
+        Err(e) if e.code == ErrorCode::NOT_FOUND => create(collection, data),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn list_all(
+    collection: &str,
+    filters: Vec<Filter>,
+) -> Result<Vec<Record>, WaferError> {
+    let result = list(
+        collection,
+        &ListOptions {
+            filters,
+            limit: 100000,
+            ..Default::default()
+        },
+    )?;
+    Ok(result.records)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn paginated_list(
+    collection: &str,
+    page: i64,
+    page_size: i64,
+    filters: Vec<Filter>,
+    sort: Vec<SortField>,
+) -> Result<RecordList, WaferError> {
+    let page = if page < 1 { 1 } else { page };
+    let page_size = if page_size < 1 { 20 } else { page_size };
+    list(
+        collection,
+        &ListOptions {
+            filters,
+            sort,
+            limit: page_size,
+            offset: (page - 1).saturating_mul(page_size),
+        },
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn soft_delete(
+    collection: &str,
+    id: &str,
+) -> Result<Record, WaferError> {
+    let mut data = HashMap::new();
+    data.insert(
+        "deleted_at".to_string(),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    update(collection, id, data)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn delete_by_field(
+    collection: &str,
+    field: &str,
+    value: serde_json::Value,
+) -> Result<(), WaferError> {
+    let records = list_all(
+        collection,
+        vec![Filter {
+            field: field.to_string(),
+            operator: FilterOp::Equal,
+            value,
+        }],
+    )?;
+    for r in records {
+        delete(collection, &r.id)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn count_by_field(
+    collection: &str,
+    field: &str,
+    value: serde_json::Value,
+) -> Result<i64, WaferError> {
+    count(
+        collection,
+        &[Filter {
+            field: field.to_string(),
+            operator: FilterOp::Equal,
+            value,
+        }],
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn delete_by_filters(
+    collection: &str,
+    filters: Vec<Filter>,
+) -> Result<(), WaferError> {
+    let records = list_all(collection, filters)?;
+    for r in records {
+        delete(collection, &r.id)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn update_by_filters(
+    collection: &str,
+    filters: Vec<Filter>,
+    data: HashMap<String, serde_json::Value>,
+) -> Result<(), WaferError> {
+    let records = list_all(collection, filters)?;
+    for r in records {
+        update(collection, &r.id, data.clone())?;
     }
     Ok(())
 }

@@ -7,9 +7,33 @@
 use std::future::Future;
 use std::pin::Pin;
 
-/// Cross-platform Instant. On native, this is `std::time::Instant`.
-/// On wasm32, this uses `Performance.now()` via the `web-time` crate.
+/// Cross-platform Instant. On native, this is `std::time::Instant` (via web-time,
+/// which is a zero-cost wrapper). On wasm32 Component targets, a minimal stub
+/// is provided since there's no system clock available.
+#[cfg(not(target_arch = "wasm32"))]
 pub use web_time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Instant;
+
+#[cfg(target_arch = "wasm32")]
+impl Instant {
+    pub fn now() -> Self { Self }
+    pub fn elapsed(&self) -> std::time::Duration { std::time::Duration::ZERO }
+    pub fn checked_duration_since(&self, _earlier: Instant) -> Option<std::time::Duration> {
+        Some(std::time::Duration::ZERO)
+    }
+    pub fn duration_since(&self, _earlier: Instant) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Add<std::time::Duration> for Instant {
+    type Output = Instant;
+    fn add(self, _rhs: std::time::Duration) -> Instant { self }
+}
 
 // ---------------------------------------------------------------------------
 // Boxed future type aliases (Send on native, !Send on wasm32)

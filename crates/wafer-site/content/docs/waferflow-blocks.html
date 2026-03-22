@@ -1,0 +1,131 @@
+<!--
+TITLE: WaferFlow Blocks — wafer.run docs
+ACTIVE: waferflow-blocks
+-->
+
+<h2>WaferFlow Blocks</h2>
+<p>A block is the executable unit behind each step in a WaferFlow. Blocks receive structured input, do work, and return structured output. This page covers how blocks are defined, named, packaged, and integrated with the runtime.</p>
+
+<h3>BlockDef</h3>
+<p>Every block has a <code>BlockDef</code> that describes its metadata and contract. This is typically stored as a <code>block.json</code> file alongside the compiled block.</p>
+<pre><code>{
+    "id": "@wafer-run/wafer-run/sqlite",
+    "name": "SQLite",
+    "version": "0.1.0",
+    "description": "CRUD operations on SQLite collections",
+    "input": {
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "description": "get, list, create, update, delete" },
+            "collection": { "type": "string" },
+            "id": { "type": "string" }
+        },
+        "required": ["action", "collection"]
+    },
+    "output": {
+        "type": "object",
+        "properties": {
+            "data": { "description": "Query result" },
+            "error": { "type": "string" }
+        }
+    },
+    "runtime": "both"
+}</code></pre>
+<p>Fields:</p>
+<ul>
+    <li><code>id</code> &mdash; unique identifier following the naming convention (see below)</li>
+    <li><code>name</code> &mdash; human-readable display name</li>
+    <li><code>version</code> &mdash; semantic version (e.g. <code>0.1.0</code>)</li>
+    <li><code>description</code> &mdash; optional summary of what the block does</li>
+    <li><code>input</code> &mdash; optional <code>PortSchema</code> describing the expected input shape</li>
+    <li><code>output</code> &mdash; optional <code>PortSchema</code> describing the output shape</li>
+    <li><code>runtime</code> &mdash; which runtime targets the block supports: <code>wasm</code>, <code>native</code>, or <code>both</code></li>
+</ul>
+<p>The <code>input</code> and <code>output</code> schemas use a JSON Schema subset (<code>PortSchema</code>) that supports <code>type</code>, <code>properties</code>, <code>items</code>, <code>required</code>, <code>description</code>, and <code>default</code>. These schemas enable tooling to validate flow definitions before execution and provide editor autocomplete for step inputs.</p>
+
+<h3>Naming Convention</h3>
+<p>Block ids follow the <code>@{github_owner}/{repo}/{block}</code> format:</p>
+<ul>
+    <li><code>@wafer-run/wafer-run/sqlite</code> &mdash; core SQLite block from the wafer-run repo</li>
+    <li><code>@wafer-run/wafer-run/s3</code> &mdash; core S3 storage block</li>
+    <li><code>@suppers-ai/solobase/auth</code> &mdash; authentication block from the solobase repo</li>
+    <li><code>@acme/my-blocks/validator</code> &mdash; a third-party block</li>
+</ul>
+<p>Ownership is enforced by GitHub permissions &mdash; only the repository owner can publish blocks under their namespace. The registry validates this on package submission.</p>
+<p>When referencing blocks in flow steps, use the full id:</p>
+<pre><code>{
+    "id": "find-user",
+    "block": "@wafer-run/wafer-run/sqlite",
+    "input": { "action": "get", "collection": "users", "id": "$.input.user_id" }
+}</code></pre>
+
+<h3>Runtime Types</h3>
+<p>The <code>runtime</code> field in a BlockDef indicates how the block can be executed:</p>
+<ul>
+    <li><strong>native</strong> &mdash; compiled Rust that runs directly in the host process. Zero overhead, full access to the host. Cannot be distributed as a standalone package (must be compiled in).</li>
+    <li><strong>wasm</strong> &mdash; compiled to WebAssembly and loaded at runtime. Cross-language (Rust, Go, TypeScript), sandboxed, distributable via the package registry.</li>
+    <li><strong>both</strong> &mdash; supports both native and WASM compilation. Core <code>@wafer-run/wafer-run/*</code> blocks are typically <code>both</code>, so they work in any deployment context.</li>
+</ul>
+<p>The runtime type is detected automatically from the release assets when publishing to the registry &mdash; if a <code>.wasm</code> file is present, the block is marked as <code>wasm</code>. If a Rust crate is referenced, it is marked as <code>native</code>. Both assets means <code>both</code>.</p>
+
+<h3>Pure Blocks vs Service Blocks</h3>
+<p>Blocks fall into two categories based on their side effects:</p>
+
+<h4>Pure Blocks</h4>
+<p>Pure blocks are deterministic transformations: given the same input, they always produce the same output. They do not access databases, storage, network, or any external state.</p>
+<ul>
+    <li>Validators &mdash; check input structure, format, ranges</li>
+    <li>Transformers &mdash; reshape data, map fields, compute values</li>
+    <li>Formatters &mdash; render templates, build response bodies</li>
+</ul>
+<p>Example:</p>
+<pre><code>// Input:  { "price": 100, "tax_rate": 0.08 }
+// Output: { "total": 108.0, "tax": 8.0 }</code></pre>
+
+<h4>Service Blocks</h4>
+<p>Service blocks interact with the runtime context to access databases, storage, cryptographic operations, or external APIs. They declare their dependencies in the <code>requires</code> list of their <code>BlockInfo</code>, and the runtime enforces access control.</p>
+<ul>
+    <li><code>@wafer-run/wafer-run/sqlite</code> &mdash; CRUD against SQLite collections</li>
+    <li><code>@wafer-run/wafer-run/s3</code> &mdash; object storage operations</li>
+    <li><code>@wafer-run/wafer-run/postgres</code> &mdash; PostgreSQL queries</li>
+    <li><code>@wafer-run/wafer-run/local-storage</code> &mdash; local filesystem storage</li>
+</ul>
+<p>Service blocks use the context's <code>call_block()</code> to invoke runtime services:</p>
+<pre><code>// A service block that reads from the database
+fn handle(ctx: Context, msg: Message) -&gt; BlockResult {
+    let user = ctx.call_block("wafer-run/database", query_msg)?;
+    // ... process user ...
+}</code></pre>
+
+<h3>WASM Packaging</h3>
+<p>A WASM block package consists of two files:</p>
+<ul>
+    <li><code>block.json</code> &mdash; the <code>BlockDef</code> metadata described above</li>
+    <li><code>block.wasm</code> &mdash; the compiled WebAssembly component</li>
+</ul>
+<p>The <code>.wasm</code> file exports four functions that the runtime calls: <code>malloc</code>, <code>info</code>, <code>handle</code>, and <code>lifecycle</code>. Guest SDKs (TypeScript, Go, Rust) generate these exports automatically. See <a href="/docs/wasm-blocks">WASM Blocks</a> for build instructions.</p>
+<p>Build and package with the CLI:</p>
+<pre><code># Build the WASM binary
+cargo build --target wasm32-wasip1 --release
+
+# The block.json is generated from #[wafer_block] attributes
+# or written manually for non-Rust blocks</code></pre>
+
+<h3>Package Registry Integration</h3>
+<p>Published blocks are discoverable through the <a href="/registry">wafer.run package registry</a>. The registry stores manifests that point to GitHub Release assets:</p>
+<pre><code>{
+    "name": "acme/validator",
+    "summary": "Input validation block",
+    "latest": "1.0.0",
+    "versions": {
+        "1.0.0": {
+            "abi": 1,
+            "wasm_url": "https://github.com/acme/validator/releases/download/v1.0.0/block.wasm"
+        }
+    }
+}</code></pre>
+<p>When a flow references a block that is not registered locally, the runtime resolves it from the registry, downloads the <code>.wasm</code>, validates ABI compatibility, and loads it. See <a href="/docs/registry">Package Registry</a> for the full publishing workflow.</p>
+
+<h3>Creating Blocks for WaferFlow</h3>
+<p>Any block that conforms to the wafer-run block interface works in WaferFlow. The flow engine maps step inputs to a <code>Message</code>, calls the block's <code>handle()</code>, and stores the result in the accumulator. No special WaferFlow-specific code is needed in the block itself.</p>
+<p>For step-by-step instructions on creating blocks, see <a href="/docs/creating-a-block">Creating a Block</a> (native) and <a href="/docs/wasm-blocks">WASM Blocks</a> (cross-language).</p>

@@ -23,6 +23,7 @@ members = [
     "crates/wafer-block-sqlite",
     "crates/wafer-block-web",
     "crates/wafer-flow-http-server",
+    "crates/wafer-flow",
     "crates/wafer-run",
     "crates/wafer-core",
     "crates/wafer-ffi",
@@ -44,6 +45,7 @@ license = "MIT"
 wafer-block = { path = "crates/wafer-block" }
 wafer-run = { path = "crates/wafer-run", features = ["full"] }
 wafer-core = { path = "crates/wafer-core" }
+wafer-flow = { path = "crates/wafer-flow" }
 
 # Core
 serde = { version = "1", features = ["derive"] }

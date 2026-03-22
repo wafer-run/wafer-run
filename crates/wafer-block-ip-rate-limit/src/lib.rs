@@ -40,6 +40,7 @@ impl Block for RateLimitBlock {
             admin_ui: None,
             runtime: wafer_run::types::BlockRuntime::Both,
             requires: Vec::new(),
+            collections: Vec::new(),
         }
     }
 

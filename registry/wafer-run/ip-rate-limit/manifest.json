@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run/ip-rate-limit",
+  "summary": "IP-based rate limiting",
+  "latest": "0.1.0",
+  "versions": {
+    "0.1.0": {
+      "abi": 1,
+      "crate": "wafer-block-ip-rate-limit"
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "wf": "https://wafer.run/ns/waferflow/v0.1.0#",
+    "schema": "https://schema.org/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+    "Flow": "wf:Flow",
+    "Step": "wf:Step",
+    "Block": "wf:Block",
+    "BlockDef": "wf:BlockDef",
+    "NextEntry": "wf:NextEntry",
+    "PortSchema": "wf:PortSchema",
+    "FlowConfig": "wf:FlowConfig",
+
+    "id": "@id",
+    "name": "schema:name",
+    "version": "schema:version",
+    "description": "schema:description",
+
+    "steps": {
+      "@id": "wf:steps",
+      "@type": "@id",
+      "@container": "@list"
+    },
+    "block": {
+      "@id": "wf:block",
+      "@type": "@id"
+    },
+    "input": {
+      "@id": "wf:input"
+    },
+    "output": {
+      "@id": "wf:output"
+    },
+    "next": {
+      "@id": "wf:next",
+      "@type": "@id",
+      "@container": "@list"
+    },
+    "when": {
+      "@id": "wf:when",
+      "@type": "xsd:string"
+    },
+    "step": {
+      "@id": "wf:targetStep",
+      "@type": "@id"
+    },
+    "flow": {
+      "@id": "wf:targetFlow",
+      "@type": "@id"
+    },
+    "each": {
+      "@id": "wf:each",
+      "@type": "xsd:string"
+    },
+    "parallel": {
+      "@id": "wf:parallel",
+      "@container": "@list"
+    },
+    "config": {
+      "@id": "wf:config"
+    },
+    "runtime": {
+      "@id": "wf:runtime"
+    },
+    "timeout_ms": {
+      "@id": "wf:timeoutMs",
+      "@type": "xsd:integer"
+    },
+    "max_steps": {
+      "@id": "wf:maxSteps",
+      "@type": "xsd:integer"
+    },
+    "on_error": {
+      "@id": "wf:onError"
+    }
+  }
+}

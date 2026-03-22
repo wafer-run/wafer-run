@@ -22,10 +22,10 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> { Vec::new() }
 
     /// List flow summary info.
-    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> { Vec::new() }
+    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> { Vec::new() }
 
     /// List full flow definitions.
-    fn flow_defs(&self) -> Vec<crate::config::FlowDef> { Vec::new() }
+    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> { Vec::new() }
 }
 
 /// RuntimeContext implements Context for blocks.
@@ -47,9 +47,9 @@ pub struct RuntimeContext {
     /// Snapshot of registered block info (populated at start time).
     pub registered_blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
     /// Snapshot of flow info (populated at start time).
-    pub flow_infos_snapshot: Arc<Vec<crate::config::FlowInfo>>,
+    pub flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
-    pub flow_defs_snapshot: Arc<Vec<crate::config::FlowDef>>,
+    pub flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
@@ -187,11 +187,11 @@ impl Context for RuntimeContext {
         (*self.registered_blocks_snapshot).clone()
     }
 
-    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> {
+    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
         (*self.flow_infos_snapshot).clone()
     }
 
-    fn flow_defs(&self) -> Vec<crate::config::FlowDef> {
+    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
         (*self.flow_defs_snapshot).clone()
     }
 }

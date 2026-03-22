@@ -339,11 +339,11 @@ impl Context for ContextWrapper {
         unsafe { &*self.0 }.registered_blocks()
     }
 
-    fn flow_infos(&self) -> Vec<crate::config::FlowInfo> {
+    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
         unsafe { &*self.0 }.flow_infos()
     }
 
-    fn flow_defs(&self) -> Vec<crate::config::FlowDef> {
+    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
         unsafe { &*self.0 }.flow_defs()
     }
 }
@@ -401,6 +401,21 @@ impl Block for WASMBlock {
                     admin_ui: None,
                     runtime: BlockRuntime::Wasm,
                     requires: vec![],
+                    collections: info.collections.into_iter().map(|c| wafer_block::CollectionSchema {
+                        name: c.name,
+                        fields: c.fields.into_iter().map(|f| wafer_block::FieldSchema {
+                            name: f.name,
+                            field_type: f.field_type,
+                            unique: f.unique,
+                            optional: f.optional,
+                            default_value: f.default_value,
+                            reference: f.reference,
+                        }).collect(),
+                        indexes: c.indexes.into_iter().map(|i| wafer_block::IndexSchema {
+                            fields: i.fields,
+                            unique: i.unique,
+                        }).collect(),
+                    }).collect(),
                 })
             })
         }).join().unwrap().unwrap_or_else(|e| BlockInfo {
@@ -413,6 +428,7 @@ impl Block for WASMBlock {
             admin_ui: None,
             runtime: BlockRuntime::Wasm,
             requires: Vec::new(),
+            collections: Vec::new(),
         });
 
         if let Ok(mut guard) = self.info_cache.lock() {

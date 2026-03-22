@@ -69,6 +69,7 @@ impl Block for NotesHandler {
             admin_ui: None,
             runtime: BlockRuntime::Native,
             requires: vec![],
+            collections: vec![],
         }
     }
 

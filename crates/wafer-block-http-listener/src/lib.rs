@@ -341,6 +341,7 @@ impl Block for HttpListenerBlock {
             admin_ui: None,
             runtime: wafer_run::types::BlockRuntime::Native,
             requires: Vec::new(),
+            collections: Vec::new(),
         }
     }
 
@@ -425,8 +426,8 @@ impl Block for HttpListenerBlock {
                         );
 
                         let result = match &target {
-                            DispatchTarget::Flow(fid) => h.execute(fid, &mut msg).await,
-                            DispatchTarget::Block(name) => h.execute_block(name, &mut msg).await,
+                            DispatchTarget::Flow(fid) => h.run(fid, &mut msg).await,
+                            DispatchTarget::Block(name) => h.run_block(name, &mut msg).await,
                         };
                         wafer_result_to_response(result)
                     }

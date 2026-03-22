@@ -42,7 +42,10 @@ code, pre { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
 /* Brand: wafer.run */
 .brand {
     font-size: 1.5rem; font-weight: 700; text-decoration: none;
-    display: inline-flex; align-items: baseline;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+}
+.brand-logo {
+    height: 1.5rem; width: auto; border-radius: 0.25rem;
 }
 .brand-wafer {
     color: var(--wafer);

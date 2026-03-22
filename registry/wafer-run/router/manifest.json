@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run/router",
+  "summary": "Request routing and path matching",
+  "latest": "0.1.0",
+  "versions": {
+    "0.1.0": {
+      "abi": 1,
+      "crate": "wafer-block-router"
+    }
+  }
+}

@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::types::{InstanceMode, LifecycleEvent};
+use crate::types::LifecycleEvent;
 
 // ---------------------------------------------------------------------------
 // BlockConfig — common config accessor for blocks
@@ -62,121 +61,8 @@ impl BlockConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Flow & Node definitions
+// Utilities
 // ---------------------------------------------------------------------------
-
-/// A declarative config routing entry: maps a user-facing config key
-/// to a target block and key within that block's config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigMapEntry {
-    pub target: String,
-    pub key: String,
-}
-
-/// FlowDef defines a flow in JSON configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlowDef {
-    pub id: String,
-    #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
-    pub config: FlowConfigDef,
-    pub root: NodeDef,
-    /// Block dependencies — the runtime ensures these exist before resolving.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<String>,
-    /// Declarative config expansion: maps user-facing config keys to target block configs.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config_map: HashMap<String, ConfigMapEntry>,
-    /// Static config values always injected into target block configs.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config_defaults: HashMap<String, serde_json::Value>,
-}
-
-/// FlowConfigDef holds flow-level configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FlowConfigDef {
-    #[serde(default)]
-    pub on_error: String,
-    #[serde(default)]
-    pub timeout: String,
-}
-
-/// NodeDef defines a node in the flow tree (JSON serialization).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeDef {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub block: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub flow: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub r#match: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub instance: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next: Vec<NodeDef>,
-}
-
-/// Flow is the runtime representation of a flow.
-pub struct Flow {
-    pub id: String,
-    pub summary: String,
-    pub config: FlowConfig,
-    pub root: Box<Node>,
-    /// Block dependencies.
-    pub blocks: Vec<String>,
-    /// Declarative config expansion map.
-    pub config_map: HashMap<String, ConfigMapEntry>,
-    /// Static config defaults for target blocks.
-    pub config_defaults: HashMap<String, serde_json::Value>,
-}
-
-/// FlowConfig holds runtime flow configuration.
-#[derive(Debug, Clone)]
-pub struct FlowConfig {
-    pub on_error: String,
-    pub timeout: Duration,
-}
-
-impl Default for FlowConfig {
-    fn default() -> Self {
-        Self {
-            on_error: "stop".to_string(),
-            timeout: Duration::ZERO,
-        }
-    }
-}
-
-/// Node is the runtime representation of a flow node.
-pub struct Node {
-    pub block: String,
-    pub flow: String,
-    pub match_pattern: String,
-    pub config: Option<serde_json::Value>,
-    pub instance: Option<InstanceMode>,
-    pub next: Vec<Box<Node>>,
-
-    // Resolved at startup
-    pub(crate) resolved_block: Option<std::sync::Arc<dyn crate::block::Block>>,
-    pub(crate) config_map: std::collections::HashMap<String, String>,
-}
-
-impl Node {
-    pub fn new() -> Self {
-        Self {
-            block: String::new(),
-            flow: String::new(),
-            match_pattern: String::new(),
-            config: None,
-            instance: None,
-            next: Vec::new(),
-            resolved_block: None,
-            config_map: std::collections::HashMap::new(),
-        }
-    }
-}
 
 /// Parse config JSON into a map of string key-value pairs.
 /// String values are used as-is. Numbers and booleans are converted to their
@@ -229,79 +115,8 @@ pub fn parse_duration(s: &str) -> Duration {
     }
 }
 
-/// Convert a FlowDef to a runtime Flow.
-pub fn flow_def_to_flow(def: &FlowDef) -> Flow {
-    Flow {
-        id: def.id.clone(),
-        summary: def.summary.clone(),
-        config: FlowConfig {
-            on_error: if def.config.on_error.is_empty() {
-                "stop".to_string()
-            } else {
-                def.config.on_error.clone()
-            },
-            timeout: parse_duration(&def.config.timeout),
-        },
-        root: Box::new(node_def_to_node(&def.root)),
-        blocks: def.blocks.clone(),
-        config_map: def.config_map.clone(),
-        config_defaults: def.config_defaults.clone(),
-    }
-}
-
-/// Convert a NodeDef to a runtime Node.
-fn node_def_to_node(def: &NodeDef) -> Node {
-    Node {
-        block: def.block.clone(),
-        flow: def.flow.clone(),
-        match_pattern: def.r#match.clone(),
-        config: def.config.clone(),
-        instance: if def.instance.is_empty() {
-            None
-        } else {
-            Some(InstanceMode::parse(&def.instance))
-        },
-        next: def.next.iter().map(|n| Box::new(node_def_to_node(n))).collect(),
-        resolved_block: None,
-        config_map: std::collections::HashMap::new(),
-    }
-}
-
-/// Convert a runtime Flow back to a FlowDef.
-pub fn flow_to_flow_def(c: &Flow) -> FlowDef {
-    FlowDef {
-        id: c.id.clone(),
-        summary: c.summary.clone(),
-        config: FlowConfigDef {
-            on_error: c.config.on_error.clone(),
-            timeout: if c.config.timeout.is_zero() {
-                String::new()
-            } else {
-                format!("{}s", c.config.timeout.as_secs())
-            },
-        },
-        root: node_to_node_def(&c.root),
-        blocks: c.blocks.clone(),
-        config_map: c.config_map.clone(),
-        config_defaults: c.config_defaults.clone(),
-    }
-}
-
-/// Convert a runtime Node to a NodeDef.
-fn node_to_node_def(n: &Node) -> NodeDef {
-    NodeDef {
-        block: n.block.clone(),
-        flow: n.flow.clone(),
-        r#match: n.match_pattern.clone(),
-        config: n.config.clone(),
-        instance: n.instance.map(|m| m.to_string()).unwrap_or_default(),
-        next: n.next.iter().map(|child| node_to_node_def(child)).collect(),
-    }
-}
-
 /// A dispatch target: either a flow or a single block.
-/// This is the same `block` XOR `flow` pattern used in `NodeDef`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DispatchTarget {
     Flow(String),
     Block(String),
@@ -328,15 +143,4 @@ impl DispatchTarget {
         }
         None
     }
-}
-
-/// FlowInfo provides read-only info about a flow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlowInfo {
-    pub id: String,
-    pub summary: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub on_error: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub timeout: String,
 }

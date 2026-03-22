@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run/security-headers",
+  "summary": "Security headers (CSP, HSTS, X-Frame-Options)",
+  "latest": "0.1.0",
+  "versions": {
+    "0.1.0": {
+      "abi": 1,
+      "crate": "wafer-block-security-headers"
+    }
+  }
+}

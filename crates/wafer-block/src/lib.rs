@@ -33,8 +33,17 @@ pub use wafer::block_world::types::{
 // Re-export the WIT Guest trait for WASM block authors.
 pub use exports::wafer::block_world::block::Guest;
 
+/// WIT runtime host imports — only usable from WASM components.
+///
+/// These functions trap to the host runtime for inter-block calls, cancellation
+/// checks, and logging. They are only available when targeting `wasm32`.
+#[cfg(target_arch = "wasm32")]
+pub mod runtime {
+    pub use super::wafer::block_world::runtime::{call_block, is_cancelled, log};
+}
+
 // Re-export runtime-specific types.
-pub use types::{AdminUIInfo, BlockInfo, BlockRuntime, MetaAccess, RequestAction};
+pub use types::{AdminUIInfo, BlockInfo, BlockRuntime, CollectionSchema, FieldSchema, IndexSchema, MetaAccess, RequestAction};
 
 /// Alias for BlockResult — common in block handler return types.
 pub type Result_ = BlockResult;

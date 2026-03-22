@@ -40,6 +40,105 @@ pub struct BlockInfo {
     pub admin_ui: Option<AdminUIInfo>,
     pub runtime: BlockRuntime,
     pub requires: Vec<String>,
+    /// Database collections this block requires. The runtime ensures these
+    /// tables exist when the block is registered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<CollectionSchema>,
+}
+
+/// A database collection (table) declared by a block.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CollectionSchema {
+    pub name: String,
+    pub fields: Vec<FieldSchema>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<IndexSchema>,
+}
+
+/// A field (column) in a collection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FieldSchema {
+    pub name: String,
+    pub field_type: String,
+    #[serde(default)]
+    pub unique: bool,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_value: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reference: String,
+}
+
+/// An index on a collection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexSchema {
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Schema builder helpers
+// ---------------------------------------------------------------------------
+
+impl CollectionSchema {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.to_string(), fields: Vec::new(), indexes: Vec::new() }
+    }
+
+    pub fn field(mut self, name: &str, field_type: &str) -> Self {
+        self.fields.push(FieldSchema::new(name, field_type));
+        self
+    }
+
+    pub fn field_unique(mut self, name: &str, field_type: &str) -> Self {
+        self.fields.push(FieldSchema::new(name, field_type).set_unique());
+        self
+    }
+
+    pub fn field_optional(mut self, name: &str, field_type: &str) -> Self {
+        self.fields.push(FieldSchema::new(name, field_type).set_optional());
+        self
+    }
+
+    pub fn field_default(mut self, name: &str, field_type: &str, default: &str) -> Self {
+        self.fields.push(FieldSchema::new(name, field_type).set_default(default));
+        self
+    }
+
+    pub fn field_ref(mut self, name: &str, field_type: &str, reference: &str) -> Self {
+        self.fields.push(FieldSchema::new(name, field_type).set_ref(reference));
+        self
+    }
+
+    pub fn index(mut self, fields: &[&str]) -> Self {
+        self.indexes.push(IndexSchema { fields: fields.iter().map(|s| s.to_string()).collect(), unique: false });
+        self
+    }
+
+    pub fn unique_index(mut self, fields: &[&str]) -> Self {
+        self.indexes.push(IndexSchema { fields: fields.iter().map(|s| s.to_string()).collect(), unique: true });
+        self
+    }
+}
+
+impl FieldSchema {
+    pub fn new(name: &str, field_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            unique: false,
+            optional: false,
+            default_value: String::new(),
+            reference: String::new(),
+        }
+    }
+
+    pub fn set_unique(mut self) -> Self { self.unique = true; self }
+    pub fn set_optional(mut self) -> Self { self.optional = true; self }
+    pub fn set_default(mut self, val: &str) -> Self { self.default_value = val.to_string(); self }
+    pub fn set_ref(mut self, reference: &str) -> Self { self.reference = reference.to_string(); self }
 }
 
 /// HTTP-level request action mapped from method to WAFER semantics.

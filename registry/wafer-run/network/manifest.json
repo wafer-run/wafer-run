@@ -1,0 +1,11 @@
+{
+  "name": "wafer-run/network",
+  "summary": "Outbound HTTP requests",
+  "latest": "0.1.0",
+  "versions": {
+    "0.1.0": {
+      "abi": 1,
+      "crate": "wafer-block-network"
+    }
+  }
+}
