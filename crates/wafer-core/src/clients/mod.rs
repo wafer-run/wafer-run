@@ -6,13 +6,13 @@ pub mod network;
 pub mod storage;
 
 use wafer_run::common::ErrorCode;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::*;
 
 /// Call a block and return the raw response bytes (native async variant).
 /// Returns `Err(WaferError)` if the block returns an error.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub(crate) async fn call_service(
     ctx: &dyn Context,
     block: &str,
@@ -33,7 +33,7 @@ pub(crate) async fn call_service(
 
 /// Call a block and return the raw response bytes (WASM sync variant).
 /// Uses the WIT `runtime::call-block` host import instead of `ctx.call_block()`.
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub(crate) fn call_service(
     block: &str,
     kind: &str,

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use wafer_run::common::{ErrorCode, ServiceOp};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -157,13 +157,13 @@ fn to_sort_defs(sort: &[SortField]) -> Vec<SortDef<'_>> {
 // Public API: core CRUD — native async
 // ===========================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn get(ctx: &dyn Context, collection: &str, id: &str) -> Result<Record, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id }).await?;
     decode(&data)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
     let data = call_service(
         ctx,
@@ -180,7 +180,7 @@ pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Re
     decode(&data)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn create(
     ctx: &dyn Context,
     collection: &str,
@@ -198,7 +198,7 @@ pub async fn create(
     decode(&resp)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn update(
     ctx: &dyn Context,
     collection: &str,
@@ -218,7 +218,7 @@ pub async fn update(
     decode(&resp)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -229,7 +229,7 @@ pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(),
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
     let data = call_service(
         ctx,
@@ -244,7 +244,7 @@ pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> R
     Ok(resp.count)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn sum(
     ctx: &dyn Context,
     collection: &str,
@@ -265,7 +265,7 @@ pub async fn sum(
     Ok(resp.sum)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn query_raw(
     ctx: &dyn Context,
     query: &str,
@@ -280,7 +280,7 @@ pub async fn query_raw(
     decode(&data)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn exec_raw(
     ctx: &dyn Context,
     query: &str,
@@ -298,7 +298,7 @@ pub async fn exec_raw(
 
 // --- Public API: higher-level helpers (native) ---
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn get_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -325,7 +325,7 @@ pub async fn get_by_field(
         .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn upsert(
     ctx: &dyn Context,
     collection: &str,
@@ -340,7 +340,7 @@ pub async fn upsert(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn list_all(
     ctx: &dyn Context,
     collection: &str,
@@ -358,7 +358,7 @@ pub async fn list_all(
     Ok(result.records)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn paginated_list(
     ctx: &dyn Context,
     collection: &str,
@@ -381,7 +381,7 @@ pub async fn paginated_list(
     ).await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn soft_delete(
     ctx: &dyn Context,
     collection: &str,
@@ -395,7 +395,7 @@ pub async fn soft_delete(
     update(ctx, collection, id, data).await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn delete_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -417,7 +417,7 @@ pub async fn delete_by_field(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn count_by_field(
     ctx: &dyn Context,
     collection: &str,
@@ -435,7 +435,7 @@ pub async fn count_by_field(
     ).await
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn delete_by_filters(
     ctx: &dyn Context,
     collection: &str,
@@ -448,7 +448,7 @@ pub async fn delete_by_filters(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn update_by_filters(
     ctx: &dyn Context,
     collection: &str,
@@ -466,13 +466,13 @@ pub async fn update_by_filters(
 // Public API: core CRUD — WASM sync (calls WIT runtime::call-block import)
 // ===========================================================================
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn get(collection: &str, id: &str) -> Result<Record, WaferError> {
     let data = call_service(BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id })?;
     decode(&data)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn list(collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
     let data = call_service(
         BLOCK,
@@ -488,7 +488,7 @@ pub fn list(collection: &str, opts: &ListOptions) -> Result<RecordList, WaferErr
     decode(&data)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn create(
     collection: &str,
     data: HashMap<String, serde_json::Value>,
@@ -504,7 +504,7 @@ pub fn create(
     decode(&resp)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn update(
     collection: &str,
     id: &str,
@@ -522,7 +522,7 @@ pub fn update(
     decode(&resp)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn delete(collection: &str, id: &str) -> Result<(), WaferError> {
     call_service(
         BLOCK,
@@ -532,7 +532,7 @@ pub fn delete(collection: &str, id: &str) -> Result<(), WaferError> {
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn count(collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
     let data = call_service(
         BLOCK,
@@ -546,7 +546,7 @@ pub fn count(collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
     Ok(resp.count)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn sum(
     collection: &str,
     field: &str,
@@ -565,7 +565,7 @@ pub fn sum(
     Ok(resp.sum)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn query_raw(
     query: &str,
     args: &[serde_json::Value],
@@ -578,7 +578,7 @@ pub fn query_raw(
     decode(&data)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn exec_raw(
     query: &str,
     args: &[serde_json::Value],
@@ -594,7 +594,7 @@ pub fn exec_raw(
 
 // --- Public API: higher-level helpers (WASM) ---
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn get_by_field(
     collection: &str,
     field: &str,
@@ -619,7 +619,7 @@ pub fn get_by_field(
         .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn upsert(
     collection: &str,
     field: &str,
@@ -633,7 +633,7 @@ pub fn upsert(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn list_all(
     collection: &str,
     filters: Vec<Filter>,
@@ -649,7 +649,7 @@ pub fn list_all(
     Ok(result.records)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn paginated_list(
     collection: &str,
     page: i64,
@@ -670,7 +670,7 @@ pub fn paginated_list(
     )
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn soft_delete(
     collection: &str,
     id: &str,
@@ -683,7 +683,7 @@ pub fn soft_delete(
     update(collection, id, data)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn delete_by_field(
     collection: &str,
     field: &str,
@@ -703,7 +703,7 @@ pub fn delete_by_field(
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn count_by_field(
     collection: &str,
     field: &str,
@@ -719,7 +719,7 @@ pub fn count_by_field(
     )
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn delete_by_filters(
     collection: &str,
     filters: Vec<Filter>,
@@ -731,7 +731,7 @@ pub fn delete_by_filters(
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn update_by_filters(
     collection: &str,
     filters: Vec<Filter>,

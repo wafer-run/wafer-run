@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -31,19 +31,19 @@ struct SetReq<'a> {
 // Public API — native async
 // ===========================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn get(ctx: &dyn Context, key: &str) -> Result<String, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }).await?;
     let resp: GetResp = decode(&data)?;
     Ok(resp.value)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn get_default(ctx: &dyn Context, key: &str, default: &str) -> String {
     get(ctx, key).await.unwrap_or_else(|_| default.to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferError> {
     call_service(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }).await?;
     Ok(())
@@ -53,19 +53,19 @@ pub async fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferE
 // Public API — WASM sync
 // ===========================================================================
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn get(key: &str) -> Result<String, WaferError> {
     let data = call_service(BLOCK, ServiceOp::CONFIG_GET, &GetReq { key })?;
     let resp: GetResp = decode(&data)?;
     Ok(resp.value)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn get_default(key: &str, default: &str) -> String {
     get(key).unwrap_or_else(|_| default.to_string())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn set(key: &str, value: &str) -> Result<(), WaferError> {
     call_service(BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value })?;
     Ok(())

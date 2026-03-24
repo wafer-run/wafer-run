@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -64,7 +64,7 @@ struct DeleteFolderReq<'a> {
 // Public API — native async
 // ===========================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn put(
     ctx: &dyn Context,
     folder: &str,
@@ -86,7 +86,7 @@ pub async fn put(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn get(
     ctx: &dyn Context,
     folder: &str,
@@ -97,7 +97,7 @@ pub async fn get(
     Ok((resp.data, resp.info))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -108,7 +108,7 @@ pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), Wa
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
     let data = call_service(
         ctx,
@@ -124,7 +124,7 @@ pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result
     decode(&data)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn create_folder(
     ctx: &dyn Context,
     name: &str,
@@ -139,7 +139,7 @@ pub async fn create_folder(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferError> {
     call_service(
         ctx,
@@ -150,7 +150,7 @@ pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferErr
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferError> {
     let data = call_service(
         ctx,
@@ -165,7 +165,7 @@ pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferErr
 // Public API — WASM sync
 // ===========================================================================
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn put(
     folder: &str,
     key: &str,
@@ -185,7 +185,7 @@ pub fn put(
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn get(
     folder: &str,
     key: &str,
@@ -195,7 +195,7 @@ pub fn get(
     Ok((resp.data, resp.info))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
     call_service(
         BLOCK,
@@ -205,7 +205,7 @@ pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn list(folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
     let data = call_service(
         BLOCK,
@@ -220,7 +220,7 @@ pub fn list(folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> 
     decode(&data)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn create_folder(
     name: &str,
     public: bool,
@@ -233,7 +233,7 @@ pub fn create_folder(
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn delete_folder(name: &str) -> Result<(), WaferError> {
     call_service(
         BLOCK,
@@ -243,7 +243,7 @@ pub fn delete_folder(name: &str) -> Result<(), WaferError> {
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn list_folders() -> Result<Vec<FolderInfo>, WaferError> {
     let data = call_service(
         BLOCK,

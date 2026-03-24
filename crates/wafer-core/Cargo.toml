@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Shared interfaces, clients, and utilities for WAFER blocks"
 
+[features]
+default = []
+# Enable the WASM Component sync path (WIT call-block imports).
+# Without this feature, the native async (ctx-based) path is used even on wasm32.
+# This is needed because CF Workers use wasm-bindgen (wasm32 but async), not WIT Components.
+wasm-component = []
+
 [dependencies]
 wafer-run = { path = "../wafer-run", default-features = false }
 wafer-block = { path = "../wafer-block" }

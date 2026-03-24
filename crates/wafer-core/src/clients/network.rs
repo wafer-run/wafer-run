@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::ServiceOp;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -33,7 +33,7 @@ pub struct NetworkResponse {
 // Public API — native async
 // ===========================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn do_request(
     ctx: &dyn Context,
     method: &str,
@@ -59,7 +59,7 @@ pub async fn do_request(
 // Public API — WASM sync
 // ===========================================================================
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn do_request(
     method: &str,
     url: &str,

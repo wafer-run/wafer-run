@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use wafer_run::common::{ErrorCode, ServiceOp};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 use wafer_run::context::Context;
 use wafer_run::types::WaferError;
 
@@ -70,14 +70,14 @@ struct RandomBytesResp {
 // Public API — native async
 // ===========================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn hash(ctx: &dyn Context, password: &str) -> Result<String, WaferError> {
     let data = call_service(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password }).await?;
     let resp: HashResp = decode(&data)?;
     Ok(resp.hash)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Result<(), WaferError> {
     let data = call_service(
         ctx,
@@ -96,7 +96,7 @@ pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Resu
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn sign(
     ctx: &dyn Context,
     claims: &HashMap<String, serde_json::Value>,
@@ -115,7 +115,7 @@ pub async fn sign(
     Ok(resp.token)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn verify(
     ctx: &dyn Context,
     token: &str,
@@ -125,7 +125,7 @@ pub async fn verify(
     Ok(resp.claims)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(feature = "wasm-component"))]
 pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferError> {
     let data = call_service(
         ctx,
@@ -141,14 +141,14 @@ pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferE
 // Public API — WASM sync
 // ===========================================================================
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn hash(password: &str) -> Result<String, WaferError> {
     let data = call_service(BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password })?;
     let resp: HashResp = decode(&data)?;
     Ok(resp.hash)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn compare_hash(password: &str, hash: &str) -> Result<(), WaferError> {
     let data = call_service(
         BLOCK,
@@ -166,7 +166,7 @@ pub fn compare_hash(password: &str, hash: &str) -> Result<(), WaferError> {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn sign(
     claims: &HashMap<String, serde_json::Value>,
     expiry: std::time::Duration,
@@ -183,7 +183,7 @@ pub fn sign(
     Ok(resp.token)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn verify(
     token: &str,
 ) -> Result<HashMap<String, serde_json::Value>, WaferError> {
@@ -192,7 +192,7 @@ pub fn verify(
     Ok(resp.claims)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-component")]
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, WaferError> {
     let data = call_service(
         BLOCK,
