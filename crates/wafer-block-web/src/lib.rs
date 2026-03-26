@@ -54,12 +54,19 @@ impl WebBlock {
         // Storage key: strip leading slash
         let key = clean.trim_start_matches('/');
 
-        // Try the exact key first, then with .html suffix for clean URLs
+        // Try the exact key first, then with .html suffix for clean URLs,
+        // then directory index (path/index.html) for sub-app entry points.
         let result = match store::get(ctx, &config.folder, key).await {
             Ok(r) => Ok(r),
             Err(_) if !key.is_empty() && Path::new(key).extension().is_none() => {
                 let html_key = format!("{}.html", key);
-                store::get(ctx, &config.folder, &html_key).await
+                match store::get(ctx, &config.folder, &html_key).await {
+                    Ok(r) => Ok(r),
+                    Err(_) => {
+                        let index_key = format!("{}/{}", key, config.index_file);
+                        store::get(ctx, &config.folder, &index_key).await
+                    }
+                }
             }
             Err(e) => Err(e),
         };
