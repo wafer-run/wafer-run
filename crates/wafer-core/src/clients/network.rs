@@ -55,6 +55,33 @@ pub async fn do_request(
     decode(&data)
 }
 
+/// Like `do_request`, but routes through a specific block instead of `wafer-run/network`.
+///
+/// This allows callers to route through an alternative block (e.g. `solobase/dispatcher`)
+/// that accepts the same `network.do` message format.
+#[cfg(not(feature = "wasm-component"))]
+pub async fn do_request_via(
+    ctx: &dyn Context,
+    block: &str,
+    method: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Option<&[u8]>,
+) -> Result<NetworkResponse, WaferError> {
+    let data = call_service(
+        ctx,
+        block,
+        ServiceOp::NETWORK_DO_REQUEST,
+        &DoReq {
+            method,
+            url,
+            headers,
+            body,
+        },
+    ).await?;
+    decode(&data)
+}
+
 // ===========================================================================
 // Public API — WASM sync
 // ===========================================================================
