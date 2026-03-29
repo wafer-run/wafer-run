@@ -1,14 +1,10 @@
-mod block;
+//! Configuration service implementations for WAFER.
+//!
+//! Provides `EnvConfigService` (env vars + overrides) for native use.
+//! The `ConfigService` trait is re-exported from `wafer_core::interfaces::config`.
+//!
+//! Use `wafer_core::service_blocks::config::register_with()` to register.
+
 pub mod service;
 #[cfg(feature = "toml")]
 pub mod toml;
-
-pub use block::ConfigBlock;
-
-pub fn register(w: &mut wafer_run::Wafer) {
-    use std::sync::Arc;
-    w.register_block(
-        "wafer-run/config",
-        Arc::new(ConfigBlock::new(Some(Arc::new(service::EnvConfigService::new())))),
-    );
-}

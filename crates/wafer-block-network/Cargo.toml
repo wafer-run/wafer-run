@@ -7,10 +7,10 @@ description = "WAFER block: outbound network requests via NetworkService"
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
+wafer-core = { path = "../wafer-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
-tokio = { workspace = true }

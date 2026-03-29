@@ -10,6 +10,7 @@ toml = ["dep:toml"]
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
+wafer-core = { path = "../wafer-core", default-features = false }
 serde = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }

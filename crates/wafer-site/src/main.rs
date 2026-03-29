@@ -53,16 +53,34 @@ async fn main() {
         "web_index": "index.html"
     }));
 
+    // Register unified service blocks
+    {
+        use std::sync::Arc;
+        let storage_root = std::env::var("STORAGE_ROOT").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
+        wafer_core::service_blocks::storage::register_with(
+            &mut w,
+            Arc::new(wafer_block_local_storage::service::LocalStorageService::new(&storage_root).expect("storage")),
+        );
+        w.add_alias("storage", "wafer-run/storage");
+        wafer_core::service_blocks::config::register_with(
+            &mut w,
+            Arc::new(wafer_block_config::service::EnvConfigService::new()),
+        );
+        wafer_core::service_blocks::logger::register_with(
+            &mut w,
+            Arc::new(wafer_block_logger::service::TracingLogger),
+        );
+        wafer_core::service_blocks::crypto::register_with(
+            &mut w,
+            Arc::new(wafer_block_crypto::service::Argon2JwtCryptoService::new("wafer-site-dev-secret".to_string())),
+        );
+    }
+
     // Register infrastructure blocks
     wafer_block_auth_validator::register(&mut w);
     wafer_block_iam_guard::register(&mut w);
     wafer_block_inspector::register(&mut w);
-    wafer_block_local_storage::register(&mut w);
-    w.add_alias("wafer-run/storage", "wafer-run/local-storage");
     wafer_block_web::register(&mut w);
-    wafer_block_config::register(&mut w);
-    wafer_block_logger::register(&mut w);
-    wafer_block_crypto::register(&mut w);
 
     // Register site-specific blocks
     register_api_block(&mut w);

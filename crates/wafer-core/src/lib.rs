@@ -8,3 +8,4 @@
 pub mod clients;
 pub mod interfaces;
 pub mod mime;
+pub mod service_blocks;

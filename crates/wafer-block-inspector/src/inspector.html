@@ -208,6 +208,7 @@
             <span class="tooltip">Instance mode<span class="tip-text">Singleton: one shared instance. Per-use: a new instance for each invocation.</span></span>
             <span class="badge badge-instance">${esc(b.instance_mode)}</span>
           </div>
+          ${b.admin_ui && b.admin_ui.url ? `<div class="detail-row"><a href="${esc(b.admin_ui.url)}" style="color:#fe6627;font-weight:600;text-decoration:none;font-size:0.875rem">&#9881; ${esc(b.admin_ui.label || 'Manage')}</a></div>` : ''}
         </div>
       </div>
     `).join('');

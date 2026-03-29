@@ -1,9 +1,8 @@
-mod block;
+//! Cryptographic service implementations for WAFER.
+//!
+//! Provides `Argon2JwtCryptoService` (argon2id + HMAC-SHA256 JWT) for native use.
+//! The `CryptoService` trait is re-exported from `wafer_core::interfaces::crypto`.
+//!
+//! Use `wafer_core::service_blocks::crypto::register_with()` to register.
+
 pub mod service;
-
-pub use block::CryptoBlock;
-
-pub fn register(w: &mut wafer_run::Wafer) {
-    use std::sync::Arc;
-    w.register_block("wafer-run/crypto", Arc::new(CryptoBlock::new()));
-}

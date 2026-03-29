@@ -1,12 +1,8 @@
-mod block;
+//! Network service implementations for WAFER.
+//!
+//! Provides `HttpNetworkService` (async reqwest with SSRF protection) for native use.
+//! The `NetworkService` trait is re-exported from `wafer_core::interfaces::network`.
+//!
+//! Use `wafer_core::service_blocks::network::register_with()` to register.
+
 pub mod service;
-
-pub use block::NetworkBlock;
-
-pub fn register(w: &mut wafer_run::Wafer) {
-    use std::sync::Arc;
-    w.register_block(
-        "wafer-run/network",
-        Arc::new(NetworkBlock::new(Arc::new(service::HttpNetworkService::new()))),
-    );
-}

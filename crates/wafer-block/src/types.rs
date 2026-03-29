@@ -18,6 +18,9 @@ use std::collections::HashMap;
 pub struct AdminUIInfo {
     pub label: String,
     pub description: String,
+    /// URL path to the block's management UI (e.g. "/blocks/admin/frontend/").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
 }
 
 /// Whether a block runs natively, as WASM, or both.

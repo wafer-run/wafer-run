@@ -26,22 +26,22 @@ async fn main() {
         "listen": "0.0.0.0:8080",
         "routes": [{ "path": "/api/**", "block": "api-handler" }]
     }));
-    wafer_block_sqlite::register(&mut wafer);
-    wafer_block_logger::register(&mut wafer);
+    // Ensure data directory exists
+    std::fs::create_dir_all("data").ok();
+
+    // Register unified service blocks
+    wafer_core::service_blocks::database::register_with(
+        &mut wafer,
+        Arc::new(wafer_block_sqlite::service::SQLiteDatabaseService::open("data/notes.db").expect("open db")),
+    );
+    wafer_core::service_blocks::logger::register_with(
+        &mut wafer,
+        Arc::new(wafer_block_logger::service::TracingLogger),
+    );
     wafer.register_block("api-handler", Arc::new(NotesHandler));
-    wafer.add_block_config("wafer-run/sqlite", serde_json::json!({
-        "type": "sqlite",
-        "path": "data/notes.db"
-    }));
     wafer.add_block_config("wafer-run/cors", serde_json::json!({
         "allow_origins": ["*"]
     }));
-
-    // Alias wafer-run/sqlite as wafer-run/database (the standard database interface)
-    wafer.add_alias("wafer-run/database", "wafer-run/sqlite");
-
-    // Ensure data directory exists
-    std::fs::create_dir_all("data").ok();
 
     tracing::info!("API server starting on http://localhost:8080");
     let wafer = wafer.start().await.expect("failed to start");

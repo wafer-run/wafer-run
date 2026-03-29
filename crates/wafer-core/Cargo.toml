@@ -22,6 +22,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+parking_lot = { workspace = true }
 
 [lib]
 name = "wafer_core"

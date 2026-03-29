@@ -4181,6 +4181,7 @@ dependencies = [
  "serde_json",
  "toml",
  "tracing",
+ "wafer-core",
  "wafer-run",
 ]
 
@@ -4206,6 +4207,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "wafer-core",
  "wafer-run",
 ]
 
@@ -4271,6 +4273,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "wafer-core",
  "wafer-run",
 ]
 
@@ -4302,8 +4305,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
+ "wafer-core",
  "wafer-run",
 ]
 
@@ -4394,6 +4397,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4499,6 +4503,7 @@ dependencies = [
  "wafer-block-local-storage",
  "wafer-block-logger",
  "wafer-block-web",
+ "wafer-core",
  "wafer-flow-http-server",
  "wafer-run",
 ]

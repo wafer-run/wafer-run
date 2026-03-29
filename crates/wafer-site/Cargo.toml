@@ -7,6 +7,7 @@ description = "WAFER website, documentation, playground, and block registry"
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
+wafer-core = { path = "../wafer-core" }
 wafer-flow-http-server = { path = "../wafer-flow-http-server" }
 wafer-block-auth-validator = { path = "../wafer-block-auth-validator" }
 wafer-block-iam-guard = { path = "../wafer-block-iam-guard" }

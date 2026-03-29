@@ -1,0 +1,12 @@
+//! Unified service block implementations.
+//!
+//! Each block wraps an `Arc<dyn XService>` and delegates to the shared handler
+//! in `wafer_core::interfaces`. Platform-specific code only provides the service
+//! implementation; the block struct, `info()`, and message routing are shared.
+
+pub mod config;
+pub mod crypto;
+pub mod database;
+pub mod logger;
+pub mod network;
+pub mod storage;
