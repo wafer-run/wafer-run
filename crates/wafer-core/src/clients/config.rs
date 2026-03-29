@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use wafer_run::common::ServiceOp;
+use wafer_block::common::ServiceOp;
 #[cfg(not(feature = "wasm-component"))]
-use wafer_run::context::Context;
-use wafer_run::types::WaferError;
+use wafer_block::context::Context;
+use wafer_block::WaferError;
 
 use super::{call_service, decode};
 

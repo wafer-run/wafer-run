@@ -371,7 +371,11 @@ impl Block for HttpListenerBlock {
         Ok(())
     }
 
-    fn bind(&self, handle: wafer_run::runtime::RuntimeHandle) {
+    fn bind(&self, handle: Box<dyn std::any::Any + Send + Sync>) {
+        let handle = match handle.downcast::<wafer_run::runtime::RuntimeHandle>() {
+            Ok(h) => *h,
+            Err(_) => return,
+        };
         let target = match self.target.get().cloned() {
             Some(t) => t,
             None => return,

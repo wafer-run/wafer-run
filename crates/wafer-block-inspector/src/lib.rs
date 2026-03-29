@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use wafer_run::*;
+use wafer_block::*;
 
 /// InspectorBlock provides runtime introspection — listing blocks, flows, and
 /// serving a visual UI.
@@ -23,7 +23,7 @@ impl Block for InspectorBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
         }
@@ -146,6 +146,6 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()));
 }

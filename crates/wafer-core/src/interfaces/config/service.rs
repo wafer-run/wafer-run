@@ -1,5 +1,5 @@
 /// Service provides key-value configuration access.
-pub trait ConfigService: wafer_run::MaybeSend + wafer_run::MaybeSync {
+pub trait ConfigService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Get retrieves a config value by key.
     fn get(&self, key: &str) -> Option<String>;
 

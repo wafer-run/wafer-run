@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use wafer_run::common::ServiceOp;
+use wafer_block::common::ServiceOp;
 #[cfg(not(feature = "wasm-component"))]
-use wafer_run::context::Context;
-use wafer_run::types::WaferError;
+use wafer_block::context::Context;
+use wafer_block::WaferError;
 
 // Re-export data types used by callers.
 pub use crate::interfaces::storage::service::{FolderInfo, ObjectInfo, ObjectList};

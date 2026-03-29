@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use wafer_run::*;
+use wafer_block::*;
 
 /// ReadonlyGuardBlock blocks write operations when in read-only mode.
 pub struct ReadonlyGuardBlock {
@@ -24,7 +24,7 @@ impl Block for ReadonlyGuardBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
         }
@@ -60,6 +60,6 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/readonly-guard", Arc::new(ReadonlyGuardBlock::new()));
 }

@@ -3,7 +3,7 @@ mod mime;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use wafer_core::clients::storage as store;
-use wafer_run::*;
+use wafer_block::*;
 
 /// WebBlock serves static files from wafer-run/storage with caching and SPA support.
 ///
@@ -206,7 +206,7 @@ impl Block for WebBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: vec![InstanceMode::PerNode],
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: vec!["wafer-run/storage".to_string()],
             collections: Vec::new(),
         }
@@ -249,6 +249,6 @@ impl Block for WebBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/web", Arc::new(WebBlock::new()));
 }

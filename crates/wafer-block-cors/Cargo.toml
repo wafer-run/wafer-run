@@ -6,6 +6,6 @@ license.workspace = true
 description = "WAFER block: CORS preflight handler and header injection"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 tracing = { workspace = true }

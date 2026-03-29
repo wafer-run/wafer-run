@@ -1,3 +1,5 @@
+//! Context trait re-exported from wafer-block. RuntimeContext stays here.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -5,28 +7,8 @@ use crate::block::Block;
 use crate::platform::Instant;
 use crate::types::*;
 
-/// Context provides runtime capabilities to blocks.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
-    /// Call another block by name.
-    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
-
-    /// Check if the context has been cancelled.
-    fn is_cancelled(&self) -> bool;
-
-    /// Get a config value from the block's node config.
-    fn config_get(&self, key: &str) -> Option<&str>;
-
-    /// List all registered blocks.
-    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> { Vec::new() }
-
-    /// List flow summary info.
-    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> { Vec::new() }
-
-    /// List full flow definitions.
-    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> { Vec::new() }
-}
+// Re-export the trait from wafer-block.
+pub use wafer_block::context::Context;
 
 /// RuntimeContext implements Context for blocks.
 ///
@@ -96,7 +78,6 @@ impl Context for RuntimeContext {
         }
 
         // Enforce requires: if the caller declared a requires list, check it
-        // Resolve alias to target name so both alias and canonical name match
         let resolved_name = self.aliases.get(block_name)
             .map(|s| s.as_str())
             .unwrap_or(block_name);

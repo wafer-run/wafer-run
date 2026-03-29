@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use wafer_run::common::{ErrorCode, ServiceOp};
-use wafer_run::helpers::{respond_empty, respond_json};
-use wafer_run::types::*;
+use wafer_block::common::{ErrorCode, ServiceOp};
+use wafer_block::helpers::{respond_empty, respond_json};
+use wafer_block::*;
 
 use super::service::ConfigService;
 

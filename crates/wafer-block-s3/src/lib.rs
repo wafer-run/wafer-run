@@ -7,9 +7,7 @@ pub mod service;
 
 use std::sync::{Arc, OnceLock};
 
-use wafer_run::block::{Block, BlockInfo};
-use wafer_run::context::Context;
-use wafer_run::types::*;
+use wafer_block::*;
 
 use wafer_core::interfaces::storage::service::StorageService;
 use service::S3StorageService;
@@ -62,7 +60,7 @@ impl Block for S3StorageBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config = wafer_run::BlockConfig::from_event(&event);
+            let config = wafer_block::BlockConfig::from_event(&event);
 
             let bucket = config.env_or("STORAGE_BUCKET", "bucket")
                 .unwrap_or_else(|| "solobase".to_string());
@@ -87,7 +85,7 @@ impl Block for S3StorageBlock {
     }
 }
 
-/// Register the S3 storage block with the given Wafer runtime.
-pub fn register(w: &mut wafer_run::Wafer) {
+/// Register the S3 storage block with the given block registry.
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/s3", Arc::new(S3StorageBlock::new()));
 }

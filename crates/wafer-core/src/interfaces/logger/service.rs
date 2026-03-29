@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Service provides structured logging with levels.
-pub trait LoggerService: wafer_run::MaybeSend + wafer_run::MaybeSync {
+pub trait LoggerService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn debug(&self, msg: &str, fields: &[Field]);
     fn info(&self, msg: &str, fields: &[Field]);
     fn warn(&self, msg: &str, fields: &[Field]);

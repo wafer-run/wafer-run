@@ -5,10 +5,10 @@ pub mod logger;
 pub mod network;
 pub mod storage;
 
-use wafer_run::common::ErrorCode;
+use wafer_block::common::ErrorCode;
 #[cfg(not(feature = "wasm-component"))]
-use wafer_run::context::Context;
-use wafer_run::types::*;
+use wafer_block::context::Context;
+use wafer_block::{Action, Message, WaferError};
 
 /// Call a block and return the raw response bytes (native async variant).
 /// Returns `Err(WaferError)` if the block returns an error.

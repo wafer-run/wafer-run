@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use wafer_core::clients::{crypto, database as db};
 use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
-use wafer_run::*;
+use wafer_block::*;
 
 /// AuthBlock validates authentication from HTTP request metadata.
 /// Supports JWT Bearer tokens, API keys (sb_ prefix), and httpOnly cookies.
@@ -217,7 +217,7 @@ impl Block for AuthBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: vec![
                 "wafer-run/crypto".to_string(),
                 "wafer-run/database".to_string(),
@@ -283,6 +283,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/auth-validator", Arc::new(AuthBlock::new()));
 }

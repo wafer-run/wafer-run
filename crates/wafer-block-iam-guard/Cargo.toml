@@ -6,7 +6,7 @@ license.workspace = true
 description = "Role-based access control middleware block for WAFER"
 
 [dependencies]
-wafer-run = { workspace = true }
+wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core", default-features = false }
 serde_json = { workspace = true }
 tracing = { workspace = true }

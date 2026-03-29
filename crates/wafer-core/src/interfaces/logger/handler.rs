@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use wafer_run::common::{ErrorCode, ServiceOp};
-use wafer_run::types::*;
+use wafer_block::common::{ErrorCode, ServiceOp};
+use wafer_block::*;
 
 use super::service::{Field, FieldValue, LoggerService};
 

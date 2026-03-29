@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use wafer_run::*;
+use wafer_block::*;
 
 /// CorsBlock handles CORS preflight and sets CORS headers.
 pub struct CorsBlock {
@@ -32,7 +32,7 @@ impl Block for CorsBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
         }
@@ -95,6 +95,6 @@ impl Block for CorsBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/cors", Arc::new(CorsBlock::new()));
 }

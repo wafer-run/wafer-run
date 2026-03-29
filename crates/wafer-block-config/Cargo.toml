@@ -9,7 +9,6 @@ description = "WAFER block: configuration key-value access"
 toml = ["dep:toml"]
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
 wafer-core = { path = "../wafer-core", default-features = false }
 serde = { workspace = true }
 parking_lot = { workspace = true }

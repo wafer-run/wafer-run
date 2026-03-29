@@ -1,6 +1,5 @@
 use std::sync::{Arc, OnceLock};
-use wafer_run::block::{Block, BlockInfo};
-use wafer_run::*;
+use wafer_block::*;
 
 /// Normalize a value to a standard action. Accepts both action names
 /// (`"retrieve"`) and HTTP methods (`"GET"`).
@@ -23,7 +22,7 @@ struct Route {
 }
 
 /// Parse routes from block config.
-fn parse_routes(config: &wafer_run::BlockConfig) -> Vec<Route> {
+fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
     config
         .get("routes")
         .and_then(|v| v.as_array())
@@ -101,7 +100,7 @@ impl Block for RouterBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
         }
@@ -142,7 +141,7 @@ impl Block for RouterBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.routes.get().is_none() {
-            let config = wafer_run::BlockConfig::from_event(&event);
+            let config = wafer_block::BlockConfig::from_event(&event);
 
             let routes = parse_routes(&config);
             if routes.is_empty() {
@@ -154,6 +153,6 @@ impl Block for RouterBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/router", Arc::new(RouterBlock::new()));
 }

@@ -5,13 +5,35 @@
 //! type definitions, and optionally use the `#[wafer_block]` proc macro for
 //! reduced boilerplate.
 
+pub mod block;
+pub mod capabilities;
+pub mod common;
+pub mod compat;
+pub mod config;
+pub mod context;
+pub mod executor;
+pub mod hash;
 pub mod helpers;
 pub mod meta;
+pub mod registry;
+pub mod router;
 pub mod types;
 
 // Re-export everything at the crate root for convenience.
+pub use block::{AsyncFuncBlock, Block, FuncBlock};
+pub use capabilities::BlockCapabilities;
+pub use common::{ErrorCode, ServiceName, ServiceOp};
+pub use compat::{MaybeSend, MaybeSync};
+pub use config::{BlockConfig, DispatchTarget};
+pub use context::Context;
+pub use executor::{extract_path_vars, match_path, matches_pattern};
+pub use hash::{sha256, sha256_hex, hex_encode};
+#[cfg(not(target_arch = "wasm32"))]
+pub use hash::expand_env_vars;
 pub use helpers::*;
 pub use meta::*;
+pub use registry::BlockRegistry;
+pub use router::Router;
 
 // Re-export the proc macro.
 pub use wafer_block_macro::wafer_block;
@@ -26,7 +48,7 @@ wit_bindgen::generate!({
 
 // Re-export WIT types at crate root (skip WIT BlockInfo — runtime version is in types.rs).
 pub use wafer::block_world::types::{
-    Action, BlockResult, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message,
+    Action, BlockResult, InstanceMode, LifecycleEvent, LifecycleType, Message,
     MetaEntry, Response, WaferError,
 };
 

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use wafer_run::block::{Block, BlockInfo};
-use wafer_run::context::Context;
-use wafer_run::types::*;
-use wafer_run::Wafer;
+use wafer_block::block::Block;
+use wafer_block::types::BlockInfo;
+use wafer_block::context::Context;
+use wafer_block::*;
+use wafer_block::BlockRegistry;
 
 use crate::interfaces::storage::{handler, service::StorageService};
 
@@ -50,6 +51,6 @@ impl Block for StorageBlock {
 }
 
 /// Register the unified storage block with the given service.
-pub fn register_with(w: &mut Wafer, service: Arc<dyn StorageService>) {
+pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn StorageService>) {
     w.register_block("wafer-run/storage", Arc::new(StorageBlock::new(service)));
 }

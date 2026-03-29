@@ -29,6 +29,6 @@ pub struct Response {
 /// Service provides outbound network connectivity.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait NetworkService: wafer_run::MaybeSend + wafer_run::MaybeSync {
+pub trait NetworkService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;
 }

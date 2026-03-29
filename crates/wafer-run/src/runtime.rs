@@ -1139,7 +1139,7 @@ impl Wafer {
             inner: arc_self.clone(),
         };
         for (_, block) in &arc_self.blocks {
-            block.bind(handle.clone());
+            block.bind(Box::new(handle.clone()));
         }
 
         Ok(arc_self)
@@ -1370,5 +1370,23 @@ fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
         }
         // Non-object: dst wins, do nothing
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BlockRegistry implementation
+// ---------------------------------------------------------------------------
+
+impl wafer_block::registry::BlockRegistry for Wafer {
+    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) {
+        self.blocks.insert(name.to_string(), block);
+    }
+
+    fn add_alias(&mut self, alias: &str, target: &str) {
+        self.aliases.insert(alias.to_string(), target.to_string());
+    }
+
+    fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
+        self.block_configs.insert(name.to_string(), config);
     }
 }

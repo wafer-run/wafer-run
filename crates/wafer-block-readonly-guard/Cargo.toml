@@ -6,5 +6,5 @@ license.workspace = true
 description = "WAFER block: blocks write operations in read-only mode"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }

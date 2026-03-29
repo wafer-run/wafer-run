@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use wafer_core::clients::database as db;
 use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
-use wafer_run::*;
+use wafer_block::*;
 
 /// IAMBlock checks if the authenticated user has a required role.
 /// Configure the required role via node config: {"role": "admin"}.
@@ -61,7 +61,7 @@ impl Block for IAMBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: vec!["wafer-run/database".to_string()],
             collections: Vec::new(),
         }
@@ -102,6 +102,6 @@ impl Block for IAMBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/iam-guard", Arc::new(IAMBlock::new()));
 }

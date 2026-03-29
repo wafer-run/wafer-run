@@ -10,5 +10,10 @@ keywords = ["wafer", "blocks", "types", "sdk"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+async-trait = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+wafer-flow = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
 wit-bindgen = { workspace = true }

@@ -6,5 +6,5 @@ license.workspace = true
 description = "WAFER block: adds standard security headers to HTTP responses"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }

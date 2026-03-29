@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use wafer_run::common::{ErrorCode, ServiceOp};
+use wafer_block::common::{ErrorCode, ServiceOp};
 #[cfg(not(feature = "wasm-component"))]
-use wafer_run::context::Context;
-use wafer_run::types::WaferError;
+use wafer_block::context::Context;
+use wafer_block::WaferError;
 
 use super::{call_service, decode};
 

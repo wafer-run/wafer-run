@@ -11,6 +11,7 @@ pub use wafer_run::schema::{
     default_true, default_int, default_string,
 };
 
+
 #[derive(Error, Debug)]
 pub enum DatabaseError {
     #[error("record not found")]
@@ -24,7 +25,7 @@ pub enum DatabaseError {
 /// Service provides generic CRUD operations on collections.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait DatabaseService: wafer_run::MaybeSend + wafer_run::MaybeSync {
+pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Get retrieves a single record by ID from a collection.
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError>;
 

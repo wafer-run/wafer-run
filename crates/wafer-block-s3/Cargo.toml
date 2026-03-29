@@ -6,7 +6,7 @@ license.workspace = true
 description = "S3-compatible storage block for WAFER"
 
 [dependencies]
-wafer-run = { workspace = true }
+wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core", default-features = false }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }

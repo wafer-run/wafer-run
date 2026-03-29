@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use wafer_run::block::{Block, BlockInfo};
-use wafer_run::context::Context;
+use wafer_block::block::Block;
+use wafer_block::types::BlockInfo;
+use wafer_block::context::Context;
+use wafer_block::*;
+use wafer_block::BlockRegistry;
 use wafer_run::schema::Table;
-use wafer_run::types::*;
-use wafer_run::Wafer;
 
 use crate::interfaces::database::{handler, service::DatabaseService};
 
@@ -60,13 +61,13 @@ impl Block for DatabaseBlock {
 }
 
 /// Register the unified database block with the given service.
-pub fn register_with(w: &mut Wafer, service: Arc<dyn DatabaseService>) {
+pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn DatabaseService>) {
     w.register_block("wafer-run/database", Arc::new(DatabaseBlock::new(service)));
 }
 
 /// Register with pre-built schema tables for migration.
 pub fn register_with_tables(
-    w: &mut Wafer,
+    w: &mut dyn BlockRegistry,
     service: Arc<dyn DatabaseService>,
     tables: Vec<Table>,
 ) {

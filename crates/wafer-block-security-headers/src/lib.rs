@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use wafer_run::*;
+use wafer_block::*;
 
 /// SecurityHeadersBlock adds standard security headers to responses.
 pub struct SecurityHeadersBlock {
@@ -26,7 +26,7 @@ impl Block for SecurityHeadersBlock {
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
         }
@@ -65,6 +65,6 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
     w.register_block("wafer-run/security-headers", Arc::new(SecurityHeadersBlock::new()));
 }
