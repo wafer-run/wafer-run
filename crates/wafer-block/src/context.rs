@@ -27,4 +27,7 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
 
     /// Get expanded block configs (for inspector app view).
     fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> { std::collections::HashMap::new() }
+
+    /// List registered interface specifications.
+    fn interface_specs(&self) -> Vec<crate::types::InterfaceSpec> { Vec::new() }
 }

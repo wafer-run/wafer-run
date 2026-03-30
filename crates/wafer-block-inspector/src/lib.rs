@@ -30,7 +30,7 @@ impl Block for InspectorBlock {
         BlockInfo {
             name: "wafer-run/inspector".to_string(),
             version: "0.1.0".to_string(),
-            interface: "handler@v1".to_string(),
+            interface: "http-handler@v1".to_string(),
             summary: "Runtime introspection — blocks, flows, and visual UI".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
@@ -38,6 +38,7 @@ impl Block for InspectorBlock {
             runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 
@@ -83,10 +84,12 @@ impl Block for InspectorBlock {
             let flows = ctx.flow_defs();
             let configs = ctx.block_configs();
             let blocks = ctx.registered_blocks();
+            let interfaces = ctx.interface_specs();
             return json_respond(msg, &serde_json::json!({
                 "flows": flows,
                 "configs": configs,
                 "blocks": blocks,
+                "interfaces": interfaces,
             }));
         }
 
@@ -98,6 +101,11 @@ impl Block for InspectorBlock {
         if path.ends_with("/flows") {
             let flows = ctx.flow_infos();
             return json_respond(msg, &flows);
+        }
+
+        if path.ends_with("/interfaces") {
+            let interfaces = ctx.interface_specs();
+            return json_respond(msg, &interfaces);
         }
 
         if path.ends_with("/ui") {

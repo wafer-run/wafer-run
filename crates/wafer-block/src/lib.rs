@@ -14,6 +14,7 @@ pub mod context;
 pub mod executor;
 pub mod hash;
 pub mod helpers;
+pub mod interfaces;
 pub mod meta;
 pub mod registry;
 pub mod router;
@@ -65,7 +66,7 @@ pub mod runtime {
 }
 
 // Re-export runtime-specific types.
-pub use types::{AdminUIInfo, BlockInfo, BlockRuntime, CollectionSchema, FieldSchema, IndexSchema, MetaAccess, RequestAction, UiRoute};
+pub use types::{ActionSpec, AdminUIInfo, BlockInfo, BlockRuntime, CollectionSchema, FieldSchema, IndexSchema, InterfaceSpec, MetaAccess, RequestAction, UiRoute};
 
 /// Alias for BlockResult — common in block handler return types.
 pub type Result_ = BlockResult;

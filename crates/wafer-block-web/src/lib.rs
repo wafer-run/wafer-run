@@ -201,7 +201,7 @@ impl Block for WebBlock {
         BlockInfo {
             name: "wafer-run/web".to_string(),
             version: "0.2.0".to_string(),
-            interface: "handler@v1".to_string(),
+            interface: "http-handler@v1".to_string(),
             summary: "Static file server with caching and SPA support".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: vec![InstanceMode::PerNode],
@@ -209,6 +209,7 @@ impl Block for WebBlock {
             runtime: wafer_block::types::BlockRuntime::Both,
             requires: vec!["wafer-run/storage".to_string()],
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

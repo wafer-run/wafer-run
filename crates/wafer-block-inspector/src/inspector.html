@@ -153,6 +153,19 @@
   }
   .flow-node:hover .config-icon { opacity: 0.8; }
   .config-icon svg { width: 16px; height: 16px; fill: currentColor; }
+
+  /* ── Interface & schema styles ───────────────────── */
+  .action-entry { font-size: 13px; margin: 4px 0; padding: 4px 0; border-bottom: 1px solid var(--border-light); }
+  .action-name { font-weight: 600; color: var(--accent); font-family: monospace; font-size: 12px; }
+  .action-desc { color: var(--text-secondary); }
+  .schema-label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .3px; margin: 6px 0 2px; padding-left: 8px; }
+  .schema-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 2px 0 8px; }
+  .schema-table th { text-align: left; font-size: 11px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .schema-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: top; }
+  .schema-key { font-family: monospace; font-weight: 600; color: var(--text); white-space: nowrap; }
+  .schema-req { color: #dc2626; margin-left: 2px; }
+  .schema-type { font-family: monospace; color: #7c3aed; white-space: nowrap; }
+  .schema-desc { color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -210,6 +223,7 @@
   const base = window.location.pathname.replace(/\/ui\/?$/, '');
   let blocksData = [];
   let blockConfigs = {};
+  let interfaceSpecs = {}; // name → InterfaceSpec
   let selectedNodeEl = null;
   let flowItems = []; // track flow list items for auto-select
 
@@ -318,6 +332,7 @@
       blocksData = data.blocks || [];
       blocksData.sort((a, b) => a.name.localeCompare(b.name));
       blockConfigs = data.configs || {};
+      (data.interfaces || []).forEach(s => { interfaceSpecs[s.name] = s; });
       renderAppView(data);
     })
     .catch(e => {
@@ -331,12 +346,17 @@
     const flows = data.flows || [];
     const configs = data.configs || {};
 
-    // Find the HTTP server flow (has wafer-run/http-listener in blocks)
+    // Find the HTTP server flow:
+    // 1. Has wafer-run/http-listener in blocks array, OR
+    // 2. Has wafer-run/router as a step, OR
+    // 3. Has a config with "flow" key pointing to it from http-listener
     const serverFlow = flows.find(f =>
       (f.blocks || []).includes('wafer-run/http-listener')
-    );
+    ) || flows.find(f =>
+      (f.steps || []).some(s => s.block === 'wafer-run/router')
+    ) || flows[0];
     if (!serverFlow) {
-      container.innerHTML = '<div class="loading">No HTTP server flow found</div>';
+      container.innerHTML = '<div class="loading">No flows found</div>';
       return;
     }
 
@@ -658,12 +678,40 @@
         html += '<div class="field"><span class="field-label">Version:</span> ' + esc(blockInfo.version) + '</div>';
         html += '<div class="field"><span class="field-label">Interface:</span> <span class="badge badge-interface">' + esc(blockInfo.interface) + '</span></div>';
         html += '<div class="field"><span class="field-label">Instance mode:</span> <span class="badge badge-instance">' + esc(blockInfo.instance_mode) + '</span></div>';
+
+        // Show config schema if declared
+        if (blockInfo.config_schema) {
+          html += '<div class="section-title">Config Schema</div>';
+          html += renderSchema(blockInfo.config_schema);
+        }
+
+        // Show interface spec
+        const iface = interfaceSpecs[blockInfo.interface];
+        if (iface) {
+          html += '<div class="section-title">Interface: ' + esc(iface.name) + '</div>';
+          html += '<div class="field">' + esc(iface.description) + '</div>';
+          const actionKeys = Object.keys(iface.actions || {});
+          if (actionKeys.length) {
+            html += '<div class="field" style="margin-top:8px;"><b>Actions:</b></div>';
+            actionKeys.sort().forEach(ak => {
+              const a = iface.actions[ak];
+              html += '<div class="action-entry"><span class="action-name">' + esc(ak) + '</span>';
+              html += '<span class="action-desc"> &mdash; ' + esc(a.description) + '</span></div>';
+              if (a.message_schema) {
+                html += '<div class="schema-label">Message:</div>' + renderSchema(a.message_schema);
+              }
+              if (a.response_schema) {
+                html += '<div class="schema-label">Response:</div>' + renderSchema(a.response_schema);
+              }
+            });
+          }
+        }
       }
 
       // Show block config if available
       const cfg = blockConfigs[node.block];
       if (cfg && Object.keys(cfg).length) {
-        html += '<div class="section-title">Configuration</div>';
+        html += '<div class="section-title">Current Configuration</div>';
         html += '<pre>' + esc(JSON.stringify(cfg, null, 2)) + '</pre>';
       }
     }
@@ -686,6 +734,29 @@
   document.getElementById('detail-overlay').addEventListener('click', e => {
     if (!e.target.closest('.detail-popup')) closeDetailPanel();
   });
+
+  // ── Schema rendering ─────────────────────────────────
+  function renderSchema(schema) {
+    if (!schema) return '';
+    if (schema.type === 'object' && schema.properties) {
+      const required = schema.required || [];
+      let rows = '';
+      Object.keys(schema.properties).forEach(key => {
+        const prop = schema.properties[key];
+        const req = required.includes(key);
+        const typeStr = prop.enum ? prop.enum.join(' | ') : (prop.type || 'any');
+        let desc = prop.description || '';
+        if (prop.default !== undefined) desc += (desc ? ' ' : '') + '(default: ' + JSON.stringify(prop.default) + ')';
+        if (prop.maximum !== undefined) desc += (desc ? ' ' : '') + '(max: ' + prop.maximum + ')';
+        rows += '<tr><td class="schema-key">' + esc(key) + (req ? '<span class="schema-req">*</span>' : '') + '</td>';
+        rows += '<td class="schema-type">' + esc(typeStr) + '</td>';
+        rows += '<td class="schema-desc">' + esc(desc) + '</td></tr>';
+      });
+      return '<table class="schema-table"><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+    // Fallback: show as JSON
+    return '<pre>' + esc(JSON.stringify(schema, null, 2)) + '</pre>';
+  }
 
   function esc(s) {
     if (s == null) return '';

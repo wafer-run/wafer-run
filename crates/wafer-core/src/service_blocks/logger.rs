@@ -34,6 +34,7 @@ impl Block for LoggerBlock {
             runtime: BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

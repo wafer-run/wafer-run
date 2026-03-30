@@ -50,6 +50,7 @@ impl Block for PostgresDatabaseBlock {
             runtime: BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

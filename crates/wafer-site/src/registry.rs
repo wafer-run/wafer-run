@@ -242,7 +242,7 @@ impl Block for RegistryBlock {
         BlockInfo {
             name: "wafer-site/registry".to_string(),
             version: "0.6.0".to_string(),
-            interface: "handler@v1".to_string(),
+            interface: "http-handler@v1".to_string(),
             summary: "Package registry backed by wafer-run/registry GitHub repo".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
@@ -250,6 +250,7 @@ impl Block for RegistryBlock {
             runtime: wafer_run::types::BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

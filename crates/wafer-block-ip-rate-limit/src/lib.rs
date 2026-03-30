@@ -41,6 +41,7 @@ impl Block for RateLimitBlock {
             runtime: wafer_run::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

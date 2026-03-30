@@ -78,6 +78,7 @@ impl Block for NotesHandler {
             runtime: BlockRuntime::Native,
             requires: vec![],
             collections: vec![],
+            config_schema: None,
         }
     }
 

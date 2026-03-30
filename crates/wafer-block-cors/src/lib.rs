@@ -35,6 +35,7 @@ impl Block for CorsBlock {
             runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

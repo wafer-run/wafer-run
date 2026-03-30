@@ -416,6 +416,7 @@ impl Block for WASMBlock {
                             unique: i.unique,
                         }).collect(),
                     }).collect(),
+                    config_schema: None,
                 })
             })
         }).join().unwrap().unwrap_or_else(|e| BlockInfo {
@@ -429,6 +430,7 @@ impl Block for WASMBlock {
             runtime: BlockRuntime::Wasm,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         });
 
         if let Ok(mut guard) = self.info_cache.lock() {

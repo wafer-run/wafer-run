@@ -108,6 +108,7 @@ impl PureWASMBlock {
             runtime: BlockRuntime::Wasm,
             requires: vec![],
             collections: Vec::new(),
+            config_schema: None,
         };
 
         {

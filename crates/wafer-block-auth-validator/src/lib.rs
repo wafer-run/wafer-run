@@ -223,6 +223,7 @@ impl Block for AuthBlock {
                 "wafer-run/database".to_string(),
             ],
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

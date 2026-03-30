@@ -342,6 +342,7 @@ impl Block for HttpListenerBlock {
             runtime: wafer_run::types::BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

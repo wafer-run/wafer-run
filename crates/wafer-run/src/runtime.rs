@@ -143,6 +143,10 @@ pub struct Wafer {
     /// Populated by crate consumers (e.g. wafer-core) so that
     /// `wafer.register("wafer-run/http-server", config)` works.
     pub(crate) registrars: HashMap<String, RegistrarFn>,
+    /// Registered interface specifications.
+    pub(crate) interface_specs: HashMap<String, wafer_block::InterfaceSpec>,
+    /// Snapshot of interface specs (populated at start time).
+    pub(crate) interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
@@ -164,6 +168,11 @@ impl Wafer {
             flow_infos_snapshot: Arc::new(Vec::new()),
             flow_defs_snapshot: Arc::new(Vec::new()),
             block_configs_snapshot: Arc::new(HashMap::new()),
+            interface_specs: wafer_block::interfaces::all()
+                .into_iter()
+                .map(|s| (s.name.clone(), s))
+                .collect(),
+            interface_specs_snapshot: Arc::new(Vec::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
         }
@@ -178,6 +187,12 @@ impl Wafer {
     /// it resolves to the target block name.
     pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
         self.aliases.insert(alias.into(), target.into());
+    }
+
+    /// Register an interface specification. Overwrites any existing spec
+    /// with the same name.
+    pub fn register_interface(&mut self, spec: wafer_block::InterfaceSpec) {
+        self.interface_specs.insert(spec.name.clone(), spec);
     }
 
     /// Add a named registrar function. Registrars are called by
@@ -249,6 +264,7 @@ impl Wafer {
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             block_configs_snapshot: self.block_configs_snapshot.clone(),
+            interface_specs_snapshot: self.interface_specs_snapshot.clone(),
             aliases: Arc::new(self.aliases.clone()),
             caller_requires: None, // unrestricted by default
         }
@@ -370,6 +386,7 @@ impl Wafer {
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
                 collections: Vec::new(),
+                config_schema: None,
             },
             handler: Box::new(handler),
         });
@@ -397,6 +414,7 @@ impl Wafer {
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
                 collections: Vec::new(),
+                config_schema: None,
             },
             handler: Box::new(handler),
         });
@@ -427,6 +445,7 @@ impl Wafer {
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
                 collections: Vec::new(),
+                config_schema: None,
             },
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
@@ -457,6 +476,7 @@ impl Wafer {
                 runtime: BlockRuntime::default(),
                 requires: Vec::new(),
                 collections: Vec::new(),
+                config_schema: None,
             },
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
@@ -1114,6 +1134,7 @@ impl Wafer {
         self.blocks_snapshot = Arc::new(self.blocks.values().map(|b| b.info()).collect());
         self.flow_infos_snapshot = Arc::new(self.flows_info());
         self.flow_defs_snapshot = Arc::new(self.flow_defs());
+        self.interface_specs_snapshot = Arc::new(self.interface_specs.values().cloned().collect());
 
         Ok(())
     }

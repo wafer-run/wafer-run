@@ -43,6 +43,7 @@ impl Block for S3StorageBlock {
             runtime: BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 

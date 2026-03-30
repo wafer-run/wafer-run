@@ -9,7 +9,7 @@ pub struct SecurityHeadersBlock {
 impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {
-            csp: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
+            csp: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
         }
     }
 }
@@ -29,6 +29,7 @@ impl Block for SecurityHeadersBlock {
             runtime: wafer_block::types::BlockRuntime::Both,
             requires: Vec::new(),
             collections: Vec::new(),
+            config_schema: None,
         }
     }
 
