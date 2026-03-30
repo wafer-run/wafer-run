@@ -131,6 +131,8 @@ pub struct Wafer {
     pub(crate) flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub(crate) flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
+    /// Snapshot of expanded block configs (populated at start time, for inspector).
+    pub(crate) block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: HashMap<String, String>,
@@ -161,6 +163,7 @@ impl Wafer {
             blocks_snapshot: Arc::new(Vec::new()),
             flow_infos_snapshot: Arc::new(Vec::new()),
             flow_defs_snapshot: Arc::new(Vec::new()),
+            block_configs_snapshot: Arc::new(HashMap::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
         }
@@ -245,6 +248,7 @@ impl Wafer {
             registered_blocks_snapshot: self.blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            block_configs_snapshot: self.block_configs_snapshot.clone(),
             aliases: Arc::new(self.aliases.clone()),
             caller_requires: None, // unrestricted by default
         }
@@ -643,6 +647,9 @@ impl Wafer {
         self.expand_declarative_flow_configs();
         // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
+
+        // Snapshot expanded configs for inspector before draining
+        self.block_configs_snapshot = Arc::new(self.block_configs.clone());
 
         let configs: Vec<(String, serde_json::Value)> =
             self.block_configs.drain().collect();

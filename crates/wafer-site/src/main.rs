@@ -80,6 +80,9 @@ async fn main() {
     wafer_block_auth_validator::register(&mut w);
     wafer_block_iam_guard::register(&mut w);
     wafer_block_inspector::register(&mut w);
+    w.add_block_config("wafer-run/inspector", serde_json::json!({
+        "allow_anonymous": true
+    }));
     wafer_block_web::register(&mut w);
 
     // Register site-specific blocks

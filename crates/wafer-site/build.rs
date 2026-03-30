@@ -120,6 +120,14 @@ fn main() {
     // Copy public/ assets to dist/
     copy_dir_recursive(&public_dir, &dist_dir);
 
+    // Copy content/fonts/ to dist/fonts/
+    let fonts_src = content_dir.join("fonts");
+    if fonts_src.exists() {
+        let fonts_dst = dist_dir.join("fonts");
+        let _ = fs::create_dir_all(&fonts_dst);
+        copy_dir_recursive(&fonts_src, &fonts_dst);
+    }
+
     // favicon.ico needs to be at the root (HTML references /favicon.ico)
     let favicon_src = dist_dir.join("images").join("favicon.ico");
     if favicon_src.exists() {

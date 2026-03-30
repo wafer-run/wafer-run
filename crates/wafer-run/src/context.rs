@@ -32,6 +32,8 @@ pub struct RuntimeContext {
     pub flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
     /// Snapshot of flow definitions (populated at start time).
     pub flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
+    /// Snapshot of expanded block configs (populated at start time).
+    pub block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
@@ -131,6 +133,7 @@ impl Context for RuntimeContext {
             registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
             flow_infos_snapshot: self.flow_infos_snapshot.clone(),
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
+            block_configs_snapshot: self.block_configs_snapshot.clone(),
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
         };
@@ -174,5 +177,9 @@ impl Context for RuntimeContext {
 
     fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
         (*self.flow_defs_snapshot).clone()
+    }
+
+    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        (*self.block_configs_snapshot).clone()
     }
 }

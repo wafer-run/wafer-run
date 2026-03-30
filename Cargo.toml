@@ -33,6 +33,8 @@ members = [
     "examples/hello-world",
     "examples/static-site",
     "examples/api-server",
+    "examples/multi-flow",
+    "examples/middleware-chain",
 ]
 
 [workspace.package]

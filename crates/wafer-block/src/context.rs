@@ -24,4 +24,7 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
 
     /// List full flow definitions.
     fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> { Vec::new() }
+
+    /// Get expanded block configs (for inspector app view).
+    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> { std::collections::HashMap::new() }
 }

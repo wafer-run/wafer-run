@@ -1,13 +1,25 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use wafer_block::*;
+
+/// Access control policy for the inspector.
+enum AccessPolicy {
+    /// Require `auth.user_id` to be set (default).
+    Authenticated,
+    /// Allow unauthenticated access (dev mode).
+    Anonymous,
+    /// Require `auth.user_roles` to contain one of these roles.
+    Roles(Vec<String>),
+}
 
 /// InspectorBlock provides runtime introspection — listing blocks, flows, and
 /// serving a visual UI.
-pub struct InspectorBlock;
+pub struct InspectorBlock {
+    policy: RwLock<AccessPolicy>,
+}
 
 impl InspectorBlock {
     pub fn new() -> Self {
-        Self
+        Self { policy: RwLock::new(AccessPolicy::Roles(vec!["admin".to_string()])) }
     }
 }
 
@@ -30,10 +42,32 @@ impl Block for InspectorBlock {
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        // Require authentication — reject if no auth.user_id is set
-        let auth_user = msg.get_meta("auth.user_id");
-        if auth_user.is_empty() {
-            return err_unauthorized(msg, "inspector requires authentication");
+        // Access control
+        {
+            let policy = self.policy.read().unwrap();
+            match &*policy {
+                AccessPolicy::Anonymous => {}
+                AccessPolicy::Authenticated => {
+                    if msg.get_meta("auth.user_id").is_empty() {
+                        return err_unauthorized(msg, "inspector requires authentication");
+                    }
+                }
+                AccessPolicy::Roles(allowed) => {
+                    if msg.get_meta("auth.user_id").is_empty() {
+                        return err_unauthorized(msg, "inspector requires authentication");
+                    }
+                    let user_roles: Vec<&str> = msg
+                        .get_meta("auth.user_roles")
+                        .split(',')
+                        .map(|r| r.trim())
+                        .filter(|r| !r.is_empty())
+                        .collect();
+                    if !allowed.iter().any(|a| user_roles.contains(&a.as_str())) {
+                        let roles_list = allowed.join(", ");
+                        return error(msg, "forbidden", &format!("inspector requires one of these roles: [{}]", roles_list));
+                    }
+                }
+            }
         }
 
         // Only allow retrieve (GET)
@@ -45,6 +79,17 @@ impl Block for InspectorBlock {
         let path = msg.path().to_string();
 
         // Suffix-based routing — works regardless of mount prefix
+        if path.ends_with("/app") {
+            let flows = ctx.flow_defs();
+            let configs = ctx.block_configs();
+            let blocks = ctx.registered_blocks();
+            return json_respond(msg, &serde_json::json!({
+                "flows": flows,
+                "configs": configs,
+                "blocks": blocks,
+            }));
+        }
+
         if path.ends_with("/blocks") {
             let blocks = ctx.registered_blocks();
             return json_respond(msg, &blocks);
@@ -95,8 +140,28 @@ impl Block for InspectorBlock {
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if let LifecycleType::Init = event.event_type {
+            if let Ok(config) = serde_json::from_slice::<serde_json::Value>(&event.data) {
+                // "allow_anonymous": true  → anyone can access
+                if config.get("allow_anonymous").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    *self.policy.write().unwrap() = AccessPolicy::Anonymous;
+                    tracing::warn!("inspector: anonymous access enabled — do not use in production");
+                }
+                // "allowed_roles": ["admin", "developer"]  → only these roles
+                else if let Some(roles) = config.get("allowed_roles").and_then(|v| v.as_array()) {
+                    let role_list: Vec<String> = roles
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if !role_list.is_empty() {
+                        tracing::info!("inspector: access restricted to roles: {:?}", role_list);
+                        *self.policy.write().unwrap() = AccessPolicy::Roles(role_list);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

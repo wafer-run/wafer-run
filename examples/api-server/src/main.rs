@@ -24,7 +24,11 @@ async fn main() {
     // --- Register blocks ---
     wafer_flow_http_server::register(&mut wafer, serde_json::json!({
         "listen": "0.0.0.0:8080",
-        "routes": [{ "path": "/api/**", "block": "api-handler" }]
+        "routes": [
+            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+            { "path": "/_inspector", "block": "wafer-run/inspector" },
+            { "path": "/api/**", "block": "api-handler" }
+        ]
     }));
     // Ensure data directory exists
     std::fs::create_dir_all("data").ok();
@@ -38,6 +42,10 @@ async fn main() {
         &mut wafer,
         Arc::new(wafer_block_logger::service::TracingLogger),
     );
+    wafer_block_inspector::register(&mut wafer);
+    wafer.add_block_config("wafer-run/inspector", serde_json::json!({
+        "allow_anonymous": true
+    }));
     wafer.register_block("api-handler", Arc::new(NotesHandler));
     wafer.add_block_config("wafer-run/cors", serde_json::json!({
         "allow_origins": ["*"]

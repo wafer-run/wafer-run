@@ -3,135 +3,180 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WAFER Inspector</title>
+<title>wafer.run / inspector</title>
 <style>
+  :root { --wafer: #FCC450; --accent: #1e3a5f; --bg: #ffffff; --bg-secondary: #f8f9fa; --bg-card: #ffffff; --border: #e2e8f0; --border-light: #f1f5f9; --text: #1e293b; --text-secondary: #64748b; --text-muted: #94a3b8; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-secondary); color: var(--text); }
 
   /* ── Header & Tabs ─────────────────────────────────── */
-  .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
-  .header h1 { font-size: 18px; font-weight: 600; }
-  .header h1 span { color: #58a6ff; }
-  .tabs { display: flex; gap: 4px; }
-  .tab { padding: 6px 16px; border-radius: 6px; cursor: pointer; background: transparent; border: 1px solid transparent; color: #8b949e; font-size: 14px; transition: color .15s; }
-  .tab.active { background: #21262d; border-color: #30363d; color: #e1e4e8; }
-  .tab:hover { color: #e1e4e8; }
+  .header { background: var(--bg); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; align-items: center; gap: 16px; }
+  .header-brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .header-brand .brand-logo { height: 24px; width: 24px; border-radius: 4px; }
+  .header-brand h1 { font-size: 17px; font-weight: 600; }
+  .header-brand .brand-wafer { color: #b8860b; }
+  .header-brand .brand-run { color: var(--accent); }
+  .header-brand .brand-sep { color: var(--border); margin: 0 2px; }
+  .header-brand .brand-page { color: var(--text); }
+  .tabs { display: flex; gap: 4px; margin-left: auto; }
+  .tab { padding: 6px 16px; border-radius: 6px; cursor: pointer; background: transparent; border: 1px solid transparent; color: var(--text-secondary); font-size: 14px; transition: all .15s; }
+  .tab.active { background: #fef9e7; border-color: #f0d78c; color: #92610a; font-weight: 600; }
+  .tab:hover { color: var(--text); }
   .content { padding: 24px; }
 
   /* ── Intro text ─────────────────────────────────────── */
-  .intro { font-size: 14px; color: #8b949e; margin-bottom: 16px; line-height: 1.5; max-width: 720px; }
+  .intro { font-size: 14px; color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5; max-width: 720px; }
 
   /* ── Search ─────────────────────────────────────────── */
   .search-bar { margin-bottom: 16px; }
   .search-bar input {
     width: 100%; max-width: 480px; padding: 8px 12px; border-radius: 6px;
-    border: 1px solid #30363d; background: #0d1117; color: #e1e4e8; font-size: 14px; outline: none;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; outline: none;
   }
-  .search-bar input:focus { border-color: #58a6ff; }
-  .search-bar input::placeholder { color: #484f58; }
+  .search-bar input:focus { border-color: #d4a017; box-shadow: 0 0 0 3px rgba(252, 196, 80, 0.15); }
+  .search-bar input::placeholder { color: var(--text-muted); }
 
   /* ── Block cards ────────────────────────────────────── */
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; transition: border-color .15s; }
-  .card:hover { border-color: #484f58; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; transition: border-color .15s, box-shadow .15s; }
+  .card:hover { border-color: #cbd5e1; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
   .card-header { display: flex; justify-content: space-between; align-items: flex-start; cursor: pointer; }
-  .card h3 { font-size: 15px; color: #58a6ff; word-break: break-all; margin-bottom: 4px; }
-  .card .summary { font-size: 13px; color: #8b949e; line-height: 1.4; }
-  .card .toggle { color: #484f58; font-size: 18px; flex-shrink: 0; margin-left: 8px; user-select: none; transition: transform .2s; }
+  .card h3 { font-size: 14px; color: var(--accent); font-weight: 600; word-break: break-all; margin-bottom: 3px; }
+  .card .summary { font-size: 13px; color: var(--text-secondary); line-height: 1.4; }
+  .card .toggle { color: var(--text-muted); font-size: 16px; flex-shrink: 0; margin-left: 8px; user-select: none; transition: transform .2s; }
   .card.expanded .toggle { transform: rotate(90deg); }
-  .card .details { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #21262d; }
+  .card .details { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-light); }
   .card.expanded .details { display: block; }
-  .detail-row { font-size: 13px; color: #8b949e; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
-  .detail-row b { color: #c9d1d9; }
+  .detail-row { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .detail-row b { color: var(--text); }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .badge-interface { background: #1f6feb33; color: #58a6ff; border: 1px solid #1f6feb55; }
-  .badge-instance { background: #23863633; color: #3fb950; border: 1px solid #23863655; }
-  .tooltip { position: relative; cursor: help; border-bottom: 1px dotted #484f58; }
+  .badge-interface { background: #fef9e7; color: #92610a; border: 1px solid #f0d78c; }
+  .badge-instance { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+  .tooltip { position: relative; cursor: help; border-bottom: 1px dotted var(--text-muted); }
   .tooltip .tip-text {
     display: none; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%);
-    background: #21262d; color: #c9d1d9; padding: 6px 10px; border-radius: 6px; font-size: 12px;
-    white-space: nowrap; z-index: 10; border: 1px solid #30363d; pointer-events: none;
+    background: var(--text); color: white; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    white-space: nowrap; z-index: 10; pointer-events: none;
   }
   .tooltip:hover .tip-text { display: block; }
 
   /* ── Flow layout ──────────────────────────────────── */
   .flows-layout { display: flex; height: calc(100vh - 110px); }
-  .flow-list { width: 260px; border-right: 1px solid #30363d; overflow-y: auto; padding: 8px; flex-shrink: 0; }
-  .flow-item { padding: 10px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 4px; font-size: 13px; word-break: break-all; }
-  .flow-item:hover { background: #21262d; }
-  .flow-item.active { background: #1f6feb33; border: 1px solid #1f6feb; }
-  .flow-view { flex: 1; position: relative; overflow: auto; background: #0d1117; }
-  .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; font-size: 15px; }
-  .loading { color: #484f58; padding: 24px; font-size: 14px; }
+  .flow-list { width: 240px; border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; flex-shrink: 0; background: var(--bg); }
+  .flow-item { padding: 10px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 2px; font-size: 13px; word-break: break-all; color: var(--text-secondary); border: 1px solid transparent; }
+  .flow-item:hover { background: var(--bg-secondary); }
+  .flow-item.active { background: #fef9e7; border-color: #f0d78c; color: #92610a; font-weight: 600; }
+  .flow-view { flex: 1; position: relative; overflow: auto; background: var(--bg-secondary); }
+  .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 15px; }
+  .loading { color: var(--text-muted); padding: 24px; font-size: 14px; }
 
-  /* ── Flow tree (CSS-only horizontal layout) ─────────── */
-  .flow-tree { padding: 32px; min-width: max-content; }
-  .flow-branch { display: flex; align-items: center; }
+  /* ── Flow tree (vertical layout) ────────────────────── */
+  .flow-tree { padding: 24px 32px; min-width: min-content; }
+  .flow-branch { display: flex; flex-direction: column; align-items: center; }
   .flow-node {
-    background: #161b22; border: 1px solid #30363d; border-radius: 8px; min-width: 170px;
-    cursor: pointer; transition: border-color .15s, box-shadow .15s; flex-shrink: 0;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; width: 260px;
+    cursor: pointer; transition: all .15s; flex-shrink: 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    border-left: 3px solid var(--accent);
+    overflow: hidden;
   }
-  .flow-node:hover { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff44; }
-  .flow-node.selected { border-color: #58a6ff; box-shadow: 0 0 0 2px #58a6ff44; }
-  .flow-node .node-title { background: #21262d; border-bottom: 1px solid #30363d; padding: 8px 12px; border-radius: 8px 8px 0 0; font-weight: 600; font-size: 13px; color: #58a6ff; }
-  .flow-node .node-body { padding: 8px 12px; font-size: 12px; color: #8b949e; }
-  .flow-node .node-match { color: #f0883e; margin-top: 2px; }
-  .flow-connector { display: flex; align-items: center; }
-  .flow-connector .h-line { width: 40px; height: 2px; background: #30363d; position: relative; }
-  .flow-connector .h-line::after {
-    content: ''; position: absolute; right: -1px; top: -4px;
-    border: 5px solid transparent; border-left-color: #30363d;
+  .flow-node:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.1); transform: translateY(-1px); }
+  .flow-node.selected { border-color: #d4a017; border-left-color: #d4a017; box-shadow: 0 2px 12px rgba(252,196,80,0.25); }
+  .flow-node .node-title { padding: 10px 14px; font-weight: 600; font-size: 13px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .flow-node .node-step { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: white; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+  .flow-node .node-body { padding: 0 14px 10px; font-size: 12px; color: var(--text-secondary); }
+  .flow-node .node-summary { color: var(--text-muted); margin-bottom: 2px; }
+  .flow-node .node-match { color: #b45309; font-style: italic; font-size: 11px; background: #fef3c7; padding: 2px 8px; border-radius: 4px; display: inline-block; }
+
+  /* Vertical connectors */
+  .flow-connector { display: flex; justify-content: center; }
+  .flow-connector .v-line { width: 2px; height: 36px; background: var(--accent); opacity: 0.3; position: relative; }
+  .flow-connector .v-line::after {
+    content: ''; position: absolute; bottom: -6px; left: -5px;
+    border: 6px solid transparent; border-top-color: var(--accent); opacity: 0.5;
   }
-  .flow-children { display: flex; flex-direction: column; gap: 0; position: relative; }
-  .flow-children > .flow-child { display: flex; align-items: center; position: relative; }
-  .flow-children > .flow-child .child-connector { width: 40px; height: 2px; background: #30363d; position: relative; }
+  .flow-children { display: flex; flex-direction: row; gap: 16px; position: relative; align-items: flex-start; }
+  .flow-children > .flow-child { display: flex; flex-direction: column; align-items: center; position: relative; }
+  .flow-children > .flow-child .child-connector { width: 2px; height: 36px; background: var(--accent); opacity: 0.3; position: relative; }
   .flow-children > .flow-child .child-connector::after {
-    content: ''; position: absolute; right: -1px; top: -4px;
-    border: 5px solid transparent; border-left-color: #30363d;
-  }
-  /* Vertical branch line connecting children */
-  .flow-children::before {
-    content: ''; position: absolute; left: 0; top: 50%;
-    width: 2px; background: #30363d;
-    /* Sized dynamically via JS for accuracy */
-  }
-  .flow-children.has-branch-line::before {
-    display: block;
+    content: ''; position: absolute; bottom: -6px; left: -5px;
+    border: 6px solid transparent; border-top-color: var(--accent); opacity: 0.5;
   }
 
-  /* ── Detail panel (slide-in from right) ─────────────── */
-  .detail-panel {
-    position: absolute; top: 0; right: 0; width: 360px; height: 100%;
-    background: #161b22; border-left: 1px solid #30363d; overflow-y: auto;
-    transform: translateX(100%); transition: transform .2s ease;
-    z-index: 20; padding: 20px;
+  /* ── Detail popup ────────────────────────────────────── */
+  .detail-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.25); z-index: 50;
+    align-items: center; justify-content: center;
   }
-  .detail-panel.open { transform: translateX(0); }
-  .detail-panel .panel-close {
-    position: absolute; top: 12px; right: 12px; background: none; border: none;
-    color: #8b949e; cursor: pointer; font-size: 20px; line-height: 1;
+  .detail-overlay.open { display: flex; }
+  .detail-popup {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    width: 420px; max-width: 90vw; max-height: 80vh; overflow-y: auto;
+    padding: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+    position: relative;
   }
-  .detail-panel .panel-close:hover { color: #e1e4e8; }
-  .detail-panel h3 { font-size: 16px; color: #58a6ff; margin-bottom: 16px; word-break: break-all; }
-  .detail-panel .section-title { font-size: 12px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 8px; }
-  .detail-panel .field { font-size: 13px; color: #c9d1d9; margin-bottom: 8px; line-height: 1.5; }
-  .detail-panel .field-label { color: #8b949e; }
-  .detail-panel .field-explain { font-size: 12px; color: #484f58; margin-top: 2px; font-style: italic; }
-  .detail-panel pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
-  .no-cards-match { color: #484f58; font-size: 14px; padding: 24px 0; }
+  .detail-popup .panel-close {
+    position: absolute; top: 12px; right: 14px; background: none; border: none;
+    color: var(--text-muted); cursor: pointer; font-size: 22px; line-height: 1;
+  }
+  .detail-popup .panel-close:hover { color: var(--text); }
+  .detail-popup h3 { font-size: 16px; color: var(--accent); margin-bottom: 16px; word-break: break-all; padding-right: 28px; }
+  .detail-popup .section-title { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 8px; }
+  .detail-popup .field { font-size: 13px; color: var(--text); margin-bottom: 8px; line-height: 1.5; }
+  .detail-popup .field-label { color: var(--text-secondary); }
+  .detail-popup pre { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
+  .no-cards-match { color: var(--text-muted); font-size: 14px; padding: 24px 0; }
+
+  /* ── Flow group (app view) ─────────────────────────── */
+  .flow-group {
+    border: 2px dashed var(--border); border-radius: 12px; padding: 20px 24px 24px;
+    position: relative; margin: 8px 0;
+  }
+  .flow-group-label {
+    position: absolute; top: -10px; left: 20px; background: var(--bg-secondary);
+    padding: 0 10px; font-size: 12px; font-weight: 600; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .flow-group-info {
+    position: absolute; top: -10px; right: 20px; background: var(--bg-secondary);
+    padding: 0 4px; cursor: pointer; display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: var(--text-muted); transition: color 0.15s;
+  }
+  .flow-group-info:hover { color: var(--accent); }
+  .flow-group-info svg { width: 16px; height: 16px; fill: currentColor; }
+
+  /* Config icon on nodes */
+  .node-title { position: relative; }
+  .config-icon {
+    position: absolute; top: 8px; right: 10px; width: 16px; height: 16px;
+    color: var(--text-muted); opacity: 0.5; transition: opacity 0.15s;
+  }
+  .flow-node:hover .config-icon { opacity: 0.8; }
+  .config-icon svg { width: 16px; height: 16px; fill: currentColor; }
 </style>
 </head>
 <body>
 <div class="header">
-  <h1><span>WAFER</span> Inspector</h1>
+  <a class="header-brand" href="/">
+    <h1><span class="brand-wafer">wafer</span><span class="brand-run">.run</span> <span class="brand-sep">/</span> <span class="brand-page">inspector</span></h1>
+  </a>
   <div class="tabs">
-    <div class="tab active" data-tab="blocks">Blocks</div>
+    <div class="tab active" data-tab="app">App</div>
     <div class="tab" data-tab="flows">Flows</div>
+    <div class="tab" data-tab="blocks">Blocks</div>
+  </div>
+</div>
+
+<!-- ── App view ────────────────────────────────────── -->
+<div id="app-view" class="content" style="overflow: auto; height: calc(100vh - 52px);">
+  <p class="intro">Full application topology: from HTTP listener through the middleware flow to individual route handlers.</p>
+  <div id="app-tree" class="flow-tree" style="overflow-x: auto; padding-bottom: 32px;">
+    <div class="loading">Loading app topology...</div>
   </div>
 </div>
 
 <!-- ── Blocks view ──────────────────────────────────── -->
-<div id="blocks-view" class="content">
+<div id="blocks-view" class="content" style="display:none;">
   <p class="intro">Blocks are reusable processing units that handle messages. Each block declares an interface (the protocol it speaks) and an instance mode (whether it is shared or created per use).</p>
   <div class="search-bar"><input type="text" id="block-search" placeholder="Search blocks by name, interface, or summary..." /></div>
   <div id="block-cards" class="cards">
@@ -143,17 +188,20 @@
 <div id="flows-view" class="content" style="display:none; padding:0;">
   <div class="flows-layout">
     <div class="flow-list" id="flow-list">
-      <p class="intro" style="padding:8px;">Flows wire blocks together into processing pipelines. Select a flow to visualize its flow.</p>
+      <p class="intro" style="padding:8px;">Flows wire blocks together into processing pipelines.</p>
       <div class="loading" id="flow-loading">Loading flows...</div>
     </div>
     <div class="flow-view" id="flow-view">
       <div id="flow-container"></div>
       <div class="empty-state" id="flow-empty">Select a flow to visualize</div>
-      <div class="detail-panel" id="detail-panel">
-        <button class="panel-close" id="panel-close" aria-label="Close">&times;</button>
-        <div id="panel-content"></div>
-      </div>
     </div>
+  </div>
+</div>
+
+<div class="detail-overlay" id="detail-overlay">
+  <div class="detail-popup" id="detail-popup">
+    <button class="panel-close" id="panel-close" aria-label="Close">&times;</button>
+    <div id="panel-content"></div>
   </div>
 </div>
 
@@ -161,16 +209,20 @@
 (function() {
   const base = window.location.pathname.replace(/\/ui\/?$/, '');
   let blocksData = [];
+  let blockConfigs = {};
   let selectedNodeEl = null;
+  let flowItems = []; // track flow list items for auto-select
 
   // ── Tab switching ───────────────────────────────────
+  const views = ['app', 'blocks', 'flows'];
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       const name = tab.dataset.tab;
-      document.getElementById('blocks-view').style.display = name === 'blocks' ? '' : 'none';
-      document.getElementById('flows-view').style.display = name === 'flows' ? '' : 'none';
+      views.forEach(v => {
+        document.getElementById(v + '-view').style.display = v === name ? '' : 'none';
+      });
     });
   });
 
@@ -201,14 +253,14 @@
         <div class="details">
           <div class="detail-row"><b>Version:</b> ${esc(b.version)}</div>
           <div class="detail-row">
-            <span class="tooltip">Interface<span class="tip-text">The protocol this block uses to communicate (e.g. handler@v1 handles HTTP-style request/response)</span></span>
+            <span class="tooltip">Interface<span class="tip-text">The protocol this block uses to communicate</span></span>
             <span class="badge badge-interface">${esc(b.interface)}</span>
           </div>
           <div class="detail-row">
             <span class="tooltip">Instance mode<span class="tip-text">Singleton: one shared instance. Per-use: a new instance for each invocation.</span></span>
             <span class="badge badge-instance">${esc(b.instance_mode)}</span>
           </div>
-          ${b.admin_ui && b.admin_ui.url ? `<div class="detail-row"><a href="${esc(b.admin_ui.url)}" style="color:#fe6627;font-weight:600;text-decoration:none;font-size:0.875rem">&#9881; ${esc(b.admin_ui.label || 'Manage')}</a></div>` : ''}
+          ${b.admin_ui && b.admin_ui.url ? `<div class="detail-row"><a href="${esc(b.admin_ui.url)}" style="color:#b45309;font-weight:600;text-decoration:none;font-size:0.875rem">&#9881; ${esc(b.admin_ui.label || 'Manage')}</a></div>` : ''}
         </div>
       </div>
     `).join('');
@@ -239,23 +291,184 @@
       if (loadingEl) loadingEl.remove();
       if (!flows.length) { list.innerHTML += '<div class="empty-state" style="height:auto;padding:24px;">No flows</div>'; return; }
       flows.sort((a, b) => a.id.localeCompare(b.id));
-      const items = flows.map(c => {
+      flows.forEach(c => {
         const div = document.createElement('div');
         div.className = 'flow-item';
         div.dataset.id = c.id;
-        div.innerHTML = esc(c.id) + (c.summary ? '<br><small style="color:#8b949e">' + esc(c.summary) + '</small>' : '');
+        div.textContent = c.id;
         div.addEventListener('click', () => {
           list.querySelectorAll('.flow-item').forEach(i => i.classList.remove('active'));
           div.classList.add('active');
           loadFlow(c.id);
         });
-        return div;
+        list.appendChild(div);
+        flowItems.push(div);
       });
-      items.forEach(el => list.appendChild(el));
+      // Auto-select first flow
+      if (flowItems.length) flowItems[0].click();
     })
     .catch(e => {
       document.getElementById('flow-loading').textContent = 'Error: ' + e.message;
     });
+
+  // ── App view ──────────────────────────────────────
+  fetch(base + '/app')
+    .then(r => r.json())
+    .then(data => {
+      blocksData = data.blocks || [];
+      blocksData.sort((a, b) => a.name.localeCompare(b.name));
+      blockConfigs = data.configs || {};
+      renderAppView(data);
+    })
+    .catch(e => {
+      document.getElementById('app-tree').innerHTML = '<div class="loading">Error: ' + esc(e.message) + '</div>';
+    });
+
+  function renderAppView(data) {
+    const container = document.getElementById('app-tree');
+    container.innerHTML = '';
+
+    const flows = data.flows || [];
+    const configs = data.configs || {};
+
+    // Find the HTTP server flow (has wafer-run/http-listener in blocks)
+    const serverFlow = flows.find(f =>
+      (f.blocks || []).includes('wafer-run/http-listener')
+    );
+    if (!serverFlow) {
+      container.innerHTML = '<div class="loading">No HTTP server flow found</div>';
+      return;
+    }
+
+    // Get the listener config
+    const listenerConfig = configs['wafer-run/http-listener'] || {};
+    const listenAddr = listenerConfig.flow ? undefined : (listenerConfig.listen || '');
+
+    // Get the router config to find routes
+    const routerConfig = configs['wafer-run/router'] || {};
+    const routes = routerConfig.routes || [];
+
+    // Build the app tree
+    stepCounter = 0;
+
+    const tree = document.createElement('div');
+    tree.className = 'flow-branch';
+
+    // Listener node (outside the flow group)
+    const listenerNode = makeAppNode('wafer-run/http-listener', 'HTTP Listener', listenAddr ? 'Listening on ' + listenAddr : null);
+    tree.appendChild(listenerNode);
+    tree.appendChild(makeConnector());
+
+    // Flow group wrapper
+    const flowGroup = document.createElement('div');
+    flowGroup.className = 'flow-group';
+    const flowLabel = document.createElement('div');
+    flowLabel.className = 'flow-group-label';
+    flowLabel.textContent = serverFlow.name || serverFlow.id;
+    flowGroup.appendChild(flowLabel);
+
+    const flowInfo = document.createElement('div');
+    flowInfo.className = 'flow-group-info';
+    flowInfo.innerHTML = cfgSvg + '<span>flow.json</span>';
+    flowInfo.title = 'View flow definition';
+    flowInfo.addEventListener('click', () => {
+      const content = document.getElementById('panel-content');
+      let html = '<h3>' + esc(serverFlow.name || serverFlow.id) + '</h3>';
+      html += '<div class="section-title">Flow Definition</div>';
+      html += '<pre>' + esc(JSON.stringify(serverFlow, null, 2)) + '</pre>';
+      content.innerHTML = html;
+      document.getElementById('detail-overlay').classList.add('open');
+    });
+    flowGroup.appendChild(flowInfo);
+
+    const flowInner = document.createElement('div');
+    flowInner.className = 'flow-branch';
+
+    // Flow steps (middleware chain, excluding the router which we handle separately)
+    const steps = serverFlow.steps || [];
+    const middlewareSteps = steps.filter(s => s.block !== 'wafer-run/router');
+
+    middlewareSteps.forEach(step => {
+      const info = blocksData.find(b => b.name === step.block);
+      flowInner.appendChild(makeAppNode(step.block, null, info ? info.summary : null));
+      flowInner.appendChild(makeConnector());
+    });
+
+    // Router node (last step in the flow)
+    const routerNode = makeAppNode('wafer-run/router', null, routes.length + ' routes configured');
+    flowInner.appendChild(routerNode);
+
+    flowGroup.appendChild(flowInner);
+    tree.appendChild(flowGroup);
+
+    // Routes fan-out (outside the flow group), grouped by block name
+    if (routes.length) {
+      tree.appendChild(makeConnector());
+
+      // Group routes by block name
+      const grouped = {};
+      routes.forEach(route => {
+        if (!grouped[route.block]) grouped[route.block] = [];
+        grouped[route.block].push(route.path);
+      });
+
+      const children = document.createElement('div');
+      children.className = 'flow-children';
+      Object.keys(grouped).forEach(blockName => {
+        const paths = grouped[blockName];
+        const child = document.createElement('div');
+        child.className = 'flow-child';
+        const conn = document.createElement('div');
+        conn.className = 'child-connector';
+        child.appendChild(conn);
+
+        const routeBranch = document.createElement('div');
+        routeBranch.className = 'flow-branch';
+        const info = blocksData.find(b => b.name === blockName);
+        const routeNode = makeAppNode(blockName, null, info ? info.summary : null, paths);
+        routeBranch.appendChild(routeNode);
+        child.appendChild(routeBranch);
+        children.appendChild(child);
+      });
+      tree.appendChild(children);
+    }
+
+    container.appendChild(tree);
+    layoutBranchLines(container);
+  }
+
+  const cfgSvg = '<svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.69-1.62-.91l-.36-2.54a.48.48 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.22-1.13.53-1.62.91l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.69 1.62.91l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.22 1.13-.53 1.62-.91l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.61 3.61 0 0112 15.6z"/></svg>';
+
+  function makeAppNode(name, label, subtitle, routePaths) {
+    stepCounter++;
+    const node = document.createElement('div');
+    node.className = 'flow-node';
+
+    const hasConfig = blockConfigs[name] && Object.keys(blockConfigs[name]).length > 0;
+    const cfgIcon = hasConfig ? '<span class="config-icon">' + cfgSvg + '</span>' : '';
+    let titleHtml = '<div class="node-title"><span class="node-step">' + stepCounter + '</span>' + esc(label || name) + cfgIcon + '</div>';
+    let bodyParts = [];
+    if (routePaths) {
+      const paths = Array.isArray(routePaths) ? routePaths : [routePaths];
+      bodyParts.push('<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">' +
+        paths.map(p => '<span class="node-match">' + esc(p) + '</span>').join('') + '</div>');
+    }
+    if (subtitle) bodyParts.push('<div class="node-summary">' + esc(subtitle) + '</div>');
+    let bodyHtml = bodyParts.length ? '<div class="node-body">' + bodyParts.join('') + '</div>' : '';
+
+    node.innerHTML = titleHtml + bodyHtml;
+    node.addEventListener('click', () => {
+      openDetailPanel({ block: name }, node);
+    });
+    return node;
+  }
+
+  function makeConnector() {
+    const c = document.createElement('div');
+    c.className = 'flow-connector';
+    c.innerHTML = '<div class="v-line"></div>';
+    return c;
+  }
 
   function loadFlow(id) {
     closeDetailPanel();
@@ -272,38 +485,101 @@
       });
   }
 
-  // ── Flow rendering (CSS flexbox tree) ───────────────
+  // ── Flow rendering (vertical tree) ─────────────────
+
+  function stepsToTree(def) {
+    const steps = def.steps || [];
+    if (!steps.length) return { block: '(empty)', next: [] };
+
+    const stepMap = {};
+    steps.forEach((s, i) => { stepMap[s.id] = { ...s, _index: i }; });
+
+    function buildNode(stepId, visited) {
+      if (!stepId || visited.has(stepId)) return null;
+      visited.add(stepId);
+      const step = stepMap[stepId];
+      if (!step) return null;
+
+      const node = { block: step.block, id: step.id, config: step.config, input: step.input, next: [] };
+
+      if (step.next && step.next.length) {
+        step.next.forEach(n => {
+          const child = n.step ? buildNode(n.step, new Set(visited)) : null;
+          if (child) {
+            if (n.when) child.match = n.when;
+            node.next.push(child);
+          } else if (n.flow) {
+            node.next.push({ flow: n.flow, match: n.when || undefined, next: [] });
+          }
+        });
+      } else {
+        const nextIndex = step._index + 1;
+        if (nextIndex < steps.length) {
+          const child = buildNode(steps[nextIndex].id, visited);
+          if (child) node.next.push(child);
+        }
+      }
+      return node;
+    }
+
+    return buildNode(steps[0].id, new Set());
+  }
+
   function renderFlow(def) {
     const container = document.getElementById('flow-container');
     container.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'padding: 20px 32px 0; font-size: 13px; color: var(--text-secondary);';
+    header.innerHTML = '<b style="color:var(--text);font-size:16px;">' + esc(def.name || def.id) + '</b>' +
+      (def.version ? ' <span style="color:var(--text-muted)">v' + esc(def.version) + '</span>' : '') +
+      (def.description ? '<div style="margin-top:4px;">' + esc(def.description) + '</div>' : '');
+    container.appendChild(header);
+
+    stepCounter = 0;
+    const root = def.root || stepsToTree(def);
+    if (!root) {
+      container.innerHTML += '<div class="empty-state" style="height:200px">No steps in this flow</div>';
+      return;
+    }
+
     const tree = document.createElement('div');
     tree.className = 'flow-tree';
-    tree.appendChild(buildBranch(def.root));
+    tree.appendChild(buildBranch(root));
     container.appendChild(tree);
     layoutBranchLines(tree);
   }
+
+  let stepCounter = 0;
 
   function buildBranch(node) {
     const branch = document.createElement('div');
     branch.className = 'flow-branch';
 
-    // Node element
+    stepCounter++;
     const nodeEl = document.createElement('div');
     nodeEl.className = 'flow-node';
     nodeEl.dataset.nodeData = JSON.stringify(node);
     const label = node.block || (node.flow ? 'flow:' + node.flow : '(root)');
-    let bodyHtml = '';
-    if (node.match) bodyHtml += '<div class="node-match">match: ' + esc(node.match) + '</div>';
-    nodeEl.innerHTML = '<div class="node-title">' + esc(label) + '</div>' +
-                       (bodyHtml ? '<div class="node-body">' + bodyHtml + '</div>' : '');
+
+    // Look up block summary
+    const blockInfo = node.block ? blocksData.find(b => b.name === node.block) : null;
+    const summary = blockInfo ? blockInfo.summary : '';
+
+    let titleHtml = '<div class="node-title"><span class="node-step">' + stepCounter + '</span>' + esc(label) + '</div>';
+    let bodyParts = [];
+    if (summary) bodyParts.push('<div class="node-summary">' + esc(summary) + '</div>');
+    if (node.match) bodyParts.push('<div class="node-match">when: ' + esc(node.match) + '</div>');
+    let bodyHtml = bodyParts.length ? '<div class="node-body">' + bodyParts.join('') + '</div>' : '';
+
+    nodeEl.innerHTML = titleHtml + bodyHtml;
     nodeEl.addEventListener('click', () => openDetailPanel(node, nodeEl));
     branch.appendChild(nodeEl);
 
-    // Children
     if (node.next && node.next.length) {
       const connector = document.createElement('div');
       connector.className = 'flow-connector';
-      connector.innerHTML = '<div class="h-line"></div>';
+      connector.innerHTML = '<div class="v-line"></div>';
       branch.appendChild(connector);
 
       if (node.next.length === 1) {
@@ -334,28 +610,17 @@
       const first = children[0];
       const last = children[children.length - 1];
       const containerRect = container.getBoundingClientRect();
-      const firstRect = first.getBoundingClientRect();
-      const lastRect = last.getBoundingClientRect();
-      const top = firstRect.top + firstRect.height / 2 - containerRect.top;
-      const bottom = lastRect.top + lastRect.height / 2 - containerRect.top;
-      container.style.setProperty('--branch-top', top + 'px');
-      container.style.setProperty('--branch-height', (bottom - top) + 'px');
-      container.classList.add('has-branch-line');
-      container.style.position = 'relative';
-      // Apply via pseudo-element CSS custom properties
-      const style = container.style;
-      style.setProperty('position', 'relative');
-      // We need inline override since pseudo-elements can't use inline style directly
-      // Use a real element instead
-      let line = container.querySelector('.v-branch-line');
+      const firstCenter = first.getBoundingClientRect().left + first.getBoundingClientRect().width / 2 - containerRect.left;
+      const lastCenter = last.getBoundingClientRect().left + last.getBoundingClientRect().width / 2 - containerRect.left;
+      let line = container.querySelector('.h-branch-line');
       if (!line) {
         line = document.createElement('div');
-        line.className = 'v-branch-line';
-        line.style.cssText = 'position:absolute;left:0;width:2px;background:#30363d;';
+        line.className = 'h-branch-line';
+        line.style.cssText = 'position:absolute;top:0;height:2px;background:var(--border);';
         container.insertBefore(line, container.firstChild);
       }
-      line.style.top = top + 'px';
-      line.style.height = (bottom - top) + 'px';
+      line.style.left = firstCenter + 'px';
+      line.style.width = (lastCenter - firstCenter) + 'px';
     });
   }
 
@@ -371,25 +636,20 @@
 
     let html = '<h3>' + esc(label) + '</h3>';
 
-    // Node info
     html += '<div class="section-title">Node Configuration</div>';
     if (node.match) {
-      html += '<div class="field"><span class="field-label">Match pattern:</span> ' + esc(node.match) + '</div>';
-      html += '<div class="field-explain">Messages are routed to this node only when they match this pattern.</div>';
+      html += '<div class="field"><span class="field-label">Condition:</span> ' + esc(node.match) + '</div>';
     } else {
-      html += '<div class="field"><span class="field-label">Match pattern:</span> (none &mdash; receives all messages)</div>';
+      html += '<div class="field"><span class="field-label">Condition:</span> (none &mdash; always executes)</div>';
     }
     if (node.config) {
       const cfgStr = typeof node.config === 'string' ? node.config : JSON.stringify(node.config, null, 2);
-      html += '<div class="field"><span class="field-label">Config:</span></div><pre>' + esc(cfgStr) + '</pre>';
-      html += '<div class="field-explain">Static configuration passed to this block instance at startup.</div>';
+      html += '<div class="field"><span class="field-label">Step config:</span></div><pre>' + esc(cfgStr) + '</pre>';
     }
-    if (node.instance_mode) {
-      html += '<div class="field"><span class="field-label">Instance override:</span> ' + esc(node.instance_mode) + '</div>';
-      html += '<div class="field-explain">Overrides the block\'s default instance mode for this flow node.</div>';
+    if (node.input) {
+      html += '<div class="field"><span class="field-label">Input mapping:</span></div><pre>' + esc(JSON.stringify(node.input, null, 2)) + '</pre>';
     }
 
-    // Block info (from cached blocks data)
     if (node.block) {
       const blockInfo = blocksData.find(b => b.name === node.block);
       if (blockInfo) {
@@ -397,30 +657,36 @@
         html += '<div class="field"><span class="field-label">Summary:</span> ' + esc(blockInfo.summary) + '</div>';
         html += '<div class="field"><span class="field-label">Version:</span> ' + esc(blockInfo.version) + '</div>';
         html += '<div class="field"><span class="field-label">Interface:</span> <span class="badge badge-interface">' + esc(blockInfo.interface) + '</span></div>';
-        html += '<div class="field-explain">The protocol this block uses (e.g. handler@v1 for HTTP request/response).</div>';
         html += '<div class="field"><span class="field-label">Instance mode:</span> <span class="badge badge-instance">' + esc(blockInfo.instance_mode) + '</span></div>';
-        html += '<div class="field-explain">Singleton means one shared instance; per-use creates a fresh instance each time.</div>';
+      }
+
+      // Show block config if available
+      const cfg = blockConfigs[node.block];
+      if (cfg && Object.keys(cfg).length) {
+        html += '<div class="section-title">Configuration</div>';
+        html += '<pre>' + esc(JSON.stringify(cfg, null, 2)) + '</pre>';
       }
     }
 
     if (node.flow) {
       html += '<div class="section-title">Sub-flow Reference</div>';
-      html += '<div class="field">This node delegates to flow <b>' + esc(node.flow) + '</b>.</div>';
-      html += '<div class="field-explain">Instead of running a block directly, this node forwards messages into another flow.</div>';
+      html += '<div class="field">Delegates to flow <b>' + esc(node.flow) + '</b></div>';
     }
 
     content.innerHTML = html;
-    panel.classList.add('open');
+    document.getElementById('detail-overlay').classList.add('open');
   }
 
   function closeDetailPanel() {
-    document.getElementById('detail-panel').classList.remove('open');
+    document.getElementById('detail-overlay').classList.remove('open');
     if (selectedNodeEl) { selectedNodeEl.classList.remove('selected'); selectedNodeEl = null; }
   }
 
   document.getElementById('panel-close').addEventListener('click', closeDetailPanel);
+  document.getElementById('detail-overlay').addEventListener('click', e => {
+    if (!e.target.closest('.detail-popup')) closeDetailPanel();
+  });
 
-  // ── Utility ─────────────────────────────────────────
   function esc(s) {
     if (s == null) return '';
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

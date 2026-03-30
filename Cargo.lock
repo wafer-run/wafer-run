@@ -62,6 +62,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wafer-block-inspector",
  "wafer-block-logger",
  "wafer-block-sqlite",
  "wafer-core",
@@ -2252,6 +2253,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "middleware-chain"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wafer-block-cors",
+ "wafer-block-http-listener",
+ "wafer-block-inspector",
+ "wafer-block-router",
+ "wafer-block-security-headers",
+ "wafer-run",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2266,6 +2283,19 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "multi-flow"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wafer-block-inspector",
+ "wafer-flow-http-server",
+ "wafer-run",
 ]
 
 [[package]]
@@ -4245,6 +4275,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+ "tracing",
  "wafer-block",
 ]
 

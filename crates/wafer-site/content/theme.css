@@ -3,7 +3,7 @@
 
 :root {
     /* Wafer tones (golden biscuit) */
-    --wafer:          #D4A574;
+    --wafer:          #FCC450;
     --wafer-cream:    #FFF8F0;
 
     /* Blue tones */
@@ -42,10 +42,11 @@ code, pre { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
 /* Brand: wafer.run */
 .brand {
     font-size: 1.5rem; font-weight: 700; text-decoration: none;
-    display: inline-flex; align-items: center; gap: 0.5rem;
+    display: inline-flex; align-items: center;
 }
 .brand-logo {
     height: 1.5rem; width: auto; border-radius: 0.25rem;
+    margin-right: 0.5rem;
 }
 .brand-wafer {
     color: var(--wafer);
@@ -60,6 +61,11 @@ code, pre { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
     transition: color 0.2s;
 }
 .header nav a:hover { color: var(--wafer); }
+.nav-icon {
+    display: inline-flex; align-items: center; vertical-align: middle;
+    color: var(--text-secondary); transition: color 0.2s;
+}
+.nav-icon:hover { color: var(--text); }
 
 /* ─── Page title banner ──────────────────────────────────── */
 .page-title {

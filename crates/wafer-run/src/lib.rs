@@ -24,7 +24,7 @@ pub mod waferflow;
 pub mod wasm;
 
 // Re-exports for convenience
-pub use block::{AdminUIInfo, Block, BlockInfo};
+pub use block::{AdminUIInfo, Block, BlockInfo, UiRoute};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};
 pub use executor::{extract_path_vars, match_path, matches_pattern};

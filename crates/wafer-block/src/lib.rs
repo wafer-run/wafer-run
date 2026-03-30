@@ -65,7 +65,7 @@ pub mod runtime {
 }
 
 // Re-export runtime-specific types.
-pub use types::{AdminUIInfo, BlockInfo, BlockRuntime, CollectionSchema, FieldSchema, IndexSchema, MetaAccess, RequestAction};
+pub use types::{AdminUIInfo, BlockInfo, BlockRuntime, CollectionSchema, FieldSchema, IndexSchema, MetaAccess, RequestAction, UiRoute};
 
 /// Alias for BlockResult — common in block handler return types.
 pub type Result_ = BlockResult;

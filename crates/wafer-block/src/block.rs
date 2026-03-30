@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use crate::capabilities::BlockCapabilities;
 use crate::context::Context;
-use crate::types::BlockInfo;
+use crate::types::{BlockInfo, UiRoute};
 use crate::{LifecycleEvent, Message, Result_, WaferError};
 
 /// Block is the core interface every WAFER block must implement.
@@ -29,6 +29,12 @@ pub trait Block: Send + Sync {
     fn block_capabilities(&self) -> Option<&BlockCapabilities> {
         None
     }
+
+    /// Declare UI routes this block serves (SSR pages).
+    /// The router auto-prefixes each path with `/b/{block_short_name}`.
+    fn ui_routes(&self) -> Vec<UiRoute> {
+        Vec::new()
+    }
 }
 
 /// On wasm32, Send/Sync are not meaningful (single-threaded), so we drop all bounds.
@@ -42,6 +48,11 @@ pub trait Block {
     /// Return the capability restrictions for this block, if any.
     fn block_capabilities(&self) -> Option<&BlockCapabilities> {
         None
+    }
+
+    /// Declare UI routes this block serves (SSR pages).
+    fn ui_routes(&self) -> Vec<UiRoute> {
+        Vec::new()
     }
 }
 
