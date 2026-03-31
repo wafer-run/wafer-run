@@ -54,13 +54,13 @@ impl Block for MonitoringBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/monitoring".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "middleware@v1".to_string(),
             summary: "Request metrics and monitoring".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Both,
+            runtime: wafer_run::types::BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
             config_schema: None,

@@ -94,13 +94,13 @@ impl Block for RouterBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/router".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "router@v1".to_string(),
             summary: "Config-driven router that dispatches to handler blocks".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
             config_schema: None,

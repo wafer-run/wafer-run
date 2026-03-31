@@ -211,13 +211,13 @@ impl Block for AuthBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/auth-validator".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "middleware@v1".to_string(),
             summary: "Authentication middleware: JWT, API key, and cookie auth".to_string(),
             instance_mode: InstanceMode::Singleton,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Both,
+            runtime: wafer_block::types::BlockRuntime::Native,
             requires: vec![
                 "wafer-run/crypto".to_string(),
                 "wafer-run/database".to_string(),

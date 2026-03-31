@@ -23,12 +23,11 @@ pub struct AdminUIInfo {
     pub url: String,
 }
 
-/// Whether a block runs natively, as WASM, or both.
+/// Whether a block runs natively or as WASM.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlockRuntime {
     Native,
     Wasm,
-    Both,
 }
 
 /// Runtime block info — extends the WIT `block-info` with runtime-specific fields.

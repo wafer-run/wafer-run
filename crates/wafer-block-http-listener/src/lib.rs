@@ -332,7 +332,7 @@ impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/http-listener".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "http-listener@v1".to_string(),
             summary: "HTTP transport — listens for HTTP requests and converts to messages"
                 .to_string(),

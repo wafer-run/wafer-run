@@ -20,7 +20,7 @@ impl Block for PlaygroundBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-site/playground".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "http-handler@v1".to_string(),
             summary: "Browser-based code editor with live execution".to_string(),
             instance_mode: InstanceMode::Singleton,

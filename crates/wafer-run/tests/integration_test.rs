@@ -14,7 +14,7 @@ fn single_step_flow(id: &str, block: &str) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
         name: format!("Test flow: {}", id),
-        version: "0.1.0".to_string(),
+        version: "0.0.1".to_string(),
         description: None,
         input: None,
         output: None,
@@ -65,7 +65,7 @@ fn make_flow(id: &str, steps: Vec<wafer_flow::Step>) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
         name: format!("Test flow: {}", id),
-        version: "0.1.0".to_string(),
+        version: "0.0.1".to_string(),
         description: None,
         input: None,
         output: None,
@@ -81,7 +81,7 @@ fn make_flow_with_on_error(id: &str, steps: Vec<wafer_flow::Step>, on_error: &st
     wafer_flow::WaferFlow {
         id: id.to_string(),
         name: format!("Test flow: {}", id),
-        version: "0.1.0".to_string(),
+        version: "0.0.1".to_string(),
         description: None,
         input: None,
         output: None,

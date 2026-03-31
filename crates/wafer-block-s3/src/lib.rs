@@ -34,7 +34,7 @@ impl Block for S3StorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/s3".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "storage@v1".to_string(),
             summary: "S3-compatible storage block".to_string(),
             instance_mode: InstanceMode::PerNode,

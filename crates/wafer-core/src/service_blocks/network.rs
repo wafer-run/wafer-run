@@ -25,13 +25,13 @@ impl Block for NetworkBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo {
             name: "wafer-run/network".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             interface: "http-client@v1".to_string(),
             summary: "Outbound HTTP requests".to_string(),
             instance_mode: InstanceMode::PerNode,
             allowed_modes: Vec::new(),
             admin_ui: None,
-            runtime: BlockRuntime::Both,
+            runtime: BlockRuntime::Native,
             requires: Vec::new(),
             collections: Vec::new(),
             config_schema: None,
