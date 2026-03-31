@@ -51,6 +51,8 @@
   .detail-row b { color: var(--text); }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge-interface { background: #fef9e7; color: #92610a; border: 1px solid #f0d78c; }
+  .badge-clickable { cursor: pointer; transition: all .15s; }
+  .badge-clickable:hover { background: #fdf0c8; border-color: #d4a017; box-shadow: 0 1px 3px rgba(212,160,23,0.2); }
   .badge-instance { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
   .tooltip { position: relative; cursor: help; border-bottom: 1px dotted var(--text-muted); }
   .tooltip .tip-text {
@@ -154,6 +156,9 @@
   .flow-node:hover .config-icon { opacity: 0.8; }
   .config-icon svg { width: 16px; height: 16px; fill: currentColor; }
 
+  /* ── Stacked interface overlay ────────────────────── */
+  .iface-overlay { z-index: 60; }
+
   /* ── Interface & schema styles ───────────────────── */
   .action-entry { font-size: 13px; margin: 4px 0; padding: 4px 0; border-bottom: 1px solid var(--border-light); }
   .action-name { font-weight: 600; color: var(--accent); font-family: monospace; font-size: 12px; }
@@ -181,9 +186,11 @@
 </div>
 
 <!-- ── App view ────────────────────────────────────── -->
-<div id="app-view" class="content" style="overflow: auto; height: calc(100vh - 52px);">
-  <p class="intro">Full application topology: from HTTP listener through the middleware flow to individual route handlers.</p>
-  <div id="app-tree" class="flow-tree" style="overflow-x: auto; padding-bottom: 32px;">
+<div id="app-view" style="height: calc(100vh - 52px); display: flex; flex-direction: column;">
+  <div style="padding: 16px 24px 0; flex-shrink: 0;">
+    <p class="intro" style="margin-bottom: 0;">Full application topology: from HTTP listener through the middleware flow to individual route handlers.</p>
+  </div>
+  <div id="app-tree" class="flow-tree" style="overflow: auto; flex: 1; padding-bottom: 32px;">
     <div class="loading">Loading app topology...</div>
   </div>
 </div>
@@ -215,6 +222,13 @@
   <div class="detail-popup" id="detail-popup">
     <button class="panel-close" id="panel-close" aria-label="Close">&times;</button>
     <div id="panel-content"></div>
+  </div>
+</div>
+
+<div class="detail-overlay iface-overlay" id="iface-overlay">
+  <div class="detail-popup" id="iface-popup">
+    <button class="panel-close" id="iface-close" aria-label="Close">&times;</button>
+    <div id="iface-content"></div>
   </div>
 </div>
 
@@ -252,6 +266,27 @@
       document.getElementById('block-cards').innerHTML = '<div class="loading">Error loading blocks: ' + esc(e.message) + '</div>';
     });
 
+  /** Render requires badges for a block (shared between card view and detail panel). */
+  function renderRequiresBadges(b) {
+    if (!b.requires || !b.requires.length) return '';
+    return b.requires.map(r => '<span class="badge badge-interface" style="font-size:12px">' + esc(r) + '</span>').join(' ');
+  }
+
+  function renderBlockDetails(b) {
+    let html = '';
+    html += '<div class="detail-row"><b>Version:</b> ' + esc(b.version) + '</div>';
+    html += '<div class="detail-row"><span class="tooltip">Interface<span class="tip-text">The protocol this block uses to communicate</span></span> <span class="badge badge-interface badge-clickable" data-iface="' + esc(b.interface) + '">' + esc(b.interface) + '</span></div>';
+    html += '<div class="detail-row"><span class="tooltip">Instance mode<span class="tip-text">Singleton: one shared instance. Per-use: a new instance for each invocation.</span></span> <span class="badge badge-instance badge-clickable" data-instance-mode="' + esc(b.instance_mode) + '">' + esc(b.instance_mode) + '</span></div>';
+    if (b.admin_ui && b.admin_ui.url) {
+      html += '<div class="detail-row"><a href="' + esc(b.admin_ui.url) + '" style="color:#b45309;font-weight:600;text-decoration:none;font-size:0.875rem">&#9881; ' + esc(b.admin_ui.label || 'Manage') + '</a></div>';
+    }
+    const reqBadges = renderRequiresBadges(b);
+    if (reqBadges) {
+      html += '<div class="detail-row" style="flex-wrap:wrap"><b>Requires:</b> ' + reqBadges + '</div>';
+    }
+    return html;
+  }
+
   function renderBlockCards(blocks) {
     const container = document.getElementById('block-cards');
     if (!blocks.length) { container.innerHTML = '<div class="no-cards-match">No blocks registered</div>'; return; }
@@ -265,16 +300,7 @@
           <span class="toggle">&#9654;</span>
         </div>
         <div class="details">
-          <div class="detail-row"><b>Version:</b> ${esc(b.version)}</div>
-          <div class="detail-row">
-            <span class="tooltip">Interface<span class="tip-text">The protocol this block uses to communicate</span></span>
-            <span class="badge badge-interface">${esc(b.interface)}</span>
-          </div>
-          <div class="detail-row">
-            <span class="tooltip">Instance mode<span class="tip-text">Singleton: one shared instance. Per-use: a new instance for each invocation.</span></span>
-            <span class="badge badge-instance">${esc(b.instance_mode)}</span>
-          </div>
-          ${b.admin_ui && b.admin_ui.url ? `<div class="detail-row"><a href="${esc(b.admin_ui.url)}" style="color:#b45309;font-weight:600;text-decoration:none;font-size:0.875rem">&#9881; ${esc(b.admin_ui.label || 'Manage')}</a></div>` : ''}
+          ${renderBlockDetails(b)}
         </div>
       </div>
     `).join('');
@@ -421,16 +447,20 @@
     flowGroup.appendChild(flowInner);
     tree.appendChild(flowGroup);
 
-    // Routes fan-out (outside the flow group), grouped by block name
-    if (routes.length) {
-      tree.appendChild(makeConnector());
+    // Routes fan-out: grouped by block name.
+    // Blocks with their own sub-routes get expanded as a second level below.
+    function buildRouteFanOut(parentEl, routes) {
+      if (!routes.length) return;
+      parentEl.appendChild(makeConnector());
 
-      // Group routes by block name
       const grouped = {};
       routes.forEach(route => {
         if (!grouped[route.block]) grouped[route.block] = [];
         grouped[route.block].push(route.path);
       });
+
+      // Collect blocks that have sub-routes for second-level expansion
+      const subRouteBlocks = [];
 
       const children = document.createElement('div');
       children.className = 'flow-children';
@@ -445,16 +475,42 @@
         const routeBranch = document.createElement('div');
         routeBranch.className = 'flow-branch';
         const info = blocksData.find(b => b.name === blockName);
-        const routeNode = makeAppNode(blockName, null, info ? info.summary : null, paths);
+        const subConfig = blockConfigs[blockName];
+        const subRoutes = subConfig && subConfig.routes ? subConfig.routes : [];
+        const subtitle = subRoutes.length
+          ? subRoutes.length + ' routes configured'
+          : (info ? info.summary : null);
+        const routeNode = makeAppNode(blockName, null, subtitle, paths);
         routeBranch.appendChild(routeNode);
+
         child.appendChild(routeBranch);
         children.appendChild(child);
+
+        if (subRoutes.length) {
+          subRouteBlocks.push({ blockName, subRoutes });
+        }
       });
-      tree.appendChild(children);
+      parentEl.appendChild(children);
+
+      // Second level: expand sub-route blocks as separate fan-outs
+      subRouteBlocks.forEach(({ blockName, subRoutes }) => {
+        buildRouteFanOut(parentEl, subRoutes);
+      });
     }
+
+    buildRouteFanOut(tree, routes);
 
     container.appendChild(tree);
     layoutBranchLines(container);
+
+    // Center the horizontal scroll
+    requestAnimationFrame(() => {
+      const scrollWidth = container.scrollWidth;
+      const clientWidth = container.clientWidth;
+      if (scrollWidth > clientWidth) {
+        container.scrollLeft = (scrollWidth - clientWidth) / 2;
+      }
+    });
   }
 
   const cfgSvg = '<svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.69-1.62-.91l-.36-2.54a.48.48 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.22-1.13.53-1.62.91l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.69 1.62.91l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.22 1.13-.53 1.62-.91l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.61 3.61 0 0112 15.6z"/></svg>';
@@ -675,36 +731,12 @@
       if (blockInfo) {
         html += '<div class="section-title">Block Details</div>';
         html += '<div class="field"><span class="field-label">Summary:</span> ' + esc(blockInfo.summary) + '</div>';
-        html += '<div class="field"><span class="field-label">Version:</span> ' + esc(blockInfo.version) + '</div>';
-        html += '<div class="field"><span class="field-label">Interface:</span> <span class="badge badge-interface">' + esc(blockInfo.interface) + '</span></div>';
-        html += '<div class="field"><span class="field-label">Instance mode:</span> <span class="badge badge-instance">' + esc(blockInfo.instance_mode) + '</span></div>';
+        html += renderBlockDetails(blockInfo);
 
         // Show config schema if declared
         if (blockInfo.config_schema) {
           html += '<div class="section-title">Config Schema</div>';
           html += renderSchema(blockInfo.config_schema);
-        }
-
-        // Show interface spec
-        const iface = interfaceSpecs[blockInfo.interface];
-        if (iface) {
-          html += '<div class="section-title">Interface: ' + esc(iface.name) + '</div>';
-          html += '<div class="field">' + esc(iface.description) + '</div>';
-          const actionKeys = Object.keys(iface.actions || {});
-          if (actionKeys.length) {
-            html += '<div class="field" style="margin-top:8px;"><b>Actions:</b></div>';
-            actionKeys.sort().forEach(ak => {
-              const a = iface.actions[ak];
-              html += '<div class="action-entry"><span class="action-name">' + esc(ak) + '</span>';
-              html += '<span class="action-desc"> &mdash; ' + esc(a.description) + '</span></div>';
-              if (a.message_schema) {
-                html += '<div class="schema-label">Message:</div>' + renderSchema(a.message_schema);
-              }
-              if (a.response_schema) {
-                html += '<div class="schema-label">Response:</div>' + renderSchema(a.response_schema);
-              }
-            });
-          }
         }
       }
 
@@ -726,6 +758,7 @@
   }
 
   function closeDetailPanel() {
+    closeInterfacePopup();
     document.getElementById('detail-overlay').classList.remove('open');
     if (selectedNodeEl) { selectedNodeEl.classList.remove('selected'); selectedNodeEl = null; }
   }
@@ -757,6 +790,87 @@
     // Fallback: show as JSON
     return '<pre>' + esc(JSON.stringify(schema, null, 2)) + '</pre>';
   }
+
+  // ── Interface popup (stacked) ─────────────────────────
+  function openInterfacePopup(name) {
+    const iface = interfaceSpecs[name];
+    if (!iface) return;
+
+    const content = document.getElementById('iface-content');
+    let html = '<h3>' + esc(iface.name) + '</h3>';
+    html += '<div class="field">' + esc(iface.description) + '</div>';
+
+    const actionKeys = Object.keys(iface.actions || {});
+    if (actionKeys.length) {
+      html += '<div class="section-title">Actions (' + actionKeys.length + ')</div>';
+      actionKeys.sort().forEach(ak => {
+        const a = iface.actions[ak];
+        html += '<div class="action-entry"><span class="action-name">' + esc(ak) + '</span>';
+        html += '<span class="action-desc"> &mdash; ' + esc(a.description) + '</span></div>';
+        if (a.message_schema) {
+          html += '<div class="schema-label">Message:</div>' + renderSchema(a.message_schema);
+        }
+        if (a.response_schema) {
+          html += '<div class="schema-label">Response:</div>' + renderSchema(a.response_schema);
+        }
+      });
+    } else {
+      html += '<div class="section-title">Actions</div>';
+      html += '<div class="field" style="color:var(--text-muted)">Action-agnostic &mdash; handles any message kind.</div>';
+    }
+
+    content.innerHTML = html;
+    document.getElementById('iface-overlay').classList.add('open');
+  }
+
+  function closeInterfacePopup() {
+    document.getElementById('iface-overlay').classList.remove('open');
+  }
+
+  document.getElementById('iface-close').addEventListener('click', closeInterfacePopup);
+  document.getElementById('iface-overlay').addEventListener('click', e => {
+    if (!e.target.closest('.detail-popup')) closeInterfacePopup();
+  });
+
+  // ── Instance mode popup (stacked) ────────────────────
+  const instanceModes = [
+    { name: 'Singleton', value: 'Singleton', description: 'One shared instance for the entire runtime. All flows and requests share the same block instance. Use for blocks that manage global state (e.g. connection pools, caches).' },
+    { name: 'Per-Node', value: 'PerNode', description: 'One instance per registered block name (the default). Each block registration gets its own instance, but it is shared across all flows that reference it.' },
+    { name: 'Per-Flow', value: 'PerFlow', description: 'A new instance is created for each flow that uses the block. Different flows get independent instances, but executions within the same flow share one.' },
+    { name: 'Per-Execution', value: 'PerExecution', description: 'A fresh instance is created for every single request/execution. No state is shared between requests. Use for blocks that must be stateless or isolated per request.' },
+  ];
+
+  function openInstanceModePopup(currentMode) {
+    const content = document.getElementById('iface-content');
+    let html = '<h3>Instance Modes</h3>';
+    html += '<div class="field">Controls how many instances of a block exist and how they are shared.</div>';
+    html += '<div class="section-title">All Modes</div>';
+    instanceModes.forEach(m => {
+      const active = m.value === currentMode;
+      html += '<div class="action-entry" style="' + (active ? 'background:#fef9e7;border-radius:6px;padding:6px 8px;margin:4px -8px;' : '') + '">';
+      html += '<span class="action-name">' + esc(m.name) + '</span>';
+      if (active) html += ' <span class="badge badge-instance" style="margin-left:6px;font-size:10px;">current</span>';
+      html += '<div style="margin-top:2px;color:var(--text-secondary);font-size:12px;">' + esc(m.description) + '</div>';
+      html += '</div>';
+    });
+    content.innerHTML = html;
+    document.getElementById('iface-overlay').classList.add('open');
+  }
+
+  // Global click handler for interface and instance mode badges
+  document.addEventListener('click', e => {
+    const ifaceBadge = e.target.closest('[data-iface]');
+    if (ifaceBadge) {
+      e.stopPropagation();
+      openInterfacePopup(ifaceBadge.dataset.iface);
+      return;
+    }
+    const modeBadge = e.target.closest('[data-instance-mode]');
+    if (modeBadge) {
+      e.stopPropagation();
+      openInstanceModePopup(modeBadge.dataset.instanceMode);
+    }
+  });
 
   function esc(s) {
     if (s == null) return '';
