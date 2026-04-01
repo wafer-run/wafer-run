@@ -18,19 +18,9 @@ impl SecurityHeadersBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for SecurityHeadersBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/security-headers".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "middleware@v1".to_string(),
-            summary: "Adds standard security headers to HTTP responses".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/security-headers", "0.0.1", "middleware@v1", "Adds standard security headers to HTTP responses")
+            .instance_mode(InstanceMode::Singleton)
+            .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

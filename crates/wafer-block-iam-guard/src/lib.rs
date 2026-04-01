@@ -53,19 +53,10 @@ impl IAMBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for IAMBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/iam-guard".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "middleware@v1".to_string(),
-            summary: "Role-based access control middleware".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: vec!["wafer-run/database".to_string()],
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/iam-guard", "0.0.1", "middleware@v1", "Role-based access control middleware")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["wafer-run/database".into()])
+            .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

@@ -24,19 +24,9 @@ impl CorsBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for CorsBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/cors".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "middleware@v1".to_string(),
-            summary: "CORS preflight handler and header injection".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/cors", "0.0.1", "middleware@v1", "CORS preflight handler and header injection")
+            .instance_mode(InstanceMode::Singleton)
+            .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

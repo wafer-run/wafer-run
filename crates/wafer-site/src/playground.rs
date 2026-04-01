@@ -18,19 +18,9 @@ impl PlaygroundBlock {
 #[async_trait::async_trait]
 impl Block for PlaygroundBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-site/playground".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http-handler@v1".to_string(),
-            summary: "Browser-based code editor with live execution".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-site/playground", "0.0.1", "http-handler@v1", "Browser-based code editor with live execution")
+            .instance_mode(InstanceMode::Singleton)
+            .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

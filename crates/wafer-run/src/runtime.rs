@@ -375,19 +375,7 @@ impl Wafer {
         use crate::block::BlockInfo;
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(FuncBlock {
-            info: BlockInfo {
-                name: name.clone(),
-                version: "0.0.0".to_string(),
-                interface: "inline".to_string(),
-                summary: "Inline function block".to_string(),
-                instance_mode: InstanceMode::PerNode,
-                allowed_modes: Vec::new(),
-                admin_ui: None,
-                runtime: BlockRuntime::default(),
-                requires: Vec::new(),
-                collections: Vec::new(),
-                config_schema: None,
-            },
+            info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
             handler: Box::new(handler),
         });
         self.register_block(name, block);
@@ -403,19 +391,7 @@ impl Wafer {
         use crate::block::BlockInfo;
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(FuncBlock {
-            info: BlockInfo {
-                name: name.clone(),
-                version: "0.0.0".to_string(),
-                interface: "inline".to_string(),
-                summary: "Inline function block".to_string(),
-                instance_mode: InstanceMode::PerNode,
-                allowed_modes: Vec::new(),
-                admin_ui: None,
-                runtime: BlockRuntime::default(),
-                requires: Vec::new(),
-                collections: Vec::new(),
-                config_schema: None,
-            },
+            info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
             handler: Box::new(handler),
         });
         self.register_block(name, block);
@@ -434,19 +410,7 @@ impl Wafer {
         use crate::block::{AsyncFuncBlock, BlockInfo};
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo {
-                name: name.clone(),
-                version: "0.0.0".to_string(),
-                interface: "inline-async".to_string(),
-                summary: "Inline async function block".to_string(),
-                instance_mode: InstanceMode::PerNode,
-                allowed_modes: Vec::new(),
-                admin_ui: None,
-                runtime: BlockRuntime::default(),
-                requires: Vec::new(),
-                collections: Vec::new(),
-                config_schema: None,
-            },
+            info: BlockInfo::new(name.clone(), "0.0.0", "inline-async", "Inline async function block"),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
         self.register_block(name, block);
@@ -465,19 +429,7 @@ impl Wafer {
         use crate::block::{AsyncFuncBlock, BlockInfo};
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo {
-                name: name.clone(),
-                version: "0.0.0".to_string(),
-                interface: "inline-async".to_string(),
-                summary: "Inline async function block".to_string(),
-                instance_mode: InstanceMode::PerNode,
-                allowed_modes: Vec::new(),
-                admin_ui: None,
-                runtime: BlockRuntime::default(),
-                requires: Vec::new(),
-                collections: Vec::new(),
-                config_schema: None,
-            },
+            info: BlockInfo::new(name.clone(), "0.0.0", "inline-async", "Inline async function block"),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
         self.register_block(name, block);

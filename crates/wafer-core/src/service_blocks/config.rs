@@ -23,19 +23,8 @@ impl ConfigBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for ConfigBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/config".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "config@v1".to_string(),
-            summary: "Configuration key-value access".to_string(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/config", "0.0.1", "config@v1", "Configuration key-value access")
+            .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

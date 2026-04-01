@@ -8,7 +8,7 @@ pub mod service;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use wafer_run::block::{Block, BlockInfo};
+use wafer_run::block::{Block, BlockCategory, BlockInfo};
 use wafer_run::context::Context;
 use wafer_run::manifest::{CollectionDef, collections_to_tables};
 use wafer_run::schema::Table;
@@ -39,19 +39,8 @@ impl PostgresDatabaseBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for PostgresDatabaseBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/postgres".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "database@v1".to_string(),
-            summary: "PostgreSQL database block".to_string(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/postgres", "0.0.1", "database@v1", "PostgreSQL database block")
+            .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

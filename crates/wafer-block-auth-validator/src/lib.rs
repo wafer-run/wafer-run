@@ -209,22 +209,10 @@ impl AuthBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for AuthBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/auth-validator".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "middleware@v1".to_string(),
-            summary: "Authentication middleware: JWT, API key, and cookie auth".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: vec![
-                "wafer-run/crypto".to_string(),
-                "wafer-run/database".to_string(),
-            ],
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/auth-validator", "0.0.1", "middleware@v1", "Authentication middleware: JWT, API key, and cookie auth")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["wafer-run/crypto".into(), "wafer-run/database".into()])
+            .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

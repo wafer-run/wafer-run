@@ -24,7 +24,7 @@ pub mod waferflow;
 pub mod wasm;
 
 // Re-exports for convenience
-pub use block::{AdminUIInfo, Block, BlockInfo, UiRoute};
+pub use block::{Block, BlockCategory, BlockInfo, UiRoute};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};
 pub use executor::{extract_path_vars, match_path, matches_pattern};
@@ -47,8 +47,8 @@ pub use runtime::{
     parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION,
 };
 pub use types::{
-    Action, BlockResult, BlockRuntime, InstanceMode, LifecycleEvent, LifecycleType, Message,
-    RequestAction, Response, Result_, WaferError,
+    Action, AuthLevel, BlockResult, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType,
+    Message, RequestAction, Response, Result_, WaferError,
 };
 pub use compat::{MaybeSend, MaybeSync};
 

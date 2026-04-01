@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use wasmtime::{component::*, Config, Engine, Store};
 
 use crate::block::BlockInfo;
-use crate::types::{BlockRuntime, InstanceMode};
+use crate::types::InstanceMode;
 
 bindgen!({
     world: "wafer-pure-block",
@@ -97,19 +97,8 @@ impl PureWASMBlock {
         let def: wafer_flow::BlockDef =
             serde_json::from_str(&info_json).map_err(|e| format!("invalid block info JSON: {e}"))?;
 
-        let info = BlockInfo {
-            name: def.name,
-            version: def.version,
-            interface: String::new(),
-            summary: def.description.unwrap_or_default(),
-            instance_mode: InstanceMode::PerExecution,
-            allowed_modes: vec![InstanceMode::PerExecution],
-            admin_ui: None,
-            runtime: BlockRuntime::Wasm,
-            requires: vec![],
-            collections: Vec::new(),
-            config_schema: None,
-        };
+        let info = BlockInfo::new(def.name, def.version, "", def.description.unwrap_or_default())
+            .instance_mode(InstanceMode::PerExecution);
 
         {
             let mut cache = self.info_cache.lock().unwrap();

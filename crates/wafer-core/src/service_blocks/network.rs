@@ -23,19 +23,8 @@ impl NetworkBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for NetworkBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/network".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http-client@v1".to_string(),
-            summary: "Outbound HTTP requests".to_string(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/network", "0.0.1", "http-client@v1", "Outbound HTTP requests")
+            .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

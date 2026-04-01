@@ -13,42 +13,231 @@ use std::collections::HashMap;
 // Runtime-only types (not part of WIT)
 // ---------------------------------------------------------------------------
 
-/// Metadata for a block's admin UI panel.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AdminUIInfo {
-    pub label: String,
-    pub description: String,
-    /// URL path to the block's management UI (e.g. "/blocks/admin/frontend/").
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub url: String,
+/// HTTP method for block endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HttpMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
 }
 
-/// Whether a block runs natively or as WASM.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum BlockRuntime {
-    Native,
-    Wasm,
+impl std::fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Get => f.write_str("GET"),
+            Self::Post => f.write_str("POST"),
+            Self::Patch => f.write_str("PATCH"),
+            Self::Delete => f.write_str("DELETE"),
+        }
+    }
 }
 
-/// Runtime block info — extends the WIT `block-info` with runtime-specific fields.
+/// Access level required for a block endpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthLevel {
+    #[default]
+    Public,
+    Authenticated,
+    Admin,
+}
+
+impl std::fmt::Display for AuthLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => f.write_str("public"),
+            Self::Authenticated => f.write_str("authenticated"),
+            Self::Admin => f.write_str("admin"),
+        }
+    }
+}
+
+/// Block category — determines how the block is displayed in the admin UI.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BlockCategory {
+    /// User/admin-facing feature blocks (Auth, Products, Files, etc.)
+    Feature,
+    /// Internal service blocks (Database, Storage, Config, etc.)
+    Service,
+    /// Request pipeline middleware (CORS, Security Headers, etc.)
+    Middleware,
+    /// System infrastructure (HTTP Listener, Router, Inspector, etc.)
+    Infrastructure,
+    /// Uncategorized / third-party blocks.
+    #[default]
+    Misc,
+}
+
+fn default_true() -> bool { true }
+fn default_instance_mode() -> crate::InstanceMode { crate::InstanceMode::PerNode }
+
+/// Block metadata — identity, schema declarations, and admin UI metadata.
+///
+/// Only `name`, `version`, `interface`, and `summary` are required.
+/// All other fields have sensible defaults via `Default`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockInfo {
+    // -- Core identity --
     pub name: String,
     pub version: String,
     pub interface: String,
     pub summary: String,
+    #[serde(default = "default_instance_mode")]
     pub instance_mode: crate::InstanceMode,
-    pub allowed_modes: Vec<crate::InstanceMode>,
-    pub admin_ui: Option<AdminUIInfo>,
-    pub runtime: BlockRuntime,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+
+    // -- Schema declarations --
     /// Database collections this block requires. The runtime ensures these
     /// tables exist when the block is registered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collections: Vec<CollectionSchema>,
-    /// JSON Schema describing the configuration this block accepts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_schema: Option<serde_json::Value>,
+    /// Configuration keys that affect this block's behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_keys: Vec<BlockConfigKey>,
+
+    // -- Admin / UI metadata --
+    /// Block category for admin UI grouping.
+    #[serde(default)]
+    pub category: BlockCategory,
+    /// Whether this block can be disabled by the admin.
+    #[serde(default)]
+    pub can_disable: bool,
+    /// Whether the block is enabled by default on first run.
+    #[serde(default = "default_true")]
+    pub default_enabled: bool,
+    /// Longer description of what the block does and how to use it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// HTTP endpoints exposed by this block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<BlockEndpoint>,
+}
+
+impl Default for BlockInfo {
+    fn default() -> Self {
+        Self::new("", "", "", "")
+    }
+}
+
+impl BlockInfo {
+    /// Create a new BlockInfo with the four required fields.
+    /// All other fields use sensible defaults.
+    pub fn new(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        interface: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            interface: interface.into(),
+            summary: summary.into(),
+            instance_mode: crate::InstanceMode::PerNode,
+            requires: Vec::new(),
+            collections: Vec::new(),
+            config_keys: Vec::new(),
+            category: BlockCategory::default(),
+            can_disable: false,
+            default_enabled: true,
+            description: String::new(),
+            endpoints: Vec::new(),
+        }
+    }
+
+    pub fn instance_mode(mut self, mode: crate::InstanceMode) -> Self {
+        self.instance_mode = mode;
+        self
+    }
+
+    pub fn requires(mut self, requires: Vec<String>) -> Self {
+        self.requires = requires;
+        self
+    }
+
+    pub fn collections(mut self, collections: Vec<CollectionSchema>) -> Self {
+        self.collections = collections;
+        self
+    }
+
+    pub fn config_keys(mut self, config_keys: Vec<BlockConfigKey>) -> Self {
+        self.config_keys = config_keys;
+        self
+    }
+
+    pub fn category(mut self, category: BlockCategory) -> Self {
+        self.category = category;
+        self
+    }
+
+    pub fn can_disable(mut self, can_disable: bool) -> Self {
+        self.can_disable = can_disable;
+        self
+    }
+
+    pub fn default_enabled(mut self, default_enabled: bool) -> Self {
+        self.default_enabled = default_enabled;
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn endpoints(mut self, endpoints: Vec<BlockEndpoint>) -> Self {
+        self.endpoints = endpoints;
+        self
+    }
+}
+
+/// An HTTP endpoint exposed by a block.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BlockEndpoint {
+    pub method: HttpMethod,
+    pub path: String,
+    pub summary: String,
+    #[serde(default)]
+    pub auth: AuthLevel,
+}
+
+impl BlockEndpoint {
+    pub fn get(path: &str, summary: &str, auth: AuthLevel) -> Self {
+        Self { method: HttpMethod::Get, path: path.into(), summary: summary.into(), auth }
+    }
+    pub fn post(path: &str, summary: &str, auth: AuthLevel) -> Self {
+        Self { method: HttpMethod::Post, path: path.into(), summary: summary.into(), auth }
+    }
+    pub fn patch(path: &str, summary: &str, auth: AuthLevel) -> Self {
+        Self { method: HttpMethod::Patch, path: path.into(), summary: summary.into(), auth }
+    }
+    pub fn delete(path: &str, summary: &str, auth: AuthLevel) -> Self {
+        Self { method: HttpMethod::Delete, path: path.into(), summary: summary.into(), auth }
+    }
+}
+
+/// A configuration key that affects a block's behavior.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BlockConfigKey {
+    /// Environment variable / settings key (e.g., "ALLOW_SIGNUP")
+    pub key: String,
+    /// What this key controls.
+    pub description: String,
+    /// Default value if not set.
+    #[serde(default)]
+    pub default: String,
+}
+
+impl BlockConfigKey {
+    pub fn new(key: &str, description: &str, default: &str) -> Self {
+        Self { key: key.into(), description: description.into(), default: default.into() }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,16 +747,6 @@ impl crate::InstanceMode {
             "per-execution" => Self::PerExecution,
             _ => Self::PerNode,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BlockRuntime helpers
-// ---------------------------------------------------------------------------
-
-impl Default for BlockRuntime {
-    fn default() -> Self {
-        Self::Native
     }
 }
 

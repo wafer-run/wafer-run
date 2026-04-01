@@ -23,19 +23,8 @@ impl LoggerBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for LoggerBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/logger".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "logger@v1".to_string(),
-            summary: "Structured logging".to_string(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/logger", "0.0.1", "logger@v1", "Structured logging")
+            .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

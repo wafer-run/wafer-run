@@ -391,17 +391,9 @@ impl Block for WASMBlock {
                 let info = bindings.wafer_block_world_block().call_info(&mut store).await
                     .map_err(|e| format!("calling block.info(): {e}"))?;
 
-                Ok::<BlockInfo, String>(BlockInfo {
-                    name: info.name,
-                    version: info.version,
-                    interface: info.interface,
-                    summary: info.summary,
-                    instance_mode: to_runtime_instance_mode(info.instance_mode),
-                    allowed_modes: info.allowed_modes.into_iter().map(to_runtime_instance_mode).collect(),
-                    admin_ui: None,
-                    runtime: BlockRuntime::Wasm,
-                    requires: vec![],
-                    collections: info.collections.into_iter().map(|c| wafer_block::CollectionSchema {
+                Ok::<BlockInfo, String>(BlockInfo::new(info.name, info.version, info.interface, info.summary)
+                    .instance_mode(to_runtime_instance_mode(info.instance_mode))
+                    .collections(info.collections.into_iter().map(|c| wafer_block::CollectionSchema {
                         name: c.name,
                         fields: c.fields.into_iter().map(|f| wafer_block::FieldSchema {
                             name: f.name,
@@ -415,22 +407,10 @@ impl Block for WASMBlock {
                             fields: i.fields,
                             unique: i.unique,
                         }).collect(),
-                    }).collect(),
-                    config_schema: None,
-                })
+                    }).collect()))
             })
-        }).join().unwrap().unwrap_or_else(|e| BlockInfo {
-            name: "unknown".to_string(),
-            version: "0.0.0".to_string(),
-            interface: "error".to_string(),
-            summary: format!("failed to get info: {}", e),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Wasm,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
+        }).join().unwrap().unwrap_or_else(|e| {
+            BlockInfo::new("unknown", "0.0.0", "error", format!("failed to get info: {}", e))
         });
 
         if let Ok(mut guard) = self.info_cache.lock() {

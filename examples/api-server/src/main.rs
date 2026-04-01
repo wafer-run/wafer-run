@@ -67,19 +67,8 @@ struct NotesHandler;
 #[async_trait::async_trait]
 impl Block for NotesHandler {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "api-handler".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http.handler".to_string(),
-            summary: "Notes CRUD API".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: vec![],
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: vec![],
-            collections: vec![],
-            config_schema: None,
-        }
+        BlockInfo::new("api-handler", "0.0.1", "http.handler", "Notes CRUD API")
+            .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

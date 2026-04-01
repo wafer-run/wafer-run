@@ -23,19 +23,8 @@ impl CryptoBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for CryptoBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/crypto".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "crypto@v1".to_string(),
-            summary: "Cryptographic operations (hashing, JWT, random bytes)".to_string(),
-            instance_mode: InstanceMode::PerNode,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/crypto", "0.0.1", "crypto@v1", "Cryptographic operations (hashing, JWT, random bytes)")
+            .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

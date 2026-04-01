@@ -27,19 +27,9 @@ impl InspectorBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for InspectorBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/inspector".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http-handler@v1".to_string(),
-            summary: "Runtime introspection — blocks, flows, and visual UI".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/inspector", "0.0.1", "http-handler@v1", "Runtime introspection — blocks, flows, and visual UI")
+            .instance_mode(InstanceMode::Singleton)
+            .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

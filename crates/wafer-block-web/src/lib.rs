@@ -198,19 +198,10 @@ async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfi
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for WebBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/web".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http-handler@v1".to_string(),
-            summary: "Static file server with caching and SPA support".to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: vec![InstanceMode::PerNode],
-            admin_ui: None,
-            runtime: wafer_block::types::BlockRuntime::Native,
-            requires: vec!["wafer-run/storage".to_string()],
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/web", "0.0.1", "http-handler@v1", "Static file server with caching and SPA support")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["wafer-run/storage".into()])
+            .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

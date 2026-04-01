@@ -5,7 +5,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode};
 use parking_lot::Mutex;
 
-use wafer_run::block::{Block, BlockInfo};
+use wafer_run::block::{Block, BlockCategory, BlockInfo};
 use wafer_run::common::ErrorCode;
 use wafer_run::meta::*;
 use wafer_run::types::*;
@@ -330,20 +330,9 @@ impl HttpListenerBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo {
-            name: "wafer-run/http-listener".to_string(),
-            version: "0.0.1".to_string(),
-            interface: "http-listener@v1".to_string(),
-            summary: "HTTP transport — listens for HTTP requests and converts to messages"
-                .to_string(),
-            instance_mode: InstanceMode::Singleton,
-            allowed_modes: Vec::new(),
-            admin_ui: None,
-            runtime: wafer_run::types::BlockRuntime::Native,
-            requires: Vec::new(),
-            collections: Vec::new(),
-            config_schema: None,
-        }
+        BlockInfo::new("wafer-run/http-listener", "0.0.1", "http-listener@v1", "HTTP transport — listens for HTTP requests and converts to messages")
+            .instance_mode(InstanceMode::Singleton)
+            .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
