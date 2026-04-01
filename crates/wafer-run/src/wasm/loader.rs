@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use wasmtime::{Engine, Config, Store, component::*};
+use wasmtime::{Engine, Config, Store, StoreLimitsBuilder, component::*};
 
 use crate::block::{Block, BlockInfo};
 use crate::context::Context;
@@ -21,12 +21,16 @@ use wafer::block_world::runtime::Host;
 /// Default fuel budget for WASM execution (~100M instructions).
 const DEFAULT_FUEL: u64 = 100_000_000;
 
-/// Create a wasmtime Engine with fuel metering enabled.
+/// Maximum WASM memory: 256 pages = 16 MiB (each page is 64 KiB).
+const MAX_WASM_MEMORY_PAGES: u64 = 256;
+
+/// Create a wasmtime Engine with fuel metering and memory limits enabled.
 fn fuel_engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
     config.wasm_component_model(true);
     config.async_support(true);
+    config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
     Engine::new(&config).expect("failed to create wasmtime engine")
 }
 
@@ -59,6 +63,20 @@ impl Host for HostState {
         block_name: String,
         msg: wafer::block_world::types::Message,
     ) -> wasmtime::Result<wafer::block_world::types::BlockResult> {
+        // Enforce capability: check if this WASM block is allowed to call the target
+        if !self.capabilities.allows_call_block(&block_name) {
+            return Ok(wafer::block_world::types::BlockResult {
+                action: wafer::block_world::types::Action::Error,
+                response: None,
+                error: Some(wafer::block_world::types::WaferError {
+                    code: wafer::block_world::types::ErrorCode::PermissionDenied,
+                    message: format!("WASM block not allowed to call '{}'", block_name),
+                    meta: vec![],
+                }),
+                message: Some(msg.clone()),
+            });
+        }
+
         let ctx = match self.context.as_ref() {
             Some(c) => c.clone(),
             None => {
@@ -124,13 +142,18 @@ impl WASMBlock {
     }
 
     async fn instantiate(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, WaferBlock), String> {
+        let limiter = StoreLimitsBuilder::new()
+            .memory_size(MAX_WASM_MEMORY_PAGES as usize * 65536) // pages * 64 KiB
+            .build();
         let mut store = Store::new(
             &self.engine,
             HostState {
                 context: ctx,
                 capabilities: self.capabilities.clone(),
+                limiter,
             },
         );
+        store.limiter(|state| &mut state.limiter);
         store.set_fuel(DEFAULT_FUEL).map_err(|e| format!("setting fuel: {e}"))?;
 
         let mut linker = Linker::new(&self.engine);
@@ -373,13 +396,18 @@ impl Block for WASMBlock {
         let info = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
+                let limiter = StoreLimitsBuilder::new()
+                    .memory_size(MAX_WASM_MEMORY_PAGES as usize * 65536)
+                    .build();
                 let mut store = Store::new(
                     &engine,
                     HostState {
                         context: None,
                         capabilities,
+                        limiter,
                     },
                 );
+                store.limiter(|state| &mut state.limiter);
                 store.set_fuel(DEFAULT_FUEL).map_err(|e| format!("setting fuel: {e}"))?;
                 let mut linker = Linker::new(&engine);
                 wafer::block_world::runtime::add_to_linker(&mut linker, |s| s)

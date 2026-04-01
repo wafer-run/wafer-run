@@ -68,10 +68,10 @@ impl CryptoService for Argon2JwtCryptoService {
         &self,
         token: &str,
     ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        use jsonwebtoken::{decode, DecodingKey, Validation};
+        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
-        let validation = Validation::default();
+        let validation = Validation::new(Algorithm::HS256);
 
         let data = decode::<HashMap<String, serde_json::Value>>(token, &key, &validation)
             .map_err(|e| CryptoError::VerifyError(e.to_string()))?;

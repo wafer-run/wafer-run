@@ -28,6 +28,9 @@ pub struct BlockCapabilities {
     /// Allowed config key patterns.
     #[serde(default)]
     pub config_keys: HashSet<String>,
+    /// Blocks that may be called via `call_block()`. Empty = unrestricted.
+    #[serde(default)]
+    pub callable_blocks: HashSet<String>,
 }
 
 impl BlockCapabilities {
@@ -50,6 +53,11 @@ impl BlockCapabilities {
             network_allow: Vec::new(),
             config: true,
             config_keys: HashSet::new(),
+            callable_blocks: {
+                let mut s = HashSet::new();
+                s.insert("*".to_string());
+                s
+            },
         }
     }
 
@@ -64,6 +72,7 @@ impl BlockCapabilities {
             network_allow: Vec::new(),
             config: false,
             config_keys: HashSet::new(),
+            callable_blocks: HashSet::new(), // empty = no calls allowed
         }
     }
 
@@ -99,5 +108,12 @@ impl BlockCapabilities {
             return true;
         }
         self.config_keys.contains(key)
+    }
+
+    /// Check whether a call_block invocation to `target` is allowed.
+    ///
+    /// `"*"` = unrestricted. Empty set = no calls allowed.
+    pub fn allows_call_block(&self, target: &str) -> bool {
+        self.callable_blocks.contains("*") || self.callable_blocks.contains(target)
     }
 }

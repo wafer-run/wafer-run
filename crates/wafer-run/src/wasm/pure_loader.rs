@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use wasmtime::{component::*, Config, Engine, Store};
+use wasmtime::{component::*, Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::block::BlockInfo;
 use crate::types::InstanceMode;
@@ -13,13 +13,21 @@ bindgen!({
 /// Default fuel budget for pure block WASM execution.
 const DEFAULT_FUEL: u64 = 100_000_000;
 
+/// Maximum WASM memory: 256 pages = 16 MiB (each page is 64 KiB).
+const MAX_WASM_MEMORY_PAGES: u64 = 256;
+
 /// Create a wasmtime Engine for pure blocks (no host imports needed).
 fn pure_engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
     config.wasm_component_model(true);
     config.async_support(true);
+    config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
     Engine::new(&config).expect("failed to create wasmtime engine")
+}
+
+struct PureHostState {
+    limiter: StoreLimits,
 }
 
 /// A simplified WASM loader for pure blocks.
@@ -51,8 +59,12 @@ impl PureWASMBlock {
     }
 
     /// Instantiate the pure block component.
-    async fn instantiate(&self) -> Result<(Store<()>, WaferPureBlock), String> {
-        let mut store = Store::new(&self.engine, ());
+    async fn instantiate(&self) -> Result<(Store<PureHostState>, WaferPureBlock), String> {
+        let limiter = StoreLimitsBuilder::new()
+            .memory_size(MAX_WASM_MEMORY_PAGES as usize * 65536)
+            .build();
+        let mut store = Store::new(&self.engine, PureHostState { limiter });
+        store.limiter(|state| &mut state.limiter);
         store
             .set_fuel(DEFAULT_FUEL)
             .map_err(|e| format!("failed to set fuel: {e}"))?;

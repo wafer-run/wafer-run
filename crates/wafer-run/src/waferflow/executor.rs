@@ -97,7 +97,20 @@ pub async fn execute(
                     .map_err(|e| e.to_string());
                 match resolved {
                     Ok(val) => {
-                        msg.data = serde_json::to_vec(&val).unwrap_or_default();
+                        match serde_json::to_vec(&val) {
+                            Ok(data) => msg.data = data,
+                            Err(e) => {
+                                return Result_ {
+                                    action: Action::Error,
+                                    error: Some(WaferError::new(
+                                        "internal",
+                                        format!("failed to serialize input for step '{}': {}", step.id, e),
+                                    )),
+                                    response: None,
+                                    message: Some(msg.clone()),
+                                };
+                            }
+                        }
                     }
                     Err(e) => {
                         return Result_ {
