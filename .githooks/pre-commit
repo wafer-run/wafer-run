@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -e
+
+# ── Rust: fmt + clippy on staged .rs files ──────────────────────────
+RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+if [ -n "$RS_FILES" ]; then
+  echo "Running cargo fmt --check..."
+  cargo fmt --all -- --check || {
+    echo "❌ cargo fmt failed. Run 'cargo fmt --all' and re-stage."
+    exit 1
+  }
+
+  echo "Running cargo clippy..."
+  cargo clippy --all-targets --all-features -- -D warnings 2>&1 || {
+    echo "❌ clippy found warnings. Fix them and re-stage."
+    exit 1
+  }
+fi
+
+echo "✓ Pre-commit checks passed."
