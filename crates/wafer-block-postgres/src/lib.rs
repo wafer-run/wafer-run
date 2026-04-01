@@ -26,6 +26,12 @@ pub struct PostgresDatabaseBlock {
     tables: OnceLock<Vec<Table>>,
 }
 
+impl Default for PostgresDatabaseBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PostgresDatabaseBlock {
     pub fn new() -> Self {
         Self {

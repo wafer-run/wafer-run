@@ -16,6 +16,12 @@ struct RateBucket {
     window_start: Instant,
 }
 
+impl Default for RateLimitBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateLimitBlock {
     pub fn new() -> Self {
         Self {
@@ -99,16 +105,16 @@ impl Block for RateLimitBlock {
             let retry_after = remaining.as_secs().to_string();
 
             let mut m = msg.clone();
-            m.set_meta("resp.header.Retry-After", &retry_after);
-            m.set_meta("resp.header.X-RateLimit-Limit", &max.to_string());
+            m.set_meta("resp.header.Retry-After", retry_after);
+            m.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
             m.set_meta("resp.header.X-RateLimit-Remaining", "0");
 
             return error(&m, "resource_exhausted", "Too many requests");
         }
 
         let remaining = max - bucket.count;
-        msg.set_meta("resp.header.X-RateLimit-Limit", &max.to_string());
-        msg.set_meta("resp.header.X-RateLimit-Remaining", &remaining.to_string());
+        msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
+        msg.set_meta("resp.header.X-RateLimit-Remaining", remaining.to_string());
 
         msg.cont_ref()
     }

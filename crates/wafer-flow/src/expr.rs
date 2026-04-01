@@ -279,23 +279,25 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
         }
         if i + op_len <= bytes.len() && &bytes[i..i + op_len] == op_bytes {
             // For single-char ops (> or <), make sure it's not part of >= or <=, !=, ==.
-            if op_len == 1 && (op_bytes[0] == b'>' || op_bytes[0] == b'<') {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    i += 1;
-                    continue;
-                }
+            if op_len == 1
+                && (op_bytes[0] == b'>' || op_bytes[0] == b'<')
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'='
+            {
+                i += 1;
+                continue;
             }
             // For single-char ops, also skip if preceded by ! or = (to avoid matching != or ==).
-            if op_len == 1 && op_bytes[0] == b'=' {
-                if i > 0
-                    && (bytes[i - 1] == b'!'
-                        || bytes[i - 1] == b'='
-                        || bytes[i - 1] == b'>'
-                        || bytes[i - 1] == b'<')
-                {
-                    i += 1;
-                    continue;
-                }
+            if op_len == 1
+                && op_bytes[0] == b'='
+                && i > 0
+                && (bytes[i - 1] == b'!'
+                    || bytes[i - 1] == b'='
+                    || bytes[i - 1] == b'>'
+                    || bytes[i - 1] == b'<')
+            {
+                i += 1;
+                continue;
             }
             return Some(i);
         }
@@ -422,7 +424,7 @@ fn as_bool(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
         Value::Null => false,
-        Value::Number(n) => n.as_f64().map_or(false, |f| f != 0.0),
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),

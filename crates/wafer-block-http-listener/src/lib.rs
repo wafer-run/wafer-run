@@ -315,6 +315,12 @@ pub struct HttpListenerBlock {
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
+impl Default for HttpListenerBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpListenerBlock {
     pub fn new() -> Self {
         Self {

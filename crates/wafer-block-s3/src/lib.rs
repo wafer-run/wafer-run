@@ -20,6 +20,12 @@ pub struct S3StorageBlock {
     service: OnceLock<Arc<dyn StorageService>>,
 }
 
+impl Default for S3StorageBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl S3StorageBlock {
     pub fn new() -> Self {
         Self {

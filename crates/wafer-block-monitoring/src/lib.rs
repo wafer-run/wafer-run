@@ -34,6 +34,12 @@ impl MonitoringBlock {
     }
 }
 
+impl Default for MonitoringBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MonitoringBlock {
     pub fn new() -> Self {
         Self {

@@ -37,6 +37,7 @@ impl Wafer {
 
     /// Expand declarative `config_map` and `config_defaults` from WaferFlow definitions.
     pub(crate) fn expand_declarative_flow_configs(&mut self) {
+        #[allow(clippy::type_complexity)]
         let eligible: Vec<(
             String,
             HashMap<String, wafer_flow::ConfigMapEntry>,
@@ -44,7 +45,7 @@ impl Wafer {
         )> = self
             .flows
             .values()
-            .filter(|f| f.config_map.as_ref().map_or(false, |m| !m.is_empty()))
+            .filter(|f| f.config_map.as_ref().is_some_and(|m| !m.is_empty()))
             .filter(|f| self.block_configs.contains_key(&f.id))
             .map(|f| {
                 (

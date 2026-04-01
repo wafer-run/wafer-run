@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 use wafer_block::*;
 
 /// Access control policy for the inspector.
+#[allow(dead_code)]
 enum AccessPolicy {
     /// Require `auth.user_id` to be set (default).
     Authenticated,
@@ -15,6 +16,12 @@ enum AccessPolicy {
 /// serving a visual UI.
 pub struct InspectorBlock {
     policy: RwLock<AccessPolicy>,
+}
+
+impl Default for InspectorBlock {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InspectorBlock {

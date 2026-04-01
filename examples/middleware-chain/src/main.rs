@@ -97,7 +97,7 @@ async fn main() {
         let method = msg.action().to_string();
         let path = msg.path().to_string();
         tracing::info!(req = n, method = %method, path = %path, "incoming request");
-        msg.set_meta("request.number", &n.to_string());
+        msg.set_meta("request.number", n.to_string());
         msg.cont_ref()
     });
 

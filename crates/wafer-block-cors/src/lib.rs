@@ -9,6 +9,12 @@ pub struct CorsBlock {
     max_age: String,
 }
 
+impl Default for CorsBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CorsBlock {
     pub fn new() -> Self {
         Self {

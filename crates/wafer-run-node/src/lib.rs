@@ -72,7 +72,7 @@ impl WaferRuntime {
     pub fn resolve(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.resolve())
-            .map_err(|e| Error::from_reason(e))
+            .map_err(Error::from_reason)
     }
 
     /// Start the runtime. Calls resolve() if not already resolved.
@@ -83,7 +83,7 @@ impl WaferRuntime {
     pub fn start(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.start_without_bind())
-            .map_err(|e| Error::from_reason(e))
+            .map_err(Error::from_reason)
     }
 
     /// Stop the runtime and shut down all block instances.

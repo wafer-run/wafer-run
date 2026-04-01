@@ -80,6 +80,12 @@ pub struct RouterBlock {
     routes: OnceLock<Vec<Route>>,
 }
 
+impl Default for RouterBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouterBlock {
     pub fn new() -> Self {
         Self {
@@ -109,7 +115,7 @@ impl Block for RouterBlock {
 
         for route in routes {
             // Check action match (empty list matches any action)
-            if !route.actions.is_empty() && !route.actions.iter().any(|a| *a == action) {
+            if !route.actions.is_empty() && !route.actions.contains(&action) {
                 continue;
             }
 

@@ -55,7 +55,7 @@ impl Wafer {
         let handle = super::RuntimeHandle {
             inner: arc_self.clone(),
         };
-        for (_, block) in &arc_self.blocks {
+        for block in arc_self.blocks.values() {
             block.bind(Box::new(handle.clone()));
         }
 

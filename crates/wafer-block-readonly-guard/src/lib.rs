@@ -6,6 +6,12 @@ pub struct ReadonlyGuardBlock {
     enabled: bool,
 }
 
+impl Default for ReadonlyGuardBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReadonlyGuardBlock {
     pub fn new() -> Self {
         Self { enabled: false }

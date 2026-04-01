@@ -111,7 +111,7 @@ impl StorageService for LocalStorageService {
 
         let last_modified = metadata
             .modified()
-            .map(|t| chrono::DateTime::<Utc>::from(t))
+            .map(chrono::DateTime::<Utc>::from)
             .unwrap_or_else(|_| Utc::now());
 
         let info = ObjectInfo {
@@ -197,7 +197,7 @@ impl StorageService for LocalStorageService {
             if metadata.is_dir() {
                 let created_at = metadata
                     .created()
-                    .map(|t| chrono::DateTime::<Utc>::from(t))
+                    .map(chrono::DateTime::<Utc>::from)
                     .unwrap_or_else(|_| Utc::now());
                 folders.push(FolderInfo {
                     name: entry.file_name().to_string_lossy().to_string(),
@@ -243,7 +243,7 @@ impl LocalStorageService {
 
                 let last_modified = metadata
                     .modified()
-                    .map(|t| chrono::DateTime::<Utc>::from(t))
+                    .map(chrono::DateTime::<Utc>::from)
                     .unwrap_or_else(|_| Utc::now());
 
                 objects.push(ObjectInfo {

@@ -18,6 +18,12 @@ pub struct WebBlock {
     config: OnceLock<WebConfig>,
 }
 
+impl Default for WebBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebBlock {
     pub fn new() -> Self {
         Self {

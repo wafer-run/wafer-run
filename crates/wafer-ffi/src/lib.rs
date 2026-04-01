@@ -3,6 +3,7 @@
 //! Design:
 //! - Rust owns all memory; callers hold an opaque `*mut WaferRuntime` pointer.
 //! - All complex data crosses the FFI boundary as JSON C strings.
+#![allow(clippy::missing_safety_doc)]
 //! - Caller must free returned strings via `wafer_free_string()`.
 //! - Functions that can fail return NULL on success, or a JSON error string.
 //! - Panics are caught at every FFI boundary.

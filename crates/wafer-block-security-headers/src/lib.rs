@@ -6,6 +6,12 @@ pub struct SecurityHeadersBlock {
     csp: String,
 }
 
+impl Default for SecurityHeadersBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {

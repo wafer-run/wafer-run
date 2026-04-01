@@ -35,7 +35,7 @@ fn main() {
     if partials_dir.exists() {
         if let Ok(entries) = fs::read_dir(&partials_dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_file()) {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if let Ok(contents) = fs::read_to_string(entry.path()) {
                         partials.insert(name, contents);
@@ -178,7 +178,7 @@ fn collect_doc_pages(content_dir: &Path) -> Vec<PathBuf> {
             let mut entries: Vec<_> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map_or(false, |ext| ext == "html"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "html"))
                 .collect();
             entries.sort();
             pages.extend(entries);

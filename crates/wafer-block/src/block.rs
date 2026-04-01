@@ -85,6 +85,7 @@ type AsyncHandler = Box<
 #[cfg(not(target_arch = "wasm32"))]
 pub struct FuncBlock {
     pub info: BlockInfo,
+    #[allow(clippy::type_complexity)]
     pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
 }
 

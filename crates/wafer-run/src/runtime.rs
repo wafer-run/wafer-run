@@ -253,18 +253,14 @@ impl Default for Wafer {
 /// For non-object values, `dst`'s existing value wins (contributors cannot
 /// override the target block's own scalar values).
 pub(crate) fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
-    match (dst, src) {
-        (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
-            for (key, src_val) in src_map {
-                if let Some(dst_val) = dst_map.get_mut(key) {
-                    deep_merge(dst_val, src_val);
-                } else {
-                    dst_map.insert(key.clone(), src_val.clone());
-                }
+    if let (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) = (dst, src) {
+        for (key, src_val) in src_map {
+            if let Some(dst_val) = dst_map.get_mut(key) {
+                deep_merge(dst_val, src_val);
+            } else {
+                dst_map.insert(key.clone(), src_val.clone());
             }
         }
-        // Non-object: dst wins, do nothing
-        _ => {}
     }
 }
 

@@ -7,6 +7,12 @@ use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
 /// Configure the required role via node config: {"role": "admin"}.
 pub struct IAMBlock;
 
+impl Default for IAMBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IAMBlock {
     pub fn new() -> Self {
         Self

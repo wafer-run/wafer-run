@@ -7,6 +7,12 @@ use wafer_core::clients::{crypto, database as db};
 /// Supports JWT Bearer tokens, API keys (sb_ prefix), and httpOnly cookies.
 pub struct AuthBlock;
 
+impl Default for AuthBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthBlock {
     pub fn new() -> Self {
         Self
@@ -251,7 +257,7 @@ impl Block for AuthBlock {
             msg.set_meta("auth.user_email", &email);
         }
         if !roles.is_empty() {
-            msg.set_meta("auth.user_roles", &roles.join(","));
+            msg.set_meta("auth.user_roles", roles.join(","));
         }
 
         msg.cont_ref()
