@@ -59,47 +59,87 @@ impl Router {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn retrieve(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static) {
+    pub fn retrieve(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
         self.on(RequestAction::Retrieve, pattern, handler);
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn retrieve(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static) {
+    pub fn retrieve(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+    ) {
         self.on(RequestAction::Retrieve, pattern, handler);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn create(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static) {
+    pub fn create(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
         self.on(RequestAction::Create, pattern, handler);
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn create(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static) {
+    pub fn create(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+    ) {
         self.on(RequestAction::Create, pattern, handler);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn update(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static) {
+    pub fn update(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
         self.on(RequestAction::Update, pattern, handler);
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn update(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static) {
+    pub fn update(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+    ) {
         self.on(RequestAction::Update, pattern, handler);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn delete(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static) {
+    pub fn delete(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
         self.on(RequestAction::Delete, pattern, handler);
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn delete(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static) {
+    pub fn delete(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+    ) {
         self.on(RequestAction::Delete, pattern, handler);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn execute(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static) {
+    pub fn execute(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+    ) {
         self.on(RequestAction::Execute, pattern, handler);
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn execute(&mut self, pattern: impl Into<String>, handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static) {
+    pub fn execute(
+        &mut self,
+        pattern: impl Into<String>,
+        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+    ) {
         self.on(RequestAction::Execute, pattern, handler);
     }
 

@@ -19,8 +19,12 @@ pub struct Instant;
 
 #[cfg(target_arch = "wasm32")]
 impl Instant {
-    pub fn now() -> Self { Self }
-    pub fn elapsed(&self) -> std::time::Duration { std::time::Duration::ZERO }
+    pub fn now() -> Self {
+        Self
+    }
+    pub fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
     pub fn checked_duration_since(&self, _earlier: Instant) -> Option<std::time::Duration> {
         Some(std::time::Duration::ZERO)
     }
@@ -32,7 +36,9 @@ impl Instant {
 #[cfg(target_arch = "wasm32")]
 impl std::ops::Add<std::time::Duration> for Instant {
     type Output = Instant;
-    fn add(self, _rhs: std::time::Duration) -> Instant { self }
+    fn add(self, _rhs: std::time::Duration) -> Instant {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +63,7 @@ pub type RegistrarFn = Box<dyn Fn(&mut crate::runtime::Wafer, serde_json::Value)
 
 /// ConfigExpanderFn — function that splits a composite config into individual block configs.
 #[cfg(not(target_arch = "wasm32"))]
-pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>;
+pub type ConfigExpanderFn =
+    Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
 pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)>>;

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use wafer_block::block::Block;
-use wafer_block::types::BlockInfo;
 use wafer_block::context::Context;
-use wafer_block::*;
+use wafer_block::types::BlockInfo;
 use wafer_block::BlockRegistry;
+use wafer_block::*;
 
 use crate::interfaces::storage::{handler, service::StorageService};
 
@@ -23,8 +23,13 @@ impl StorageBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for StorageBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/storage", "0.0.1", "storage@v1", "Object storage service (files, folders, buckets)")
-            .category(BlockCategory::Service)
+        BlockInfo::new(
+            "wafer-run/storage",
+            "0.0.1",
+            "storage@v1",
+            "Object storage service (files, folders, buckets)",
+        )
+        .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

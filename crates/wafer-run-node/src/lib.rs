@@ -7,7 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use wafer_run::{Message, Wafer, WASMBlock};
+use wafer_run::{Message, WASMBlock, Wafer};
 
 /// The WAFER runtime, exposed as a JavaScript class.
 ///
@@ -60,7 +60,8 @@ impl WaferRuntime {
         } else {
             let json = std::fs::read_to_string(&path)
                 .map_err(|e| Error::from_reason(format!("failed to read file: {}", e)))?;
-            self.inner.add_flow_json(&json)
+            self.inner
+                .add_flow_json(&json)
                 .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {}", e)))?;
         }
         Ok(())
@@ -69,7 +70,8 @@ impl WaferRuntime {
     /// Resolve all block references in registered flows.
     #[napi]
     pub fn resolve(&mut self) -> Result<()> {
-        self.rt.block_on(self.inner.resolve())
+        self.rt
+            .block_on(self.inner.resolve())
             .map_err(|e| Error::from_reason(e))
     }
 
@@ -79,7 +81,8 @@ impl WaferRuntime {
     /// own HTTP handling — blocks that spawn listeners are not needed here.
     #[napi]
     pub fn start(&mut self) -> Result<()> {
-        self.rt.block_on(self.inner.start_without_bind())
+        self.rt
+            .block_on(self.inner.start_without_bind())
             .map_err(|e| Error::from_reason(e))
     }
 

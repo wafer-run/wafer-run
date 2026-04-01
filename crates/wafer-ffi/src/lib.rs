@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
-use wafer_run::{Message, Result_, Wafer, WASMBlock};
+use wafer_run::{Message, Result_, WASMBlock, Wafer};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -170,19 +170,18 @@ pub unsafe extern "C" fn wafer_register(
         if path_str.ends_with(".wasm") {
             match WASMBlock::load(path_str) {
                 Ok(block) => {
-                    rt.inner.register_block(name_str, std::sync::Arc::new(block));
+                    rt.inner
+                        .register_block(name_str, std::sync::Arc::new(block));
                     std::ptr::null_mut()
                 }
                 Err(e) => error_json(&e),
             }
         } else {
             match std::fs::read_to_string(path_str) {
-                Ok(json) => {
-                    match rt.inner.add_flow_json(&json) {
-                        Ok(()) => std::ptr::null_mut(),
-                        Err(e) => error_json(&format!("invalid WaferFlow JSON: {}", e)),
-                    }
-                }
+                Ok(json) => match rt.inner.add_flow_json(&json) {
+                    Ok(()) => std::ptr::null_mut(),
+                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {}", e)),
+                },
                 Err(e) => error_json(&format!("failed to read file: {}", e)),
             }
         }
@@ -247,12 +246,10 @@ pub unsafe extern "C" fn wafer_run(
                     "ffi_error",
                     format!("invalid Message JSON: {}", e),
                 ));
-                return to_c_string(
-                    &serde_json::to_string(&err_result).unwrap_or_else(|_| {
-                        r#"{"action":"error","error":{"code":"ffi_error","message":"json error"}}"#
-                            .to_string()
-                    }),
-                );
+                return to_c_string(&serde_json::to_string(&err_result).unwrap_or_else(|_| {
+                    r#"{"action":"error","error":{"code":"ffi_error","message":"json error"}}"#
+                        .to_string()
+                }));
             }
         };
 
@@ -291,10 +288,7 @@ pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
 /// Check whether a block type is registered.
 /// Returns 1 if registered, 0 if not.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_has_block(
-    w: *mut WaferRuntime,
-    type_name: *const c_char,
-) -> c_int {
+pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const c_char) -> c_int {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rt = match deref_ref(w) {
             Some(r) => r,

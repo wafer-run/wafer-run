@@ -176,7 +176,9 @@ mod tests {
         }"#;
         let flow = parse(json).unwrap();
         let errors = validate(&flow).unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::DuplicateStepId(id) if id == "a")));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::DuplicateStepId(id) if id == "a")));
     }
 
     #[test]
@@ -219,6 +221,8 @@ mod tests {
         }"#;
         let flow = parse(json).unwrap();
         let errors = validate(&flow).unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::MissingDefaultNext(_))));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingDefaultNext(_))));
     }
 }

@@ -77,7 +77,11 @@ fn make_flow(id: &str, steps: Vec<wafer_flow::Step>) -> wafer_flow::WaferFlow {
     }
 }
 
-fn make_flow_with_on_error(id: &str, steps: Vec<wafer_flow::Step>, on_error: &str) -> wafer_flow::WaferFlow {
+fn make_flow_with_on_error(
+    id: &str,
+    steps: Vec<wafer_flow::Step>,
+    on_error: &str,
+) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
         name: format!("Test flow: {}", id),
@@ -138,10 +142,7 @@ async fn test_single_block_flow() {
     let result = w.run("to-upper", &mut msg).await;
 
     assert_eq!(result.action, Action::Continue);
-    assert_eq!(
-        String::from_utf8_lossy(&msg.data),
-        "HELLO WORLD"
-    );
+    assert_eq!(String::from_utf8_lossy(&msg.data), "HELLO WORLD");
 }
 
 // ===========================================================================
@@ -180,11 +181,14 @@ async fn test_sequential_flow() {
     });
 
     // Build flow: A -> B -> C (sequential steps, middleware mode)
-    w.add_flow(make_flow("abc", vec![
-        step("a", "append-a"),
-        step("b", "append-b"),
-        step("c", "append-c"),
-    ]));
+    w.add_flow(make_flow(
+        "abc",
+        vec![
+            step("a", "append-a"),
+            step("b", "append-b"),
+            step("c", "append-c"),
+        ],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "start");
@@ -220,7 +224,9 @@ fn test_router_basic() {
     });
 
     router.create("/items", |_ctx, msg| {
-        new_response(msg).status(201).json(&serde_json::json!({"id": "new-1"}))
+        new_response(msg)
+            .status(201)
+            .json(&serde_json::json!({"id": "new-1"}))
     });
 
     router.retrieve("/items/{id}", |_ctx, msg| {
@@ -236,8 +242,7 @@ fn test_router_basic() {
 
     let result = router.route(&ctx, &mut msg);
     assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value =
-        serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
     assert_eq!(body["items"], serde_json::json!([]));
 
     // Simulate POST /items
@@ -247,8 +252,7 @@ fn test_router_basic() {
 
     let result = router.route(&ctx, &mut msg);
     assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value =
-        serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
     assert_eq!(body["id"], "new-1");
 
     // Simulate GET /items/42
@@ -258,8 +262,7 @@ fn test_router_basic() {
 
     let result = router.route(&ctx, &mut msg);
     assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value =
-        serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
     assert_eq!(body["id"], "42");
 }
 
@@ -286,9 +289,7 @@ fn test_router_update_delete() {
         json_respond(msg, &serde_json::json!({"updated": id}))
     });
 
-    router.delete("/items/{id}", |_ctx, msg| {
-        msg.clone().drop_msg()
-    });
+    router.delete("/items/{id}", |_ctx, msg| msg.clone().drop_msg());
 
     let ctx = make_test_context();
 
@@ -299,8 +300,7 @@ fn test_router_update_delete() {
 
     let result = router.route(&ctx, &mut msg);
     assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value =
-        serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
     assert_eq!(body["updated"], "99");
 
     // Delete
@@ -358,7 +358,10 @@ fn test_json_respond_helper() {
     let parsed: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
     assert_eq!(parsed["id"], 1);
     assert_eq!(parsed["name"], "Widget");
-    assert_eq!(resp.meta.get("resp.content_type").unwrap(), "application/json");
+    assert_eq!(
+        resp.meta.get("resp.content_type").unwrap(),
+        "application/json"
+    );
 }
 
 #[test]
@@ -407,7 +410,10 @@ fn test_response_builder() {
 
     let parsed: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
     assert_eq!(parsed["ok"], true);
-    assert_eq!(resp.meta.get("resp.content_type").unwrap(), "application/json");
+    assert_eq!(
+        resp.meta.get("resp.content_type").unwrap(),
+        "application/json"
+    );
     assert_eq!(
         resp.meta.get("resp.header.X-Request-Id").unwrap(),
         "abc-123"
@@ -425,7 +431,8 @@ fn test_response_builder() {
 #[test]
 fn test_response_builder_body() {
     let msg = Message::new("test", "");
-    let result = new_response(&msg).status(201)
+    let result = new_response(&msg)
+        .status(201)
         .body(b"raw bytes here".to_vec(), "application/octet-stream");
 
     assert_eq!(result.action, Action::Respond);
@@ -488,18 +495,17 @@ async fn test_observability_block_hooks() {
     let block_durations = Arc::new(parking_lot::Mutex::new(Vec::<Duration>::new()));
     let bd = block_durations.clone();
 
-    w.hooks
-        .on_block_end(move |_ctx, _result, duration| {
-            bd.lock().push(duration);
-        });
+    w.hooks.on_block_end(move |_ctx, _result, duration| {
+        bd.lock().push(duration);
+    });
 
     w.register_block_func("step-1", |_ctx, msg| msg.clone().cont());
     w.register_block_func("step-2", |_ctx, msg| msg.clone().cont());
 
-    w.add_flow(make_flow("two-steps", vec![
-        step("s1", "step-1"),
-        step("s2", "step-2"),
-    ]));
+    w.add_flow(make_flow(
+        "two-steps",
+        vec![step("s1", "step-1"), step("s2", "step-2")],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -548,10 +554,10 @@ async fn test_flow_reference() {
     // We register a separate "main-flow" that just has validate + store
     // Since flow references are done through next.flow, let's test with a simpler approach:
     // just use two steps
-    w.add_flow(make_flow("main-flow", vec![
-        step("v", "validate"),
-        step("s", "store"),
-    ]));
+    w.add_flow(make_flow(
+        "main-flow",
+        vec![step("v", "validate"), step("s", "store")],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("user.create", "data");
@@ -577,10 +583,10 @@ async fn test_flow_reference_short_circuit() {
         out.cont()
     });
 
-    w.add_flow(make_flow("short-circuit", vec![
-        step("r", "responder"),
-        step("s", "should-not-run"),
-    ]));
+    w.add_flow(make_flow(
+        "short-circuit",
+        vec![step("r", "responder"), step("s", "should-not-run")],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -639,10 +645,11 @@ async fn test_on_error_stop() {
         out.cont()
     });
 
-    w.add_flow(make_flow_with_on_error("stop-flow", vec![
-        step("f", "fail"),
-        step("a", "after-fail"),
-    ], "stop"));
+    w.add_flow(make_flow_with_on_error(
+        "stop-flow",
+        vec![step("f", "fail"), step("a", "after-fail")],
+        "stop",
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -674,10 +681,11 @@ async fn test_on_error_continue() {
         out.cont()
     });
 
-    w.add_flow(make_flow_with_on_error("cont-flow", vec![
-        step("f", "fail"),
-        step("a", "after-fail"),
-    ], "continue"));
+    w.add_flow(make_flow_with_on_error(
+        "cont-flow",
+        vec![step("f", "fail"), step("a", "after-fail")],
+        "continue",
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -698,9 +706,11 @@ async fn test_on_error_continue_no_more_nodes() {
             .err(WaferError::new("terminal_error", "error at tail"))
     });
 
-    w.add_flow(make_flow_with_on_error("cont-end", vec![
-        step("f", "fail-at-end"),
-    ], "continue"));
+    w.add_flow(make_flow_with_on_error(
+        "cont-end",
+        vec![step("f", "fail-at-end")],
+        "continue",
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -728,10 +738,10 @@ async fn test_respond_short_circuits() {
         out.cont()
     });
 
-    w.add_flow(make_flow("short-circuit", vec![
-        step("r", "early-respond"),
-        step("u", "unreachable"),
-    ]));
+    w.add_flow(make_flow(
+        "short-circuit",
+        vec![step("r", "early-respond"), step("u", "unreachable")],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -757,10 +767,10 @@ async fn test_drop_action() {
         out.cont()
     });
 
-    w.add_flow(make_flow("drop-flow", vec![
-        step("d", "dropper"),
-        step("u", "unreachable"),
-    ]));
+    w.add_flow(make_flow(
+        "drop-flow",
+        vec![step("d", "dropper"), step("u", "unreachable")],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
@@ -801,9 +811,14 @@ async fn test_block_with_config() {
         out.cont()
     });
 
-    w.add_flow(make_flow("config-flow", vec![
-        step_with_config("root", "configurable", serde_json::json!({"prefix": "hello"})),
-    ]));
+    w.add_flow(make_flow(
+        "config-flow",
+        vec![step_with_config(
+            "root",
+            "configurable",
+            serde_json::json!({"prefix": "hello"}),
+        )],
+    ));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "world");
@@ -896,13 +911,16 @@ async fn test_add_flow_json() {
 
     w.register_block_func("echo", |_ctx, msg| msg.clone().cont());
 
-    w.add_flow_json(r#"{
+    w.add_flow_json(
+        r#"{
         "id": "from-json",
         "name": "From JSON",
         "version": "0.1.0",
         "steps": [{ "id": "root", "block": "echo" }],
         "config": { "on_error": "stop", "timeout": "30s" }
-    }"#).expect("add_flow_json failed");
+    }"#,
+    )
+    .expect("add_flow_json failed");
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "hello");
@@ -994,7 +1012,6 @@ fn test_wafer_error_meta() {
     assert_eq!(err.meta.get("resource").unwrap(), "users");
     assert_eq!(err.meta.get("id").unwrap(), "42");
 }
-
 
 // ===========================================================================
 // Test context helper (minimal Context implementation for router tests)
@@ -1162,11 +1179,17 @@ async fn test_resolve_versioned_block_download_error() {
     let mut w = Wafer::new();
 
     // Use a nonexistent remote block in a flow to trigger resolve error
-    w.add_flow(single_step_flow("remote-test", "acme/nonexistent-block@v1.0.0"));
+    w.add_flow(single_step_flow(
+        "remote-test",
+        "acme/nonexistent-block@v1.0.0",
+    ));
 
     let err = w.resolve().await.unwrap_err();
     assert!(
-        err.contains("block type not found") || err.contains("failed to download") || err.contains("failed to load remote block") || err.contains("failed to fetch registry"),
+        err.contains("block type not found")
+            || err.contains("failed to download")
+            || err.contains("failed to load remote block")
+            || err.contains("failed to fetch registry"),
         "Expected block-not-found or download error, got: {}",
         err
     );
@@ -1179,11 +1202,18 @@ async fn test_resolve_unversioned_block_download_error() {
 
     let mut w = Wafer::new();
 
-    w.add_flow(single_step_flow("unversioned-test", "acme/nonexistent-block"));
+    w.add_flow(single_step_flow(
+        "unversioned-test",
+        "acme/nonexistent-block",
+    ));
 
     let err = w.resolve().await.unwrap_err();
     assert!(
-        err.contains("block type not found") || err.contains("failed to fetch releases") || err.contains("failed to download") || err.contains("failed to fetch registry") || err.contains("HTTP"),
+        err.contains("block type not found")
+            || err.contains("failed to fetch releases")
+            || err.contains("failed to download")
+            || err.contains("failed to fetch registry")
+            || err.contains("HTTP"),
         "Expected block-not-found or download error, got: {}",
         err
     );
@@ -1331,7 +1361,8 @@ async fn test_waferflow_validation_errors() {
     let mut w = Wafer::new();
 
     // Duplicate step IDs
-    let result = w.add_flow_json(r#"{
+    let result = w.add_flow_json(
+        r#"{
         "id": "bad",
         "name": "Bad",
         "version": "0.1.0",
@@ -1339,7 +1370,8 @@ async fn test_waferflow_validation_errors() {
             { "id": "a", "block": "x" },
             { "id": "a", "block": "y" }
         ]
-    }"#);
+    }"#,
+    );
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("duplicate"));
 }

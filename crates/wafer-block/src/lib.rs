@@ -28,9 +28,9 @@ pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::Context;
 pub use executor::{extract_path_vars, match_path, matches_pattern};
-pub use hash::{sha256, sha256_hex, hex_encode};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
+pub use hash::{hex_encode, sha256, sha256_hex};
 pub use helpers::*;
 pub use meta::*;
 pub use registry::BlockRegistry;
@@ -49,8 +49,8 @@ wit_bindgen::generate!({
 
 // Re-export WIT types at crate root (skip WIT BlockInfo — runtime version is in types.rs).
 pub use wafer::block_world::types::{
-    Action, BlockResult, InstanceMode, LifecycleEvent, LifecycleType, Message,
-    MetaEntry, Response, WaferError,
+    Action, BlockResult, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, Response,
+    WaferError,
 };
 
 // Re-export the WIT Guest trait for WASM block authors.
@@ -66,7 +66,11 @@ pub mod runtime {
 }
 
 // Re-export runtime-specific types.
-pub use types::{ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, CollectionSchema, FieldSchema, HttpMethod, IndexSchema, InterfaceSpec, MetaAccess, RequestAction, UiRoute};
+pub use types::{
+    ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo,
+    CollectionSchema, FieldSchema, HttpMethod, IndexSchema, InterfaceSpec, MetaAccess,
+    RequestAction, UiRoute,
+};
 
 /// Alias for BlockResult — common in block handler return types.
 pub type Result_ = BlockResult;

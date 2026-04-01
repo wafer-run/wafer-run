@@ -5,10 +5,7 @@ use std::path::Path;
 /// Accepts a file path (or bare filename) and returns the MIME type string
 /// based on its extension. Unknown extensions return `"application/octet-stream"`.
 pub fn mime_for_ext(path: &Path) -> &'static str {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     mime_for_ext_str(ext)
 }

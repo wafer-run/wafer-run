@@ -22,34 +22,46 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
-        "listen": "0.0.0.0:8080",
-        "routes": [
-            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
-            { "path": "/_inspector", "block": "wafer-run/inspector" },
-            { "path": "/api/**", "block": "api-handler" }
-        ]
-    }));
+    wafer_flow_http_server::register(
+        &mut wafer,
+        serde_json::json!({
+            "listen": "0.0.0.0:8080",
+            "routes": [
+                { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+                { "path": "/_inspector", "block": "wafer-run/inspector" },
+                { "path": "/api/**", "block": "api-handler" }
+            ]
+        }),
+    );
     // Ensure data directory exists
     std::fs::create_dir_all("data").ok();
 
     // Register unified service blocks
     wafer_core::service_blocks::database::register_with(
         &mut wafer,
-        Arc::new(wafer_block_sqlite::service::SQLiteDatabaseService::open("data/notes.db").expect("open db")),
+        Arc::new(
+            wafer_block_sqlite::service::SQLiteDatabaseService::open("data/notes.db")
+                .expect("open db"),
+        ),
     );
     wafer_core::service_blocks::logger::register_with(
         &mut wafer,
         Arc::new(wafer_block_logger::service::TracingLogger),
     );
     wafer_block_inspector::register(&mut wafer);
-    wafer.add_block_config("wafer-run/inspector", serde_json::json!({
-        "allow_anonymous": true
-    }));
+    wafer.add_block_config(
+        "wafer-run/inspector",
+        serde_json::json!({
+            "allow_anonymous": true
+        }),
+    );
     wafer.register_block("api-handler", Arc::new(NotesHandler));
-    wafer.add_block_config("wafer-run/cors", serde_json::json!({
-        "allow_origins": ["*"]
-    }));
+    wafer.add_block_config(
+        "wafer-run/cors",
+        serde_json::json!({
+            "allow_origins": ["*"]
+        }),
+    );
 
     tracing::info!("API server starting on http://localhost:8080");
     let wafer = wafer.start().await.expect("failed to start");
@@ -80,10 +92,13 @@ impl Block for NotesHandler {
             ("retrieve", "/api/notes") => {
                 let opts = db::ListOptions::default();
                 match db::list(ctx, "notes", &opts).await {
-                    Ok(result) => json_respond(msg, &serde_json::json!({
-                        "notes": result.records,
-                        "total": result.total_count,
-                    })),
+                    Ok(result) => json_respond(
+                        msg,
+                        &serde_json::json!({
+                            "notes": result.records,
+                            "total": result.total_count,
+                        }),
+                    ),
                     Err(e) => err_internal(msg, &e.to_string()),
                 }
             }
@@ -91,8 +106,14 @@ impl Block for NotesHandler {
             ("create", "/api/notes") => {
                 let body: serde_json::Value = msg.decode().unwrap_or_default();
                 let mut data = std::collections::HashMap::new();
-                data.insert("title".to_string(), body.get("title").cloned().unwrap_or_default());
-                data.insert("body".to_string(), body.get("body").cloned().unwrap_or_default());
+                data.insert(
+                    "title".to_string(),
+                    body.get("title").cloned().unwrap_or_default(),
+                );
+                data.insert(
+                    "body".to_string(),
+                    body.get("body").cloned().unwrap_or_default(),
+                );
 
                 match db::create(ctx, "notes", data).await {
                     Ok(record) => json_respond(msg, &record),
@@ -100,11 +121,14 @@ impl Block for NotesHandler {
                 }
             }
             // Fallback
-            _ => json_respond(msg, &serde_json::json!({
-                "error": "not found",
-                "path": path,
-                "hint": "try GET /api/notes or POST /api/notes"
-            })),
+            _ => json_respond(
+                msg,
+                &serde_json::json!({
+                    "error": "not found",
+                    "path": path,
+                    "hint": "try GET /api/notes or POST /api/notes"
+                }),
+            ),
         }
     }
 

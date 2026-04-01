@@ -17,17 +17,27 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn config_get(&self, key: &str) -> Option<&str>;
 
     /// List all registered blocks.
-    fn registered_blocks(&self) -> Vec<BlockInfo> { Vec::new() }
+    fn registered_blocks(&self) -> Vec<BlockInfo> {
+        Vec::new()
+    }
 
     /// List flow summary info.
-    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> { Vec::new() }
+    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
+        Vec::new()
+    }
 
     /// List full flow definitions.
-    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> { Vec::new() }
+    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
+        Vec::new()
+    }
 
     /// Get expanded block configs (for inspector app view).
-    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> { std::collections::HashMap::new() }
+    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::new()
+    }
 
     /// List registered interface specifications.
-    fn interface_specs(&self) -> Vec<crate::types::InterfaceSpec> { Vec::new() }
+    fn interface_specs(&self) -> Vec<crate::types::InterfaceSpec> {
+        Vec::new()
+    }
 }

@@ -92,7 +92,10 @@ pub async fn handle_message(service: &dyn StorageService, msg: &mut Message) -> 
                     ))
                 }
             };
-            match service.put(&req.folder, &req.key, &req.data, &req.content_type).await {
+            match service
+                .put(&req.folder, &req.key, &req.data, &req.content_type)
+                .await
+            {
                 Ok(()) => respond_empty(msg),
                 Err(e) => Result_::error(storage_error_to_wafer(e)),
             }
@@ -177,12 +180,10 @@ pub async fn handle_message(service: &dyn StorageService, msg: &mut Message) -> 
                 Err(e) => Result_::error(storage_error_to_wafer(e)),
             }
         }
-        ServiceOp::STORAGE_LIST_FOLDERS => {
-            match service.list_folders().await {
-                Ok(folders) => respond_json(msg, &folders),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
-            }
-        }
+        ServiceOp::STORAGE_LIST_FOLDERS => match service.list_folders().await {
+            Ok(folders) => respond_json(msg, &folders),
+            Err(e) => Result_::error(storage_error_to_wafer(e)),
+        },
         other => Result_::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown storage operation: {other}"),

@@ -41,18 +41,28 @@ impl Wafer {
             // Prefer string timeout, fall back to timeout_ms
             if let Some(ref t) = c.timeout {
                 let d = parse_duration(t);
-                if !d.is_zero() { return Some(d); }
+                if !d.is_zero() {
+                    return Some(d);
+                }
             }
             c.timeout_ms.map(std::time::Duration::from_millis)
         });
         let deadline = timeout.and_then(|t| {
-            if !t.is_zero() { Some(Instant::now() + t) } else { None }
+            if !t.is_zero() {
+                Some(Instant::now() + t)
+            } else {
+                None
+            }
         });
 
-        let result = crate::waferflow::execute_waferflow(flow, msg, self, &cancelled, deadline).await;
+        let result =
+            crate::waferflow::execute_waferflow(flow, msg, self, &cancelled, deadline).await;
 
         // Check timeout
-        let result = if deadline.is_some() && cancelled.load(Ordering::Relaxed) && result.action != Action::Error {
+        let result = if deadline.is_some()
+            && cancelled.load(Ordering::Relaxed)
+            && result.action != Action::Error
+        {
             Result_ {
                 action: Action::Error,
                 error: Some(WaferError::new(
@@ -75,11 +85,17 @@ impl Wafer {
     /// Run a single block by name, bypassing flows.
     pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
         // Resolve alias
-        let resolved = self.aliases.get(block_name)
+        let resolved = self
+            .aliases
+            .get(block_name)
             .map(|s| s.as_str())
             .unwrap_or(block_name);
 
-        let block = match self.all_blocks.get(resolved).or_else(|| self.all_blocks.get(block_name)) {
+        let block = match self
+            .all_blocks
+            .get(resolved)
+            .or_else(|| self.all_blocks.get(block_name))
+        {
             Some(b) => b.clone(),
             None => {
                 return Result_ {
@@ -97,7 +113,11 @@ impl Wafer {
         let cancelled = Arc::new(AtomicBool::new(false));
         let caller_requires = {
             let info = block.info();
-            if info.requires.is_empty() { None } else { Some(info.requires) }
+            if info.requires.is_empty() {
+                None
+            } else {
+                Some(info.requires)
+            }
         };
         let mut ctx = self.make_context(block_name, "root", HashMap::new(), cancelled, None);
         ctx.caller_requires = caller_requires;
@@ -115,7 +135,8 @@ impl Wafer {
 
         let result = run_block_with_recovery(&*block, &ctx, msg).await;
 
-        self.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
+        self.hooks
+            .fire_block_end(&obs_ctx, &result, start.elapsed());
 
         result
     }
@@ -163,7 +184,10 @@ pub async fn run_block_with_recovery(
                 };
                 Result_ {
                     action: Action::Error,
-                    error: Some(WaferError::new("panic", format!("block panicked: {}", panic_msg))),
+                    error: Some(WaferError::new(
+                        "panic",
+                        format!("block panicked: {}", panic_msg),
+                    )),
                     response: None,
                     message: Some(msg.clone()),
                 }

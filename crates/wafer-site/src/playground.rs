@@ -18,9 +18,14 @@ impl PlaygroundBlock {
 #[async_trait::async_trait]
 impl Block for PlaygroundBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-site/playground", "0.0.1", "http-handler@v1", "Browser-based code editor with live execution")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-site/playground",
+            "0.0.1",
+            "http-handler@v1",
+            "Browser-based code editor with live execution",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -62,16 +67,8 @@ impl Block for PlaygroundBlock {
                 });
 
                 match proxy_post_json("https://play.rust-lang.org/execute", &payload) {
-                    Ok(bytes) => respond(
-                        msg,
-                        bytes,
-                        "application/json",
-                    ),
-                    Err(e) => error(
-                        msg,
-                        "unavailable",
-                        &format!("Rust Playground error: {}", e),
-                    ),
+                    Ok(bytes) => respond(msg, bytes, "application/json"),
+                    Err(e) => error(msg, "unavailable", &format!("Rust Playground error: {}", e)),
                 }
             }
 
@@ -96,16 +93,8 @@ impl Block for PlaygroundBlock {
                     "https://go.dev/_/compile",
                     &[("version", "2"), ("body", &source), ("withVet", "true")],
                 ) {
-                    Ok(bytes) => respond(
-                        msg,
-                        bytes,
-                        "application/json",
-                    ),
-                    Err(e) => error(
-                        msg,
-                        "unavailable",
-                        &format!("Go Playground error: {}", e),
-                    ),
+                    Ok(bytes) => respond(msg, bytes, "application/json"),
+                    Err(e) => error(msg, "unavailable", &format!("Go Playground error: {}", e)),
                 }
             }
 
@@ -125,10 +114,7 @@ impl Block for PlaygroundBlock {
                 &serde_json::json!({ "language": "javascript", "template": JS_TEMPLATE }),
             ),
 
-            _ => err_not_found(
-                msg,
-                &format!("Playground endpoint not found: {}", path),
-            ),
+            _ => err_not_found(msg, &format!("Playground endpoint not found: {}", path)),
         }
     }
 
@@ -215,7 +201,10 @@ fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, St
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| e.to_string())
         })
     })
 }
@@ -224,7 +213,10 @@ fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, St
 fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String> {
     let handle = tokio::runtime::Handle::current();
     let url = url.to_string();
-    let params: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let params: Vec<(String, String)> = params
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     tokio::task::block_in_place(|| {
         handle.block_on(async {
             let client = playground_client();
@@ -234,14 +226,14 @@ fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| e.to_string())
         })
     })
 }
 
 pub fn register(w: &mut Wafer) {
-    w.register_block(
-        "wafer-site/playground",
-        Arc::new(PlaygroundBlock::new()),
-    );
+    w.register_block("wafer-site/playground", Arc::new(PlaygroundBlock::new()));
 }

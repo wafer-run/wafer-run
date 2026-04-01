@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use wafer_block::common::{ErrorCode, ServiceOp};
 use wafer_block::helpers::{respond_empty, respond_json};
-use wafer_run::schema::Table;
 use wafer_block::*;
+use wafer_run::schema::Table;
 
 use super::service::{DatabaseError, DatabaseService, Filter, FilterOp, ListOptions, SortField};
 
@@ -313,7 +313,12 @@ pub async fn handle_message(service: &dyn DatabaseService, msg: &mut Message) ->
                 }
             };
             match service.exec_raw(&req.query, &req.args).await {
-                Ok(rows) => respond_json(msg, &ExecRawResponse { rows_affected: rows }),
+                Ok(rows) => respond_json(
+                    msg,
+                    &ExecRawResponse {
+                        rows_affected: rows,
+                    },
+                ),
                 Err(e) => Result_::error(db_error_to_wafer(e)),
             }
         }
@@ -340,10 +345,7 @@ pub async fn handle_lifecycle(
                     format!("schema migration failed: {}", e),
                 )
             })?;
-            tracing::info!(
-                tables = tables.len(),
-                "database schema migrations applied"
-            );
+            tracing::info!(tables = tables.len(), "database schema migrations applied");
         }
     }
     Ok(())

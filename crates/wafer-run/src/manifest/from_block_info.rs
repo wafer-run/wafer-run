@@ -4,9 +4,9 @@
 //!
 //! This bridges the block-declared schema → database table creation pipeline.
 
+use super::types::{CollectionDef, FieldDef, IndexDef};
 use std::collections::HashMap;
 use wafer_block::{CollectionSchema, FieldSchema};
-use super::types::{CollectionDef, FieldDef, IndexDef};
 
 /// Convert a block's `CollectionSchema` declarations into manifest `CollectionDef`
 /// types keyed by collection name.
@@ -21,27 +21,33 @@ pub fn block_collections_to_defs(
         let mut fields = HashMap::new();
 
         // Every collection gets an auto-generated TEXT primary key `id`.
-        fields.insert("id".to_string(), FieldDef {
-            field_type: "string".to_string(),
-            primary: true,
-            unique: false,
-            optional: false,
-            default: None,
-            auto: false,
-            r#ref: String::new(),
-        });
+        fields.insert(
+            "id".to_string(),
+            FieldDef {
+                field_type: "string".to_string(),
+                primary: true,
+                unique: false,
+                optional: false,
+                default: None,
+                auto: false,
+                r#ref: String::new(),
+            },
+        );
 
         // Every collection gets auto-set created_at / updated_at.
         for ts in &["created_at", "updated_at"] {
-            fields.insert(ts.to_string(), FieldDef {
-                field_type: "datetime".to_string(),
-                primary: false,
-                unique: false,
-                optional: false,
-                default: Some(serde_json::Value::String("CURRENT_TIMESTAMP".to_string())),
-                auto: true,
-                r#ref: String::new(),
-            });
+            fields.insert(
+                ts.to_string(),
+                FieldDef {
+                    field_type: "datetime".to_string(),
+                    primary: false,
+                    unique: false,
+                    optional: false,
+                    default: Some(serde_json::Value::String("CURRENT_TIMESTAMP".to_string())),
+                    auto: true,
+                    r#ref: String::new(),
+                },
+            );
         }
 
         // User-declared fields.
@@ -49,10 +55,14 @@ pub fn block_collections_to_defs(
             fields.insert(f.name.clone(), field_schema_to_def(f));
         }
 
-        let indexes = coll.indexes.iter().map(|i| IndexDef {
-            fields: i.fields.clone(),
-            unique: i.unique,
-        }).collect();
+        let indexes = coll
+            .indexes
+            .iter()
+            .map(|i| IndexDef {
+                fields: i.fields.clone(),
+                unique: i.unique,
+            })
+            .collect();
 
         map.insert(coll.name.clone(), CollectionDef { fields, indexes });
     }
@@ -82,9 +92,7 @@ fn field_schema_to_def(f: &FieldSchema) -> FieldDef {
 }
 
 /// Convenience: convert a block's collections directly to schema Tables.
-pub fn block_collections_to_tables(
-    collections: &[CollectionSchema],
-) -> Vec<crate::schema::Table> {
+pub fn block_collections_to_tables(collections: &[CollectionSchema]) -> Vec<crate::schema::Table> {
     let defs = block_collections_to_defs(collections);
     super::to_schema::collections_to_tables(&defs)
 }

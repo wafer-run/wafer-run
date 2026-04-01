@@ -287,7 +287,12 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
             }
             // For single-char ops, also skip if preceded by ! or = (to avoid matching != or ==).
             if op_len == 1 && op_bytes[0] == b'=' {
-                if i > 0 && (bytes[i - 1] == b'!' || bytes[i - 1] == b'=' || bytes[i - 1] == b'>' || bytes[i - 1] == b'<') {
+                if i > 0
+                    && (bytes[i - 1] == b'!'
+                        || bytes[i - 1] == b'='
+                        || bytes[i - 1] == b'>'
+                        || bytes[i - 1] == b'<')
+                {
                     i += 1;
                     continue;
                 }
@@ -347,7 +352,10 @@ fn parse_atom(s: &str) -> Result<Expr, ExprError> {
 }
 
 /// Evaluate an expression against a resolver function.
-pub fn eval(expr: &Expr, resolve: &dyn Fn(&[String]) -> Result<Value, ExprError>) -> Result<Value, ExprError> {
+pub fn eval(
+    expr: &Expr,
+    resolve: &dyn Fn(&[String]) -> Result<Value, ExprError>,
+) -> Result<Value, ExprError> {
     match expr {
         Expr::Path(segments) => resolve(segments),
         Expr::Literal(v) => Ok(v.clone()),

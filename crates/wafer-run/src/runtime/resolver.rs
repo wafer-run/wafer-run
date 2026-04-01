@@ -7,9 +7,7 @@ use crate::types::*;
 
 use super::Wafer;
 #[cfg(feature = "wasm")]
-use super::{
-    parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION,
-};
+use super::{parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION};
 
 impl Wafer {
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -137,8 +135,7 @@ impl Wafer {
         // Snapshot expanded configs for inspector before draining
         self.block_configs_snapshot = Arc::new(self.block_configs.clone());
 
-        let configs: Vec<(String, serde_json::Value)> =
-            self.block_configs.drain().collect();
+        let configs: Vec<(String, serde_json::Value)> = self.block_configs.drain().collect();
 
         // Collect names of all pre-registered blocks for phase 2 ordering.
         let pre_registered: Vec<String> = self.blocks.keys().cloned().collect();
@@ -335,8 +332,8 @@ impl Wafer {
             .map_err(|e| format!("failed to create HTTP client: {}", e))?;
 
         for name in candidates {
-            let remote_ref = parse_versioned_block(&name)
-                .or_else(|| parse_unversioned_block(&name));
+            let remote_ref =
+                parse_versioned_block(&name).or_else(|| parse_unversioned_block(&name));
             let remote_ref = match remote_ref {
                 Some(r) => r,
                 None => continue,
@@ -360,11 +357,14 @@ impl Wafer {
             if resp.status().as_u16() != 200 {
                 return Err(format!(
                     "failed to fetch registry manifest for {}: HTTP {}",
-                    name, resp.status().as_u16()
+                    name,
+                    resp.status().as_u16()
                 ));
             }
 
-            let manifest_bytes = resp.bytes().await
+            let manifest_bytes = resp
+                .bytes()
+                .await
                 .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
             let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
                 .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
@@ -375,9 +375,10 @@ impl Wafer {
                 remote_ref.version.clone()
             };
 
-            let entry = manifest.versions.get(&version).ok_or_else(|| {
-                format!("version {} not found in registry for {}", version, name)
-            })?;
+            let entry = manifest
+                .versions
+                .get(&version)
+                .ok_or_else(|| format!("version {} not found in registry for {}", version, name))?;
 
             if entry.abi != ABI_VERSION {
                 return Err(format!(
@@ -387,16 +388,20 @@ impl Wafer {
             }
 
             if let Some(flow_url) = &entry.flow_url {
-                let flow = self.download_flow_from_url(&client, flow_url, &name).await?;
+                let flow = self
+                    .download_flow_from_url(&client, flow_url, &name)
+                    .await?;
 
                 // Pre-resolve block dependencies from the flow's blocks list
                 let blocks_to_resolve: Vec<String> = flow
                     .blocks
                     .as_ref()
-                    .map(|b| b.iter()
-                        .filter(|b| !self.blocks.contains_key(b.as_str()))
-                        .cloned()
-                        .collect())
+                    .map(|b| {
+                        b.iter()
+                            .filter(|b| !self.blocks.contains_key(b.as_str()))
+                            .cloned()
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 self.add_flow(flow);
@@ -425,7 +430,9 @@ impl Wafer {
                     }
                 }
             } else if let Some(wasm_url) = &entry.wasm_url {
-                let block = self.download_wasm_from_url(&client, wasm_url, &name).await?;
+                let block = self
+                    .download_wasm_from_url(&client, wasm_url, &name)
+                    .await?;
                 tracing::info!(block = %name, "downloaded remote WASM block from registry");
                 self.blocks.insert(name.clone(), block);
             }
@@ -452,11 +459,14 @@ impl Wafer {
         if resp.status().as_u16() != 200 {
             return Err(format!(
                 "failed to download flow for {}: HTTP {}",
-                name, resp.status().as_u16()
+                name,
+                resp.status().as_u16()
             ));
         }
 
-        let body = resp.bytes().await
+        let body = resp
+            .bytes()
+            .await
             .map_err(|e| format!("failed to read flow body for {}: {}", name, e))?;
 
         let body_str = std::str::from_utf8(&body)
@@ -477,8 +487,8 @@ impl Wafer {
         url: &str,
         name: &str,
     ) -> Result<Arc<dyn Block>, String> {
-        use crate::wasm::WASMBlock;
         use crate::wasm::capabilities::BlockCapabilities;
+        use crate::wasm::WASMBlock;
 
         let resp = client
             .get(url)
@@ -489,14 +499,22 @@ impl Wafer {
 
         let status = resp.status().as_u16();
         if status != 200 {
-            return Err(format!("failed to download WASM for {}: HTTP {}", name, status));
+            return Err(format!(
+                "failed to download WASM for {}: HTTP {}",
+                name, status
+            ));
         }
 
-        let body = resp.bytes().await
+        let body = resp
+            .bytes()
+            .await
             .map_err(|e| format!("failed to read WASM body for {}: {}", name, e))?;
 
         if body.is_empty() {
-            return Err(format!("failed to download WASM for {}: empty response body", name));
+            return Err(format!(
+                "failed to download WASM for {}: empty response body",
+                name
+            ));
         }
 
         let engine = self.wasm_engine()?.clone();
@@ -514,8 +532,7 @@ impl Wafer {
         client: &reqwest::Client,
         name: &str,
     ) -> Result<Option<Arc<dyn Block>>, String> {
-        let remote_ref = parse_versioned_block(name)
-            .or_else(|| parse_unversioned_block(name));
+        let remote_ref = parse_versioned_block(name).or_else(|| parse_unversioned_block(name));
         let remote_ref = match remote_ref {
             Some(r) => r,
             None => return Ok(None),
@@ -539,11 +556,14 @@ impl Wafer {
         if resp.status().as_u16() != 200 {
             return Err(format!(
                 "failed to fetch registry manifest for {}: HTTP {}",
-                name, resp.status().as_u16()
+                name,
+                resp.status().as_u16()
             ));
         }
 
-        let manifest_bytes = resp.bytes().await
+        let manifest_bytes = resp
+            .bytes()
+            .await
             .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
         let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
@@ -554,9 +574,10 @@ impl Wafer {
             remote_ref.version.clone()
         };
 
-        let entry = manifest.versions.get(&version).ok_or_else(|| {
-            format!("version {} not found in registry for {}", version, name)
-        })?;
+        let entry = manifest
+            .versions
+            .get(&version)
+            .ok_or_else(|| format!("version {} not found in registry for {}", version, name))?;
 
         if entry.abi != ABI_VERSION {
             return Err(format!(
@@ -594,6 +615,9 @@ impl Wafer {
                 .map_err(|e| format!("failed to create wasmtime engine: {}", e))?;
             self.wasm_engine = Some(Arc::new(engine));
         }
-        Ok(self.wasm_engine.as_ref().expect("wasm_engine initialized above"))
+        Ok(self
+            .wasm_engine
+            .as_ref()
+            .expect("wasm_engine initialized above"))
     }
 }

@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use wasmtime::{Engine, Config, Store, StoreLimitsBuilder, component::*};
+use std::sync::{Arc, Mutex};
+use wasmtime::{component::*, Config, Engine, Store, StoreLimitsBuilder};
 
+use super::capabilities::BlockCapabilities;
+use super::host::HostState;
 use crate::block::{Block, BlockInfo};
 use crate::context::Context;
 use crate::types::*;
-use super::capabilities::BlockCapabilities;
-use super::host::HostState;
 use wafer_block::helpers::MessageExt;
 
 bindgen!({
@@ -41,7 +41,8 @@ fn fuel_engine() -> Engine {
 #[async_trait]
 impl Host for HostState {
     async fn is_cancelled(&mut self) -> wasmtime::Result<bool> {
-        Ok(self.context
+        Ok(self
+            .context
             .as_ref()
             .map(|ctx| ctx.is_cancelled())
             .unwrap_or(false))
@@ -120,16 +121,27 @@ impl WASMBlock {
         Self::load_with_capabilities(wasm_bytes, BlockCapabilities::unrestricted())
     }
 
-    pub fn load_with_capabilities(wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
+    pub fn load_with_capabilities(
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+    ) -> Result<Self, String> {
         let engine = fuel_engine();
         Self::build_from_engine(engine, wasm_bytes, caps)
     }
 
-    pub fn load_with_engine(engine: &Engine, wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
+    pub fn load_with_engine(
+        engine: &Engine,
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+    ) -> Result<Self, String> {
         Self::build_from_engine(engine.clone(), wasm_bytes, caps)
     }
 
-    fn build_from_engine(engine: Engine, wasm_bytes: &[u8], caps: BlockCapabilities) -> Result<Self, String> {
+    fn build_from_engine(
+        engine: Engine,
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+    ) -> Result<Self, String> {
         let component = Component::new(&engine, wasm_bytes)
             .map_err(|e| format!("compiling WASM component: {}", e))?;
 
@@ -141,7 +153,10 @@ impl WASMBlock {
         })
     }
 
-    async fn instantiate(&self, ctx: Option<Arc<dyn Context>>) -> Result<(Store<HostState>, WaferBlock), String> {
+    async fn instantiate(
+        &self,
+        ctx: Option<Arc<dyn Context>>,
+    ) -> Result<(Store<HostState>, WaferBlock), String> {
         let limiter = StoreLimitsBuilder::new()
             .memory_size(MAX_WASM_MEMORY_PAGES as usize * 65536) // pages * 64 KiB
             .build();
@@ -154,7 +169,9 @@ impl WASMBlock {
             },
         );
         store.limiter(|state| &mut state.limiter);
-        store.set_fuel(DEFAULT_FUEL).map_err(|e| format!("setting fuel: {e}"))?;
+        store
+            .set_fuel(DEFAULT_FUEL)
+            .map_err(|e| format!("setting fuel: {e}"))?;
 
         let mut linker = Linker::new(&self.engine);
         wafer::block_world::runtime::add_to_linker(&mut linker, |s| s)
@@ -222,7 +239,10 @@ fn to_guest_error_code(c: &ErrorCode) -> wafer::block_world::types::ErrorCode {
 
 fn to_runtime_meta(meta: Vec<wafer::block_world::types::MetaEntry>) -> Vec<MetaEntry> {
     meta.into_iter()
-        .map(|e| MetaEntry { key: e.key, value: e.value })
+        .map(|e| MetaEntry {
+            key: e.key,
+            value: e.value,
+        })
         .collect()
 }
 
@@ -292,20 +312,29 @@ fn to_runtime_result(r: wafer::block_world::types::BlockResult) -> Result_ {
 fn to_guest_result(r: &Result_) -> wafer::block_world::types::BlockResult {
     wafer::block_world::types::BlockResult {
         action: to_guest_action(&r.action),
-        response: r.response.as_ref().map(|resp| wafer::block_world::types::Response {
-            data: resp.data.clone(),
-            meta: to_guest_meta(&resp.meta),
-        }),
-        error: r.error.as_ref().map(|err| wafer::block_world::types::WaferError {
-            code: to_guest_error_code(&err.code),
-            message: err.message.clone(),
-            meta: to_guest_meta(&err.meta),
-        }),
-        message: r.message.as_ref().map(|msg| wafer::block_world::types::Message {
-            kind: msg.kind.clone(),
-            data: msg.data.clone(),
-            meta: to_guest_meta(&msg.meta),
-        }),
+        response: r
+            .response
+            .as_ref()
+            .map(|resp| wafer::block_world::types::Response {
+                data: resp.data.clone(),
+                meta: to_guest_meta(&resp.meta),
+            }),
+        error: r
+            .error
+            .as_ref()
+            .map(|err| wafer::block_world::types::WaferError {
+                code: to_guest_error_code(&err.code),
+                message: err.message.clone(),
+                meta: to_guest_meta(&err.meta),
+            }),
+        message: r
+            .message
+            .as_ref()
+            .map(|msg| wafer::block_world::types::Message {
+                kind: msg.kind.clone(),
+                data: msg.data.clone(),
+                meta: to_guest_meta(&msg.meta),
+            }),
     }
 }
 
@@ -394,7 +423,10 @@ impl Block for WASMBlock {
         let capabilities = self.capabilities.clone();
 
         let info = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async {
                 let limiter = StoreLimitsBuilder::new()
                     .memory_size(MAX_WASM_MEMORY_PAGES as usize * 65536)
@@ -408,7 +440,9 @@ impl Block for WASMBlock {
                     },
                 );
                 store.limiter(|state| &mut state.limiter);
-                store.set_fuel(DEFAULT_FUEL).map_err(|e| format!("setting fuel: {e}"))?;
+                store
+                    .set_fuel(DEFAULT_FUEL)
+                    .map_err(|e| format!("setting fuel: {e}"))?;
                 let mut linker = Linker::new(&engine);
                 wafer::block_world::runtime::add_to_linker(&mut linker, |s| s)
                     .map_err(|e| format!("failed to add host runtime to linker: {}", e))?;
@@ -416,29 +450,55 @@ impl Block for WASMBlock {
                     .await
                     .map_err(|e| format!("instantiating WASM component: {}", e))?;
 
-                let info = bindings.wafer_block_world_block().call_info(&mut store).await
+                let info = bindings
+                    .wafer_block_world_block()
+                    .call_info(&mut store)
+                    .await
                     .map_err(|e| format!("calling block.info(): {e}"))?;
 
-                Ok::<BlockInfo, String>(BlockInfo::new(info.name, info.version, info.interface, info.summary)
-                    .instance_mode(to_runtime_instance_mode(info.instance_mode))
-                    .collections(info.collections.into_iter().map(|c| wafer_block::CollectionSchema {
-                        name: c.name,
-                        fields: c.fields.into_iter().map(|f| wafer_block::FieldSchema {
-                            name: f.name,
-                            field_type: f.field_type,
-                            unique: f.unique,
-                            optional: f.optional,
-                            default_value: f.default_value,
-                            reference: f.reference,
-                        }).collect(),
-                        indexes: c.indexes.into_iter().map(|i| wafer_block::IndexSchema {
-                            fields: i.fields,
-                            unique: i.unique,
-                        }).collect(),
-                    }).collect()))
+                Ok::<BlockInfo, String>(
+                    BlockInfo::new(info.name, info.version, info.interface, info.summary)
+                        .instance_mode(to_runtime_instance_mode(info.instance_mode))
+                        .collections(
+                            info.collections
+                                .into_iter()
+                                .map(|c| wafer_block::CollectionSchema {
+                                    name: c.name,
+                                    fields: c
+                                        .fields
+                                        .into_iter()
+                                        .map(|f| wafer_block::FieldSchema {
+                                            name: f.name,
+                                            field_type: f.field_type,
+                                            unique: f.unique,
+                                            optional: f.optional,
+                                            default_value: f.default_value,
+                                            reference: f.reference,
+                                        })
+                                        .collect(),
+                                    indexes: c
+                                        .indexes
+                                        .into_iter()
+                                        .map(|i| wafer_block::IndexSchema {
+                                            fields: i.fields,
+                                            unique: i.unique,
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                        ),
+                )
             })
-        }).join().unwrap().unwrap_or_else(|e| {
-            BlockInfo::new("unknown", "0.0.0", "error", format!("failed to get info: {}", e))
+        })
+        .join()
+        .unwrap()
+        .unwrap_or_else(|e| {
+            BlockInfo::new(
+                "unknown",
+                "0.0.0",
+                "error",
+                format!("failed to get info: {}", e),
+            )
         });
 
         if let Ok(mut guard) = self.info_cache.lock() {
@@ -453,13 +513,29 @@ impl Block for WASMBlock {
 
         let (mut store, bindings) = match self.instantiate(Some(guard.as_arc())).await {
             Ok(r) => r,
-            Err(e) => return msg.clone().err(WaferError { code: ErrorCode::Internal, message: e, meta: vec![] }),
+            Err(e) => {
+                return msg.clone().err(WaferError {
+                    code: ErrorCode::Internal,
+                    message: e,
+                    meta: vec![],
+                })
+            }
         };
 
         let guest_msg = to_guest_message(msg);
-        let result = match bindings.wafer_block_world_block().call_handle(&mut store, &guest_msg).await {
+        let result = match bindings
+            .wafer_block_world_block()
+            .call_handle(&mut store, &guest_msg)
+            .await
+        {
             Ok(r) => r,
-            Err(e) => return msg.clone().err(WaferError { code: ErrorCode::Internal, message: format!("calling block.handle(): {e}"), meta: vec![] }),
+            Err(e) => {
+                return msg.clone().err(WaferError {
+                    code: ErrorCode::Internal,
+                    message: format!("calling block.handle(): {e}"),
+                    meta: vec![],
+                })
+            }
         };
 
         to_runtime_result(result)
@@ -472,10 +548,14 @@ impl Block for WASMBlock {
     ) -> std::result::Result<(), WaferError> {
         let guard = ContextGuard::new(ctx);
 
-        let (mut store, bindings) = self
-            .instantiate(Some(guard.as_arc()))
-            .await
-            .map_err(|e| WaferError { code: ErrorCode::Internal, message: e, meta: vec![] })?;
+        let (mut store, bindings) =
+            self.instantiate(Some(guard.as_arc()))
+                .await
+                .map_err(|e| WaferError {
+                    code: ErrorCode::Internal,
+                    message: e,
+                    meta: vec![],
+                })?;
 
         let guest_event = wafer::block_world::types::LifecycleEvent {
             event_type: match event.event_type {
@@ -486,14 +566,22 @@ impl Block for WASMBlock {
             data: event.data,
         };
 
-        match bindings.wafer_block_world_block().call_lifecycle(&mut store, &guest_event).await {
+        match bindings
+            .wafer_block_world_block()
+            .call_lifecycle(&mut store, &guest_event)
+            .await
+        {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => Err(WaferError {
                 code: to_runtime_error_code(e.code),
                 message: e.message,
                 meta: to_runtime_meta(e.meta),
             }),
-            Err(e) => Err(WaferError { code: ErrorCode::Internal, message: format!("calling block.lifecycle(): {e}"), meta: vec![] }),
+            Err(e) => Err(WaferError {
+                code: ErrorCode::Internal,
+                message: format!("calling block.lifecycle(): {e}"),
+                meta: vec![],
+            }),
         }
     }
 }

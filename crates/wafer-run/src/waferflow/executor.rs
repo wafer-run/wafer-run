@@ -92,26 +92,25 @@ pub async fn execute(
         let is_pipeline = step.input.is_some();
         if is_pipeline {
             if let Some(input_template) = &step.input {
-                let resolved = acc
-                    .resolve_input(input_template)
-                    .map_err(|e| e.to_string());
+                let resolved = acc.resolve_input(input_template).map_err(|e| e.to_string());
                 match resolved {
-                    Ok(val) => {
-                        match serde_json::to_vec(&val) {
-                            Ok(data) => msg.data = data,
-                            Err(e) => {
-                                return Result_ {
-                                    action: Action::Error,
-                                    error: Some(WaferError::new(
-                                        "internal",
-                                        format!("failed to serialize input for step '{}': {}", step.id, e),
-                                    )),
-                                    response: None,
-                                    message: Some(msg.clone()),
-                                };
-                            }
+                    Ok(val) => match serde_json::to_vec(&val) {
+                        Ok(data) => msg.data = data,
+                        Err(e) => {
+                            return Result_ {
+                                action: Action::Error,
+                                error: Some(WaferError::new(
+                                    "internal",
+                                    format!(
+                                        "failed to serialize input for step '{}': {}",
+                                        step.id, e
+                                    ),
+                                )),
+                                response: None,
+                                message: Some(msg.clone()),
+                            };
                         }
-                    }
+                    },
                     Err(e) => {
                         return Result_ {
                             action: Action::Error,
@@ -133,13 +132,7 @@ pub async fn execute(
             .as_ref()
             .map(parse_config_map)
             .unwrap_or_default();
-        let ctx = wafer.make_context(
-            &flow.id,
-            &step.id,
-            step_config,
-            cancelled.clone(),
-            deadline,
-        );
+        let ctx = wafer.make_context(&flow.id, &step.id, step_config, cancelled.clone(), deadline);
 
         // --- Look up block ---
         let block_name = wafer
@@ -147,7 +140,11 @@ pub async fn execute(
             .get(&step.block)
             .cloned()
             .unwrap_or_else(|| step.block.clone());
-        let block = match wafer.all_blocks.get(&block_name).or_else(|| wafer.all_blocks.get(&step.block)) {
+        let block = match wafer
+            .all_blocks
+            .get(&block_name)
+            .or_else(|| wafer.all_blocks.get(&step.block))
+        {
             Some(b) => b.clone(),
             None => {
                 return Result_ {
@@ -177,7 +174,9 @@ pub async fn execute(
         let result = run_block_with_recovery(&*block, &ctx, msg).await;
 
         // --- Observability: block end ---
-        wafer.hooks.fire_block_end(&obs_ctx, &result, start.elapsed());
+        wafer
+            .hooks
+            .fire_block_end(&obs_ctx, &result, start.elapsed());
 
         // --- Process result ---
         match result.action {
@@ -233,8 +232,7 @@ pub async fn execute(
                         }
                     } else if let Some(target_flow) = &entry.flow {
                         // Flow transfer: execute the target flow (boxed to break recursion)
-                        let flow_result =
-                            Box::pin(wafer.run(target_flow, msg)).await;
+                        let flow_result = Box::pin(wafer.run(target_flow, msg)).await;
                         return flow_result;
                     }
                     break;

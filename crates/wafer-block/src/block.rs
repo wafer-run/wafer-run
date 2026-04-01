@@ -18,7 +18,11 @@ use crate::{LifecycleEvent, Message, Result_, WaferError};
 pub trait Block: Send + Sync {
     fn info(&self) -> BlockInfo;
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
-    async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError>;
+    async fn lifecycle(
+        &self,
+        ctx: &dyn Context,
+        event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError>;
 
     /// Called after the runtime starts with a handle for running flows/blocks.
     /// The handle is type-erased — downcast to `wafer_run::RuntimeHandle` if needed.
@@ -43,7 +47,11 @@ pub trait Block: Send + Sync {
 pub trait Block {
     fn info(&self) -> BlockInfo;
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
-    async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError>;
+    async fn lifecycle(
+        &self,
+        ctx: &dyn Context,
+        event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError>;
 
     /// Return the capability restrictions for this block, if any.
     fn block_capabilities(&self) -> Option<&BlockCapabilities> {
@@ -69,10 +77,7 @@ type AsyncHandler = Box<
 
 #[cfg(target_arch = "wasm32")]
 type AsyncHandler = Box<
-    dyn for<'a> Fn(
-            &'a dyn Context,
-            &'a mut Message,
-        ) -> Pin<Box<dyn Future<Output = Result_> + 'a>>
+    dyn for<'a> Fn(&'a dyn Context, &'a mut Message) -> Pin<Box<dyn Future<Output = Result_> + 'a>>
         + Sync,
 >;
 

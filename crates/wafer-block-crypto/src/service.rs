@@ -38,8 +38,7 @@ impl CryptoService for Argon2JwtCryptoService {
 
     fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
         use argon2::{password_hash::PasswordHash, Argon2, PasswordVerifier};
-        let parsed = PasswordHash::new(hash)
-            .map_err(|e| CryptoError::HashError(e.to_string()))?;
+        let parsed = PasswordHash::new(hash).map_err(|e| CryptoError::HashError(e.to_string()))?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .map_err(|_| CryptoError::PasswordMismatch)
@@ -64,10 +63,7 @@ impl CryptoService for Argon2JwtCryptoService {
             .map_err(|e| CryptoError::SignError(e.to_string()))
     }
 
-    fn verify(
-        &self,
-        token: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+    fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
         use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());

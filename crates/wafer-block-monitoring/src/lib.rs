@@ -52,9 +52,14 @@ impl MonitoringBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for MonitoringBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/monitoring", "0.0.1", "middleware@v1", "Request metrics and monitoring")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/monitoring",
+            "0.0.1",
+            "middleware@v1",
+            "Request metrics and monitoring",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

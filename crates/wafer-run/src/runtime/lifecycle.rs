@@ -36,13 +36,16 @@ impl Wafer {
             None,
         );
         for (name, block) in &self.blocks {
-            if let Err(e) = block.lifecycle(
-                &ctx,
-                LifecycleEvent {
-                    event_type: LifecycleType::Start,
-                    data: Vec::new(),
-                },
-            ).await {
+            if let Err(e) = block
+                .lifecycle(
+                    &ctx,
+                    LifecycleEvent {
+                        event_type: LifecycleType::Start,
+                        data: Vec::new(),
+                    },
+                )
+                .await
+            {
                 tracing::error!(block = %name, error = %e, "block start lifecycle failed");
             }
         }
@@ -69,13 +72,16 @@ impl Wafer {
             None,
         );
         for (name, block) in &self.blocks {
-            if let Err(e) = block.lifecycle(
-                &ctx,
-                LifecycleEvent {
-                    event_type: LifecycleType::Stop,
-                    data: Vec::new(),
-                },
-            ).await {
+            if let Err(e) = block
+                .lifecycle(
+                    &ctx,
+                    LifecycleEvent {
+                        event_type: LifecycleType::Stop,
+                        data: Vec::new(),
+                    },
+                )
+                .await
+            {
                 tracing::error!(block = %name, error = %e, "block stop lifecycle failed");
             }
         }
@@ -91,13 +97,16 @@ impl Wafer {
             None,
         );
         for (name, block) in &self.blocks {
-            if let Err(e) = block.lifecycle(
-                &ctx,
-                LifecycleEvent {
-                    event_type: LifecycleType::Stop,
-                    data: Vec::new(),
-                },
-            ).await {
+            if let Err(e) = block
+                .lifecycle(
+                    &ctx,
+                    LifecycleEvent {
+                        event_type: LifecycleType::Stop,
+                        data: Vec::new(),
+                    },
+                )
+                .await
+            {
                 tracing::error!(block = %name, error = %e, "block stop lifecycle failed");
             }
         }

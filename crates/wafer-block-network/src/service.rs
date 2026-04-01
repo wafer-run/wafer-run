@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 // Re-export the trait and types from wafer-core.
-pub use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Request, Response};
+pub use wafer_core::interfaces::network::service::{
+    NetworkError, NetworkService, Request, Response,
+};
 
 // ---------------------------------------------------------------------------
 // HTTP client concrete implementation (reqwest async)
@@ -42,9 +44,10 @@ impl NetworkService for HttpNetworkService {
             ));
         }
 
-        let method = req.method.parse::<reqwest::Method>().map_err(|e| {
-            NetworkError::RequestError(format!("invalid method: {}", e))
-        })?;
+        let method = req
+            .method
+            .parse::<reqwest::Method>()
+            .map_err(|e| NetworkError::RequestError(format!("invalid method: {}", e)))?;
 
         let client = self.client.get_or_init(|| {
             reqwest::Client::builder()
@@ -63,9 +66,10 @@ impl NetworkService for HttpNetworkService {
             builder = builder.body(body.clone());
         }
 
-        let response = builder.send().await.map_err(|e| {
-            NetworkError::RequestError(e.to_string())
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| NetworkError::RequestError(e.to_string()))?;
 
         let status_code = response.status().as_u16();
 
@@ -77,9 +81,10 @@ impl NetworkService for HttpNetworkService {
             }
         }
 
-        let body = response.bytes().await.map_err(|e| {
-            NetworkError::RequestError(format!("reading body: {}", e))
-        })?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| NetworkError::RequestError(format!("reading body: {}", e)))?;
 
         Ok(Response {
             status_code,

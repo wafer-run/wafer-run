@@ -78,10 +78,7 @@ impl BlockDef {
             );
         }
         if let Some(runtime) = &self.runtime {
-            obj.insert(
-                "runtime".into(),
-                serde_json::Value::String(runtime.clone()),
-            );
+            obj.insert("runtime".into(), serde_json::Value::String(runtime.clone()));
         }
         serde_json::Value::Object(obj).to_string()
     }

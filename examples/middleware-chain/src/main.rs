@@ -68,20 +68,26 @@ async fn main() {
     wafer_block_router::register(&mut wafer);
 
     // Flow-level config (same shape as wafer-flow-http-server::register)
-    wafer.add_block_config("custom-http-server", serde_json::json!({
-        "listen": "0.0.0.0:8080",
-        "routes": [
-            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
-            { "path": "/_inspector", "block": "wafer-run/inspector" },
-            { "path": "/api/**", "block": "echo-handler" },
-            { "path": "/stats", "block": "stats" },
-            { "path": "/**", "block": "fallback" }
-        ]
-    }));
+    wafer.add_block_config(
+        "custom-http-server",
+        serde_json::json!({
+            "listen": "0.0.0.0:8080",
+            "routes": [
+                { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+                { "path": "/_inspector", "block": "wafer-run/inspector" },
+                { "path": "/api/**", "block": "echo-handler" },
+                { "path": "/stats", "block": "stats" },
+                { "path": "/**", "block": "fallback" }
+            ]
+        }),
+    );
 
-    wafer.add_block_config("wafer-run/inspector", serde_json::json!({
-        "allow_anonymous": true
-    }));
+    wafer.add_block_config(
+        "wafer-run/inspector",
+        serde_json::json!({
+            "allow_anonymous": true
+        }),
+    );
 
     // --- Custom middleware blocks ---
 
@@ -106,17 +112,23 @@ async fn main() {
         let key = msg.header("X-Api-Key").to_string();
         if key.is_empty() {
             msg.set_meta("resp.status", "401");
-            return json_respond(msg, &serde_json::json!({
-                "error": "unauthorized",
-                "message": "missing X-Api-Key header"
-            }));
+            return json_respond(
+                msg,
+                &serde_json::json!({
+                    "error": "unauthorized",
+                    "message": "missing X-Api-Key header"
+                }),
+            );
         }
         if key != "secret123" {
             msg.set_meta("resp.status", "403");
-            return json_respond(msg, &serde_json::json!({
-                "error": "forbidden",
-                "message": "invalid API key"
-            }));
+            return json_respond(
+                msg,
+                &serde_json::json!({
+                    "error": "forbidden",
+                    "message": "invalid API key"
+                }),
+            );
         }
         msg.set_meta("auth.api_key_valid", "true");
         msg.cont_ref()
@@ -128,35 +140,44 @@ async fn main() {
     wafer.register_func("echo-handler", |_ctx, msg| {
         let body: serde_json::Value = msg.decode().unwrap_or(serde_json::Value::Null);
         let req_num = msg.get_meta("request.number").to_string();
-        json_respond(msg, &serde_json::json!({
-            "echo": {
-                "path": msg.path(),
-                "action": msg.action(),
-                "body": body,
-                "request_number": req_num,
-            },
-            "message": "request passed all middleware checks!"
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "echo": {
+                    "path": msg.path(),
+                    "action": msg.action(),
+                    "body": body,
+                    "request_number": req_num,
+                },
+                "message": "request passed all middleware checks!"
+            }),
+        )
     });
 
     // Stats endpoint
     wafer.register_func("stats", |_ctx, msg| {
-        json_respond(msg, &serde_json::json!({
-            "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
+            }),
+        )
     });
 
     // 404 fallback
     wafer.register_func("fallback", |_ctx, msg| {
         msg.set_meta("resp.status", "404");
-        json_respond(msg, &serde_json::json!({
-            "error": "not found",
-            "endpoints": [
-                "POST /api/echo -H 'X-Api-Key: secret123'",
-                "GET /stats",
-                "GET /_inspector/ui"
-            ]
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "error": "not found",
+                "endpoints": [
+                    "POST /api/echo -H 'X-Api-Key: secret123'",
+                    "GET /stats",
+                    "GET /_inspector/ui"
+                ]
+            }),
+        )
     });
 
     tracing::info!("middleware-chain example on http://localhost:8080");

@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use wafer_core::clients::{crypto, database as db};
-use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
 use wafer_block::*;
+use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
+use wafer_core::clients::{crypto, database as db};
 
 /// AuthBlock validates authentication from HTTP request metadata.
 /// Supports JWT Bearer tokens, API keys (sb_ prefix), and httpOnly cookies.
@@ -72,7 +72,7 @@ impl AuthBlock {
         };
 
         if result.records.is_empty() {
-            return Err(auth_error(msg,"Invalid API key"));
+            return Err(auth_error(msg, "Invalid API key"));
         }
 
         let key_record = &result.records[0];
@@ -82,14 +82,14 @@ impl AuthBlock {
         // here in constant time to prevent subtle timing leaks.
         if let Some(stored_hash) = key_record.data.get("key_hash").and_then(|v| v.as_str()) {
             if !constant_time_eq(key_hash.as_bytes(), stored_hash.as_bytes()) {
-                return Err(auth_error(msg,"Invalid API key"));
+                return Err(auth_error(msg, "Invalid API key"));
             }
         }
 
         // Check if revoked
         if let Some(revoked) = key_record.data.get("revoked_at") {
             if !revoked.is_null() {
-                return Err(auth_error(msg,"API key has been revoked"));
+                return Err(auth_error(msg, "API key has been revoked"));
             }
         }
 
@@ -99,7 +99,7 @@ impl AuthBlock {
                 if !expires_str.is_empty() {
                     if let Ok(exp_time) = chrono::DateTime::parse_from_rfc3339(expires_str) {
                         if exp_time < chrono::Utc::now() {
-                            return Err(auth_error(msg,"API key has expired"));
+                            return Err(auth_error(msg, "API key has expired"));
                         }
                     }
                 }
@@ -115,7 +115,7 @@ impl AuthBlock {
             .to_string();
 
         if user_id.is_empty() {
-            return Err(auth_error(msg,"API key has no associated user"));
+            return Err(auth_error(msg, "API key has no associated user"));
         }
 
         // Look up user email
@@ -143,7 +143,12 @@ impl AuthBlock {
             Ok(r) => r
                 .records
                 .iter()
-                .filter_map(|rec| rec.data.get("role").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .filter_map(|rec| {
+                    rec.data
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect(),
             Err(_) => Vec::new(),
         };
@@ -160,7 +165,7 @@ impl AuthBlock {
         // Verify JWT signature and extract claims
         let claims_map = match crypto::verify(ctx, token).await {
             Ok(data) => data,
-            Err(_) => return Err(auth_error(msg,"Invalid or expired token")),
+            Err(_) => return Err(auth_error(msg, "Invalid or expired token")),
         };
 
         // Convert claims HashMap to serde_json::Value for uniform access
@@ -198,7 +203,7 @@ impl AuthBlock {
         };
 
         if user_id.is_empty() {
-            return Err(auth_error(msg,"Token missing user_id"));
+            return Err(auth_error(msg, "Token missing user_id"));
         }
 
         Ok((user_id, email, roles))
@@ -209,17 +214,22 @@ impl AuthBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for AuthBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/auth-validator", "0.0.1", "middleware@v1", "Authentication middleware: JWT, API key, and cookie auth")
-            .instance_mode(InstanceMode::Singleton)
-            .requires(vec!["wafer-run/crypto".into(), "wafer-run/database".into()])
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/auth-validator",
+            "0.0.1",
+            "middleware@v1",
+            "Authentication middleware: JWT, API key, and cookie auth",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .requires(vec!["wafer-run/crypto".into(), "wafer-run/database".into()])
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         // Extract token
         let token = match Self::extract_token(msg) {
             Some(t) => t,
-            None => return auth_error(msg,"No authentication token provided"),
+            None => return auth_error(msg, "No authentication token provided"),
         };
 
         // Validate based on token type

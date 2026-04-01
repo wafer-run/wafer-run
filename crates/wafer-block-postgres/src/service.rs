@@ -143,10 +143,7 @@ impl PostgresDatabaseService {
             );
         }
         if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(now),
-            );
+            data.insert("updated_at".to_string(), serde_json::Value::String(now));
         }
 
         // Auto-create table if it doesn't exist
@@ -377,7 +374,11 @@ impl PostgresDatabaseService {
         Ok(())
     }
 
-    async fn schema_add_column_async(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
+    async fn schema_add_column_async(
+        &self,
+        table: &str,
+        column: &Column,
+    ) -> Result<(), DatabaseError> {
         let col_sql = schema_column_to_sql(column);
         let sql = format!("ALTER TABLE {} ADD COLUMN IF NOT EXISTS {}", table, col_sql);
         sqlx::query(&sql)
@@ -410,7 +411,10 @@ impl PostgresDatabaseService {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DatabaseError::Internal(format!("get_columns: {e}")))?;
-        Ok(rows.into_iter().map(|(name,)| name.to_lowercase()).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(name,)| name.to_lowercase())
+            .collect())
     }
 
     /// Auto-create a table with id, created_at, updated_at and any additional
@@ -446,14 +450,14 @@ impl PostgresDatabaseService {
                 let pg_type = pg_type_for_json_value(value);
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
-                    table, sanitize_ident(key), pg_type
+                    table,
+                    sanitize_ident(key),
+                    pg_type
                 );
                 sqlx::query(&alter)
                     .execute(&self.pool)
                     .await
-                    .map_err(|e| {
-                        DatabaseError::Internal(format!("add column {key}: {e}"))
-                    })?;
+                    .map_err(|e| DatabaseError::Internal(format!("add column {key}: {e}")))?;
             }
         }
         Ok(())
@@ -472,28 +476,24 @@ impl PostgresDatabaseService {
             if !existing.contains(&f.field.to_lowercase()) {
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table, sanitize_ident(&f.field)
+                    table,
+                    sanitize_ident(&f.field)
                 );
-                sqlx::query(&alter)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| {
-                        DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
-                    })?;
+                sqlx::query(&alter).execute(&self.pool).await.map_err(|e| {
+                    DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
+                })?;
             }
         }
         for s in sort {
             if !existing.contains(&s.field.to_lowercase()) {
                 let alter = format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table, sanitize_ident(&s.field)
+                    table,
+                    sanitize_ident(&s.field)
                 );
-                sqlx::query(&alter)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| {
-                        DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
-                    })?;
+                sqlx::query(&alter).execute(&self.pool).await.map_err(|e| {
+                    DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
+                })?;
             }
         }
         Ok(())
@@ -630,7 +630,15 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
     sql.push_str("INDEX IF NOT EXISTS ");
 
     let name = if idx.name.is_empty() {
-        format!("idx_{}_{}", sanitize_ident(table_name), idx.columns.iter().map(|c| sanitize_ident(c)).collect::<Vec<_>>().join("_"))
+        format!(
+            "idx_{}_{}",
+            sanitize_ident(table_name),
+            idx.columns
+                .iter()
+                .map(|c| sanitize_ident(c))
+                .collect::<Vec<_>>()
+                .join("_")
+        )
     } else {
         sanitize_ident(&idx.name)
     };
@@ -656,7 +664,11 @@ impl DatabaseService for PostgresDatabaseService {
         self.get_async(collection, id).await
     }
 
-    async fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
+    async fn list(
+        &self,
+        collection: &str,
+        opts: &ListOptions,
+    ) -> Result<RecordList, DatabaseError> {
         self.list_async(collection, opts).await
     }
 
@@ -885,13 +897,11 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                 Ok(None) => serde_json::Value::Null,
                 Err(_) => serde_json::Value::Null,
             },
-            "JSON" | "JSONB" => {
-                match row.try_get::<Option<serde_json::Value>, _>(col.ordinal()) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
-                }
-            }
+            "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(col.ordinal()) {
+                Ok(Some(v)) => v,
+                Ok(None) => serde_json::Value::Null,
+                Err(_) => serde_json::Value::Null,
+            },
             "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(col.ordinal()) {
                 Ok(Some(bytes)) => serde_json::Value::String(base64_encode(&bytes)),
                 Ok(None) => serde_json::Value::Null,
@@ -904,8 +914,7 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                     Ok(None) => serde_json::Value::Null,
                     Err(_) => {
                         // Try chrono DateTime
-                        match row
-                            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col.ordinal())
+                        match row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col.ordinal())
                         {
                             Ok(Some(dt)) => serde_json::Value::String(dt.to_rfc3339()),
                             Ok(None) => serde_json::Value::Null,
@@ -959,9 +968,7 @@ fn bind_json_value<'q, O>(
             }
         }
         serde_json::Value::String(s) => q.bind(s.as_str()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            q.bind(v.clone())
-        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
     }
 }
 
@@ -983,9 +990,7 @@ fn bind_json_value_query<'q>(
             }
         }
         serde_json::Value::String(s) => q.bind(s.as_str()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            q.bind(v.clone())
-        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
     }
 }
 
@@ -1071,18 +1076,9 @@ mod tests {
         let (clause, params) = build_where_clause(&filters);
         assert_eq!(clause, " WHERE status IN ($1, $2, $3)");
         assert_eq!(params.len(), 3);
-        assert_eq!(
-            params[0],
-            serde_json::Value::String("active".to_string())
-        );
-        assert_eq!(
-            params[1],
-            serde_json::Value::String("pending".to_string())
-        );
-        assert_eq!(
-            params[2],
-            serde_json::Value::String("review".to_string())
-        );
+        assert_eq!(params[0], serde_json::Value::String("active".to_string()));
+        assert_eq!(params[1], serde_json::Value::String("pending".to_string()));
+        assert_eq!(params[2], serde_json::Value::String("review".to_string()));
     }
 
     #[test]
@@ -1184,10 +1180,7 @@ mod tests {
             pg_type_for_json_value(&serde_json::json!(3.14)),
             "DOUBLE PRECISION"
         );
-        assert_eq!(
-            pg_type_for_json_value(&serde_json::json!("hello")),
-            "TEXT"
-        );
+        assert_eq!(pg_type_for_json_value(&serde_json::json!("hello")), "TEXT");
         assert_eq!(
             pg_type_for_json_value(&serde_json::json!([1, 2, 3])),
             "JSONB"
@@ -1204,7 +1197,10 @@ mod tests {
         assert_eq!(sanitize_ident("my_table"), "my_table");
         assert_eq!(sanitize_ident("table123"), "table123");
         assert_eq!(sanitize_ident("drop table;--"), "droptable");
-        assert_eq!(sanitize_ident("Robert'); DROP TABLE users;--"), "RobertDROPTABLEusers");
+        assert_eq!(
+            sanitize_ident("Robert'); DROP TABLE users;--"),
+            "RobertDROPTABLEusers"
+        );
     }
 
     #[test]
@@ -1248,10 +1244,7 @@ mod tests {
             },
         ];
         let (clause, params) = build_where_clause(&filters);
-        assert_eq!(
-            clause,
-            " WHERE age >= $1 AND score < $2 AND rank <= $3"
-        );
+        assert_eq!(clause, " WHERE age >= $1 AND score < $2 AND rank <= $3");
         assert_eq!(params.len(), 3);
     }
 

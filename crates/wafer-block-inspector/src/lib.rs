@@ -19,7 +19,9 @@ pub struct InspectorBlock {
 
 impl InspectorBlock {
     pub fn new() -> Self {
-        Self { policy: RwLock::new(AccessPolicy::Roles(vec!["admin".to_string()])) }
+        Self {
+            policy: RwLock::new(AccessPolicy::Roles(vec!["admin".to_string()])),
+        }
     }
 }
 
@@ -27,9 +29,14 @@ impl InspectorBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for InspectorBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/inspector", "0.0.1", "http-handler@v1", "Runtime introspection — blocks, flows, and visual UI")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/inspector",
+            "0.0.1",
+            "http-handler@v1",
+            "Runtime introspection — blocks, flows, and visual UI",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -55,7 +62,11 @@ impl Block for InspectorBlock {
                         .collect();
                     if !allowed.iter().any(|a| user_roles.contains(&a.as_str())) {
                         let roles_list = allowed.join(", ");
-                        return error(msg, "forbidden", &format!("inspector requires one of these roles: [{}]", roles_list));
+                        return error(
+                            msg,
+                            "forbidden",
+                            &format!("inspector requires one of these roles: [{}]", roles_list),
+                        );
                     }
                 }
             }
@@ -75,12 +86,15 @@ impl Block for InspectorBlock {
             let configs = ctx.block_configs();
             let blocks = ctx.registered_blocks();
             let interfaces = ctx.interface_specs();
-            return json_respond(msg, &serde_json::json!({
-                "flows": flows,
-                "configs": configs,
-                "blocks": blocks,
-                "interfaces": interfaces,
-            }));
+            return json_respond(
+                msg,
+                &serde_json::json!({
+                    "flows": flows,
+                    "configs": configs,
+                    "blocks": blocks,
+                    "interfaces": interfaces,
+                }),
+            );
         }
 
         if path.ends_with("/blocks") {
@@ -143,9 +157,15 @@ impl Block for InspectorBlock {
         if let LifecycleType::Init = event.event_type {
             if let Ok(config) = serde_json::from_slice::<serde_json::Value>(&event.data) {
                 // "allow_anonymous": true  → anyone can access
-                if config.get("allow_anonymous").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if config
+                    .get("allow_anonymous")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     *self.policy.write().unwrap() = AccessPolicy::Anonymous;
-                    tracing::warn!("inspector: anonymous access enabled — do not use in production");
+                    tracing::warn!(
+                        "inspector: anonymous access enabled — do not use in production"
+                    );
                 }
                 // "allowed_roles": ["admin", "developer"]  → only these roles
                 else if let Some(roles) = config.get("allowed_roles").and_then(|v| v.as_array()) {

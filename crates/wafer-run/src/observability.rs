@@ -53,7 +53,10 @@ impl ObservabilityBus {
         }
     }
 
-    pub fn on_block_start(&self, h: impl Fn(&ObservabilityContext) + MaybeSend + MaybeSync + 'static) {
+    pub fn on_block_start(
+        &self,
+        h: impl Fn(&ObservabilityContext) + MaybeSend + MaybeSync + 'static,
+    ) {
         self.block_start_handlers.write().push(Arc::new(h));
     }
 
@@ -82,7 +85,12 @@ impl ObservabilityBus {
         }
     }
 
-    pub(crate) fn fire_block_end(&self, ctx: &ObservabilityContext, result: &Result_, duration: Duration) {
+    pub(crate) fn fire_block_end(
+        &self,
+        ctx: &ObservabilityContext,
+        result: &Result_,
+        duration: Duration,
+    ) {
         let handlers = self.block_end_handlers.read();
         for h in handlers.iter() {
             h(ctx, result, duration);

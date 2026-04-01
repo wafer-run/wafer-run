@@ -18,9 +18,14 @@ impl SecurityHeadersBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for SecurityHeadersBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/security-headers", "0.0.1", "middleware@v1", "Adds standard security headers to HTTP responses")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/security-headers",
+            "0.0.1",
+            "middleware@v1",
+            "Adds standard security headers to HTTP responses",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -33,7 +38,10 @@ impl Block for SecurityHeadersBlock {
         msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
         msg.set_meta("resp.header.X-Frame-Options", "DENY");
         msg.set_meta("resp.header.X-XSS-Protection", "1; mode=block");
-        msg.set_meta("resp.header.Referrer-Policy", "strict-origin-when-cross-origin");
+        msg.set_meta(
+            "resp.header.Referrer-Policy",
+            "strict-origin-when-cross-origin",
+        );
         msg.set_meta("resp.header.Content-Security-Policy", &csp);
         msg.set_meta(
             "resp.header.Strict-Transport-Security",
@@ -57,5 +65,8 @@ impl Block for SecurityHeadersBlock {
 }
 
 pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/security-headers", Arc::new(SecurityHeadersBlock::new()));
+    w.register_block(
+        "wafer-run/security-headers",
+        Arc::new(SecurityHeadersBlock::new()),
+    );
 }

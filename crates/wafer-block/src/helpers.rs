@@ -206,10 +206,8 @@ impl ResponseBuilder {
     /// Body sets the response body with the given content type.
     pub fn body(mut self, data: Vec<u8>, content_type: &str) -> Result_ {
         if !content_type.is_empty() {
-            self.meta.insert(
-                META_RESP_CONTENT_TYPE.to_string(),
-                content_type.to_string(),
-            );
+            self.meta
+                .insert(META_RESP_CONTENT_TYPE.to_string(), content_type.to_string());
         }
         self.msg.respond(Response {
             data,

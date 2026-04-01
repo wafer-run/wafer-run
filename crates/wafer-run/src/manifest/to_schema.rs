@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::schema::types::*;
 use super::types::*;
+use crate::schema::types::*;
 
 /// Convert a map of collection definitions to schema Table definitions.
 /// Tables are sorted by name for deterministic creation order (important for

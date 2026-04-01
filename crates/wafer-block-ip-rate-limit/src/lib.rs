@@ -30,9 +30,14 @@ impl RateLimitBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for RateLimitBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/ip-rate-limit", "0.0.1", "middleware@v1", "Per-IP rate limiting")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/ip-rate-limit",
+            "0.0.1",
+            "middleware@v1",
+            "Per-IP rate limiting",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -95,24 +100,15 @@ impl Block for RateLimitBlock {
 
             let mut m = msg.clone();
             m.set_meta("resp.header.Retry-After", &retry_after);
-            m.set_meta(
-                "resp.header.X-RateLimit-Limit",
-                &max.to_string(),
-            );
+            m.set_meta("resp.header.X-RateLimit-Limit", &max.to_string());
             m.set_meta("resp.header.X-RateLimit-Remaining", "0");
 
             return error(&m, "resource_exhausted", "Too many requests");
         }
 
         let remaining = max - bucket.count;
-        msg.set_meta(
-            "resp.header.X-RateLimit-Limit",
-            &max.to_string(),
-        );
-        msg.set_meta(
-            "resp.header.X-RateLimit-Remaining",
-            &remaining.to_string(),
-        );
+        msg.set_meta("resp.header.X-RateLimit-Limit", &max.to_string());
+        msg.set_meta("resp.header.X-RateLimit-Remaining", &remaining.to_string());
 
         msg.cont_ref()
     }

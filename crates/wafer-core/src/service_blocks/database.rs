@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use wafer_block::block::Block;
-use wafer_block::types::BlockInfo;
 use wafer_block::context::Context;
-use wafer_block::*;
+use wafer_block::types::BlockInfo;
 use wafer_block::BlockRegistry;
+use wafer_block::*;
 use wafer_run::schema::Table;
 
 use crate::interfaces::database::{handler, service::DatabaseService};
@@ -33,8 +33,13 @@ impl DatabaseBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for DatabaseBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/database", "0.0.1", "database@v1", "Database service (SQL queries, CRUD, schema migrations)")
-            .category(BlockCategory::Service)
+        BlockInfo::new(
+            "wafer-run/database",
+            "0.0.1",
+            "database@v1",
+            "Database service (SQL queries, CRUD, schema migrations)",
+        )
+        .category(BlockCategory::Service)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {

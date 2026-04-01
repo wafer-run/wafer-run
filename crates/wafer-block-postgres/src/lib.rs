@@ -10,12 +10,12 @@ use std::sync::{Arc, OnceLock};
 
 use wafer_run::block::{Block, BlockCategory, BlockInfo};
 use wafer_run::context::Context;
-use wafer_run::manifest::{CollectionDef, collections_to_tables};
+use wafer_run::manifest::{collections_to_tables, CollectionDef};
 use wafer_run::schema::Table;
 use wafer_run::types::*;
 
-use wafer_core::interfaces::database::service::DatabaseService;
 use service::PostgresDatabaseService;
+use wafer_core::interfaces::database::service::DatabaseService;
 
 /// The PostgreSQL database block.
 ///
@@ -39,8 +39,13 @@ impl PostgresDatabaseBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for PostgresDatabaseBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/postgres", "0.0.1", "database@v1", "PostgreSQL database block")
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/postgres",
+            "0.0.1",
+            "database@v1",
+            "PostgreSQL database block",
+        )
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -76,13 +81,12 @@ impl Block for PostgresDatabaseBlock {
             };
             self.tables.set(tables).ok();
 
-            let url = config.env_or("DATABASE_URL", "url")
-                .ok_or_else(|| {
-                    WaferError::new(
-                        "config",
-                        "wafer-run/postgres: requires DATABASE_URL env var or url config",
-                    )
-                })?;
+            let url = config.env_or("DATABASE_URL", "url").ok_or_else(|| {
+                WaferError::new(
+                    "config",
+                    "wafer-run/postgres: requires DATABASE_URL env var or url config",
+                )
+            })?;
 
             let svc = PostgresDatabaseService::connect(&url)
                 .await
@@ -99,7 +103,8 @@ impl Block for PostgresDatabaseBlock {
                     service.as_ref(),
                     tables,
                     &event,
-                ).await?;
+                )
+                .await?;
             }
         }
 

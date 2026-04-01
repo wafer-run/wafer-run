@@ -41,9 +41,10 @@ impl Accumulator {
         }
 
         let root_key = &segments[0];
-        let root = self.data.get(root_key).ok_or_else(|| {
-            ExprError::UnresolvedReference(format!("$.{root_key}"))
-        })?;
+        let root = self
+            .data
+            .get(root_key)
+            .ok_or_else(|| ExprError::UnresolvedReference(format!("$.{root_key}")))?;
 
         let mut current = root;
         for seg in &segments[1..] {
@@ -142,10 +143,7 @@ mod tests {
     #[test]
     fn resolve_nested() {
         let mut acc = Accumulator::new();
-        acc.set(
-            "step1",
-            json!({ "data": { "nested": { "value": true } } }),
-        );
+        acc.set("step1", json!({ "data": { "nested": { "value": true } } }));
         assert_eq!(
             acc.resolve("$.step1.data.nested.value").unwrap(),
             json!(true)

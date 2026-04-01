@@ -73,8 +73,12 @@ pub enum BlockCategory {
     Misc,
 }
 
-fn default_true() -> bool { true }
-fn default_instance_mode() -> crate::InstanceMode { crate::InstanceMode::PerNode }
+fn default_true() -> bool {
+    true
+}
+fn default_instance_mode() -> crate::InstanceMode {
+    crate::InstanceMode::PerNode
+}
 
 /// Block metadata — identity, schema declarations, and admin UI metadata.
 ///
@@ -209,16 +213,36 @@ pub struct BlockEndpoint {
 
 impl BlockEndpoint {
     pub fn get(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self { method: HttpMethod::Get, path: path.into(), summary: summary.into(), auth }
+        Self {
+            method: HttpMethod::Get,
+            path: path.into(),
+            summary: summary.into(),
+            auth,
+        }
     }
     pub fn post(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self { method: HttpMethod::Post, path: path.into(), summary: summary.into(), auth }
+        Self {
+            method: HttpMethod::Post,
+            path: path.into(),
+            summary: summary.into(),
+            auth,
+        }
     }
     pub fn patch(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self { method: HttpMethod::Patch, path: path.into(), summary: summary.into(), auth }
+        Self {
+            method: HttpMethod::Patch,
+            path: path.into(),
+            summary: summary.into(),
+            auth,
+        }
     }
     pub fn delete(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self { method: HttpMethod::Delete, path: path.into(), summary: summary.into(), auth }
+        Self {
+            method: HttpMethod::Delete,
+            path: path.into(),
+            summary: summary.into(),
+            auth,
+        }
     }
 }
 
@@ -236,7 +260,11 @@ pub struct BlockConfigKey {
 
 impl BlockConfigKey {
     pub fn new(key: &str, description: &str, default: &str) -> Self {
-        Self { key: key.into(), description: description.into(), default: default.into() }
+        Self {
+            key: key.into(),
+            description: description.into(),
+            default: default.into(),
+        }
     }
 }
 
@@ -313,7 +341,11 @@ pub struct IndexSchema {
 
 impl CollectionSchema {
     pub fn new(name: &str) -> Self {
-        Self { name: name.to_string(), fields: Vec::new(), indexes: Vec::new() }
+        Self {
+            name: name.to_string(),
+            fields: Vec::new(),
+            indexes: Vec::new(),
+        }
     }
 
     pub fn field(mut self, name: &str, field_type: &str) -> Self {
@@ -322,32 +354,42 @@ impl CollectionSchema {
     }
 
     pub fn field_unique(mut self, name: &str, field_type: &str) -> Self {
-        self.fields.push(FieldSchema::new(name, field_type).set_unique());
+        self.fields
+            .push(FieldSchema::new(name, field_type).set_unique());
         self
     }
 
     pub fn field_optional(mut self, name: &str, field_type: &str) -> Self {
-        self.fields.push(FieldSchema::new(name, field_type).set_optional());
+        self.fields
+            .push(FieldSchema::new(name, field_type).set_optional());
         self
     }
 
     pub fn field_default(mut self, name: &str, field_type: &str, default: &str) -> Self {
-        self.fields.push(FieldSchema::new(name, field_type).set_default(default));
+        self.fields
+            .push(FieldSchema::new(name, field_type).set_default(default));
         self
     }
 
     pub fn field_ref(mut self, name: &str, field_type: &str, reference: &str) -> Self {
-        self.fields.push(FieldSchema::new(name, field_type).set_ref(reference));
+        self.fields
+            .push(FieldSchema::new(name, field_type).set_ref(reference));
         self
     }
 
     pub fn index(mut self, fields: &[&str]) -> Self {
-        self.indexes.push(IndexSchema { fields: fields.iter().map(|s| s.to_string()).collect(), unique: false });
+        self.indexes.push(IndexSchema {
+            fields: fields.iter().map(|s| s.to_string()).collect(),
+            unique: false,
+        });
         self
     }
 
     pub fn unique_index(mut self, fields: &[&str]) -> Self {
-        self.indexes.push(IndexSchema { fields: fields.iter().map(|s| s.to_string()).collect(), unique: true });
+        self.indexes.push(IndexSchema {
+            fields: fields.iter().map(|s| s.to_string()).collect(),
+            unique: true,
+        });
         self
     }
 }
@@ -364,10 +406,22 @@ impl FieldSchema {
         }
     }
 
-    pub fn set_unique(mut self) -> Self { self.unique = true; self }
-    pub fn set_optional(mut self) -> Self { self.optional = true; self }
-    pub fn set_default(mut self, val: &str) -> Self { self.default_value = val.to_string(); self }
-    pub fn set_ref(mut self, reference: &str) -> Self { self.reference = reference.to_string(); self }
+    pub fn set_unique(mut self) -> Self {
+        self.unique = true;
+        self
+    }
+    pub fn set_optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+    pub fn set_default(mut self, val: &str) -> Self {
+        self.default_value = val.to_string();
+        self
+    }
+    pub fn set_ref(mut self, reference: &str) -> Self {
+        self.reference = reference.to_string();
+        self
+    }
 }
 
 /// A UI route declared by a block for SSR page serving.
@@ -675,9 +729,7 @@ pub trait MetaAccess {
 
 impl MetaAccess for Vec<crate::MetaEntry> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.iter()
-            .find(|e| e.key == key)
-            .map(|e| e.value.as_str())
+        self.iter().find(|e| e.key == key).map(|e| e.value.as_str())
     }
 
     fn set(&mut self, key: String, value: String) {
@@ -695,9 +747,7 @@ impl MetaAccess for Vec<crate::MetaEntry> {
 
 impl MetaAccess for [crate::MetaEntry] {
     fn get(&self, key: &str) -> Option<&str> {
-        self.iter()
-            .find(|e| e.key == key)
-            .map(|e| e.value.as_str())
+        self.iter().find(|e| e.key == key).map(|e| e.value.as_str())
     }
 
     fn set(&mut self, _key: String, _value: String) {

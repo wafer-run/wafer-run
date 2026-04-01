@@ -14,11 +14,10 @@ pub use crate::interfaces::database::service::{
 
 // Re-export schema types for declarative table management.
 pub use crate::interfaces::database::service::{
-    Table, Column, DataType, Index, Reference, DefaultValue, DefaultVal,
-    pk, pk_int, col_string, col_text, col_int, col_int64, col_float,
-    col_bool, col_datetime, col_json, col_blob, timestamps, schema_soft_delete,
-    default_now, default_null, default_zero, default_empty, default_false,
-    default_true, default_int, default_string,
+    col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
+    col_text, default_empty, default_false, default_int, default_now, default_null, default_string,
+    default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
+    DefaultVal, DefaultValue, Index, Reference, Table,
 };
 
 use super::{call_service, decode};
@@ -159,12 +158,22 @@ fn to_sort_defs(sort: &[SortField]) -> Vec<SortDef<'_>> {
 
 #[cfg(not(feature = "wasm-component"))]
 pub async fn get(ctx: &dyn Context, collection: &str, id: &str) -> Result<Record, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id }).await?;
+    let data = call_service(
+        ctx,
+        BLOCK,
+        ServiceOp::DATABASE_GET,
+        &GetReq { collection, id },
+    )
+    .await?;
     decode(&data)
 }
 
 #[cfg(not(feature = "wasm-component"))]
-pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
+pub async fn list(
+    ctx: &dyn Context,
+    collection: &str,
+    opts: &ListOptions,
+) -> Result<RecordList, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -176,7 +185,8 @@ pub async fn list(ctx: &dyn Context, collection: &str, opts: &ListOptions) -> Re
             limit: opts.limit,
             offset: opts.offset,
         },
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 
@@ -194,7 +204,8 @@ pub async fn create(
             collection,
             data: &data,
         },
-    ).await?;
+    )
+    .await?;
     decode(&resp)
 }
 
@@ -214,7 +225,8 @@ pub async fn update(
             id,
             data: &data,
         },
-    ).await?;
+    )
+    .await?;
     decode(&resp)
 }
 
@@ -225,12 +237,17 @@ pub async fn delete(ctx: &dyn Context, collection: &str, id: &str) -> Result<(),
         BLOCK,
         ServiceOp::DATABASE_DELETE,
         &DeleteReq { collection, id },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
 #[cfg(not(feature = "wasm-component"))]
-pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
+pub async fn count(
+    ctx: &dyn Context,
+    collection: &str,
+    filters: &[Filter],
+) -> Result<i64, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -239,7 +256,8 @@ pub async fn count(ctx: &dyn Context, collection: &str, filters: &[Filter]) -> R
             collection,
             filters: to_filter_defs(filters),
         },
-    ).await?;
+    )
+    .await?;
     let resp: CountResp = decode(&data)?;
     Ok(resp.count)
 }
@@ -260,7 +278,8 @@ pub async fn sum(
             field,
             filters: to_filter_defs(filters),
         },
-    ).await?;
+    )
+    .await?;
     let resp: SumResp = decode(&data)?;
     Ok(resp.sum)
 }
@@ -276,7 +295,8 @@ pub async fn query_raw(
         BLOCK,
         ServiceOp::DATABASE_QUERY_RAW,
         &QueryRawReq { query, args },
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 
@@ -291,7 +311,8 @@ pub async fn exec_raw(
         BLOCK,
         ServiceOp::DATABASE_EXEC_RAW,
         &ExecRawReq { query, args },
-    ).await?;
+    )
+    .await?;
     let resp: ExecRawResp = decode(&data)?;
     Ok(resp.rows_affected)
 }
@@ -317,7 +338,8 @@ pub async fn get_by_field(
             limit: 1,
             ..Default::default()
         },
-    ).await?;
+    )
+    .await?;
     result
         .records
         .into_iter()
@@ -354,7 +376,8 @@ pub async fn list_all(
             limit: 100000,
             ..Default::default()
         },
-    ).await?;
+    )
+    .await?;
     Ok(result.records)
 }
 
@@ -378,7 +401,8 @@ pub async fn paginated_list(
             limit: page_size,
             offset: (page - 1).saturating_mul(page_size),
         },
-    ).await
+    )
+    .await
 }
 
 #[cfg(not(feature = "wasm-component"))]
@@ -410,7 +434,8 @@ pub async fn delete_by_field(
             operator: FilterOp::Equal,
             value,
         }],
-    ).await?;
+    )
+    .await?;
     for r in records {
         delete(ctx, collection, &r.id).await?;
     }
@@ -432,7 +457,8 @@ pub async fn count_by_field(
             operator: FilterOp::Equal,
             value,
         }],
-    ).await
+    )
+    .await
 }
 
 #[cfg(not(feature = "wasm-component"))]
@@ -547,11 +573,7 @@ pub fn count(collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn sum(
-    collection: &str,
-    field: &str,
-    filters: &[Filter],
-) -> Result<f64, WaferError> {
+pub fn sum(collection: &str, field: &str, filters: &[Filter]) -> Result<f64, WaferError> {
     let data = call_service(
         BLOCK,
         ServiceOp::DATABASE_SUM,
@@ -566,10 +588,7 @@ pub fn sum(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn query_raw(
-    query: &str,
-    args: &[serde_json::Value],
-) -> Result<Vec<Record>, WaferError> {
+pub fn query_raw(query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, WaferError> {
     let data = call_service(
         BLOCK,
         ServiceOp::DATABASE_QUERY_RAW,
@@ -579,10 +598,7 @@ pub fn query_raw(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn exec_raw(
-    query: &str,
-    args: &[serde_json::Value],
-) -> Result<i64, WaferError> {
+pub fn exec_raw(query: &str, args: &[serde_json::Value]) -> Result<i64, WaferError> {
     let data = call_service(
         BLOCK,
         ServiceOp::DATABASE_EXEC_RAW,
@@ -634,10 +650,7 @@ pub fn upsert(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn list_all(
-    collection: &str,
-    filters: Vec<Filter>,
-) -> Result<Vec<Record>, WaferError> {
+pub fn list_all(collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, WaferError> {
     let result = list(
         collection,
         &ListOptions {
@@ -671,10 +684,7 @@ pub fn paginated_list(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn soft_delete(
-    collection: &str,
-    id: &str,
-) -> Result<Record, WaferError> {
+pub fn soft_delete(collection: &str, id: &str) -> Result<Record, WaferError> {
     let mut data = HashMap::new();
     data.insert(
         "deleted_at".to_string(),
@@ -720,10 +730,7 @@ pub fn count_by_field(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn delete_by_filters(
-    collection: &str,
-    filters: Vec<Filter>,
-) -> Result<(), WaferError> {
+pub fn delete_by_filters(collection: &str, filters: Vec<Filter>) -> Result<(), WaferError> {
     let records = list_all(collection, filters)?;
     for r in records {
         delete(collection, &r.id)?;

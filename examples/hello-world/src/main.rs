@@ -7,24 +7,28 @@ use wafer_run::*;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let mut wafer = Wafer::new();
 
     // Register the HTTP server (infra + router)
-    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
-        "listen": "0.0.0.0:8080",
-        "routes": [{ "path": "/**", "block": "hello" }]
-    }));
+    wafer_flow_http_server::register(
+        &mut wafer,
+        serde_json::json!({
+            "listen": "0.0.0.0:8080",
+            "routes": [{ "path": "/**", "block": "hello" }]
+        }),
+    );
 
     // Register a simple inline block that responds with JSON
     wafer.register_func("hello", |_ctx, msg| {
-        json_respond(msg, &serde_json::json!({
-            "message": "Hello, World!",
-            "path": msg.path(),
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "message": "Hello, World!",
+                "path": msg.path(),
+            }),
+        )
     });
 
     tracing::info!("starting on http://localhost:8080");

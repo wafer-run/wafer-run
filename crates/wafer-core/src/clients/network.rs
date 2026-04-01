@@ -51,7 +51,8 @@ pub async fn do_request(
             headers,
             body,
         },
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 
@@ -78,7 +79,8 @@ pub async fn do_request_via(
             headers,
             body,
         },
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 

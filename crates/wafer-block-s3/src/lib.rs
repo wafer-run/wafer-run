@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 
 use wafer_block::*;
 
-use wafer_core::interfaces::storage::service::StorageService;
 use service::S3StorageService;
+use wafer_core::interfaces::storage::service::StorageService;
 
 /// The S3-compatible storage block.
 ///
@@ -32,8 +32,13 @@ impl S3StorageBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for S3StorageBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/s3", "0.0.1", "storage@v1", "S3-compatible storage block")
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/s3",
+            "0.0.1",
+            "storage@v1",
+            "S3-compatible storage block",
+        )
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -52,13 +57,17 @@ impl Block for S3StorageBlock {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
             let config = wafer_block::BlockConfig::from_event(&event);
 
-            let bucket = config.env_or("STORAGE_BUCKET", "bucket")
+            let bucket = config
+                .env_or("STORAGE_BUCKET", "bucket")
                 .unwrap_or_else(|| "solobase".to_string());
-            let prefix = config.env_or("STORAGE_PREFIX", "prefix")
+            let prefix = config
+                .env_or("STORAGE_PREFIX", "prefix")
                 .unwrap_or_default();
-            let endpoint = config.env_or("STORAGE_ENDPOINT", "endpoint")
+            let endpoint = config
+                .env_or("STORAGE_ENDPOINT", "endpoint")
                 .unwrap_or_default();
-            let region = config.env_or("STORAGE_REGION", "region")
+            let region = config
+                .env_or("STORAGE_REGION", "region")
                 .unwrap_or_else(|| "us-east-1".to_string());
 
             let svc = if endpoint.is_empty() {

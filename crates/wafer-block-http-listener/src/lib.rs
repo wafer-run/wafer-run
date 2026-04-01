@@ -268,8 +268,7 @@ pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
         }
 
         Action::Drop => {
-            let mut builder =
-                axum::http::Response::builder().status(StatusCode::NO_CONTENT);
+            let mut builder = axum::http::Response::builder().status(StatusCode::NO_CONTENT);
 
             if let Some(ref msg) = result.message {
                 builder = apply_response_meta(builder, &msg.meta);
@@ -330,9 +329,14 @@ impl HttpListenerBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/http-listener", "0.0.1", "http-listener@v1", "HTTP transport — listens for HTTP requests and converts to messages")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/http-listener",
+            "0.0.1",
+            "http-listener@v1",
+            "HTTP transport — listens for HTTP requests and converts to messages",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
@@ -442,10 +446,9 @@ impl Block for HttpListenerBlock {
 
             tracing::info!("wafer-run/http-listener listening on {}", listen);
 
-            let serve = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = rx.await;
-                });
+            let serve = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = rx.await;
+            });
 
             if let Err(e) = serve.await {
                 tracing::error!("wafer-run/http-listener server error: {}", e);
@@ -459,5 +462,8 @@ impl Block for HttpListenerBlock {
 // ---------------------------------------------------------------------------
 
 pub fn register(w: &mut wafer_run::Wafer) {
-    w.register_block("wafer-run/http-listener", Arc::new(HttpListenerBlock::new()));
+    w.register_block(
+        "wafer-run/http-listener",
+        Arc::new(HttpListenerBlock::new()),
+    );
 }

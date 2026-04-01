@@ -6,8 +6,8 @@ use wafer_block::context::Context;
 use wafer_block::WaferError;
 
 // Re-export data types used by callers.
-pub use crate::interfaces::storage::service::{FolderInfo, ObjectInfo, ObjectList};
 pub use crate::interfaces::storage::service::ListOptions;
+pub use crate::interfaces::storage::service::{FolderInfo, ObjectInfo, ObjectList};
 
 use super::{call_service, decode};
 
@@ -82,7 +82,8 @@ pub async fn put(
             data,
             content_type,
         },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -104,12 +105,17 @@ pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), Wa
         BLOCK,
         ServiceOp::STORAGE_DELETE,
         &DeleteReq { folder, key },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
 #[cfg(not(feature = "wasm-component"))]
-pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
+pub async fn list(
+    ctx: &dyn Context,
+    folder: &str,
+    opts: &ListOptions,
+) -> Result<ObjectList, WaferError> {
     let data = call_service(
         ctx,
         BLOCK,
@@ -120,22 +126,20 @@ pub async fn list(ctx: &dyn Context, folder: &str, opts: &ListOptions) -> Result
             limit: opts.limit,
             offset: opts.offset,
         },
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 
 #[cfg(not(feature = "wasm-component"))]
-pub async fn create_folder(
-    ctx: &dyn Context,
-    name: &str,
-    public: bool,
-) -> Result<(), WaferError> {
+pub async fn create_folder(ctx: &dyn Context, name: &str, public: bool) -> Result<(), WaferError> {
     call_service(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_CREATE_FOLDER,
         &CreateFolderReq { name, public },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -146,7 +150,8 @@ pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferErr
         BLOCK,
         ServiceOp::STORAGE_DELETE_FOLDER,
         &DeleteFolderReq { name },
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -157,7 +162,8 @@ pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferErr
         BLOCK,
         ServiceOp::STORAGE_LIST_FOLDERS,
         &serde_json::json!({}),
-    ).await?;
+    )
+    .await?;
     decode(&data)
 }
 
@@ -166,12 +172,7 @@ pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferErr
 // ===========================================================================
 
 #[cfg(feature = "wasm-component")]
-pub fn put(
-    folder: &str,
-    key: &str,
-    data: &[u8],
-    content_type: &str,
-) -> Result<(), WaferError> {
+pub fn put(folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), WaferError> {
     call_service(
         BLOCK,
         ServiceOp::STORAGE_PUT,
@@ -186,10 +187,7 @@ pub fn put(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn get(
-    folder: &str,
-    key: &str,
-) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
+pub fn get(folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
     let data = call_service(BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key })?;
     let resp: GetResp = decode(&data)?;
     Ok((resp.data, resp.info))
@@ -197,11 +195,7 @@ pub fn get(
 
 #[cfg(feature = "wasm-component")]
 pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
-    call_service(
-        BLOCK,
-        ServiceOp::STORAGE_DELETE,
-        &DeleteReq { folder, key },
-    )?;
+    call_service(BLOCK, ServiceOp::STORAGE_DELETE, &DeleteReq { folder, key })?;
     Ok(())
 }
 
@@ -221,10 +215,7 @@ pub fn list(folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> 
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn create_folder(
-    name: &str,
-    public: bool,
-) -> Result<(), WaferError> {
+pub fn create_folder(name: &str, public: bool) -> Result<(), WaferError> {
     call_service(
         BLOCK,
         ServiceOp::STORAGE_CREATE_FOLDER,

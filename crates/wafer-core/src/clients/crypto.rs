@@ -84,7 +84,8 @@ pub async fn compare_hash(ctx: &dyn Context, password: &str, hash: &str) -> Resu
         BLOCK,
         ServiceOp::CRYPTO_COMPARE_HASH,
         &CompareHashReq { password, hash },
-    ).await?;
+    )
+    .await?;
     let resp: CompareHashResp = decode(&data)?;
     if resp.matches {
         Ok(())
@@ -110,7 +111,8 @@ pub async fn sign(
             claims,
             expiry_secs: expiry.as_secs(),
         },
-    ).await?;
+    )
+    .await?;
     let resp: SignResp = decode(&data)?;
     Ok(resp.token)
 }
@@ -132,7 +134,8 @@ pub async fn random_bytes(ctx: &dyn Context, n: usize) -> Result<Vec<u8>, WaferE
         BLOCK,
         ServiceOp::CRYPTO_RANDOM_BYTES,
         &RandomBytesReq { n },
-    ).await?;
+    )
+    .await?;
     let resp: RandomBytesResp = decode(&data)?;
     Ok(resp.bytes)
 }
@@ -184,9 +187,7 @@ pub fn sign(
 }
 
 #[cfg(feature = "wasm-component")]
-pub fn verify(
-    token: &str,
-) -> Result<HashMap<String, serde_json::Value>, WaferError> {
+pub fn verify(token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
     let data = call_service(BLOCK, ServiceOp::CRYPTO_VERIFY, &VerifyReq { token })?;
     let resp: VerifyResp = decode(&data)?;
     Ok(resp.claims)
@@ -194,11 +195,7 @@ pub fn verify(
 
 #[cfg(feature = "wasm-component")]
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, WaferError> {
-    let data = call_service(
-        BLOCK,
-        ServiceOp::CRYPTO_RANDOM_BYTES,
-        &RandomBytesReq { n },
-    )?;
+    let data = call_service(BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &RandomBytesReq { n })?;
     let resp: RandomBytesResp = decode(&data)?;
     Ok(resp.bytes)
 }

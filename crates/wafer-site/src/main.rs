@@ -31,35 +31,45 @@ async fn main() {
     //   - /playground    → code editor + proxy to language playgrounds
     //   - /registry      → package registry browser + search API
     //   - /**            → static site content via wafer-run/web (from storage)
-    wafer_flow_http_server::register(&mut w, serde_json::json!({
-        "listen": format!("0.0.0.0:{}", port),
-        "routes": [
-            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
-            { "path": "/_inspector", "block": "wafer-run/inspector" },
-            { "path": "/api/**", "block": "wafer-site/api" },
-            { "path": "/playground/**", "block": "wafer-site/playground" },
-            { "path": "/playground", "block": "wafer-site/playground" },
-            { "path": "/registry/**", "block": "wafer-site/registry" },
-            { "path": "/registry", "block": "wafer-site/registry" },
-            { "path": "/**", "block": "wafer-run/web" }
-        ]
-    }));
+    wafer_flow_http_server::register(
+        &mut w,
+        serde_json::json!({
+            "listen": format!("0.0.0.0:{}", port),
+            "routes": [
+                { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+                { "path": "/_inspector", "block": "wafer-run/inspector" },
+                { "path": "/api/**", "block": "wafer-site/api" },
+                { "path": "/playground/**", "block": "wafer-site/playground" },
+                { "path": "/playground", "block": "wafer-site/playground" },
+                { "path": "/registry/**", "block": "wafer-site/registry" },
+                { "path": "/registry", "block": "wafer-site/registry" },
+                { "path": "/**", "block": "wafer-run/web" }
+            ]
+        }),
+    );
 
     // Block configs
     w.add_block_config("wafer-run/logger", serde_json::json!({}));
-    w.add_block_config("wafer-run/web", serde_json::json!({
-        "web_root": "dist",
-        "web_spa": "false",
-        "web_index": "index.html"
-    }));
+    w.add_block_config(
+        "wafer-run/web",
+        serde_json::json!({
+            "web_root": "dist",
+            "web_spa": "false",
+            "web_index": "index.html"
+        }),
+    );
 
     // Register unified service blocks
     {
         use std::sync::Arc;
-        let storage_root = std::env::var("STORAGE_ROOT").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
+        let storage_root = std::env::var("STORAGE_ROOT")
+            .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
         wafer_core::service_blocks::storage::register_with(
             &mut w,
-            Arc::new(wafer_block_local_storage::service::LocalStorageService::new(&storage_root).expect("storage")),
+            Arc::new(
+                wafer_block_local_storage::service::LocalStorageService::new(&storage_root)
+                    .expect("storage"),
+            ),
         );
         w.add_alias("storage", "wafer-run/storage");
         wafer_core::service_blocks::config::register_with(
@@ -72,7 +82,9 @@ async fn main() {
         );
         wafer_core::service_blocks::crypto::register_with(
             &mut w,
-            Arc::new(wafer_block_crypto::service::Argon2JwtCryptoService::new("wafer-site-dev-secret".to_string())),
+            Arc::new(wafer_block_crypto::service::Argon2JwtCryptoService::new(
+                "wafer-site-dev-secret".to_string(),
+            )),
         );
     }
 
@@ -80,9 +92,12 @@ async fn main() {
     wafer_block_auth_validator::register(&mut w);
     wafer_block_iam_guard::register(&mut w);
     wafer_block_inspector::register(&mut w);
-    w.add_block_config("wafer-run/inspector", serde_json::json!({
-        "allow_anonymous": true
-    }));
+    w.add_block_config(
+        "wafer-run/inspector",
+        serde_json::json!({
+            "allow_anonymous": true
+        }),
+    );
     wafer_block_web::register(&mut w);
 
     // Register site-specific blocks
@@ -99,7 +114,9 @@ async fn main() {
     tracing::info!("Listening on 0.0.0.0:{}", port);
 
     // Wait for shutdown signal
-    tokio::signal::ctrl_c().await.expect("failed to listen for ctrl+c");
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl+c");
     tracing::info!("Shutting down...");
     w.shutdown().await;
 }
@@ -108,10 +125,7 @@ fn register_api_block(w: &mut Wafer) {
     w.register_block_func("wafer-site/api", |_ctx, msg| {
         let path = msg.path();
         match path {
-            "/api/health" => json_respond(
-                msg,
-                &serde_json::json!({ "status": "ok" }),
-            ),
+            "/api/health" => json_respond(msg, &serde_json::json!({ "status": "ok" })),
             "/api/blocks" => json_respond(
                 msg,
                 &serde_json::json!({

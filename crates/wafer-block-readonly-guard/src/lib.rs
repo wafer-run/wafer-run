@@ -16,9 +16,14 @@ impl ReadonlyGuardBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for ReadonlyGuardBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/readonly-guard", "0.0.1", "middleware@v1", "Blocks write operations in read-only mode")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/readonly-guard",
+            "0.0.1",
+            "middleware@v1",
+            "Blocks write operations in read-only mode",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -52,5 +57,8 @@ impl Block for ReadonlyGuardBlock {
 }
 
 pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/readonly-guard", Arc::new(ReadonlyGuardBlock::new()));
+    w.register_block(
+        "wafer-run/readonly-guard",
+        Arc::new(ReadonlyGuardBlock::new()),
+    );
 }

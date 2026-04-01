@@ -70,10 +70,9 @@ impl PureWASMBlock {
             .map_err(|e| format!("failed to set fuel: {e}"))?;
 
         let linker = Linker::new(&self.engine);
-        let block =
-            WaferPureBlock::instantiate_async(&mut store, &self.component, &linker)
-                .await
-                .map_err(|e| format!("failed to instantiate pure block: {e}"))?;
+        let block = WaferPureBlock::instantiate_async(&mut store, &self.component, &linker)
+            .await
+            .map_err(|e| format!("failed to instantiate pure block: {e}"))?;
 
         Ok((store, block))
     }
@@ -106,11 +105,16 @@ impl PureWASMBlock {
             .map_err(|e| format!("pure block info trap: {e}"))?;
 
         // Parse the JSON-encoded BlockDef into a BlockInfo
-        let def: wafer_flow::BlockDef =
-            serde_json::from_str(&info_json).map_err(|e| format!("invalid block info JSON: {e}"))?;
+        let def: wafer_flow::BlockDef = serde_json::from_str(&info_json)
+            .map_err(|e| format!("invalid block info JSON: {e}"))?;
 
-        let info = BlockInfo::new(def.name, def.version, "", def.description.unwrap_or_default())
-            .instance_mode(InstanceMode::PerExecution);
+        let info = BlockInfo::new(
+            def.name,
+            def.version,
+            "",
+            def.description.unwrap_or_default(),
+        )
+        .instance_mode(InstanceMode::PerExecution);
 
         {
             let mut cache = self.info_cache.lock().unwrap();

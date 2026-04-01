@@ -92,9 +92,14 @@ impl RouterBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for RouterBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/router", "0.0.1", "router@v1", "Config-driven router that dispatches to handler blocks")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/router",
+            "0.0.1",
+            "router@v1",
+            "Config-driven router that dispatches to handler blocks",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -104,9 +109,7 @@ impl Block for RouterBlock {
 
         for route in routes {
             // Check action match (empty list matches any action)
-            if !route.actions.is_empty()
-                && !route.actions.iter().any(|a| *a == action)
-            {
+            if !route.actions.is_empty() && !route.actions.iter().any(|a| *a == action) {
                 continue;
             }
 

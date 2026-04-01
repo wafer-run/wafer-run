@@ -1,7 +1,7 @@
 use std::sync::Arc;
+use wafer_block::*;
 use wafer_core::clients::database as db;
 use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
-use wafer_block::*;
 
 /// IAMBlock checks if the authenticated user has a required role.
 /// Configure the required role via node config: {"role": "admin"}.
@@ -53,10 +53,15 @@ impl IAMBlock {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for IAMBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/iam-guard", "0.0.1", "middleware@v1", "Role-based access control middleware")
-            .instance_mode(InstanceMode::Singleton)
-            .requires(vec!["wafer-run/database".into()])
-            .category(BlockCategory::Middleware)
+        BlockInfo::new(
+            "wafer-run/iam-guard",
+            "0.0.1",
+            "middleware@v1",
+            "Role-based access control middleware",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .requires(vec!["wafer-run/database".into()])
+        .category(BlockCategory::Middleware)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -67,10 +72,7 @@ impl Block for IAMBlock {
         }
 
         // Get required role from config (default: "admin")
-        let required_role = ctx
-            .config_get("role")
-            .unwrap_or("admin")
-            .to_string();
+        let required_role = ctx.config_get("role").unwrap_or("admin").to_string();
 
         // Try database lookup first, fall back to meta roles
         let has_role = match Self::has_role_db(ctx, &user_id, &required_role).await {

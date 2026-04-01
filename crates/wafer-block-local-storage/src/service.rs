@@ -38,7 +38,9 @@ impl LocalStorageService {
             path.canonicalize()
         } else if let Some(parent) = path.parent() {
             if parent.exists() {
-                parent.canonicalize().map(|p| p.join(path.file_name().unwrap_or_default()))
+                parent
+                    .canonicalize()
+                    .map(|p| p.join(path.file_name().unwrap_or_default()))
             } else {
                 // Parent doesn't exist — will be created by put; just normalize
                 Ok(path.to_path_buf())
@@ -98,7 +100,9 @@ impl StorageService for LocalStorageService {
         if metadata.len() > MAX_FILE_SIZE {
             return Err(StorageError::Internal(format!(
                 "file {:?} is {} bytes, exceeds limit of {} bytes",
-                path, metadata.len(), MAX_FILE_SIZE
+                path,
+                metadata.len(),
+                MAX_FILE_SIZE
             )));
         }
 
@@ -186,8 +190,7 @@ impl StorageService for LocalStorageService {
             .map_err(|e| StorageError::Internal(format!("read dir {:?}: {}", self.root, e)))?;
 
         for entry in entries {
-            let entry =
-                entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
+            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
             let metadata = entry
                 .metadata()
                 .map_err(|e| StorageError::Internal(format!("metadata: {}", e)))?;
@@ -219,8 +222,7 @@ impl LocalStorageService {
             .map_err(|e| StorageError::Internal(format!("read dir {:?}: {}", dir, e)))?;
 
         for entry in entries {
-            let entry =
-                entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
+            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
             let path = entry.path();
             let metadata = entry
                 .metadata()

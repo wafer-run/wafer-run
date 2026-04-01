@@ -20,9 +20,7 @@ pub fn is_blocked_url(raw: &str) -> bool {
 
     match parsed.host() {
         None => true, // no host → block
-        Some(url::Host::Domain(domain)) => {
-            domain.eq_ignore_ascii_case("localhost")
-        }
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => is_blocked_ipv4(ip),
         Some(url::Host::Ipv6(ip)) => is_blocked_ipv6(ip),
     }

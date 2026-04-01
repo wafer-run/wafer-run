@@ -80,8 +80,7 @@ impl S3StorageService {
 
     /// Convert an aws_smithy_types::DateTime to chrono::DateTime<Utc>.
     fn to_chrono_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> DateTime<Utc> {
-        DateTime::from_timestamp(dt.secs(), dt.subsec_nanos())
-            .unwrap_or_else(Utc::now)
+        DateTime::from_timestamp(dt.secs(), dt.subsec_nanos()).unwrap_or_else(Utc::now)
     }
 }
 
@@ -145,9 +144,7 @@ impl StorageService for S3StorageService {
             .body
             .collect()
             .await
-            .map_err(|e| {
-                StorageError::Internal(format!("S3 read body {}: {}", s3_key, e))
-            })?
+            .map_err(|e| StorageError::Internal(format!("S3 read body {}: {}", s3_key, e)))?
             .into_bytes()
             .to_vec();
 
@@ -244,8 +241,7 @@ impl StorageService for S3StorageService {
             all_objects.len()
         };
 
-        let objects: Vec<ObjectInfo> =
-            all_objects.into_iter().skip(offset).take(limit).collect();
+        let objects: Vec<ObjectInfo> = all_objects.into_iter().skip(offset).take(limit).collect();
 
         Ok(ObjectList {
             objects,
@@ -265,10 +261,7 @@ impl StorageService for S3StorageService {
             .send()
             .await
             .map_err(|e| {
-                StorageError::Internal(format!(
-                    "S3 create folder marker {}: {}",
-                    marker_key, e
-                ))
+                StorageError::Internal(format!("S3 create folder marker {}: {}", marker_key, e))
             })?;
         Ok(())
     }
@@ -325,10 +318,7 @@ impl StorageService for S3StorageService {
                         .send()
                         .await
                         .map_err(|e| {
-                            StorageError::Internal(format!(
-                                "S3 DeleteObjects {}: {}",
-                                prefix, e
-                            ))
+                            StorageError::Internal(format!("S3 DeleteObjects {}: {}", prefix, e))
                         })?;
                 }
             }
@@ -354,9 +344,7 @@ impl StorageService for S3StorageService {
             .delimiter("/")
             .send()
             .await
-            .map_err(|e| {
-                StorageError::Internal(format!("S3 list folders: {}", e))
-            })?;
+            .map_err(|e| StorageError::Internal(format!("S3 list folders: {}", e)))?;
 
         let mut folders = Vec::new();
 
@@ -374,7 +362,7 @@ impl StorageService for S3StorageService {
 
                 folders.push(FolderInfo {
                     name: name.to_string(),
-                    public: false,       // S3 doesn't track this natively
+                    public: false,          // S3 doesn't track this natively
                     created_at: Utc::now(), // S3 doesn't expose folder creation time
                 });
             }

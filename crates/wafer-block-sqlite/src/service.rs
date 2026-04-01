@@ -44,11 +44,9 @@ impl SQLiteDatabaseService {
             let value = match row.get_ref(i) {
                 Ok(rusqlite::types::ValueRef::Null) => serde_json::Value::Null,
                 Ok(rusqlite::types::ValueRef::Integer(n)) => serde_json::Value::Number(n.into()),
-                Ok(rusqlite::types::ValueRef::Real(f)) => {
-                    serde_json::Number::from_f64(f)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::Null)
-                }
+                Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
                 Ok(rusqlite::types::ValueRef::Text(s)) => {
                     let text = String::from_utf8_lossy(s).to_string();
                     // Try to parse as JSON if it looks like JSON
@@ -132,9 +130,7 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
             }
         }
         serde_json::Value::String(s) => SqlValue::Text(s.clone()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            SqlValue::Text(v.to_string())
-        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => SqlValue::Text(v.to_string()),
     }
 }
 
@@ -422,7 +418,15 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
     sql.push_str("INDEX IF NOT EXISTS ");
 
     let name = if idx.name.is_empty() {
-        format!("idx_{}_{}", sanitize_ident(table_name), idx.columns.iter().map(|c| sanitize_ident(c)).collect::<Vec<_>>().join("_"))
+        format!(
+            "idx_{}_{}",
+            sanitize_ident(table_name),
+            idx.columns
+                .iter()
+                .map(|c| sanitize_ident(c))
+                .collect::<Vec<_>>()
+                .join("_")
+        )
     } else {
         sanitize_ident(&idx.name)
     };
@@ -441,7 +445,10 @@ fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DatabaseService for SQLiteDatabaseService {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         let sql = format!("SELECT * FROM {} WHERE id = ?1", table);
         db.query_row(&sql, [id], Self::row_to_record)
@@ -451,8 +458,15 @@ impl DatabaseService for SQLiteDatabaseService {
             })
     }
 
-    async fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+    async fn list(
+        &self,
+        collection: &str,
+        opts: &ListOptions,
+    ) -> Result<RecordList, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let collection = &sanitize_ident(collection);
         if !table_exists(&db, collection) {
             return Ok(RecordList {
@@ -471,14 +485,19 @@ impl DatabaseService for SQLiteDatabaseService {
 
         // Count total
         let count_sql = format!("SELECT COUNT(*) FROM {}{}", collection, where_clause);
-        let count_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let count_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         let total_count: i64 = db
             .query_row(&count_sql, count_params.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
 
         // Query records
-        let mut sql = format!("SELECT * FROM {}{}{}", collection, where_clause, order_clause);
+        let mut sql = format!(
+            "SELECT * FROM {}{}{}",
+            collection, where_clause, order_clause
+        );
 
         if opts.limit > 0 {
             sql.push_str(&format!(" LIMIT {}", opts.limit));
@@ -487,8 +506,10 @@ impl DatabaseService for SQLiteDatabaseService {
             sql.push_str(&format!(" OFFSET {}", opts.offset));
         }
 
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
 
         let mut stmt = db
             .prepare(&sql)
@@ -516,7 +537,11 @@ impl DatabaseService for SQLiteDatabaseService {
             records,
             total_count,
             page,
-            page_size: if opts.limit > 0 { opts.limit } else { total_count },
+            page_size: if opts.limit > 0 {
+                opts.limit
+            } else {
+                total_count
+            },
         })
     }
 
@@ -525,7 +550,10 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
 
         let mut data = data;
@@ -549,10 +577,7 @@ impl DatabaseService for SQLiteDatabaseService {
             );
         }
         if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(now),
-            );
+            data.insert("updated_at".to_string(), serde_json::Value::String(now));
         }
 
         // Auto-create table if it doesn't exist
@@ -560,7 +585,10 @@ impl DatabaseService for SQLiteDatabaseService {
 
         let columns: Vec<&String> = data.keys().collect();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
-        let values: Vec<SqlValue> = columns.iter().map(|k| json_to_sql_value(&data[*k])).collect();
+        let values: Vec<SqlValue> = columns
+            .iter()
+            .map(|k| json_to_sql_value(&data[*k]))
+            .collect();
 
         let safe_col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
         let sql = format!(
@@ -570,8 +598,10 @@ impl DatabaseService for SQLiteDatabaseService {
             placeholders.join(", ")
         );
 
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
 
         db.execute(&sql, params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
@@ -598,7 +628,10 @@ impl DatabaseService for SQLiteDatabaseService {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
         {
-            let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
             let table = sanitize_ident(collection);
 
             let mut data = data;
@@ -627,8 +660,10 @@ impl DatabaseService for SQLiteDatabaseService {
                 values.len()
             );
 
-            let params: Vec<&dyn rusqlite::types::ToSql> =
-                values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+            let params: Vec<&dyn rusqlite::types::ToSql> = values
+                .iter()
+                .map(|v| v as &dyn rusqlite::types::ToSql)
+                .collect();
 
             let rows = db
                 .execute(&sql, params.as_slice())
@@ -644,7 +679,10 @@ impl DatabaseService for SQLiteDatabaseService {
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         let sql = format!("DELETE FROM {} WHERE id = ?1", table);
         let rows = db
@@ -657,7 +695,10 @@ impl DatabaseService for SQLiteDatabaseService {
     }
 
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         if !table_exists(&db, &table) {
             return Ok(0);
@@ -665,8 +706,10 @@ impl DatabaseService for SQLiteDatabaseService {
         ensure_columns_for_query(&db, &table, filters, &[]);
         let (where_clause, params) = build_where_clause(filters);
         let sql = format!("SELECT COUNT(*) FROM {}{}", table, where_clause);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         db.query_row(&sql, query_params.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
@@ -677,7 +720,10 @@ impl DatabaseService for SQLiteDatabaseService {
         field: &str,
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         let safe_field = sanitize_ident(field);
         let (where_clause, params) = build_where_clause(filters);
@@ -685,8 +731,10 @@ impl DatabaseService for SQLiteDatabaseService {
             "SELECT COALESCE(SUM({}), 0) FROM {}{}",
             safe_field, table, where_clause
         );
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         db.query_row(&sql, query_params.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
@@ -696,10 +744,15 @@ impl DatabaseService for SQLiteDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let params: Vec<SqlValue> = args.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
 
         let mut stmt = db
             .prepare(query)
@@ -725,10 +778,15 @@ impl DatabaseService for SQLiteDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let params: Vec<SqlValue> = args.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
 
         let rows = db
             .execute(query, query_params.as_slice())
@@ -737,16 +795,25 @@ impl DatabaseService for SQLiteDatabaseService {
         Ok(rows as i64)
     }
 
-    async fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+    async fn delete_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<(), DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         if !table_exists(&db, &table) {
             return Ok(());
         }
         let (where_clause, params) = build_where_clause(filters);
         let sql = format!("DELETE FROM {}{}", table, where_clause);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         db.execute(&sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(())
@@ -758,7 +825,10 @@ impl DatabaseService for SQLiteDatabaseService {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
         if !table_exists(&db, &table) {
             return Err(DatabaseError::NotFound);
@@ -782,9 +852,16 @@ impl DatabaseService for SQLiteDatabaseService {
         let (where_clause, where_params) = build_where_clause(filters);
         values.extend(where_params);
 
-        let sql = format!("UPDATE {} SET {}{}", table, set_clauses.join(", "), where_clause);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> =
-            values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let sql = format!(
+            "UPDATE {} SET {}{}",
+            table,
+            set_clauses.join(", "),
+            where_clause
+        );
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         db.execute(&sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(())
@@ -793,7 +870,10 @@ impl DatabaseService for SQLiteDatabaseService {
     // --- Schema management ---
 
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let sql = schema_generate_create_table(table);
         db.execute_batch(&sql)
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
@@ -838,18 +918,27 @@ impl DatabaseService for SQLiteDatabaseService {
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(table_exists(&db, name))
     }
 
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         db.execute_batch(&format!("DROP TABLE IF EXISTS {}", sanitize_ident(name)))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        let db = self.db.lock().map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let sql = format!(
             "ALTER TABLE {} ADD COLUMN {}",
             sanitize_ident(table),

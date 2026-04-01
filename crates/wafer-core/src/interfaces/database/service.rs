@@ -4,13 +4,11 @@ use thiserror::Error;
 
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_run::schema::{
-    Column, DataType, DefaultVal, DefaultValue, Index, Reference, Table,
-    pk, pk_int, col_string, col_text, col_int, col_int64, col_float,
-    col_bool, col_datetime, col_json, col_blob, timestamps, soft_delete as schema_soft_delete,
-    default_now, default_null, default_zero, default_empty, default_false,
-    default_true, default_int, default_string,
+    col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
+    col_text, default_empty, default_false, default_int, default_now, default_null, default_string,
+    default_true, default_zero, pk, pk_int, soft_delete as schema_soft_delete, timestamps, Column,
+    DataType, DefaultVal, DefaultValue, Index, Reference, Table,
 };
-
 
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -30,7 +28,8 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError>;
 
     /// List retrieves records with optional filtering, sorting, and pagination.
-    async fn list(&self, collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError>;
+    async fn list(&self, collection: &str, opts: &ListOptions)
+        -> Result<RecordList, DatabaseError>;
 
     /// Create inserts a new record into a collection.
     async fn create(
@@ -69,25 +68,28 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// ExecRaw executes a raw non-SELECT statement.
-    async fn exec_raw(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError>;
+    async fn exec_raw(&self, query: &str, args: &[serde_json::Value])
+        -> Result<i64, DatabaseError>;
 
     /// Bulk-delete all records matching filters in a single query.
-    async fn delete_where(&self, collection: &str, filters: &[Filter]) -> Result<(), DatabaseError> {
+    async fn delete_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<(), DatabaseError> {
         // Default implementation falls back to record-by-record deletion.
         // Loops until all matching records are deleted.
         loop {
-            let records = self.list(
-                collection,
-                &ListOptions {
-                    filters: filters.to_vec(),
-                    limit: 10000,
-                    ..Default::default()
-                },
-            ).await?;
+            let records = self
+                .list(
+                    collection,
+                    &ListOptions {
+                        filters: filters.to_vec(),
+                        limit: 10000,
+                        ..Default::default()
+                    },
+                )
+                .await?;
             if records.records.is_empty() {
                 break;
             }
@@ -106,14 +108,16 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         // Default implementation falls back to record-by-record updates.
-        let records = self.list(
-            collection,
-            &ListOptions {
-                filters: filters.to_vec(),
-                limit: 10000,
-                ..Default::default()
-            },
-        ).await?;
+        let records = self
+            .list(
+                collection,
+                &ListOptions {
+                    filters: filters.to_vec(),
+                    limit: 10000,
+                    ..Default::default()
+                },
+            )
+            .await?;
 
         let mut ids: Vec<String> = records.records.into_iter().map(|r| r.id).collect();
         if let Some(last_id) = ids.pop() {

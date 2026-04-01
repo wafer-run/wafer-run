@@ -84,7 +84,9 @@ pub struct RegistryBlock {
 
 impl RegistryBlock {
     pub fn new() -> Self {
-        Self { packages: RwLock::new(Vec::new()) }
+        Self {
+            packages: RwLock::new(Vec::new()),
+        }
     }
 
     fn handle_browse(msg: &mut Message) -> Result_ {
@@ -101,33 +103,42 @@ impl RegistryBlock {
         let type_filter = msg.query("type").to_string();
 
         let packages = self.packages.read().unwrap();
-        let filtered: Vec<&PackageEntry> = packages.iter().filter(|pkg| {
-            if !query.is_empty()
-                && !pkg.name.to_lowercase().contains(&query)
-                && !pkg.description.to_lowercase().contains(&query)
-            {
-                return false;
-            }
-            if !type_filter.is_empty() {
-                let types: Vec<&str> = pkg.package_type.split(',').collect();
-                return types.contains(&type_filter.as_str());
-            }
-            true
-        }).collect();
+        let filtered: Vec<&PackageEntry> = packages
+            .iter()
+            .filter(|pkg| {
+                if !query.is_empty()
+                    && !pkg.name.to_lowercase().contains(&query)
+                    && !pkg.description.to_lowercase().contains(&query)
+                {
+                    return false;
+                }
+                if !type_filter.is_empty() {
+                    let types: Vec<&str> = pkg.package_type.split(',').collect();
+                    return types.contains(&type_filter.as_str());
+                }
+                true
+            })
+            .collect();
 
-        json_respond(msg, &serde_json::json!({
-            "packages": filtered,
-            "total": filtered.len(),
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "packages": filtered,
+                "total": filtered.len(),
+            }),
+        )
     }
 
     fn handle_get_package(&self, msg: &mut Message, name: &str) -> Result_ {
         let packages = self.packages.read().unwrap();
         match packages.iter().find(|p| p.name == name) {
-            Some(pkg) => json_respond(msg, &serde_json::json!({
-                "package": pkg,
-                "versions": pkg.versions,
-            })),
+            Some(pkg) => json_respond(
+                msg,
+                &serde_json::json!({
+                    "package": pkg,
+                    "versions": pkg.versions,
+                }),
+            ),
             None => err_not_found(msg, &format!("Package '{}' not found", name)),
         }
     }
@@ -188,7 +199,9 @@ impl RegistryBlock {
     }
 
     fn manifest_to_entry(manifest: RegistryManifest) -> PackageEntry {
-        let repo_url = manifest.versions.values()
+        let repo_url = manifest
+            .versions
+            .values()
             .find_map(|v| v.wasm_url.as_ref().or(v.flow_url.as_ref()))
             .and_then(|url| {
                 let rest = url.strip_prefix("https://github.com/")?;
@@ -202,26 +215,37 @@ impl RegistryBlock {
         let has_crate = manifest.versions.values().any(|v| v.crate_name.is_some());
 
         let mut pkg_types = Vec::new();
-        if has_wasm || has_crate { pkg_types.push("block"); }
-        if has_flow { pkg_types.push("flow"); }
-        let package_type = if pkg_types.is_empty() { "block".to_string() } else { pkg_types.join(",") };
+        if has_wasm || has_crate {
+            pkg_types.push("block");
+        }
+        if has_flow {
+            pkg_types.push("flow");
+        }
+        let package_type = if pkg_types.is_empty() {
+            "block".to_string()
+        } else {
+            pkg_types.join(",")
+        };
 
         let runtime_type = match (has_crate, has_wasm) {
             (true, true) => "both",
             (true, false) => "native",
             (false, true) => "wasm",
             (false, false) => "native",
-        }.to_string();
+        }
+        .to_string();
 
-        let mut versions: Vec<VersionInfo> = manifest.versions.iter().map(|(ver, entry)| {
-            VersionInfo {
+        let mut versions: Vec<VersionInfo> = manifest
+            .versions
+            .iter()
+            .map(|(ver, entry)| VersionInfo {
                 tag_name: format!("v{}", ver),
                 wasm_url: entry.wasm_url.clone(),
                 flow_url: entry.flow_url.clone(),
                 crate_name: entry.crate_name.clone(),
                 abi: entry.abi,
-            }
-        }).collect();
+            })
+            .collect();
         versions.sort_by(|a, b| b.tag_name.cmp(&a.tag_name));
 
         PackageEntry {
@@ -239,9 +263,14 @@ impl RegistryBlock {
 #[async_trait::async_trait]
 impl Block for RegistryBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-site/registry", "0.0.1", "http-handler@v1", "Package registry backed by wafer-run/registry GitHub repo")
-            .instance_mode(InstanceMode::Singleton)
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-site/registry",
+            "0.0.1",
+            "http-handler@v1",
+            "Package registry backed by wafer-run/registry GitHub repo",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
@@ -258,7 +287,11 @@ impl Block for RegistryBlock {
         }
     }
 
-    async fn lifecycle(&self, _ctx: &dyn Context, event: LifecycleEvent) -> std::result::Result<(), WaferError> {
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
             self.load_registry().await;
         }

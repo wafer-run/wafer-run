@@ -82,11 +82,16 @@ impl Context for RuntimeContext {
         }
 
         // Enforce requires: if the caller declared a requires list, check it
-        let resolved_name = self.aliases.get(block_name)
+        let resolved_name = self
+            .aliases
+            .get(block_name)
             .map(|s| s.as_str())
             .unwrap_or(block_name);
         if let Some(ref requires) = self.caller_requires {
-            if !requires.iter().any(|r| r == block_name || r == resolved_name) {
+            if !requires
+                .iter()
+                .any(|r| r == block_name || r == resolved_name)
+            {
                 self.call_depth
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 return err_result(
@@ -150,10 +155,7 @@ impl Context for RuntimeContext {
     }
 
     fn is_cancelled(&self) -> bool {
-        if self
-            .cancelled
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return true;
         }
         if let Some(deadline) = self.deadline {

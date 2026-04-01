@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR not set (this should only happen outside cargo)");
-    let out_dir = env::var("OUT_DIR")
-        .expect("OUT_DIR not set (this should only happen outside cargo)");
+    let out_dir =
+        env::var("OUT_DIR").expect("OUT_DIR not set (this should only happen outside cargo)");
 
     let content_dir = Path::new(&manifest_dir).join("content");
     let public_dir = Path::new(&manifest_dir).join("public");

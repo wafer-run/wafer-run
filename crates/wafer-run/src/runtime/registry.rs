@@ -47,7 +47,10 @@ impl Wafer {
         // No registrar — store config for deferred resolution during resolve().
         // The name must look like a remote ref (org/block).
         if !name.contains('/') {
-            panic!("no registrar found for {:?} and name is not a remote ref", name);
+            panic!(
+                "no registrar found for {:?} and name is not a remote ref",
+                name
+            );
         }
         tracing::debug!(name = %name, "no registrar found, deferring to resolve()");
         self.add_block_config(name, config);
@@ -66,8 +69,8 @@ impl Wafer {
 
         let expanded = crate::helpers::expand_env_vars(&data);
 
-        let mut map: std::collections::HashMap<String, serde_json::Value> = serde_json::from_str(&expanded)
-            .map_err(|e| format!("parse blocks.json: {}", e))?;
+        let mut map: std::collections::HashMap<String, serde_json::Value> =
+            serde_json::from_str(&expanded).map_err(|e| format!("parse blocks.json: {}", e))?;
 
         // Extract alias definitions before processing block configs
         if let Some(aliases_val) = map.remove("aliases") {
@@ -101,7 +104,8 @@ impl Wafer {
         name: impl Into<String>,
         expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync + 'static,
     ) {
-        self.config_expanders.insert(name.into(), Box::new(expander));
+        self.config_expanders
+            .insert(name.into(), Box::new(expander));
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -110,7 +114,8 @@ impl Wafer {
         name: impl Into<String>,
         expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + 'static,
     ) {
-        self.config_expanders.insert(name.into(), Box::new(expander));
+        self.config_expanders
+            .insert(name.into(), Box::new(expander));
     }
 
     /// HasBlock returns true if a block with the given type name is registered.
@@ -166,18 +171,23 @@ impl Wafer {
 
     /// RegisterBlockFuncAsync registers an async inline handler function as a block.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_block_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
+    pub fn register_block_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: std::future::Future<Output = Result_> + Send + 'static,
     {
         use crate::block::{AsyncFuncBlock, BlockInfo};
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo::new(name.clone(), "0.0.0", "inline-async", "Inline async function block"),
+            info: BlockInfo::new(
+                name.clone(),
+                "0.0.0",
+                "inline-async",
+                "Inline async function block",
+            ),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
         self.register_block(name, block);
@@ -185,18 +195,20 @@ impl Wafer {
 
     /// RegisterBlockFuncAsync (wasm32 variant — Sync only, no Send).
     #[cfg(target_arch = "wasm32")]
-    pub fn register_block_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) where
+    pub fn register_block_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
         Fut: std::future::Future<Output = Result_> + 'static,
     {
         use crate::block::{AsyncFuncBlock, BlockInfo};
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo::new(name.clone(), "0.0.0", "inline-async", "Inline async function block"),
+            info: BlockInfo::new(
+                name.clone(),
+                "0.0.0",
+                "inline-async",
+                "Inline async function block",
+            ),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
         self.register_block(name, block);
@@ -223,23 +235,20 @@ impl Wafer {
 
     /// Shorthand for [`register_block_func_async`](Self::register_block_func_async).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Send + Sync + 'static,
+    pub fn register_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    where
+        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: std::future::Future<Output = Result_> + Send + 'static,
     {
         self.register_block_func_async(type_name, handler);
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn register_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) where
+    pub fn register_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
         Fut: std::future::Future<Output = Result_> + 'static,
     {

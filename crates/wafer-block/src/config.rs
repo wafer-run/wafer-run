@@ -55,9 +55,15 @@ pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap
     if let Some(obj) = config.as_object() {
         for (k, v) in obj {
             match v {
-                serde_json::Value::String(s) => { cfg.insert(k.clone(), s.clone()); }
-                serde_json::Value::Number(n) => { cfg.insert(k.clone(), n.to_string()); }
-                serde_json::Value::Bool(b) => { cfg.insert(k.clone(), b.to_string()); }
+                serde_json::Value::String(s) => {
+                    cfg.insert(k.clone(), s.clone());
+                }
+                serde_json::Value::Number(n) => {
+                    cfg.insert(k.clone(), n.to_string());
+                }
+                serde_json::Value::Bool(b) => {
+                    cfg.insert(k.clone(), b.to_string());
+                }
                 _ => {}
             }
         }
@@ -99,11 +105,17 @@ pub enum DispatchTarget {
 
 impl DispatchTarget {
     pub fn from_config(config: Option<&serde_json::Value>) -> Option<Self> {
-        let block = config.and_then(|c| c.get("block")).and_then(|v| v.as_str()).unwrap_or("");
+        let block = config
+            .and_then(|c| c.get("block"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !block.is_empty() {
             return Some(DispatchTarget::Block(block.to_string()));
         }
-        let flow = config.and_then(|c| c.get("flow")).and_then(|v| v.as_str()).unwrap_or("");
+        let flow = config
+            .and_then(|c| c.get("flow"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !flow.is_empty() {
             return Some(DispatchTarget::Flow(flow.to_string()));
         }

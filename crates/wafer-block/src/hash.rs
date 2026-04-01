@@ -47,7 +47,9 @@ pub fn expand_env_vars(s: &str) -> String {
                 }
                 match std::env::var(&var_name) {
                     Ok(val) => result.push_str(&val),
-                    Err(_) => tracing::warn!(var = %var_name, "undefined environment variable referenced"),
+                    Err(_) => {
+                        tracing::warn!(var = %var_name, "undefined environment variable referenced")
+                    }
                 }
             } else {
                 let mut var_name = String::new();
@@ -62,7 +64,9 @@ pub fn expand_env_vars(s: &str) -> String {
                 if !var_name.is_empty() {
                     match std::env::var(&var_name) {
                         Ok(val) => result.push_str(&val),
-                        Err(_) => tracing::warn!(var = %var_name, "undefined environment variable referenced"),
+                        Err(_) => {
+                            tracing::warn!(var = %var_name, "undefined environment variable referenced")
+                        }
                     }
                 }
             }

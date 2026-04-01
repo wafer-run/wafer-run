@@ -234,7 +234,10 @@ url = "postgres://localhost/test"
 
         // Direct TOML key lookup
         assert_eq!(svc.get("database.type").unwrap(), "postgres");
-        assert_eq!(svc.get("database.url").unwrap(), "postgres://localhost/test");
+        assert_eq!(
+            svc.get("database.url").unwrap(),
+            "postgres://localhost/test"
+        );
     }
 
     #[test]
@@ -298,10 +301,7 @@ type = "sqlite"
             overrides: RwLock::new(HashMap::new()),
         };
         assert_eq!(svc.get_default("DB_TYPE", "sqlite"), "sqlite");
-        assert_eq!(
-            svc.get_default("nonexistent", "fallback"),
-            "fallback"
-        );
+        assert_eq!(svc.get_default("nonexistent", "fallback"), "fallback");
     }
 
     #[test]

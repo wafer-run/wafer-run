@@ -23,22 +23,28 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Standard HTTP server flow ---
-    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
-        "listen": "0.0.0.0:8080",
-        "routes": [
-            { "path": "/_inspector/**", "block": "wafer-run/inspector" },
-            { "path": "/_inspector", "block": "wafer-run/inspector" },
-            { "path": "/greet", "block": "greeter" },
-            { "path": "/health", "block": "health" },
-            { "path": "/**", "block": "not-found" }
-        ]
-    }));
+    wafer_flow_http_server::register(
+        &mut wafer,
+        serde_json::json!({
+            "listen": "0.0.0.0:8080",
+            "routes": [
+                { "path": "/_inspector/**", "block": "wafer-run/inspector" },
+                { "path": "/_inspector", "block": "wafer-run/inspector" },
+                { "path": "/greet", "block": "greeter" },
+                { "path": "/health", "block": "health" },
+                { "path": "/**", "block": "not-found" }
+            ]
+        }),
+    );
 
     // --- Inspector (anonymous for dev) ---
     wafer_block_inspector::register(&mut wafer);
-    wafer.add_block_config("wafer-run/inspector", serde_json::json!({
-        "allow_anonymous": true
-    }));
+    wafer.add_block_config(
+        "wafer-run/inspector",
+        serde_json::json!({
+            "allow_anonymous": true
+        }),
+    );
 
     // --- A second flow: onboarding pipeline (data pipeline style) ---
     // This flow shows the inspector can display multi-step flows with
@@ -172,26 +178,38 @@ async fn main() {
     wafer.register_func("not-found", |_ctx, msg| {
         let path = msg.path().to_string();
         msg.set_meta("resp.status", "404");
-        json_respond(msg, &serde_json::json!({
-            "error": "not found",
-            "path": path,
-            "endpoints": ["/greet?name=Alice", "/health", "/_inspector/ui"]
-        }))
+        json_respond(
+            msg,
+            &serde_json::json!({
+                "error": "not found",
+                "path": path,
+                "endpoints": ["/greet?name=Alice", "/health", "/_inspector/ui"]
+            }),
+        )
     });
 
     // Stub blocks referenced by the pipeline flows (needed so they register)
     for name in &[
-        "validate-signup", "account-creator", "role-assigner",
-        "enterprise-provisioner", "email-sender", "preference-loader",
-        "notification-router", "push-sender", "webhook-caller",
+        "validate-signup",
+        "account-creator",
+        "role-assigner",
+        "enterprise-provisioner",
+        "email-sender",
+        "preference-loader",
+        "notification-router",
+        "push-sender",
+        "webhook-caller",
     ] {
         let block_name = name.to_string();
         wafer.register_func(*name, move |_ctx, msg| {
-            json_respond(msg, &serde_json::json!({
-                "stub": true,
-                "block": block_name,
-                "message": "This is a stub — implement me!"
-            }))
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "stub": true,
+                    "block": block_name,
+                    "message": "This is a stub — implement me!"
+                }),
+            )
         });
     }
 

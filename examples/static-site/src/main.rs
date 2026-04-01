@@ -9,21 +9,25 @@ use wafer_run::*;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let mut wafer = Wafer::new();
 
     // --- Register blocks ---
-    wafer_flow_http_server::register(&mut wafer, serde_json::json!({
-        "listen": "0.0.0.0:8080",
-        "routes": [{ "path": "/**", "block": "wafer-run/web" }]
-    }));
+    wafer_flow_http_server::register(
+        &mut wafer,
+        serde_json::json!({
+            "listen": "0.0.0.0:8080",
+            "routes": [{ "path": "/**", "block": "wafer-run/web" }]
+        }),
+    );
     wafer_block_web::register(&mut wafer);
-    wafer.add_block_config("wafer-run/web", serde_json::json!({
-        "web_root": "./public"
-    }));
+    wafer.add_block_config(
+        "wafer-run/web",
+        serde_json::json!({
+            "web_root": "./public"
+        }),
+    );
 
     // Create a public/ dir with a sample index.html if it doesn't exist
     let public = std::path::Path::new("public");
@@ -32,7 +36,8 @@ async fn main() {
         std::fs::write(
             public.join("index.html"),
             "<h1>Hello from wafer-run!</h1><p>Served with wafer-block-web</p>",
-        ).ok();
+        )
+        .ok();
         tracing::info!("created public/index.html");
     }
 

@@ -2,8 +2,8 @@ mod mime;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
-use wafer_core::clients::storage as store;
 use wafer_block::*;
+use wafer_core::clients::storage as store;
 
 /// WebBlock serves static files from wafer-run/storage with caching and SPA support.
 ///
@@ -112,7 +112,11 @@ impl WebConfig {
     fn from_block_config(config: &BlockConfig) -> Self {
         let str_or = |key: &str, default: &str| -> String {
             let v = config.str(key);
-            if v.is_empty() { default.to_string() } else { v.to_string() }
+            if v.is_empty() {
+                default.to_string()
+            } else {
+                v.to_string()
+            }
         };
         Self {
             folder: str_or("web_root", "public"),
@@ -174,10 +178,7 @@ fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
 
     // Hashed assets: immutable
     if is_hashed_asset(key) {
-        return format!(
-            "public, max-age={}, immutable",
-            config.immutable_max_age
-        );
+        return format!("public, max-age={}, immutable", config.immutable_max_age);
     }
 
     // Everything else: standard cache
@@ -198,10 +199,15 @@ async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfi
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for WebBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("wafer-run/web", "0.0.1", "http-handler@v1", "Static file server with caching and SPA support")
-            .instance_mode(InstanceMode::Singleton)
-            .requires(vec!["wafer-run/storage".into()])
-            .category(BlockCategory::Infrastructure)
+        BlockInfo::new(
+            "wafer-run/web",
+            "0.0.1",
+            "http-handler@v1",
+            "Static file server with caching and SPA support",
+        )
+        .instance_mode(InstanceMode::Singleton)
+        .requires(vec!["wafer-run/storage".into()])
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
