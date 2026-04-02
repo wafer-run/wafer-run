@@ -1,0 +1,3 @@
+[advisories]
+# rsa timing side-channel — no fix available, only affects MySQL RSA auth which we don't use
+ignore = ["RUSTSEC-2023-0071"]
