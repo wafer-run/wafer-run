@@ -610,7 +610,6 @@ impl Wafer {
             let mut config = wasmtime::Config::default();
             config.consume_fuel(true);
             config.wasm_component_model(true);
-            config.async_support(true);
             config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
             let engine = wasmtime::Engine::new(&config)
                 .map_err(|e| format!("failed to create wasmtime engine: {}", e))?;

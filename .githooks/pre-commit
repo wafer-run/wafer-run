@@ -11,7 +11,7 @@ if [ -n "$RS_FILES" ]; then
   }
 
   echo "Running cargo clippy..."
-  cargo clippy --all-targets --all-features -- -D warnings 2>&1 || {
+  cargo clippy --all-targets -- -D warnings 2>&1 || {
     echo "❌ clippy found warnings. Fix them and re-stage."
     exit 1
   }

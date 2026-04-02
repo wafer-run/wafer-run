@@ -7,7 +7,8 @@ use crate::types::InstanceMode;
 bindgen!({
     world: "wafer-pure-block",
     path: "../../wit/wit",
-    async: true,
+    imports: { default: async },
+    exports: { default: async },
 });
 
 /// Default fuel budget for pure block WASM execution.
@@ -21,7 +22,6 @@ fn pure_engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
     config.wasm_component_model(true);
-    config.async_support(true);
     config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
     Engine::new(&config).expect("failed to create wasmtime engine")
 }

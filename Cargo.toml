@@ -73,8 +73,8 @@ hyper = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM
-wasmtime = { version = "25", features = ["component-model"] }
-wit-bindgen = "0.32"
+wasmtime = { version = "43", features = ["component-model"] }
+wit-bindgen = "0.53"
 
 # Crypto
 argon2 = { version = "0.5", features = ["std"] }

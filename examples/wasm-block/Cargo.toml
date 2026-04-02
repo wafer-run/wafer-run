@@ -11,7 +11,7 @@ description = "Example WASM block that fetches a URL via the network block and r
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.32"
+wit-bindgen = "0.53"
 wafer-core = { path = "../../crates/wafer-core", features = ["wasm-component"] }
 wafer-block = { path = "../../crates/wafer-block" }
 serde = { version = "1", features = ["derive"] }

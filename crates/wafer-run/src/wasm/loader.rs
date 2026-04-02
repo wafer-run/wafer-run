@@ -12,8 +12,8 @@ use wafer_block::helpers::MessageExt;
 bindgen!({
     world: "wafer-block",
     path: "../../wit/wit",
-    async: true,
-    trappable_imports: true,
+    imports: { default: async | trappable },
+    exports: { default: async },
 });
 
 use wafer::block_world::runtime::Host;
@@ -29,7 +29,6 @@ fn fuel_engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
     config.wasm_component_model(true);
-    config.async_support(true);
     config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
     Engine::new(&config).expect("failed to create wasmtime engine")
 }
@@ -38,7 +37,6 @@ fn fuel_engine() -> Engine {
 // Host trait implementation (runtime → WASM imports)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
 impl Host for HostState {
     async fn is_cancelled(&mut self) -> wasmtime::Result<bool> {
         Ok(self
@@ -174,8 +172,11 @@ impl WASMBlock {
             .map_err(|e| format!("setting fuel: {e}"))?;
 
         let mut linker = Linker::new(&self.engine);
-        wafer::block_world::runtime::add_to_linker(&mut linker, |s| s)
-            .map_err(|e| format!("failed to add host runtime to linker: {}", e))?;
+        wafer::block_world::runtime::add_to_linker::<
+            HostState,
+            wasmtime::component::HasSelf<HostState>,
+        >(&mut linker, |s| s)
+        .map_err(|e| format!("failed to add host runtime to linker: {}", e))?;
 
         let bindings = WaferBlock::instantiate_async(&mut store, &self.component, &linker)
             .await
@@ -444,8 +445,11 @@ impl Block for WASMBlock {
                     .set_fuel(DEFAULT_FUEL)
                     .map_err(|e| format!("setting fuel: {e}"))?;
                 let mut linker = Linker::new(&engine);
-                wafer::block_world::runtime::add_to_linker(&mut linker, |s| s)
-                    .map_err(|e| format!("failed to add host runtime to linker: {}", e))?;
+                wafer::block_world::runtime::add_to_linker::<
+                    HostState,
+                    wasmtime::component::HasSelf<HostState>,
+                >(&mut linker, |s| s)
+                .map_err(|e| format!("failed to add host runtime to linker: {}", e))?;
                 let bindings = WaferBlock::instantiate_async(&mut store, &component, &linker)
                     .await
                     .map_err(|e| format!("instantiating WASM component: {}", e))?;
