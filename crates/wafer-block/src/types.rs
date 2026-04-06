@@ -121,6 +121,10 @@ pub struct BlockInfo {
     /// HTTP endpoints exposed by this block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<BlockEndpoint>,
+    /// URL path to the block's admin UI (e.g., `/b/products/admin/`).
+    /// Empty if the block has no admin UI.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub admin_url: String,
 }
 
 impl Default for BlockInfo {
@@ -152,6 +156,7 @@ impl BlockInfo {
             default_enabled: true,
             description: String::new(),
             endpoints: Vec::new(),
+            admin_url: String::new(),
         }
     }
 
@@ -197,6 +202,11 @@ impl BlockInfo {
 
     pub fn endpoints(mut self, endpoints: Vec<BlockEndpoint>) -> Self {
         self.endpoints = endpoints;
+        self
+    }
+
+    pub fn admin_url(mut self, url: impl Into<String>) -> Self {
+        self.admin_url = url.into();
         self
     }
 }
