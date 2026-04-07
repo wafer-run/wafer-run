@@ -41,6 +41,9 @@ pub struct RuntimeContext {
     /// Block names the caller is allowed to call via `call_block()`.
     /// `None` means unrestricted. `Some(list)` enforces the allowlist.
     pub caller_requires: Option<Vec<String>>,
+    /// The block name of the caller that invoked this block via `call_block()`.
+    /// `None` for top-level calls (e.g. from the router).
+    pub caller_id: Option<String>,
 }
 
 // --- Result helpers (used by RuntimeContext impl) ---
@@ -144,6 +147,7 @@ impl Context for RuntimeContext {
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
+            caller_id: Some(self.node_id.clone()),
         };
 
         // Call the block
@@ -190,5 +194,9 @@ impl Context for RuntimeContext {
 
     fn interface_specs(&self) -> Vec<wafer_block::InterfaceSpec> {
         (*self.interface_specs_snapshot).clone()
+    }
+
+    fn caller_id(&self) -> Option<&str> {
+        self.caller_id.as_deref()
     }
 }

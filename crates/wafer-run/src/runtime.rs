@@ -223,6 +223,7 @@ impl Wafer {
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
             aliases: Arc::new(self.aliases.clone()),
             caller_requires: None, // unrestricted by default
+            caller_id: None,       // top-level call, no caller
         }
     }
 

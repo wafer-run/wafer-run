@@ -399,6 +399,10 @@ impl Context for ContextWrapper {
     fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
         unsafe { &*self.0 }.flow_defs()
     }
+
+    fn caller_id(&self) -> Option<&str> {
+        unsafe { &*self.0 }.caller_id()
+    }
 }
 
 // ---------------------------------------------------------------------------

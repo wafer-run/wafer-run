@@ -40,4 +40,10 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn interface_specs(&self) -> Vec<crate::types::InterfaceSpec> {
         Vec::new()
     }
+
+    /// The block name of the caller that invoked this block via `call_block()`.
+    /// Returns `None` for top-level calls (e.g. from the router).
+    fn caller_id(&self) -> Option<&str> {
+        None
+    }
 }
