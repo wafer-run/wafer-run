@@ -103,6 +103,7 @@ END_EXTRA_STYLES_INLINE
     <tr><td><code>call_block(block_name, msg) &rarr; Result_</code></td><td>Call another block by name. Enforced against the caller's <code>requires</code> list when set; returns <code>PERMISSION_DENIED</code> if the target block is not listed.</td></tr>
     <tr><td><code>is_cancelled() &rarr; bool</code></td><td>Whether the request has been cancelled (timeout or explicit)</td></tr>
     <tr><td><code>config_get(key) &rarr; Option&lt;&amp;str&gt;</code></td><td>Read a configuration value from the block's node config</td></tr>
+    <tr><td><code>caller_id() &rarr; Option&lt;&amp;str&gt;</code></td><td>The block name of the caller that invoked this block via <code>call_block()</code>. Returns <code>None</code> for top-level calls (e.g. from the router). Set automatically by the runtime.</td></tr>
 </table>
 
 <h3>Response Helpers</h3>

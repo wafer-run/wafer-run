@@ -31,6 +31,7 @@ ACTIVE: core-concepts
     <li><code>call_block(name, msg)</code> — call another block by name (e.g. <code>wafer-run/database</code>, <code>wafer-run/crypto</code>). Enforced against the caller's <code>requires</code> list when set.</li>
     <li><code>config_get(key)</code> — read a configuration value</li>
     <li><code>is_cancelled()</code> — check if the request has timed out or been cancelled</li>
+    <li><code>caller_id()</code> — the block name of the caller (set automatically by <code>call_block()</code>). Used by service blocks for per-caller isolation (e.g. storage namespacing).</li>
 </ul>
 <p>Use the <code>wafer_run::clients</code> module (or the Guest SDK typed clients for WASM blocks) for convenient typed access to services like database, storage, crypto, etc.</p>
 
