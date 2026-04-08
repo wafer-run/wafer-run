@@ -253,6 +253,6 @@ impl Block for WebBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/web", Arc::new(WebBlock::new()));
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+    w.register_block("wafer-run/web", Arc::new(WebBlock::new()))
 }

@@ -362,6 +362,10 @@ pub async fn upsert(
     }
 }
 
+/// List all records matching the given filters.
+///
+/// Intended for small, bounded collections (roles, permissions, legal docs).
+/// Hard-capped at 10,000 records — use paginated `list()` for larger collections.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn list_all(
     ctx: &dyn Context,
@@ -373,7 +377,7 @@ pub async fn list_all(
         collection,
         &ListOptions {
             filters,
-            limit: 100000,
+            limit: 10_000,
             ..Default::default()
         },
     )
@@ -655,7 +659,7 @@ pub fn list_all(collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, W
         collection,
         &ListOptions {
             filters,
-            limit: 100000,
+            limit: 10_000,
             ..Default::default()
         },
     )?;

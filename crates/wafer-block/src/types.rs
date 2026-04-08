@@ -107,9 +107,10 @@ pub struct BlockInfo {
     /// tables exist when the block is registered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collections: Vec<CollectionSchema>,
-    /// Configuration keys that affect this block's behavior.
+    /// Configuration variables declared by this block.
+    /// Each block should only declare variables with its own `{ORG}__{BLOCK}__` prefix.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub config_keys: Vec<BlockConfigKey>,
+    pub config_keys: Vec<ConfigVar>,
 
     // -- Admin / UI metadata --
     /// Block category for admin UI grouping.
@@ -271,27 +272,113 @@ impl BlockEndpoint {
     }
 }
 
-/// A configuration key that affects a block's behavior.
+/// Input type for config variable UI rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum InputType {
+    #[default]
+    Text,
+    Toggle,
+    Password,
+    Color,
+    Url,
+}
+
+
+/// A configuration variable declared by a block.
+///
+/// This is the single source of truth for config variable metadata.
+/// Validation rules are derived from naming conventions:
+/// - Sensitive (masked in API): `input_type == Password`
+/// - Can't be emptied: `input_type == Password`
+/// - Can't be deleted: key starts with `SOLOBASE_SHARED__`
+/// - URL validated on write: `input_type == Url`
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BlockConfigKey {
-    /// Environment variable / settings key (e.g., "ALLOW_SIGNUP")
+pub struct ConfigVar {
+    /// Full config key (e.g., `SUPPERS_AI__AUTH__JWT_SECRET`).
     pub key: String,
-    /// What this key controls.
+    /// Display label for the admin UI (e.g., "JWT Secret").
+    #[serde(default)]
+    pub name: String,
+    /// What this variable controls.
+    #[serde(default)]
     pub description: String,
     /// Default value if not set.
     #[serde(default)]
     pub default: String,
+    /// Input type for UI rendering and validation.
+    #[serde(default)]
+    pub input_type: InputType,
+    /// Optional warning shown in the admin UI (e.g., "Changing this invalidates sessions").
+    #[serde(default)]
+    pub warning: String,
 }
 
-impl BlockConfigKey {
+impl ConfigVar {
+    /// Create a config var with key, description, and default value.
+    /// Use builder methods for additional metadata (name, input_type, warning).
     pub fn new(key: &str, description: &str, default: &str) -> Self {
         Self {
             key: key.into(),
+            name: String::new(),
             description: description.into(),
             default: default.into(),
+            input_type: InputType::Text,
+            warning: String::new(),
         }
     }
+
+    pub fn name(mut self, name: &str) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn description(mut self, description: &str) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn default_value(mut self, default: &str) -> Self {
+        self.default = default.into();
+        self
+    }
+
+    pub fn input_type(mut self, input_type: InputType) -> Self {
+        self.input_type = input_type;
+        self
+    }
+
+    pub fn warning(mut self, warning: &str) -> Self {
+        self.warning = warning.into();
+        self
+    }
+
+    /// Whether this variable is sensitive (should be masked in API responses).
+    pub fn is_sensitive(&self) -> bool {
+        self.input_type == InputType::Password
+    }
+
+    /// Whether this variable needs URL validation on write.
+    pub fn is_url(&self) -> bool {
+        self.input_type == InputType::Url
+    }
+
+    /// Whether this variable can be deleted by an admin.
+    /// Shared system vars cannot be deleted.
+    pub fn is_deletable(&self) -> bool {
+        !self.key.starts_with("SOLOBASE_SHARED__")
+    }
+
+    /// Whether this variable can be set to an empty value.
+    /// Sensitive vars (passwords/secrets) cannot be emptied.
+    pub fn can_be_empty(&self) -> bool {
+        !self.is_sensitive()
+    }
 }
+
+/// Backward-compatible alias for `ConfigVar`.
+pub type BlockConfigKey = ConfigVar;
 
 // ---------------------------------------------------------------------------
 // Interface specs

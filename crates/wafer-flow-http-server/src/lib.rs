@@ -52,34 +52,34 @@ const FLOW_JSON: &str = r#"{
 ///     "routes": [{ "path": "/**", "block": "hello" }]
 /// }));
 /// ```
-pub fn register(w: &mut wafer_run::Wafer, config: serde_json::Value) {
+pub fn register(w: &mut wafer_run::Wafer, config: serde_json::Value) -> Result<(), String> {
     // Register native blocks (idempotent — skips if already registered)
     if !w.has_block("wafer-run/security-headers") {
-        wafer_block_security_headers::register(w);
+        wafer_block_security_headers::register(w)?;
     }
     if !w.has_block("wafer-run/cors") {
-        wafer_block_cors::register(w);
+        wafer_block_cors::register(w)?;
     }
     if !w.has_block("wafer-run/readonly-guard") {
-        wafer_block_readonly_guard::register(w);
+        wafer_block_readonly_guard::register(w)?;
     }
     if !w.has_block("wafer-run/ip-rate-limit") {
-        wafer_block_ip_rate_limit::register(w);
+        wafer_block_ip_rate_limit::register(w)?;
     }
     if !w.has_block("wafer-run/monitoring") {
-        wafer_block_monitoring::register(w);
+        wafer_block_monitoring::register(w)?;
     }
     if !w.has_block("wafer-run/router") {
-        wafer_block_router::register(w);
+        wafer_block_router::register(w)?;
     }
     if !w.has_block("wafer-run/http-listener") {
-        wafer_block_http_listener::register(w);
+        wafer_block_http_listener::register(w)?;
     }
 
     // Register flow
-    w.add_flow_json(FLOW_JSON)
-        .expect("invalid wafer-run/http-server flow JSON");
+    w.add_flow_json(FLOW_JSON)?;
 
     // Set config
     w.add_block_config("wafer-run/http-server", config);
+    Ok(())
 }

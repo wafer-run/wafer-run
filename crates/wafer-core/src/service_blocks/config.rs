@@ -32,8 +32,8 @@ impl Block for ConfigBlock {
         .category(BlockCategory::Service)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        handler::handle_message(self.service.as_ref(), msg)
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        handler::handle_message(self.service.as_ref(), ctx, msg)
     }
 
     async fn lifecycle(
@@ -46,6 +46,9 @@ impl Block for ConfigBlock {
 }
 
 /// Register the unified config block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn ConfigService>) {
-    w.register_block("wafer-run/config", Arc::new(ConfigBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn ConfigService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/config", Arc::new(ConfigBlock::new(service)))
 }

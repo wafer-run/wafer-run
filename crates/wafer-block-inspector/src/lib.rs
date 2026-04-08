@@ -236,6 +236,6 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()));
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+    w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()))
 }

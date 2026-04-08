@@ -18,18 +18,21 @@ async fn main() {
             "listen": "0.0.0.0:8080",
             "routes": [{ "path": "/**", "block": "hello" }]
         }),
-    );
+    )
+    .expect("register http server");
 
     // Register a simple inline block that responds with JSON
-    wafer.register_func("hello", |_ctx, msg| {
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "message": "Hello, World!",
-                "path": msg.path(),
-            }),
-        )
-    });
+    wafer
+        .register_func("hello", |_ctx, msg| {
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "message": "Hello, World!",
+                    "path": msg.path(),
+                }),
+            )
+        })
+        .expect("register hello");
 
     tracing::info!("starting on http://localhost:8080");
     let wafer = wafer.start().await.expect("failed to start");

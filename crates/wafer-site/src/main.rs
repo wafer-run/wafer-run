@@ -46,7 +46,8 @@ async fn main() {
                 { "path": "/**", "block": "wafer-run/web" }
             ]
         }),
-    );
+    )
+    .expect("register http server");
 
     // Block configs
     w.add_block_config("wafer-run/logger", serde_json::json!({}));
@@ -70,40 +71,44 @@ async fn main() {
                 wafer_block_local_storage::service::LocalStorageService::new(&storage_root)
                     .expect("storage"),
             ),
-        );
+        )
+        .expect("register storage");
         w.add_alias("storage", "wafer-run/storage");
         wafer_core::service_blocks::config::register_with(
             &mut w,
             Arc::new(wafer_block_config::service::EnvConfigService::new()),
-        );
+        )
+        .expect("register config");
         wafer_core::service_blocks::logger::register_with(
             &mut w,
             Arc::new(wafer_block_logger::service::TracingLogger),
-        );
+        )
+        .expect("register logger");
         wafer_core::service_blocks::crypto::register_with(
             &mut w,
             Arc::new(wafer_block_crypto::service::Argon2JwtCryptoService::new(
                 "wafer-site-dev-secret".to_string(),
             )),
-        );
+        )
+        .expect("register crypto");
     }
 
     // Register infrastructure blocks
-    wafer_block_auth_validator::register(&mut w);
-    wafer_block_iam_guard::register(&mut w);
-    wafer_block_inspector::register(&mut w);
+    wafer_block_auth_validator::register(&mut w).expect("register auth-validator");
+    wafer_block_iam_guard::register(&mut w).expect("register iam-guard");
+    wafer_block_inspector::register(&mut w).expect("register inspector");
     w.add_block_config(
         "wafer-run/inspector",
         serde_json::json!({
             "allow_anonymous": true
         }),
     );
-    wafer_block_web::register(&mut w);
+    wafer_block_web::register(&mut w).expect("register web");
 
     // Register site-specific blocks
-    register_api_block(&mut w);
-    playground::register(&mut w);
-    registry::register(&mut w);
+    register_api_block(&mut w).expect("register api block");
+    playground::register(&mut w).expect("register playground");
+    registry::register(&mut w).expect("register registry");
 
     // Start — the wafer-run/http-listener block spawns the Axum listener internally
     let w = w.start().await.unwrap_or_else(|e| {
@@ -121,7 +126,7 @@ async fn main() {
     w.shutdown().await;
 }
 
-fn register_api_block(w: &mut Wafer) {
+fn register_api_block(w: &mut Wafer) -> Result<(), String> {
     w.register_block_func("wafer-site/api", |_ctx, msg| {
         let path = msg.path();
         match path {
@@ -145,5 +150,5 @@ fn register_api_block(w: &mut Wafer) {
             ),
             _ => err_not_found(msg, &format!("API endpoint not found: {}", path)),
         }
-    });
+    })
 }

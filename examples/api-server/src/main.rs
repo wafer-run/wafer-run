@@ -32,7 +32,8 @@ async fn main() {
                 { "path": "/api/**", "block": "api-handler" }
             ]
         }),
-    );
+    )
+    .expect("register http server");
     // Ensure data directory exists
     std::fs::create_dir_all("data").ok();
 
@@ -43,19 +44,23 @@ async fn main() {
             wafer_block_sqlite::service::SQLiteDatabaseService::open("data/notes.db")
                 .expect("open db"),
         ),
-    );
+    )
+    .expect("register database");
     wafer_core::service_blocks::logger::register_with(
         &mut wafer,
         Arc::new(wafer_block_logger::service::TracingLogger),
-    );
-    wafer_block_inspector::register(&mut wafer);
+    )
+    .expect("register logger");
+    wafer_block_inspector::register(&mut wafer).expect("register inspector");
     wafer.add_block_config(
         "wafer-run/inspector",
         serde_json::json!({
             "allow_anonymous": true
         }),
     );
-    wafer.register_block("api-handler", Arc::new(NotesHandler));
+    wafer
+        .register_block("api-handler", Arc::new(NotesHandler))
+        .expect("register api-handler");
     wafer.add_block_config(
         "wafer-run/cors",
         serde_json::json!({

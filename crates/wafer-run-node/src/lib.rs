@@ -56,7 +56,9 @@ impl WaferRuntime {
         if path.ends_with(".wasm") {
             let block = WASMBlock::load(&path)
                 .map_err(|e| Error::from_reason(format!("failed to load WASM block: {}", e)))?;
-            self.inner.register_block(&name, Arc::new(block));
+            self.inner
+                .register_block(&name, Arc::new(block))
+                .map_err(Error::from_reason)?;
         } else {
             let json = std::fs::read_to_string(&path)
                 .map_err(|e| Error::from_reason(format!("failed to read file: {}", e)))?;

@@ -58,14 +58,14 @@ async fn main() {
     }"#).expect("valid flow JSON");
 
     // Register the standard infra blocks that the flow references
-    wafer_block_inspector::register(&mut wafer);
+    wafer_block_inspector::register(&mut wafer).expect("register inspector");
 
     // Register standard blocks needed by the flow
     // Register the standard infra blocks that the flow references
-    wafer_block_http_listener::register(&mut wafer);
-    wafer_block_security_headers::register(&mut wafer);
-    wafer_block_cors::register(&mut wafer);
-    wafer_block_router::register(&mut wafer);
+    wafer_block_http_listener::register(&mut wafer).expect("register http-listener");
+    wafer_block_security_headers::register(&mut wafer).expect("register security-headers");
+    wafer_block_cors::register(&mut wafer).expect("register cors");
+    wafer_block_router::register(&mut wafer).expect("register router");
 
     // Flow-level config (same shape as wafer-flow-http-server::register)
     wafer.add_block_config(
@@ -92,93 +92,103 @@ async fn main() {
     // --- Custom middleware blocks ---
 
     // Request logger: logs method + path, always passes through
-    wafer.register_func("request-logger", |_ctx, msg| {
-        let n = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        let method = msg.action().to_string();
-        let path = msg.path().to_string();
-        tracing::info!(req = n, method = %method, path = %path, "incoming request");
-        msg.set_meta("request.number", n.to_string());
-        msg.cont_ref()
-    });
+    wafer
+        .register_func("request-logger", |_ctx, msg| {
+            let n = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let method = msg.action().to_string();
+            let path = msg.path().to_string();
+            tracing::info!(req = n, method = %method, path = %path, "incoming request");
+            msg.set_meta("request.number", n.to_string());
+            msg.cont_ref()
+        })
+        .expect("register request-logger");
 
     // API key check: requires X-Api-Key header for /api/** routes
     // Skips auth for inspector and stats endpoints
-    wafer.register_func("api-key-check", |_ctx, msg| {
-        let path = msg.path().to_string();
-        // Skip auth for non-API routes
-        if !path.starts_with("/api/") {
-            return msg.cont_ref();
-        }
-        let key = msg.header("X-Api-Key").to_string();
-        if key.is_empty() {
-            msg.set_meta("resp.status", "401");
-            return json_respond(
-                msg,
-                &serde_json::json!({
-                    "error": "unauthorized",
-                    "message": "missing X-Api-Key header"
-                }),
-            );
-        }
-        if key != "secret123" {
-            msg.set_meta("resp.status", "403");
-            return json_respond(
-                msg,
-                &serde_json::json!({
-                    "error": "forbidden",
-                    "message": "invalid API key"
-                }),
-            );
-        }
-        msg.set_meta("auth.api_key_valid", "true");
-        msg.cont_ref()
-    });
+    wafer
+        .register_func("api-key-check", |_ctx, msg| {
+            let path = msg.path().to_string();
+            // Skip auth for non-API routes
+            if !path.starts_with("/api/") {
+                return msg.cont_ref();
+            }
+            let key = msg.header("X-Api-Key").to_string();
+            if key.is_empty() {
+                msg.set_meta("resp.status", "401");
+                return json_respond(
+                    msg,
+                    &serde_json::json!({
+                        "error": "unauthorized",
+                        "message": "missing X-Api-Key header"
+                    }),
+                );
+            }
+            if key != "secret123" {
+                msg.set_meta("resp.status", "403");
+                return json_respond(
+                    msg,
+                    &serde_json::json!({
+                        "error": "forbidden",
+                        "message": "invalid API key"
+                    }),
+                );
+            }
+            msg.set_meta("auth.api_key_valid", "true");
+            msg.cont_ref()
+        })
+        .expect("register api-key-check");
 
     // --- Handler blocks ---
 
     // Echo handler: echoes back the request info
-    wafer.register_func("echo-handler", |_ctx, msg| {
-        let body: serde_json::Value = msg.decode().unwrap_or(serde_json::Value::Null);
-        let req_num = msg.get_meta("request.number").to_string();
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "echo": {
-                    "path": msg.path(),
-                    "action": msg.action(),
-                    "body": body,
-                    "request_number": req_num,
-                },
-                "message": "request passed all middleware checks!"
-            }),
-        )
-    });
+    wafer
+        .register_func("echo-handler", |_ctx, msg| {
+            let body: serde_json::Value = msg.decode().unwrap_or(serde_json::Value::Null);
+            let req_num = msg.get_meta("request.number").to_string();
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "echo": {
+                        "path": msg.path(),
+                        "action": msg.action(),
+                        "body": body,
+                        "request_number": req_num,
+                    },
+                    "message": "request passed all middleware checks!"
+                }),
+            )
+        })
+        .expect("register echo-handler");
 
     // Stats endpoint
-    wafer.register_func("stats", |_ctx, msg| {
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
-            }),
-        )
-    });
+    wafer
+        .register_func("stats", |_ctx, msg| {
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
+                }),
+            )
+        })
+        .expect("register stats");
 
     // 404 fallback
-    wafer.register_func("fallback", |_ctx, msg| {
-        msg.set_meta("resp.status", "404");
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "error": "not found",
-                "endpoints": [
-                    "POST /api/echo -H 'X-Api-Key: secret123'",
-                    "GET /stats",
-                    "GET /_inspector/ui"
-                ]
-            }),
-        )
-    });
+    wafer
+        .register_func("fallback", |_ctx, msg| {
+            msg.set_meta("resp.status", "404");
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "error": "not found",
+                    "endpoints": [
+                        "POST /api/echo -H 'X-Api-Key: secret123'",
+                        "GET /stats",
+                        "GET /_inspector/ui"
+                    ]
+                }),
+            )
+        })
+        .expect("register fallback");
 
     tracing::info!("middleware-chain example on http://localhost:8080");
     tracing::info!("  POST /api/echo -H 'X-Api-Key: secret123' -d '{{...}}'");

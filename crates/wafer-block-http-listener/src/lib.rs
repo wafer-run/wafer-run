@@ -467,9 +467,9 @@ impl Block for HttpListenerBlock {
 // Registration
 // ---------------------------------------------------------------------------
 
-pub fn register(w: &mut wafer_run::Wafer) {
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
     w.register_block(
         "wafer-run/http-listener",
         Arc::new(HttpListenerBlock::new()),
-    );
+    )
 }

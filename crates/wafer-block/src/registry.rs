@@ -8,8 +8,8 @@ use std::sync::Arc;
 /// Block crates use this trait in their `register()` functions instead of
 /// taking `&mut Wafer` directly, so they don't need to depend on `wafer-run`.
 pub trait BlockRegistry {
-    /// Register a block by name.
-    fn register_block(&mut self, name: &str, block: Arc<dyn Block>);
+    /// Register a block by name. Returns an error if the name is already registered.
+    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), String>;
 
     /// Add a name alias (e.g. `"db"` → `"wafer-run/database"`).
     fn add_alias(&mut self, alias: &str, target: &str);

@@ -56,8 +56,11 @@ impl Block for DatabaseBlock {
 }
 
 /// Register the unified database block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn DatabaseService>) {
-    w.register_block("wafer-run/database", Arc::new(DatabaseBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn DatabaseService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/database", Arc::new(DatabaseBlock::new(service)))
 }
 
 /// Register with pre-built schema tables for migration.
@@ -65,9 +68,9 @@ pub fn register_with_tables(
     w: &mut dyn BlockRegistry,
     service: Arc<dyn DatabaseService>,
     tables: Vec<Table>,
-) {
+) -> Result<(), String> {
     w.register_block(
         "wafer-run/database",
         Arc::new(DatabaseBlock::with_tables(service, tables)),
-    );
+    )
 }

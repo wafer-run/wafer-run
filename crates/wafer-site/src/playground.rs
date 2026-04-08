@@ -234,6 +234,6 @@ fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String
     })
 }
 
-pub fn register(w: &mut Wafer) {
-    w.register_block("wafer-site/playground", Arc::new(PlaygroundBlock::new()));
+pub fn register(w: &mut Wafer) -> Result<(), String> {
+    w.register_block("wafer-site/playground", Arc::new(PlaygroundBlock::new()))
 }

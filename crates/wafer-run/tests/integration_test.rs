@@ -115,7 +115,8 @@ fn test_create_runtime() {
 #[test]
 fn test_register_inline_block() {
     let mut w = Wafer::new();
-    w.register_block_func("echo", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("echo", |_ctx, msg| msg.clone().cont())
+        .unwrap();
     assert!(w.has_block("echo"));
     assert!(!w.has_block("nonexistent"));
 }
@@ -133,7 +134,8 @@ async fn test_single_block_flow() {
         let mut out = msg.clone();
         out.data = text.into_bytes();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(single_step_flow("to-upper", "upper"));
     w.resolve().await.expect("resolve failed");
@@ -160,7 +162,8 @@ async fn test_sequential_flow() {
         text.push_str("-A");
         out.data = text.into_bytes();
         out.cont()
-    });
+    })
+    .unwrap();
 
     // Block B: append "-B"
     w.register_block_func("append-b", |_ctx, msg| {
@@ -169,7 +172,8 @@ async fn test_sequential_flow() {
         text.push_str("-B");
         out.data = text.into_bytes();
         out.cont()
-    });
+    })
+    .unwrap();
 
     // Block C: append "-C"
     w.register_block_func("append-c", |_ctx, msg| {
@@ -178,7 +182,8 @@ async fn test_sequential_flow() {
         text.push_str("-C");
         out.data = text.into_bytes();
         out.cont()
-    });
+    })
+    .unwrap();
 
     // Build flow: A -> B -> C (sequential steps, middleware mode)
     w.add_flow(make_flow(
@@ -464,7 +469,8 @@ async fn test_observability_flow_hooks() {
         ce.fetch_add(1, Ordering::SeqCst);
     });
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     w.add_flow(single_step_flow("observed", "noop"));
     w.resolve().await.expect("resolve failed");
@@ -499,8 +505,10 @@ async fn test_observability_block_hooks() {
         bd.lock().push(duration);
     });
 
-    w.register_block_func("step-1", |_ctx, msg| msg.clone().cont());
-    w.register_block_func("step-2", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("step-1", |_ctx, msg| msg.clone().cont())
+        .unwrap();
+    w.register_block_func("step-2", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     w.add_flow(make_flow(
         "two-steps",
@@ -532,13 +540,15 @@ async fn test_flow_reference() {
         let mut out = msg.clone();
         out.set_meta("validated", "true");
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.register_block_func("store", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"stored".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     // Inner flow: validate
     w.add_flow(single_step_flow("validation-flow", "validate"));
@@ -575,13 +585,15 @@ async fn test_flow_reference_short_circuit() {
     // The first step responds immediately (short-circuits)
     w.register_block_func("responder", |_ctx, msg| {
         respond(msg, b"early-response".to_vec(), "text/plain")
-    });
+    })
+    .unwrap();
 
     w.register_block_func("should-not-run", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"this should never appear".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow(
         "short-circuit",
@@ -601,7 +613,8 @@ async fn test_flow_reference_short_circuit() {
 async fn test_flow_reference_not_found() {
     let mut w = Wafer::new();
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     // Create a flow with next routing to non-existent flow
     let mut s = step("root", "noop");
@@ -637,13 +650,15 @@ async fn test_on_error_stop() {
     w.register_block_func("fail", |_ctx, msg| {
         msg.clone()
             .err(WaferError::new("test_error", "intentional failure"))
-    });
+    })
+    .unwrap();
 
     w.register_block_func("after-fail", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"should-not-run".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "stop-flow",
@@ -673,13 +688,15 @@ async fn test_on_error_continue() {
         fc.fetch_add(1, Ordering::SeqCst);
         msg.clone()
             .err(WaferError::new("test_error", "intentional failure"))
-    });
+    })
+    .unwrap();
 
     w.register_block_func("after-fail", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"recovered".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "cont-flow",
@@ -704,7 +721,8 @@ async fn test_on_error_continue_no_more_nodes() {
     w.register_block_func("fail-at-end", |_ctx, msg| {
         msg.clone()
             .err(WaferError::new("terminal_error", "error at tail"))
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "cont-end",
@@ -730,13 +748,15 @@ async fn test_respond_short_circuits() {
 
     w.register_block_func("early-respond", |_ctx, msg| {
         respond(msg, b"early".to_vec(), "text/plain")
-    });
+    })
+    .unwrap();
 
     w.register_block_func("unreachable", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"unreachable".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow(
         "short-circuit",
@@ -759,13 +779,15 @@ async fn test_respond_short_circuits() {
 async fn test_drop_action() {
     let mut w = Wafer::new();
 
-    w.register_block_func("dropper", |_ctx, msg| msg.clone().drop_msg());
+    w.register_block_func("dropper", |_ctx, msg| msg.clone().drop_msg())
+        .unwrap();
 
     w.register_block_func("unreachable", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"unreachable".to_vec();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow(
         "drop-flow",
@@ -809,7 +831,8 @@ async fn test_block_with_config() {
         let text = format!("{}-{}", prefix, String::from_utf8_lossy(&out.data));
         out.data = text.into_bytes();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.add_flow(make_flow(
         "config-flow",
@@ -909,7 +932,8 @@ async fn test_resolve_missing_block() {
 async fn test_add_flow_json() {
     let mut w = Wafer::new();
 
-    w.register_block_func("echo", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("echo", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     w.add_flow_json(
         r#"{
@@ -938,7 +962,8 @@ async fn test_panic_recovery() {
 
     w.register_block_func("panicker", |_ctx, _msg| {
         panic!("block went wrong");
-    });
+    })
+    .unwrap();
 
     w.add_flow(single_step_flow("panic-flow", "panicker"));
     w.resolve().await.expect("resolve failed");
@@ -961,7 +986,8 @@ async fn test_panic_recovery() {
 fn test_flows_info() {
     let mut w = Wafer::new();
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     w.add_flow(single_step_flow("flow-a", "noop"));
     w.add_flow(single_step_flow("flow-b", "noop"));
@@ -982,7 +1008,8 @@ fn test_flows_info() {
 async fn test_start_and_stop() {
     let mut w = Wafer::new();
 
-    w.register_block_func("lifecycle-block", |_ctx, msg| msg.clone().cont());
+    w.register_block_func("lifecycle-block", |_ctx, msg| msg.clone().cont())
+        .unwrap();
 
     w.add_flow(single_step_flow("lifecycle-test", "lifecycle-block"));
 
@@ -1235,7 +1262,8 @@ async fn test_waferflow_simple_pipeline() {
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     // Block that wraps text in a greeting
     w.register_block_func("greet", |_ctx, msg| {
@@ -1245,7 +1273,8 @@ async fn test_waferflow_simple_pipeline() {
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.resolve().await.expect("resolve failed");
 
@@ -1292,21 +1321,24 @@ async fn test_waferflow_conditional_routing() {
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.register_block_func("format-positive", |_ctx, msg| {
         let output = serde_json::json!({ "result": "positive" });
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.register_block_func("format-negative", |_ctx, msg| {
         let output = serde_json::json!({ "result": "non-positive" });
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.resolve().await.expect("resolve failed");
 
@@ -1385,7 +1417,8 @@ async fn test_waferflow_max_steps_limit() {
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
         out.cont()
-    });
+    })
+    .unwrap();
 
     w.resolve().await.expect("resolve failed");
 

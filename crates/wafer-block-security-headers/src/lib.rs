@@ -15,7 +15,7 @@ impl Default for SecurityHeadersBlock {
 impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {
-            csp: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
+            csp: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
         }
     }
 }
@@ -70,9 +70,9 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
     w.register_block(
         "wafer-run/security-headers",
         Arc::new(SecurityHeadersBlock::new()),
-    );
+    )
 }

@@ -35,10 +35,11 @@ async fn main() {
                 { "path": "/**", "block": "not-found" }
             ]
         }),
-    );
+    )
+    .expect("register http server");
 
     // --- Inspector (anonymous for dev) ---
-    wafer_block_inspector::register(&mut wafer);
+    wafer_block_inspector::register(&mut wafer).expect("register inspector");
     wafer.add_block_config(
         "wafer-run/inspector",
         serde_json::json!({
@@ -161,32 +162,38 @@ async fn main() {
     }"#).expect("valid flow JSON");
 
     // --- Handler blocks (for the HTTP routes) ---
-    wafer.register_func("greeter", |_ctx, msg| {
-        let name = msg.query("name").to_string();
-        let greeting = if name.is_empty() {
-            "Hello, stranger! Try /greet?name=YourName".to_string()
-        } else {
-            format!("Hello, {}! Welcome to WAFER.", name)
-        };
-        json_respond(msg, &serde_json::json!({ "greeting": greeting }))
-    });
+    wafer
+        .register_func("greeter", |_ctx, msg| {
+            let name = msg.query("name").to_string();
+            let greeting = if name.is_empty() {
+                "Hello, stranger! Try /greet?name=YourName".to_string()
+            } else {
+                format!("Hello, {}! Welcome to WAFER.", name)
+            };
+            json_respond(msg, &serde_json::json!({ "greeting": greeting }))
+        })
+        .expect("register greeter");
 
-    wafer.register_func("health", |_ctx, msg| {
-        json_respond(msg, &serde_json::json!({ "status": "ok" }))
-    });
+    wafer
+        .register_func("health", |_ctx, msg| {
+            json_respond(msg, &serde_json::json!({ "status": "ok" }))
+        })
+        .expect("register health");
 
-    wafer.register_func("not-found", |_ctx, msg| {
-        let path = msg.path().to_string();
-        msg.set_meta("resp.status", "404");
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "error": "not found",
-                "path": path,
-                "endpoints": ["/greet?name=Alice", "/health", "/_inspector/ui"]
-            }),
-        )
-    });
+    wafer
+        .register_func("not-found", |_ctx, msg| {
+            let path = msg.path().to_string();
+            msg.set_meta("resp.status", "404");
+            json_respond(
+                msg,
+                &serde_json::json!({
+                    "error": "not found",
+                    "path": path,
+                    "endpoints": ["/greet?name=Alice", "/health", "/_inspector/ui"]
+                }),
+            )
+        })
+        .expect("register not-found");
 
     // Stub blocks referenced by the pipeline flows (needed so they register)
     for name in &[
@@ -201,16 +208,18 @@ async fn main() {
         "webhook-caller",
     ] {
         let block_name = name.to_string();
-        wafer.register_func(*name, move |_ctx, msg| {
-            json_respond(
-                msg,
-                &serde_json::json!({
-                    "stub": true,
-                    "block": block_name,
-                    "message": "This is a stub — implement me!"
-                }),
-            )
-        });
+        wafer
+            .register_func(*name, move |_ctx, msg| {
+                json_respond(
+                    msg,
+                    &serde_json::json!({
+                        "stub": true,
+                        "block": block_name,
+                        "message": "This is a stub — implement me!"
+                    }),
+                )
+            })
+            .expect("register stub block");
     }
 
     tracing::info!("multi-flow example on http://localhost:8080");

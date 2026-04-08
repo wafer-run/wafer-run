@@ -46,6 +46,9 @@ impl Block for StorageBlock {
 }
 
 /// Register the unified storage block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn StorageService>) {
-    w.register_block("wafer-run/storage", Arc::new(StorageBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn StorageService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/storage", Arc::new(StorageBlock::new(service)))
 }

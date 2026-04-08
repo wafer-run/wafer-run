@@ -128,6 +128,6 @@ impl Block for RateLimitBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
-    w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()));
+pub fn register(w: &mut Wafer) -> Result<(), String> {
+    w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
 }

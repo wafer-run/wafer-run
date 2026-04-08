@@ -20,8 +20,9 @@ async fn main() {
             "listen": "0.0.0.0:8080",
             "routes": [{ "path": "/**", "block": "wafer-run/web" }]
         }),
-    );
-    wafer_block_web::register(&mut wafer);
+    )
+    .expect("register http server");
+    wafer_block_web::register(&mut wafer).expect("register web");
     wafer.add_block_config(
         "wafer-run/web",
         serde_json::json!({

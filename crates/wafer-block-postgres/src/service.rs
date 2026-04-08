@@ -350,11 +350,10 @@ impl PostgresDatabaseService {
         // Create indexes for columns with foreign keys
         for col in &table.columns {
             if col.references.is_some() {
-                let idx_name = format!("idx_{}_{}", table.name, col.name);
-                let sql = format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {}({})",
-                    idx_name, table.name, col.name
-                );
+                let tbl = sanitize_ident(&table.name);
+                let c = sanitize_ident(&col.name);
+                let idx_name = format!("idx_{}_{}", tbl, c);
+                let sql = format!("CREATE INDEX IF NOT EXISTS {} ON {}({})", idx_name, tbl, c);
                 sqlx::query(&sql)
                     .execute(&self.pool)
                     .await

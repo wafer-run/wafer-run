@@ -46,6 +46,9 @@ impl Block for CryptoBlock {
 }
 
 /// Register the unified crypto block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn CryptoService>) {
-    w.register_block("wafer-run/crypto", Arc::new(CryptoBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn CryptoService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/crypto", Arc::new(CryptoBlock::new(service)))
 }

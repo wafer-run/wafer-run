@@ -288,6 +288,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/auth-validator", Arc::new(AuthBlock::new()));
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+    w.register_block("wafer-run/auth-validator", Arc::new(AuthBlock::new()))
 }

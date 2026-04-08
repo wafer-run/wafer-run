@@ -270,8 +270,12 @@ pub(crate) fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
 // ---------------------------------------------------------------------------
 
 impl wafer_block::registry::BlockRegistry for Wafer {
-    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) {
+    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), String> {
+        if self.blocks.contains_key(name) {
+            return Err(format!("block '{}' already registered", name));
+        }
         self.blocks.insert(name.to_string(), block);
+        Ok(())
     }
 
     fn add_alias(&mut self, alias: &str, target: &str) {

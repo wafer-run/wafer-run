@@ -68,8 +68,8 @@ pub mod runtime {
 // Re-export runtime-specific types.
 pub use types::{
     ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
-    CollectionSchema, FieldSchema, HttpMethod, IndexSchema, InterfaceSpec, MetaAccess,
-    RequestAction, UiRoute,
+    CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
+    MetaAccess, RequestAction, UiRoute,
 };
 
 /// Alias for BlockResult — common in block handler return types.

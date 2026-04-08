@@ -46,6 +46,9 @@ impl Block for LoggerBlock {
 }
 
 /// Register the unified logger block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn LoggerService>) {
-    w.register_block("wafer-run/logger", Arc::new(LoggerBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn LoggerService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/logger", Arc::new(LoggerBlock::new(service)))
 }

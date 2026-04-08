@@ -119,6 +119,6 @@ impl Block for PostgresDatabaseBlock {
 }
 
 /// Register the PostgreSQL database block with the given Wafer runtime.
-pub fn register(w: &mut wafer_run::Wafer) {
-    w.register_block("wafer-run/postgres", Arc::new(PostgresDatabaseBlock::new()));
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
+    w.register_block("wafer-run/postgres", Arc::new(PostgresDatabaseBlock::new()))
 }

@@ -97,6 +97,6 @@ impl Block for CorsBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/cors", Arc::new(CorsBlock::new()));
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+    w.register_block("wafer-run/cors", Arc::new(CorsBlock::new()))
 }

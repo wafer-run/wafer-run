@@ -46,6 +46,9 @@ impl Block for NetworkBlock {
 }
 
 /// Register the unified network block with the given service.
-pub fn register_with(w: &mut dyn BlockRegistry, service: Arc<dyn NetworkService>) {
-    w.register_block("wafer-run/network", Arc::new(NetworkBlock::new(service)));
+pub fn register_with(
+    w: &mut dyn BlockRegistry,
+    service: Arc<dyn NetworkService>,
+) -> Result<(), String> {
+    w.register_block("wafer-run/network", Arc::new(NetworkBlock::new(service)))
 }

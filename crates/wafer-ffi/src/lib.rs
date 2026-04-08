@@ -171,9 +171,13 @@ pub unsafe extern "C" fn wafer_register(
         if path_str.ends_with(".wasm") {
             match WASMBlock::load(path_str) {
                 Ok(block) => {
-                    rt.inner
-                        .register_block(name_str, std::sync::Arc::new(block));
-                    std::ptr::null_mut()
+                    match rt
+                        .inner
+                        .register_block(name_str, std::sync::Arc::new(block))
+                    {
+                        Ok(()) => std::ptr::null_mut(),
+                        Err(e) => error_json(&e),
+                    }
                 }
                 Err(e) => error_json(&e),
             }

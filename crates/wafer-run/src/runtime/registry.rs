@@ -129,9 +129,17 @@ impl Wafer {
     ///
     /// The block's `lifecycle(Init)` will be called during `start()` with
     /// config data from `add_block_config()` (if any) or empty data.
-    pub fn register_block(&mut self, type_name: impl Into<String>, block: Arc<dyn Block>) {
+    pub fn register_block(
+        &mut self,
+        type_name: impl Into<String>,
+        block: Arc<dyn Block>,
+    ) -> Result<(), String> {
         let name = type_name.into();
+        if self.blocks.contains_key(&name) {
+            return Err(format!("block '{}' already registered", name));
+        }
         self.blocks.insert(name, block);
+        Ok(())
     }
 
     /// RegisterBlockFunc registers a synchronous inline handler function as a block.
@@ -143,14 +151,14 @@ impl Wafer {
         &mut self,
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
+    ) -> Result<(), String> {
         use crate::block::BlockInfo;
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(FuncBlock {
             info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
             handler: Box::new(handler),
         });
-        self.register_block(name, block);
+        self.register_block(name, block)
     }
 
     /// RegisterBlockFunc (wasm32 variant — no Send + Sync bounds).
@@ -159,19 +167,23 @@ impl Wafer {
         &mut self,
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
-    ) {
+    ) -> Result<(), String> {
         use crate::block::BlockInfo;
         let name = type_name.into();
         let block: Arc<dyn Block> = Arc::new(FuncBlock {
             info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
             handler: Box::new(handler),
         });
-        self.register_block(name, block);
+        self.register_block(name, block)
     }
 
     /// RegisterBlockFuncAsync registers an async inline handler function as a block.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_block_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    pub fn register_block_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), String>
     where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
             + Send
@@ -190,12 +202,16 @@ impl Wafer {
             ),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
-        self.register_block(name, block);
+        self.register_block(name, block)
     }
 
     /// RegisterBlockFuncAsync (wasm32 variant — Sync only, no Send).
     #[cfg(target_arch = "wasm32")]
-    pub fn register_block_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    pub fn register_block_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), String>
     where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
         Fut: std::future::Future<Output = Result_> + 'static,
@@ -211,7 +227,7 @@ impl Wafer {
             ),
             handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
         });
-        self.register_block(name, block);
+        self.register_block(name, block)
     }
 
     /// Shorthand for [`register_block_func`](Self::register_block_func).
@@ -220,8 +236,8 @@ impl Wafer {
         &mut self,
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.register_block_func(type_name, handler);
+    ) -> Result<(), String> {
+        self.register_block_func(type_name, handler)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -229,13 +245,17 @@ impl Wafer {
         &mut self,
         type_name: impl Into<String>,
         handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.register_block_func(type_name, handler);
+    ) -> Result<(), String> {
+        self.register_block_func(type_name, handler)
     }
 
     /// Shorthand for [`register_block_func_async`](Self::register_block_func_async).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    pub fn register_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), String>
     where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
             + Send
@@ -243,16 +263,20 @@ impl Wafer {
             + 'static,
         Fut: std::future::Future<Output = Result_> + Send + 'static,
     {
-        self.register_block_func_async(type_name, handler);
+        self.register_block_func_async(type_name, handler)
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn register_func_async<F, Fut>(&mut self, type_name: impl Into<String>, handler: F)
+    pub fn register_func_async<F, Fut>(
+        &mut self,
+        type_name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), String>
     where
         F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
         Fut: std::future::Future<Output = Result_> + 'static,
     {
-        self.register_block_func_async(type_name, handler);
+        self.register_block_func_async(type_name, handler)
     }
 
     /// Register a WaferFlow definition.

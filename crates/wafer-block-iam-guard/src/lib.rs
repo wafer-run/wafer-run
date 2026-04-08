@@ -102,6 +102,6 @@ impl Block for IAMBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) {
-    w.register_block("wafer-run/iam-guard", Arc::new(IAMBlock::new()));
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+    w.register_block("wafer-run/iam-guard", Arc::new(IAMBlock::new()))
 }

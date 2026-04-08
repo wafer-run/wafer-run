@@ -299,6 +299,6 @@ impl Block for RegistryBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) {
-    w.register_block("wafer-site/registry", Arc::new(RegistryBlock::new()));
+pub fn register(w: &mut Wafer) -> Result<(), String> {
+    w.register_block("wafer-site/registry", Arc::new(RegistryBlock::new()))
 }
