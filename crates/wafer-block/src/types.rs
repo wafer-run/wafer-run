@@ -285,7 +285,6 @@ pub enum InputType {
     Url,
 }
 
-
 /// A configuration variable declared by a block.
 ///
 /// This is the single source of truth for config variable metadata.
@@ -313,6 +312,10 @@ pub struct ConfigVar {
     /// Optional warning shown in the admin UI (e.g., "Changing this invalidates sessions").
     #[serde(default)]
     pub warning: String,
+    /// If true, a random value is auto-generated when the variable doesn't exist.
+    /// Used for secrets like JWT signing keys and webhook HMAC secrets.
+    #[serde(default)]
+    pub auto_generate: bool,
 }
 
 impl ConfigVar {
@@ -326,6 +329,7 @@ impl ConfigVar {
             default: default.into(),
             input_type: InputType::Text,
             warning: String::new(),
+            auto_generate: false,
         }
     }
 
@@ -351,6 +355,13 @@ impl ConfigVar {
 
     pub fn warning(mut self, warning: &str) -> Self {
         self.warning = warning.into();
+        self
+    }
+
+    /// Mark this variable as auto-generated if not provided.
+    /// On first startup, a random secret is generated and stored.
+    pub fn auto_generate(mut self) -> Self {
+        self.auto_generate = true;
         self
     }
 

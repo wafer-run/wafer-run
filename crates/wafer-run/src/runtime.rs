@@ -269,11 +269,37 @@ pub(crate) fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
 // BlockRegistry implementation
 // ---------------------------------------------------------------------------
 
+/// Convert a block name like `suppers-ai/auth` to its config variable prefix `SUPPERS_AI__AUTH__`.
+///
+/// Convention: `-` → `_`, `/` → `__`, uppercase, trailing `__`.
+fn block_name_to_var_prefix(name: &str) -> String {
+    let mut prefix = name.to_uppercase().replace('/', "__").replace('-', "_");
+    prefix.push_str("__");
+    prefix
+}
+
 impl wafer_block::registry::BlockRegistry for Wafer {
     fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), String> {
         if self.blocks.contains_key(name) {
             return Err(format!("block '{}' already registered", name));
         }
+
+        // Validate that all config_keys use the block's own prefix.
+        // Block "suppers-ai/auth" may only declare keys starting with "SUPPERS_AI__AUTH__".
+        let info = block.info();
+        if !info.config_keys.is_empty() && name.contains('/') {
+            let expected_prefix = block_name_to_var_prefix(name);
+            for var in &info.config_keys {
+                if !var.key.starts_with(&expected_prefix) {
+                    return Err(format!(
+                        "block '{}' declares config var '{}' which doesn't match its prefix '{}'. \
+                         Blocks can only declare variables with their own prefix.",
+                        name, var.key, expected_prefix
+                    ));
+                }
+            }
+        }
+
         self.blocks.insert(name.to_string(), block);
         Ok(())
     }
@@ -284,5 +310,26 @@ impl wafer_block::registry::BlockRegistry for Wafer {
 
     fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
         self.block_configs.insert(name.to_string(), config);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_block_name_to_var_prefix() {
+        assert_eq!(
+            block_name_to_var_prefix("suppers-ai/auth"),
+            "SUPPERS_AI__AUTH__"
+        );
+        assert_eq!(
+            block_name_to_var_prefix("wafer-run/web"),
+            "WAFER_RUN__WEB__"
+        );
+        assert_eq!(
+            block_name_to_var_prefix("suppers-ai/products"),
+            "SUPPERS_AI__PRODUCTS__"
+        );
     }
 }
