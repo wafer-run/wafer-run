@@ -43,7 +43,7 @@ impl Block for RateLimitBlock {
             "Per-IP rate limiting",
         )
         .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

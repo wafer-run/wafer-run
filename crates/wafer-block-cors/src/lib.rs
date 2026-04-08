@@ -37,7 +37,7 @@ impl Block for CorsBlock {
             "CORS preflight handler and header injection",
         )
         .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

@@ -29,7 +29,7 @@ impl Block for ReadonlyGuardBlock {
             "Blocks write operations in read-only mode",
         )
         .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

@@ -67,7 +67,7 @@ pub mod runtime {
 
 // Re-export runtime-specific types.
 pub use types::{
-    ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo,
+    ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
     CollectionSchema, FieldSchema, HttpMethod, IndexSchema, InterfaceSpec, MetaAccess,
     RequestAction, UiRoute,
 };

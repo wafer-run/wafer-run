@@ -25,7 +25,7 @@ pub mod wasm;
 
 // Re-exports for convenience
 pub use block::{AsyncFuncBlock, FuncBlock};
-pub use block::{Block, BlockCategory, BlockInfo, UiRoute};
+pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};

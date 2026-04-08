@@ -64,13 +64,19 @@ pub enum BlockCategory {
     Feature,
     /// Internal service blocks (Database, Storage, Config, etc.)
     Service,
-    /// Request pipeline middleware (CORS, Security Headers, etc.)
-    Middleware,
-    /// System infrastructure (HTTP Listener, Router, Inspector, etc.)
+    /// System infrastructure and middleware (HTTP Listener, Router, CORS, etc.)
     Infrastructure,
     /// Uncategorized / third-party blocks.
     #[default]
     Misc,
+}
+
+/// Whether a block runs as native code or as a sandboxed WASM component.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BlockRuntime {
+    #[default]
+    Native,
+    Wasm,
 }
 
 fn default_true() -> bool {
@@ -109,6 +115,9 @@ pub struct BlockInfo {
     /// Block category for admin UI grouping.
     #[serde(default)]
     pub category: BlockCategory,
+    /// Whether this block runs as native code or WASM.
+    #[serde(default)]
+    pub runtime: BlockRuntime,
     /// Whether this block can be disabled by the admin.
     #[serde(default)]
     pub can_disable: bool,
@@ -152,6 +161,7 @@ impl BlockInfo {
             collections: Vec::new(),
             config_keys: Vec::new(),
             category: BlockCategory::default(),
+            runtime: BlockRuntime::default(),
             can_disable: false,
             default_enabled: true,
             description: String::new(),
@@ -182,6 +192,11 @@ impl BlockInfo {
 
     pub fn category(mut self, category: BlockCategory) -> Self {
         self.category = category;
+        self
+    }
+
+    pub fn runtime(mut self, runtime: BlockRuntime) -> Self {
+        self.runtime = runtime;
         self
     }
 

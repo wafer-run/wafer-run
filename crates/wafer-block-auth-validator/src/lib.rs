@@ -228,7 +228,7 @@ impl Block for AuthBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .requires(vec!["wafer-run/crypto".into(), "wafer-run/database".into()])
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

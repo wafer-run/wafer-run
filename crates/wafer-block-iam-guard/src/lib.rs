@@ -67,7 +67,7 @@ impl Block for IAMBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .requires(vec!["wafer-run/database".into()])
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

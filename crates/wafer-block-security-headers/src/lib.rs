@@ -31,7 +31,7 @@ impl Block for SecurityHeadersBlock {
             "Adds standard security headers to HTTP responses",
         )
         .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {

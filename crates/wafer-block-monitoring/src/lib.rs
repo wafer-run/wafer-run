@@ -65,7 +65,7 @@ impl Block for MonitoringBlock {
             "Request metrics and monitoring",
         )
         .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Middleware)
+        .category(BlockCategory::Infrastructure)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
