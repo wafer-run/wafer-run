@@ -11,6 +11,11 @@ pub const META_AUTH_USER_ID: &str = "auth.user_id";
 pub const META_AUTH_USER_EMAIL: &str = "auth.user_email";
 pub const META_AUTH_USER_ROLES: &str = "auth.user_roles";
 
+// WRAP meta keys (set by client wrappers, read by runtime in call_block()).
+pub const META_WRAP_RESOURCE: &str = "wrap.resource";
+pub const META_WRAP_ACCESS: &str = "wrap.access"; // "read" or "write"
+pub const META_WRAP_RESOURCE_TYPE: &str = "wrap.resource_type"; // "db", "config", "storage", "crypto", "network"
+
 // Response meta keys (set by blocks, read by bridge).
 pub const META_RESP_STATUS: &str = "resp.status";
 pub const META_RESP_CONTENT_TYPE: &str = "resp.content_type";

@@ -80,6 +80,7 @@ wit-bindgen = "0.53"
 argon2 = { version = "0.5", features = ["std"] }
 jsonwebtoken = "9"
 sha2 = "0.10"
+hkdf = "0.12"
 
 # Storage
 aws-sdk-s3 = "1"

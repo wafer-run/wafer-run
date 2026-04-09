@@ -19,6 +19,7 @@ pub mod meta;
 pub mod registry;
 pub mod router;
 pub mod types;
+pub mod wrap;
 
 // Re-export everything at the crate root for convenience.
 pub use block::{AsyncFuncBlock, Block, FuncBlock};
@@ -69,7 +70,7 @@ pub mod runtime {
 pub use types::{
     ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
     CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
-    MetaAccess, RequestAction, UiRoute,
+    MetaAccess, RequestAction, ResourceGrant, ResourceType, UiRoute,
 };
 
 /// Alias for BlockResult — common in block handler return types.

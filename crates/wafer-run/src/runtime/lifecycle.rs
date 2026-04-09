@@ -23,19 +23,62 @@ impl Wafer {
         Ok(())
     }
 
+    /// Collect and validate WRAP grants from all registered blocks.
+    /// Called during resolve() after blocks are registered, so that Init
+    /// lifecycle events can access cross-block resources via grants.
+    pub(crate) fn collect_wrap_grants(&mut self) {
+        let mut all_grants = Vec::new();
+        for block in self.blocks.values() {
+            let info = block.info();
+            for grant in &info.grants {
+                // SECURITY: blocks can only grant access to resources they own
+                let grant_owner = if grant.resource.ends_with('*') {
+                    let base = grant.resource.trim_end_matches('*');
+                    wafer_block::wrap::resource_owner(&format!("{base}x"))
+                } else {
+                    wafer_block::wrap::resource_owner(&grant.resource)
+                };
+                match grant_owner {
+                    Some(owner) if owner == info.name => all_grants.push(grant.clone()),
+                    Some(owner) => tracing::error!(
+                        block = %info.name, resource = %grant.resource, owner = %owner,
+                        "WRAP: rejecting grant for resource not owned by declaring block"
+                    ),
+                    None => tracing::error!(
+                        block = %info.name, resource = %grant.resource,
+                        "WRAP: rejecting grant with unnamespaced resource"
+                    ),
+                }
+            }
+        }
+        self.wrap_grants = Arc::new(all_grants);
+    }
+
+    /// Add extra WRAP grants (e.g. loaded from a database) to the runtime.
+    /// These are appended to the existing code-declared grants.
+    /// Call this before `start()` / `start_without_bind()`, or between
+    /// `start_without_bind()` and the first request.
+    pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
+        let mut all = (*self.wrap_grants).clone();
+        all.extend(grants);
+        self.wrap_grants = Arc::new(all);
+    }
+
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, String> {
         self.start_without_bind().await?;
 
-        let ctx = self.make_context(
-            "startup",
-            "startup",
-            HashMap::new(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        );
         for (name, block) in &self.blocks {
+            // Each block gets its own context so WRAP sees the correct caller_id
+            // when the block accesses its own resources during startup.
+            let ctx = self.make_context(
+                "startup",
+                name.as_str(),
+                HashMap::new(),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            );
             if let Err(e) = block
                 .lifecycle(
                     &ctx,
@@ -64,14 +107,14 @@ impl Wafer {
 
     /// Shut down all resolved block instances (works through `Arc`).
     pub async fn shutdown(&self) {
-        let ctx = self.make_context(
-            "shutdown",
-            "shutdown",
-            HashMap::new(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        );
         for (name, block) in &self.blocks {
+            let ctx = self.make_context(
+                "shutdown",
+                name.as_str(),
+                HashMap::new(),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            );
             if let Err(e) = block
                 .lifecycle(
                     &ctx,

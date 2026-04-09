@@ -327,6 +327,83 @@ impl PostgresDatabaseService {
         Ok(result.rows_affected() as i64)
     }
 
+    async fn delete_where_async(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<(), DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_exists_async(&table).await? {
+            return Ok(());
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+
+        let (where_clause, params) = build_where_clause(filters);
+        let sql = format!("DELETE FROM {}{}", table, where_clause);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        q.execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_where_async(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_exists_async(&table).await? {
+            return Err(DatabaseError::NotFound);
+        }
+
+        let mut data = data;
+        if !data.contains_key("updated_at") {
+            data.insert(
+                "updated_at".to_string(),
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+
+        self.ensure_columns_from_data(&table, &data).await?;
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+
+        let keys: Vec<String> = data.keys().cloned().collect();
+        let set_clauses: Vec<String> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("{} = ${}", sanitize_ident(k), i + 1))
+            .collect();
+
+        let (raw_where, where_params) = build_where_clause(filters);
+        // Renumber the WHERE clause placeholders to continue after the SET params.
+        let offset = keys.len();
+        let renumbered_where = renumber_placeholders(&raw_where, offset);
+
+        let sql = format!(
+            "UPDATE {} SET {}{}",
+            table,
+            set_clauses.join(", "),
+            renumbered_where
+        );
+
+        let mut q = sqlx::query(&sql);
+        for k in &keys {
+            q = bind_json_value_query(q, &data[k]);
+        }
+        for p in &where_params {
+            q = bind_json_value_query(q, p);
+        }
+        q.execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Schema DDL async helpers
     // -----------------------------------------------------------------
@@ -738,6 +815,23 @@ impl DatabaseService for PostgresDatabaseService {
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
         self.schema_add_column_async(table, column).await
     }
+
+    async fn delete_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<(), DatabaseError> {
+        self.delete_where_async(collection, filters).await
+    }
+
+    async fn update_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        self.update_where_async(collection, filters, data).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +916,37 @@ fn build_where_clause(filters: &[Filter]) -> (String, Vec<serde_json::Value>) {
     }
 
     (format!(" WHERE {}", clauses.join(" AND ")), values)
+}
+
+/// Renumber `$N` placeholders in a SQL fragment by adding `offset` to each N.
+/// E.g. `renumber_placeholders(" WHERE a = $1 AND b = $2", 3)` returns
+/// `" WHERE a = $4 AND b = $5"`.
+fn renumber_placeholders(sql: &str, offset: usize) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            let mut num_str = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    num_str.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let Ok(n) = num_str.parse::<usize>() {
+                result.push('$');
+                result.push_str(&(n + offset).to_string());
+            } else {
+                result.push('$');
+                result.push_str(&num_str);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// Build an ORDER BY clause from sort directives.

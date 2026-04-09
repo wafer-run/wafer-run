@@ -16,3 +16,5 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 argon2 = { workspace = true }
 jsonwebtoken = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }

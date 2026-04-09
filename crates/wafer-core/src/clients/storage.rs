@@ -9,7 +9,7 @@ use wafer_block::WaferError;
 pub use crate::interfaces::storage::service::ListOptions;
 pub use crate::interfaces::storage::service::{FolderInfo, ObjectInfo, ObjectList};
 
-use super::{call_service, decode};
+use super::{call_service, decode, dual_api, svc};
 
 const BLOCK: &str = "wafer-run/storage";
 
@@ -61,185 +61,50 @@ struct DeleteFolderReq<'a> {
 }
 
 // ===========================================================================
-// Public API — native async
+// Public API — generated as async (native) or sync (wasm-component)
 // ===========================================================================
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn put(
-    ctx: &dyn Context,
-    folder: &str,
-    key: &str,
-    data: &[u8],
-    content_type: &str,
-) -> Result<(), WaferError> {
-    call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_PUT,
-        &PutReq {
-            folder,
-            key,
-            data,
-            content_type,
-        },
-    )
-    .await?;
-    Ok(())
-}
+dual_api! {
+    pub fn put(ctx, folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), WaferError> {
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_PUT, &PutReq { folder, key, data, content_type }, Some(folder), true, Some("storage"))?;
+        Ok(())
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn get(
-    ctx: &dyn Context,
-    folder: &str,
-    key: &str,
-) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key }).await?;
-    let resp: GetResp = decode(&data)?;
-    Ok((resp.data, resp.info))
-}
+    pub fn get(ctx, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
+        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key }, Some(folder), false, Some("storage"))?;
+        let resp: GetResp = decode(&data)?;
+        Ok((resp.data, resp.info))
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn delete(ctx: &dyn Context, folder: &str, key: &str) -> Result<(), WaferError> {
-    call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_DELETE,
-        &DeleteReq { folder, key },
-    )
-    .await?;
-    Ok(())
-}
+    pub fn delete(ctx, folder: &str, key: &str) -> Result<(), WaferError> {
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE, &DeleteReq { folder, key }, Some(folder), true, Some("storage"))?;
+        Ok(())
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn list(
-    ctx: &dyn Context,
-    folder: &str,
-    opts: &ListOptions,
-) -> Result<ObjectList, WaferError> {
-    let data = call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_LIST,
-        &ListReq {
-            folder,
-            prefix: &opts.prefix,
-            limit: opts.limit,
-            offset: opts.offset,
-        },
-    )
-    .await?;
-    decode(&data)
-}
+    pub fn list(ctx, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::STORAGE_LIST,
+            &ListReq { folder, prefix: &opts.prefix, limit: opts.limit, offset: opts.offset },
+            Some(folder),
+            false,
+            Some("storage")
+        )?;
+        decode(&data)
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn create_folder(ctx: &dyn Context, name: &str, public: bool) -> Result<(), WaferError> {
-    call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_CREATE_FOLDER,
-        &CreateFolderReq { name, public },
-    )
-    .await?;
-    Ok(())
-}
+    pub fn create_folder(ctx, name: &str, public: bool) -> Result<(), WaferError> {
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_CREATE_FOLDER, &CreateFolderReq { name, public }, Some(name), true, Some("storage"))?;
+        Ok(())
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn delete_folder(ctx: &dyn Context, name: &str) -> Result<(), WaferError> {
-    call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_DELETE_FOLDER,
-        &DeleteFolderReq { name },
-    )
-    .await?;
-    Ok(())
-}
+    pub fn delete_folder(ctx, name: &str) -> Result<(), WaferError> {
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE_FOLDER, &DeleteFolderReq { name }, Some(name), true, Some("storage"))?;
+        Ok(())
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn list_folders(ctx: &dyn Context) -> Result<Vec<FolderInfo>, WaferError> {
-    let data = call_service(
-        ctx,
-        BLOCK,
-        ServiceOp::STORAGE_LIST_FOLDERS,
-        &serde_json::json!({}),
-    )
-    .await?;
-    decode(&data)
-}
-
-// ===========================================================================
-// Public API — WASM sync
-// ===========================================================================
-
-#[cfg(feature = "wasm-component")]
-pub fn put(folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), WaferError> {
-    call_service(
-        BLOCK,
-        ServiceOp::STORAGE_PUT,
-        &PutReq {
-            folder,
-            key,
-            data,
-            content_type,
-        },
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn get(folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
-    let data = call_service(BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key })?;
-    let resp: GetResp = decode(&data)?;
-    Ok((resp.data, resp.info))
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
-    call_service(BLOCK, ServiceOp::STORAGE_DELETE, &DeleteReq { folder, key })?;
-    Ok(())
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn list(folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
-    let data = call_service(
-        BLOCK,
-        ServiceOp::STORAGE_LIST,
-        &ListReq {
-            folder,
-            prefix: &opts.prefix,
-            limit: opts.limit,
-            offset: opts.offset,
-        },
-    )?;
-    decode(&data)
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn create_folder(name: &str, public: bool) -> Result<(), WaferError> {
-    call_service(
-        BLOCK,
-        ServiceOp::STORAGE_CREATE_FOLDER,
-        &CreateFolderReq { name, public },
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn delete_folder(name: &str) -> Result<(), WaferError> {
-    call_service(
-        BLOCK,
-        ServiceOp::STORAGE_DELETE_FOLDER,
-        &DeleteFolderReq { name },
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn list_folders() -> Result<Vec<FolderInfo>, WaferError> {
-    let data = call_service(
-        BLOCK,
-        ServiceOp::STORAGE_LIST_FOLDERS,
-        &serde_json::json!({}),
-    )?;
-    decode(&data)
+    pub fn list_folders(ctx,) -> Result<Vec<FolderInfo>, WaferError> {
+        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_LIST_FOLDERS, &serde_json::json!({}), None, false, Some("storage"))?;
+        decode(&data)
+    }
 }

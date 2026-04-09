@@ -349,34 +349,57 @@ fn to_runtime_instance_mode(m: wafer::block_world::types::InstanceMode) -> Insta
 }
 
 // ---------------------------------------------------------------------------
-// ContextGuard — safe wrapper for passing Context across async WASM calls
+// ContextGuard — scoped wrapper for passing a borrowed Context into wasmtime.
+//
+// wasmtime's Store requires 'static data, but Block::handle receives
+// `&dyn Context`. ContextGuard bridges this by wrapping a raw pointer
+// in an Arc. The Drop impl asserts (in debug builds) that no cloned
+// Arcs escape the guard's scope, ensuring the pointer remains valid.
 // ---------------------------------------------------------------------------
 
 struct ContextGuard {
-    arc: Arc<dyn Context>,
+    wrapper: Arc<ContextWrapper>,
 }
 
 impl ContextGuard {
     fn new(ctx: &dyn Context) -> Self {
         let ptr: *const dyn Context = ctx;
-        let ctx_static: *const (dyn Context + 'static) = unsafe { std::mem::transmute(ptr) };
+        // SAFETY: We erase the borrow's lifetime so the pointer can live
+        // inside Arc (which requires 'static). The actual lifetime is bounded
+        // by Block::handle — the Drop impl asserts no Arc clones outlive
+        // this guard, preventing use-after-free.
+        let ptr_static: *const (dyn Context + 'static) = unsafe { std::mem::transmute(ptr) };
         Self {
-            arc: Arc::new(ContextWrapper(ctx_static)),
+            wrapper: Arc::new(ContextWrapper(ptr_static)),
         }
     }
 
     fn as_arc(&self) -> Arc<dyn Context> {
-        self.arc.clone()
+        self.wrapper.clone()
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            Arc::strong_count(&self.wrapper),
+            1,
+            "BUG: ContextGuard dropped while cloned Arcs still exist — \
+             this would cause use-after-free"
+        );
     }
 }
 
 struct ContextWrapper(*const dyn Context);
+// SAFETY: The pointer is only dereferenced while the original Context is alive,
+// enforced by ContextGuard's scoped usage within Block::handle.
 unsafe impl Send for ContextWrapper {}
 unsafe impl Sync for ContextWrapper {}
 
 #[async_trait]
 impl Context for ContextWrapper {
     async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+        // SAFETY: Pointer is valid — ContextGuard ensures no use-after-free.
         unsafe { &*self.0 }.call_block(block_name, msg).await
     }
 

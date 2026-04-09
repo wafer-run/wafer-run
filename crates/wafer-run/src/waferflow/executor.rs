@@ -40,8 +40,13 @@ pub async fn execute(
     // Seed accumulator with initial message data for pipeline mode
     let has_pipeline_steps = flow.steps.iter().any(|s| s.input.is_some());
     if has_pipeline_steps {
-        let input_val: serde_json::Value =
-            serde_json::from_slice(&msg.data).unwrap_or(serde_json::Value::Null);
+        let input_val: serde_json::Value = match serde_json::from_slice(&msg.data) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
+                serde_json::Value::Null
+            }
+        };
         acc.set("input", input_val);
     }
 
@@ -197,8 +202,13 @@ pub async fn execute(
 
         // Store in accumulator for pipeline mode
         if is_pipeline {
-            let output: serde_json::Value =
-                serde_json::from_slice(&msg.data).unwrap_or(serde_json::Value::Null);
+            let output: serde_json::Value = match serde_json::from_slice(&msg.data) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(step = %step.id, error = %e, "block output is not valid JSON, defaulting to null");
+                    serde_json::Value::Null
+                }
+            };
             acc.set(&step.id, output);
         }
 

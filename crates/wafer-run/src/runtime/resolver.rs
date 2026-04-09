@@ -158,11 +158,12 @@ impl Wafer {
 
         // Phase 1a: Initialize infrastructure blocks (wafer-run/*) with configs.
         self.rebuild_all_blocks();
+        self.collect_wrap_grants();
         for (name, config) in &infra_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
                 let ctx = self.make_context(
-                    String::new(),
-                    String::new(),
+                    "init",
+                    name.as_str(),
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
@@ -190,8 +191,8 @@ impl Wafer {
         for (name, config) in &feature_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
                 let ctx = self.make_context(
-                    String::new(),
-                    String::new(),
+                    "init",
+                    name.as_str(),
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
@@ -225,8 +226,8 @@ impl Wafer {
             }
             if let Some(block) = self.blocks.get(name) {
                 let ctx = self.make_context(
-                    String::new(),
-                    String::new(),
+                    "init",
+                    name.as_str(),
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
@@ -275,8 +276,8 @@ impl Wafer {
                     Some(block) => {
                         tracing::info!(block = %block_name, "downloaded remote block");
                         let ctx = self.make_context(
-                            String::new(),
-                            String::new(),
+                            "init",
+                            block_name.as_str(),
                             HashMap::new(),
                             Arc::new(AtomicBool::new(false)),
                             None,

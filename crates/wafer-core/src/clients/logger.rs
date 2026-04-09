@@ -30,7 +30,17 @@ async fn log(
     message: &str,
     fields: &HashMap<String, serde_json::Value>,
 ) {
-    if let Err(e) = call_service(ctx, BLOCK, kind, &LogReq { message, fields }).await {
+    if let Err(e) = call_service(
+        ctx,
+        BLOCK,
+        kind,
+        &LogReq { message, fields },
+        None,
+        false,
+        None,
+    )
+    .await
+    {
         // Fall back to tracing if the logger block is unavailable.
         tracing::warn!(
             logger_error = %e,
@@ -102,7 +112,7 @@ pub async fn error_with(
 
 #[cfg(feature = "wasm-component")]
 fn log(kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    if call_service(BLOCK, kind, &LogReq { message, fields }).is_err() {
+    if call_service(BLOCK, kind, &LogReq { message, fields }, None, false, None).is_err() {
         // Fall back to WIT runtime log import.
         let level = kind.strip_prefix("logger.").unwrap_or("info");
         wafer_block::runtime::log(level, message);

@@ -37,23 +37,24 @@ impl Wafer {
     /// `{org}/{block}` convention, the config is stored and the
     /// block or flow will be resolved during [`resolve()`](Self::resolve)
     /// (downloading `.flow.json` or `.wasm` via the registry).
-    pub fn register(&mut self, name: &str, config: serde_json::Value) {
+    pub fn register(&mut self, name: &str, config: serde_json::Value) -> Result<(), String> {
         if let Some(registrar) = self.registrars.remove(name) {
             registrar(self, config);
             self.registrars.insert(name.to_string(), registrar);
-            return;
+            return Ok(());
         }
 
         // No registrar — store config for deferred resolution during resolve().
         // The name must look like a remote ref (org/block).
         if !name.contains('/') {
-            panic!(
+            return Err(format!(
                 "no registrar found for {:?} and name is not a remote ref",
                 name
-            );
+            ));
         }
         tracing::debug!(name = %name, "no registrar found, deferring to resolve()");
         self.add_block_config(name, config);
+        Ok(())
     }
 
     /// Load block configurations from a JSON file.

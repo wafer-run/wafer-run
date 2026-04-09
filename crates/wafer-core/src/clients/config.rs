@@ -5,7 +5,7 @@ use wafer_block::common::ServiceOp;
 use wafer_block::context::Context;
 use wafer_block::WaferError;
 
-use super::{call_service, decode};
+use super::{call_service, decode, dual_api, svc, svc_fn};
 
 const BLOCK: &str = "wafer-run/config";
 
@@ -28,45 +28,22 @@ struct SetReq<'a> {
 }
 
 // ===========================================================================
-// Public API — native async
+// Public API — generated as async (native) or sync (wasm-component)
 // ===========================================================================
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn get(ctx: &dyn Context, key: &str) -> Result<String, WaferError> {
-    let data = call_service(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }).await?;
-    let resp: GetResp = decode(&data)?;
-    Ok(resp.value)
-}
+dual_api! {
+    pub fn get(ctx, key: &str) -> Result<String, WaferError> {
+        let data = svc!(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }, Some(key), false, Some("config"))?;
+        let resp: GetResp = decode(&data)?;
+        Ok(resp.value)
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn get_default(ctx: &dyn Context, key: &str, default: &str) -> String {
-    get(ctx, key).await.unwrap_or_else(|_| default.to_string())
-}
+    pub fn get_default(ctx, key: &str, default: &str) -> String {
+        svc_fn!(ctx, get(key)).unwrap_or_else(|_| default.to_string())
+    }
 
-#[cfg(not(feature = "wasm-component"))]
-pub async fn set(ctx: &dyn Context, key: &str, value: &str) -> Result<(), WaferError> {
-    call_service(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }).await?;
-    Ok(())
-}
-
-// ===========================================================================
-// Public API — WASM sync
-// ===========================================================================
-
-#[cfg(feature = "wasm-component")]
-pub fn get(key: &str) -> Result<String, WaferError> {
-    let data = call_service(BLOCK, ServiceOp::CONFIG_GET, &GetReq { key })?;
-    let resp: GetResp = decode(&data)?;
-    Ok(resp.value)
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn get_default(key: &str, default: &str) -> String {
-    get(key).unwrap_or_else(|_| default.to_string())
-}
-
-#[cfg(feature = "wasm-component")]
-pub fn set(key: &str, value: &str) -> Result<(), WaferError> {
-    call_service(BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value })?;
-    Ok(())
+    pub fn set(ctx, key: &str, value: &str) -> Result<(), WaferError> {
+        svc!(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }, Some(key), true, Some("config"))?;
+        Ok(())
+    }
 }

@@ -32,8 +32,8 @@ impl Block for CryptoBlock {
         .category(BlockCategory::Service)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        handler::handle_message(self.service.as_ref(), msg)
+    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+        handler::handle_message(self.service.as_ref(), ctx.caller_id(), msg)
     }
 
     async fn lifecycle(

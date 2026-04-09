@@ -103,6 +103,21 @@ struct SortFieldDef {
     desc: bool,
 }
 
+#[derive(Deserialize)]
+struct DeleteWhereRequest {
+    collection: String,
+    #[serde(default)]
+    filters: Vec<FilterDef>,
+}
+
+#[derive(Deserialize)]
+struct UpdateWhereRequest {
+    collection: String,
+    #[serde(default)]
+    filters: Vec<FilterDef>,
+    data: HashMap<String, serde_json::Value>,
+}
+
 // --- Response types ---
 
 #[derive(Serialize)]
@@ -319,6 +334,41 @@ pub async fn handle_message(service: &dyn DatabaseService, msg: &mut Message) ->
                         rows_affected: rows,
                     },
                 ),
+                Err(e) => Result_::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_DELETE_WHERE => {
+            let req: DeleteWhereRequest = match msg.decode() {
+                Ok(r) => r,
+                Err(e) => {
+                    return Result_::error(WaferError::new(
+                        ErrorCode::INVALID_ARGUMENT,
+                        format!("invalid database.delete_where request: {e}"),
+                    ))
+                }
+            };
+            let filters = convert_filters(req.filters);
+            match service.delete_where(&req.collection, &filters).await {
+                Ok(()) => respond_empty(msg),
+                Err(e) => Result_::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_UPDATE_WHERE => {
+            let req: UpdateWhereRequest = match msg.decode() {
+                Ok(r) => r,
+                Err(e) => {
+                    return Result_::error(WaferError::new(
+                        ErrorCode::INVALID_ARGUMENT,
+                        format!("invalid database.update_where request: {e}"),
+                    ))
+                }
+            };
+            let filters = convert_filters(req.filters);
+            match service
+                .update_where(&req.collection, &filters, req.data)
+                .await
+            {
+                Ok(()) => respond_empty(msg),
                 Err(e) => Result_::error(db_error_to_wafer(e)),
             }
         }

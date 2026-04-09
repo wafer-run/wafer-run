@@ -51,6 +51,9 @@ pub async fn do_request(
             headers,
             body,
         },
+        None,
+        false,
+        Some("network"),
     )
     .await?;
     decode(&data)
@@ -79,6 +82,9 @@ pub async fn do_request_via(
             headers,
             body,
         },
+        None,
+        false,
+        Some("network"),
     )
     .await?;
     decode(&data)
@@ -104,6 +110,9 @@ pub fn do_request(
             headers,
             body,
         },
+        None,
+        false,
+        Some("network"),
     )?;
     decode(&data)
 }

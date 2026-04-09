@@ -25,6 +25,28 @@ pub struct Router {
     routes: Vec<Route>,
 }
 
+/// Generate a convenience method that delegates to `on()` with a fixed action.
+macro_rules! route_method {
+    ($name:ident, $action:expr) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn $name(
+            &mut self,
+            pattern: impl Into<String>,
+            handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
+        ) {
+            self.on($action, pattern, handler);
+        }
+        #[cfg(target_arch = "wasm32")]
+        pub fn $name(
+            &mut self,
+            pattern: impl Into<String>,
+            handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
+        ) {
+            self.on($action, pattern, handler);
+        }
+    };
+}
+
 impl Router {
     pub fn new() -> Self {
         Self { routes: Vec::new() }
@@ -58,90 +80,11 @@ impl Router {
         });
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn retrieve(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.on(RequestAction::Retrieve, pattern, handler);
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn retrieve(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.on(RequestAction::Retrieve, pattern, handler);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn create(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.on(RequestAction::Create, pattern, handler);
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn create(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.on(RequestAction::Create, pattern, handler);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn update(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.on(RequestAction::Update, pattern, handler);
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn update(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.on(RequestAction::Update, pattern, handler);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn delete(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.on(RequestAction::Delete, pattern, handler);
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn delete(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.on(RequestAction::Delete, pattern, handler);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn execute(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) {
-        self.on(RequestAction::Execute, pattern, handler);
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn execute(
-        &mut self,
-        pattern: impl Into<String>,
-        handler: impl Fn(&dyn Context, &mut Message) -> Result_ + 'static,
-    ) {
-        self.on(RequestAction::Execute, pattern, handler);
-    }
+    route_method!(retrieve, RequestAction::Retrieve);
+    route_method!(create, RequestAction::Create);
+    route_method!(update, RequestAction::Update);
+    route_method!(delete, RequestAction::Delete);
+    route_method!(execute, RequestAction::Execute);
 
     pub fn route(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
         let action = msg.get_meta(META_REQ_ACTION).to_string();

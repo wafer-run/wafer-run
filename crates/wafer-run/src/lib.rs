@@ -47,7 +47,7 @@ pub use runtime::Wafer;
 pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
 pub use types::{
     Action, AuthLevel, BlockResult, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType,
-    Message, RequestAction, Response, Result_, WaferError,
+    Message, RequestAction, ResourceGrant, ResourceType, Response, Result_, WaferError,
 };
 
 pub use wasm::capabilities::BlockCapabilities;

@@ -12,10 +12,12 @@ use crate::{LifecycleEvent, Message, Result_, WaferError};
 ///
 /// All methods are async to support both sync (standalone server) and
 /// async (Cloudflare Workers) execution environments.
+///
+/// On native targets, requires Send + Sync (via MaybeSend/MaybeSync).
+/// On wasm32, these bounds are dropped (single-threaded).
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg(not(target_arch = "wasm32"))]
-pub trait Block: Send + Sync {
+pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn info(&self) -> BlockInfo;
     async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
     async fn lifecycle(
@@ -26,6 +28,8 @@ pub trait Block: Send + Sync {
 
     /// Called after the runtime starts with a handle for running flows/blocks.
     /// The handle is type-erased — downcast to `wafer_run::RuntimeHandle` if needed.
+    /// Native-only: wasm32 blocks do not receive bind calls.
+    #[cfg(not(target_arch = "wasm32"))]
     fn bind(&self, _handle: Box<dyn std::any::Any + Send + Sync>) {}
 
     /// Return the capability restrictions for this block, if any.
@@ -41,28 +45,13 @@ pub trait Block: Send + Sync {
     }
 }
 
-/// On wasm32, Send/Sync are not meaningful (single-threaded), so we drop all bounds.
-#[async_trait::async_trait(?Send)]
+// --- Handler type aliases (cfg-gated for Send+Sync) ---
+
+#[cfg(not(target_arch = "wasm32"))]
+type SyncHandler = Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>;
+
 #[cfg(target_arch = "wasm32")]
-pub trait Block {
-    fn info(&self) -> BlockInfo;
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_;
-    async fn lifecycle(
-        &self,
-        ctx: &dyn Context,
-        event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError>;
-
-    /// Return the capability restrictions for this block, if any.
-    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
-        None
-    }
-
-    /// Declare UI routes this block serves (SSR pages).
-    fn ui_routes(&self) -> Vec<UiRoute> {
-        Vec::new()
-    }
-}
+type SyncHandler = Box<dyn Fn(&dyn Context, &mut Message) -> Result_>;
 
 /// The async handler type used by `AsyncFuncBlock`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,17 +71,10 @@ type AsyncHandler = Box<
 >;
 
 /// FuncBlock wraps a synchronous handler function as a Block.
-#[cfg(not(target_arch = "wasm32"))]
 pub struct FuncBlock {
     pub info: BlockInfo,
     #[allow(clippy::type_complexity)]
-    pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_ + Send + Sync>,
-}
-
-#[cfg(target_arch = "wasm32")]
-pub struct FuncBlock {
-    pub info: BlockInfo,
-    pub handler: Box<dyn Fn(&dyn Context, &mut Message) -> Result_>,
+    pub handler: SyncHandler,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

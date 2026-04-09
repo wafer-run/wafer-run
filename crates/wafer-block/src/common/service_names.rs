@@ -24,6 +24,8 @@ impl ServiceOp {
     pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
     pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
     pub const DATABASE_SUM: &str = "database.sum";
+    pub const DATABASE_DELETE_WHERE: &str = "database.delete_where";
+    pub const DATABASE_UPDATE_WHERE: &str = "database.update_where";
     pub const STORAGE_PUT: &str = "storage.put";
     pub const STORAGE_GET: &str = "storage.get";
     pub const STORAGE_DELETE: &str = "storage.delete";

@@ -92,8 +92,20 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     }
 }
 
+/// Meta key to opt in to per-block HKDF key derivation.
+/// Set to the block ID (e.g. `"suppers-ai/auth"`) to derive a per-block key.
+/// When absent, the master key is used.
+const META_CRYPTO_BLOCK_KEY: &str = "crypto.block_key";
+
 /// Handle a crypto message by delegating to the given service.
-pub fn handle_message(service: &dyn CryptoService, msg: &mut Message) -> Result_ {
+///
+/// By default, JWT sign/verify use the master key. To opt in to per-block
+/// derived keys, set `crypto.block_key` meta on the message to the block ID.
+pub fn handle_message(
+    service: &dyn CryptoService,
+    _caller_id: Option<&str>,
+    msg: &mut Message,
+) -> Result_ {
     match msg.kind.as_str() {
         ServiceOp::CRYPTO_HASH => {
             let req: HashRequest = match msg.decode() {
@@ -139,7 +151,13 @@ pub fn handle_message(service: &dyn CryptoService, msg: &mut Message) -> Result_
                 }
             };
             let expiry = Duration::from_secs(req.expiry_secs);
-            match service.sign(req.claims, expiry) {
+            let block_key = msg.get_meta(META_CRYPTO_BLOCK_KEY);
+            let result = if block_key.is_empty() {
+                service.sign(req.claims, expiry)
+            } else {
+                service.sign_for(block_key, req.claims, expiry)
+            };
+            match result {
                 Ok(token) => respond_json(msg, &SignResponse { token }),
                 Err(e) => Result_::error(crypto_error_to_wafer(e)),
             }
@@ -154,7 +172,13 @@ pub fn handle_message(service: &dyn CryptoService, msg: &mut Message) -> Result_
                     ))
                 }
             };
-            match service.verify(&req.token) {
+            let block_key = msg.get_meta(META_CRYPTO_BLOCK_KEY);
+            let result = if block_key.is_empty() {
+                service.verify(&req.token)
+            } else {
+                service.verify_for(block_key, &req.token)
+            };
+            match result {
                 Ok(claims) => respond_json(msg, &VerifyResponse { claims }),
                 Err(e) => Result_::error(crypto_error_to_wafer(e)),
             }

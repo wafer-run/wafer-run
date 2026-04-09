@@ -34,6 +34,27 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Verify validates a token and returns its claims.
     fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError>;
 
+    /// Sign creates a signed token using a per-block derived key.
+    /// Default falls back to `sign` (ignoring block_id).
+    fn sign_for(
+        &self,
+        _block_id: &str,
+        claims: HashMap<String, serde_json::Value>,
+        expiry: Duration,
+    ) -> Result<String, CryptoError> {
+        self.sign(claims, expiry)
+    }
+
+    /// Verify validates a token using a per-block derived key.
+    /// Default falls back to `verify` (ignoring block_id).
+    fn verify_for(
+        &self,
+        _block_id: &str,
+        token: &str,
+    ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+        self.verify(token)
+    }
+
     /// RandomBytes generates n cryptographically-secure random bytes.
     fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError>;
 }

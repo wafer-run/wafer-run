@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use wafer_block::types::ResourceGrant;
+
 use crate::block::Block;
 use crate::platform::Instant;
 use crate::types::*;
@@ -44,6 +46,10 @@ pub struct RuntimeContext {
     /// The block name of the caller that invoked this block via `call_block()`.
     /// `None` for top-level calls (e.g. from the router).
     pub caller_id: Option<String>,
+    /// WRAP: all validated resource grants collected at startup.
+    pub wrap_grants: Arc<Vec<ResourceGrant>>,
+    /// WRAP: the block ID that has admin privileges (exact match).
+    pub wrap_admin_block: Arc<String>,
 }
 
 // --- Result helpers (used by RuntimeContext impl) ---
@@ -57,17 +63,27 @@ fn err_result(code: ErrorCode, message: impl Into<String>) -> Result_ {
     }
 }
 
+/// RAII guard that decrements `call_depth` on drop, even if the block panics.
+struct CallDepthGuard(Arc<std::sync::atomic::AtomicU32>);
+
+impl Drop for CallDepthGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
     async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
-        // Recursion depth check
+        // Recursion depth check — the RAII guard ensures the counter is
+        // decremented even if the block panics.
         let depth = self
             .call_depth
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _depth_guard = CallDepthGuard(self.call_depth.clone());
+
         if depth >= self.max_call_depth {
-            self.call_depth
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             return err_result(
                 ErrorCode::RESOURCE_EXHAUSTED,
                 format!(
@@ -79,8 +95,6 @@ impl Context for RuntimeContext {
 
         // Cancellation check
         if self.is_cancelled() {
-            self.call_depth
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             return err_result(ErrorCode::CANCELLED, "execution cancelled");
         }
 
@@ -95,8 +109,6 @@ impl Context for RuntimeContext {
                 .iter()
                 .any(|r| r == block_name || r == resolved_name)
             {
-                self.call_depth
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 return err_result(
                     ErrorCode::PERMISSION_DENIED,
                     format!(
@@ -107,12 +119,37 @@ impl Context for RuntimeContext {
             }
         }
 
+        // WRAP: check resource access if wrap.resource meta is set.
+        let wrap_resource = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE);
+        if !wrap_resource.is_empty() {
+            let is_write = msg.get_meta(wafer_block::meta::META_WRAP_ACCESS) == "write";
+            let wrap_rt_str = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE_TYPE);
+            let wrap_rt = if wrap_rt_str.is_empty() {
+                None
+            } else {
+                wafer_block::types::ResourceType::parse(wrap_rt_str)
+            };
+            let wrap_caller = if self.node_id.is_empty() {
+                self.caller_id.as_deref()
+            } else {
+                Some(self.node_id.as_str())
+            };
+            if let Err(e) = wafer_block::wrap::check_access(
+                wrap_caller,
+                wrap_resource,
+                is_write,
+                wrap_rt.as_ref(),
+                &self.wrap_grants,
+                &self.wrap_admin_block,
+            ) {
+                return err_result(e.code, e.message);
+            }
+        }
+
         // Look up the block
         let block = match self.all_blocks.get(block_name) {
             Some(b) => b.clone(),
             None => {
-                self.call_depth
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 return err_result(
                     ErrorCode::NOT_FOUND,
                     format!("block '{}' not found", block_name),
@@ -148,14 +185,12 @@ impl Context for RuntimeContext {
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
             caller_id: Some(self.node_id.clone()),
+            wrap_grants: self.wrap_grants.clone(),
+            wrap_admin_block: self.wrap_admin_block.clone(),
         };
 
-        // Call the block
-        let result = block.handle(&sub_ctx, msg).await;
-
-        self.call_depth
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        result
+        // Call the block — _depth_guard drops after this, decrementing counter
+        block.handle(&sub_ctx, msg).await
     }
 
     fn is_cancelled(&self) -> bool {

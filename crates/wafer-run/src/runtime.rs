@@ -150,6 +150,10 @@ pub struct Wafer {
     pub(crate) interface_specs: HashMap<String, wafer_block::InterfaceSpec>,
     /// Snapshot of interface specs (populated at start time).
     pub(crate) interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
+    /// WRAP: all validated resource grants collected from blocks at startup.
+    pub(crate) wrap_grants: Arc<Vec<wafer_block::types::ResourceGrant>>,
+    /// WRAP: the block ID that has admin privileges (exact match).
+    pub(crate) wrap_admin_block: Arc<String>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
     pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
@@ -176,6 +180,8 @@ impl Wafer {
                 .map(|s| (s.name.clone(), s))
                 .collect(),
             interface_specs_snapshot: Arc::new(Vec::new()),
+            wrap_grants: Arc::new(Vec::new()),
+            wrap_admin_block: Arc::new(String::new()),
             #[cfg(feature = "wasm")]
             wasm_engine: None,
         }
@@ -190,6 +196,12 @@ impl Wafer {
     /// it resolves to the target block name.
     pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
         self.aliases.insert(alias.into(), target.into());
+    }
+
+    /// Set the admin block ID for WRAP access control.
+    /// Must be set before `start()` / `start_without_bind()`.
+    pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
+        self.wrap_admin_block = Arc::new(block_id.into());
     }
 
     /// Register an interface specification. Overwrites any existing spec
@@ -224,6 +236,8 @@ impl Wafer {
             aliases: Arc::new(self.aliases.clone()),
             caller_requires: None, // unrestricted by default
             caller_id: None,       // top-level call, no caller
+            wrap_grants: self.wrap_grants.clone(),
+            wrap_admin_block: self.wrap_admin_block.clone(),
         }
     }
 
@@ -278,16 +292,68 @@ fn block_name_to_var_prefix(name: &str) -> String {
     prefix
 }
 
+/// Validate a block name follows the `{org}/{block}` convention.
+///
+/// Rules:
+/// - Exactly two segments separated by `/`
+/// - Each segment: lowercase `[a-z0-9-]`, no `_`, no consecutive `--`,
+///   not starting or ending with `-`
+/// - Minimum 1 char per segment
+fn validate_block_name(name: &str) -> Result<(), String> {
+    let (org, block) = name
+        .split_once('/')
+        .ok_or_else(|| format!("block name '{}' must be {{org}}/{{block}}", name))?;
+    if name.matches('/').count() != 1 {
+        return Err(format!("block name '{}': exactly one / required", name));
+    }
+    for (label, segment) in [("org", org), ("block", block)] {
+        if segment.is_empty() {
+            return Err(format!("block name '{}': empty {} segment", name, label));
+        }
+        if segment.contains('_') {
+            return Err(format!(
+                "block name '{}': underscore not allowed in {} segment, use hyphen",
+                name, label
+            ));
+        }
+        if segment.contains("--") {
+            return Err(format!(
+                "block name '{}': consecutive hyphens not allowed in {} segment",
+                name, label
+            ));
+        }
+        if segment.starts_with('-') || segment.ends_with('-') {
+            return Err(format!(
+                "block name '{}': {} segment cannot start or end with hyphen",
+                name, label
+            ));
+        }
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(format!(
+                "block name '{}': only lowercase alphanumeric and hyphens allowed in {} segment",
+                name, label
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl wafer_block::registry::BlockRegistry for Wafer {
     fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), String> {
         if self.blocks.contains_key(name) {
             return Err(format!("block '{}' already registered", name));
         }
 
+        // Validate block name format
+        validate_block_name(name)?;
+
         // Validate that all config_keys use the block's own prefix.
         // Block "suppers-ai/auth" may only declare keys starting with "SUPPERS_AI__AUTH__".
         let info = block.info();
-        if !info.config_keys.is_empty() && name.contains('/') {
+        if !info.config_keys.is_empty() {
             let expected_prefix = block_name_to_var_prefix(name);
             for var in &info.config_keys {
                 if !var.key.starts_with(&expected_prefix) {
@@ -331,5 +397,37 @@ mod tests {
             block_name_to_var_prefix("suppers-ai/products"),
             "SUPPERS_AI__PRODUCTS__"
         );
+    }
+
+    #[test]
+    fn test_validate_block_name_valid() {
+        assert!(validate_block_name("suppers-ai/auth").is_ok());
+        assert!(validate_block_name("wafer-run/sqlite").is_ok());
+        assert!(validate_block_name("some-long-repo/test-block").is_ok());
+        assert!(validate_block_name("a/b").is_ok());
+        assert!(validate_block_name("org123/block456").is_ok());
+    }
+
+    #[test]
+    fn test_validate_block_name_invalid() {
+        // No slash
+        assert!(validate_block_name("noSlash").is_err());
+        // Two slashes
+        assert!(validate_block_name("a/b/c").is_err());
+        // Empty segment
+        assert!(validate_block_name("/block").is_err());
+        assert!(validate_block_name("org/").is_err());
+        // Underscore
+        assert!(validate_block_name("my_org/block").is_err());
+        assert!(validate_block_name("org/my_block").is_err());
+        // Consecutive hyphens
+        assert!(validate_block_name("some--long/test").is_err());
+        assert!(validate_block_name("org/test--block").is_err());
+        // Leading/trailing hyphen
+        assert!(validate_block_name("-org/block").is_err());
+        assert!(validate_block_name("org/block-").is_err());
+        assert!(validate_block_name("org/-block").is_err());
+        // Uppercase
+        assert!(validate_block_name("Org/block").is_err());
     }
 }
