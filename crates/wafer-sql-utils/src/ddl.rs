@@ -197,9 +197,7 @@ pub fn build_drop_table(table_name: &str, _backend: Backend) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wafer_core::interfaces::database::service::{
-        col_string, pk, timestamps,
-    };
+    use wafer_core::interfaces::database::service::{col_string, pk, timestamps};
 
     fn test_table() -> Table {
         Table {

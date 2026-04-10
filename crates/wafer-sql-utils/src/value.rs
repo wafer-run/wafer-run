@@ -121,10 +121,12 @@ mod tests {
 
     #[test]
     fn test_sea_values_to_json_roundtrip() {
-        let original = [serde_json::json!("hello"),
+        let original = [
+            serde_json::json!("hello"),
             serde_json::json!(42),
             serde_json::json!(true),
-            serde_json::Value::Null];
+            serde_json::Value::Null,
+        ];
         let sea_vals: Vec<Value> = original.iter().map(json_to_sea_value).collect();
         let back = sea_values_to_json(sea_vals);
         assert_eq!(back[0], serde_json::json!("hello"));
