@@ -21,6 +21,7 @@ members = [
     "crates/wafer-block-s3",
     "crates/wafer-block-security-headers",
     "crates/wafer-block-sqlite",
+    "crates/wafer-sql-utils",
     "crates/wafer-block-web",
     "crates/wafer-flow-http-server",
     "crates/wafer-flow",
@@ -47,6 +48,7 @@ license = "MIT"
 wafer-block = { path = "crates/wafer-block" }
 wafer-run = { path = "crates/wafer-run", features = ["full"] }
 wafer-core = { path = "crates/wafer-core" }
+wafer-sql-utils = { path = "crates/wafer-sql-utils" }
 wafer-flow = { path = "crates/wafer-flow" }
 
 # Core

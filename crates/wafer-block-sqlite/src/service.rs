@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use wafer_core::interfaces::database::service::*;
+use wafer_sql_utils::base64::base64_encode;
+use wafer_sql_utils::ddl;
+use wafer_sql_utils::ident::sanitize_ident;
+use wafer_sql_utils::Backend;
 
 /// SQLite implementation of the DatabaseService.
 pub struct SQLiteDatabaseService {
@@ -77,43 +81,6 @@ impl SQLiteDatabaseService {
 
         Ok(Record { id, data })
     }
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((n >> 18) & 63) as usize] as char);
-        result.push(CHARS[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((n >> 6) & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(n & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
-/// Sanitize an identifier to prevent SQL injection. Only allows
-/// alphanumeric characters and underscores.
-fn sanitize_ident(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .collect()
-}
-
-/// Quote an identifier for use in DDL (double-quote escaping).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
@@ -295,150 +262,6 @@ fn build_order_clause(sort: &[SortField]) -> String {
         .collect();
 
     format!(" ORDER BY {}", parts.join(", "))
-}
-
-// ---------------------------------------------------------------------------
-// Schema DDL helpers
-// ---------------------------------------------------------------------------
-
-fn schema_data_type_to_sql(dt: DataType) -> &'static str {
-    match dt {
-        DataType::String | DataType::Text => "TEXT",
-        DataType::Int | DataType::Int64 => "INTEGER",
-        DataType::Float => "REAL",
-        DataType::Bool => "INTEGER",
-        DataType::DateTime => "DATETIME",
-        DataType::Json => "TEXT",
-        DataType::Blob => "BLOB",
-    }
-}
-
-fn schema_default_to_sql(d: &DefaultValue) -> String {
-    if d.is_null {
-        return "NULL".to_string();
-    }
-    if d.is_raw {
-        return d.raw.clone();
-    }
-    match &d.value {
-        Some(DefaultVal::String(s)) => format!("'{}'", s.replace('\'', "''")),
-        Some(DefaultVal::Int(i)) => i.to_string(),
-        Some(DefaultVal::Float(f)) => f.to_string(),
-        Some(DefaultVal::Bool(b)) => if *b { "1" } else { "0" }.to_string(),
-        None => "NULL".to_string(),
-    }
-}
-
-fn schema_column_to_sql(col: &Column) -> String {
-    let qname = quote_ident(&col.name);
-    let mut sql = format!("{} {}", qname, schema_data_type_to_sql(col.data_type));
-
-    if col.primary_key && !col.auto_increment {
-        sql.push_str(" PRIMARY KEY");
-    }
-
-    if col.auto_increment {
-        sql = format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", qname);
-    }
-
-    if !col.nullable && !col.primary_key {
-        sql.push_str(" NOT NULL");
-    }
-
-    if col.unique && !col.primary_key {
-        sql.push_str(" UNIQUE");
-    }
-
-    if let Some(ref default) = col.default {
-        sql.push_str(" DEFAULT ");
-        sql.push_str(&schema_default_to_sql(default));
-    }
-
-    sql
-}
-
-fn schema_generate_create_table(table: &Table) -> String {
-    let qtable = quote_ident(&table.name);
-    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", qtable);
-
-    for (i, col) in table.columns.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(",\n");
-        }
-        sql.push_str("    ");
-        sql.push_str(&schema_column_to_sql(col));
-    }
-
-    // Composite primary key
-    if !table.primary_key.is_empty() {
-        let quoted: Vec<String> = table.primary_key.iter().map(|k| quote_ident(k)).collect();
-        sql.push_str(",\n    PRIMARY KEY(");
-        sql.push_str(&quoted.join(", "));
-        sql.push(')');
-    }
-
-    // Composite unique constraints
-    for uk in &table.unique_keys {
-        let quoted: Vec<String> = uk.iter().map(|k| quote_ident(k)).collect();
-        sql.push_str(",\n    UNIQUE(");
-        sql.push_str(&quoted.join(", "));
-        sql.push(')');
-    }
-
-    // Foreign keys
-    for col in &table.columns {
-        if let Some(ref refs) = col.references {
-            sql.push_str(",\n    FOREIGN KEY (");
-            sql.push_str(&quote_ident(&col.name));
-            sql.push_str(") REFERENCES ");
-            sql.push_str(&quote_ident(&refs.table));
-            sql.push('(');
-            sql.push_str(&quote_ident(&refs.column));
-            sql.push(')');
-            if !refs.on_delete.is_empty() {
-                sql.push_str(" ON DELETE ");
-                sql.push_str(&sanitize_ident(&refs.on_delete));
-            }
-            if !refs.on_update.is_empty() {
-                sql.push_str(" ON UPDATE ");
-                sql.push_str(&sanitize_ident(&refs.on_update));
-            }
-        }
-    }
-
-    sql.push_str("\n)");
-    sql
-}
-
-fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
-    let mut sql = String::from("CREATE ");
-    if idx.unique {
-        sql.push_str("UNIQUE ");
-    }
-    sql.push_str("INDEX IF NOT EXISTS ");
-
-    let name = if idx.name.is_empty() {
-        format!(
-            "idx_{}_{}",
-            sanitize_ident(table_name),
-            idx.columns
-                .iter()
-                .map(|c| sanitize_ident(c))
-                .collect::<Vec<_>>()
-                .join("_")
-        )
-    } else {
-        sanitize_ident(&idx.name)
-    };
-    sql.push_str(&name);
-    sql.push_str(" ON ");
-    sql.push_str(&quote_ident(table_name));
-    sql.push('(');
-    let quoted_cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c)).collect();
-    sql.push_str(&quoted_cols.join(", "));
-    sql.push(')');
-
-    sql
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -874,7 +697,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = schema_generate_create_table(table);
+        let sql = ddl::build_create_table(table, Backend::Sqlite);
         db.execute_batch(&sql)
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
 
@@ -882,11 +705,7 @@ impl DatabaseService for SQLiteDatabaseService {
         if let Ok(existing) = table_columns(&db, &table.name) {
             for col in &table.columns {
                 if !existing.contains(&col.name.to_lowercase()) {
-                    let alter = format!(
-                        "ALTER TABLE {} ADD COLUMN {}",
-                        quote_ident(&table.name),
-                        schema_column_to_sql(col)
-                    );
+                    let alter = ddl::build_add_column(&table.name, col, Backend::Sqlite);
                     if let Err(e) = db.execute_batch(&alter) {
                         tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
                     }
@@ -896,7 +715,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let sql = schema_generate_create_index(&table.name, idx);
+            let sql = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
             db.execute_batch(&sql)
                 .map_err(|e| DatabaseError::Internal(format!("create index: {}", e)))?;
         }
@@ -929,7 +748,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        db.execute_batch(&format!("DROP TABLE IF EXISTS {}", sanitize_ident(name)))
+        db.execute_batch(&ddl::build_drop_table(name, Backend::Sqlite))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
@@ -938,11 +757,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = format!(
-            "ALTER TABLE {} ADD COLUMN {}",
-            sanitize_ident(table),
-            schema_column_to_sql(column)
-        );
+        let sql = ddl::build_add_column(table, column, Backend::Sqlite);
         db.execute_batch(&sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }

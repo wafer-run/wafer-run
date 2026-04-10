@@ -3,6 +3,10 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
 use wafer_core::interfaces::database::service::*;
+use wafer_sql_utils::base64::base64_encode;
+use wafer_sql_utils::ddl;
+use wafer_sql_utils::ident::sanitize_ident;
+use wafer_sql_utils::Backend;
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -409,7 +413,7 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn schema_ensure_table_async(&self, table: &Table) -> Result<(), DatabaseError> {
-        let sql = schema_generate_create_table(table);
+        let sql = ddl::build_create_table(table, Backend::Postgres);
         sqlx::query(&sql)
             .execute(&self.pool)
             .await
@@ -417,7 +421,7 @@ impl PostgresDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let sql = schema_generate_create_index(&table.name, idx);
+            let sql = ddl::build_create_index(&table.name, idx, Backend::Postgres);
             sqlx::query(&sql)
                 .execute(&self.pool)
                 .await
@@ -442,7 +446,7 @@ impl PostgresDatabaseService {
     }
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
-        let sql = format!("DROP TABLE IF EXISTS {}", sanitize_ident(name));
+        let sql = ddl::build_drop_table(name, Backend::Postgres);
         sqlx::query(&sql)
             .execute(&self.pool)
             .await
@@ -455,8 +459,7 @@ impl PostgresDatabaseService {
         table: &str,
         column: &Column,
     ) -> Result<(), DatabaseError> {
-        let col_sql = schema_column_to_sql(column);
-        let sql = format!("ALTER TABLE {} ADD COLUMN IF NOT EXISTS {}", table, col_sql);
+        let sql = ddl::build_add_column(table, column, Backend::Postgres);
         sqlx::query(&sql)
             .execute(&self.pool)
             .await
@@ -577,157 +580,6 @@ impl PostgresDatabaseService {
 }
 
 // ---------------------------------------------------------------------------
-// Schema DDL helpers
-// ---------------------------------------------------------------------------
-
-fn schema_data_type_to_sql(dt: DataType) -> &'static str {
-    match dt {
-        DataType::String | DataType::Text => "TEXT",
-        DataType::Int => "INTEGER",
-        DataType::Int64 => "BIGINT",
-        DataType::Float => "DOUBLE PRECISION",
-        DataType::Bool => "BOOLEAN",
-        DataType::DateTime => "TIMESTAMPTZ",
-        DataType::Json => "JSONB",
-        DataType::Blob => "BYTEA",
-    }
-}
-
-fn schema_default_to_sql(d: &DefaultValue) -> String {
-    if d.is_null {
-        return "NULL".to_string();
-    }
-    if d.is_raw {
-        return match d.raw.as_str() {
-            "CURRENT_TIMESTAMP" => "NOW()".to_string(),
-            other => other.to_string(),
-        };
-    }
-    match &d.value {
-        Some(DefaultVal::String(s)) => format!("'{}'", s.replace('\'', "''")),
-        Some(DefaultVal::Int(i)) => i.to_string(),
-        Some(DefaultVal::Float(f)) => f.to_string(),
-        Some(DefaultVal::Bool(b)) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        None => "NULL".to_string(),
-    }
-}
-
-fn schema_column_to_sql(col: &Column) -> String {
-    let qname = quote_ident(&col.name);
-    let mut sql = format!("{} {}", qname, schema_data_type_to_sql(col.data_type));
-
-    if col.primary_key && !col.auto_increment {
-        sql.push_str(" PRIMARY KEY");
-    }
-
-    if col.auto_increment {
-        sql = format!("{} SERIAL PRIMARY KEY", qname);
-        if let Some(ref default) = col.default {
-            sql.push_str(" DEFAULT ");
-            sql.push_str(&schema_default_to_sql(default));
-        }
-        return sql;
-    }
-
-    if !col.nullable && !col.primary_key {
-        sql.push_str(" NOT NULL");
-    }
-
-    if col.unique && !col.primary_key {
-        sql.push_str(" UNIQUE");
-    }
-
-    if let Some(ref default) = col.default {
-        sql.push_str(" DEFAULT ");
-        sql.push_str(&schema_default_to_sql(default));
-    }
-
-    sql
-}
-
-fn schema_generate_create_table(table: &Table) -> String {
-    let qtable = quote_ident(&table.name);
-    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", qtable);
-
-    for (i, col) in table.columns.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(",\n");
-        }
-        sql.push_str("    ");
-        sql.push_str(&schema_column_to_sql(col));
-    }
-
-    // Composite primary key
-    if !table.primary_key.is_empty() {
-        let quoted: Vec<String> = table.primary_key.iter().map(|k| quote_ident(k)).collect();
-        sql.push_str(",\n    PRIMARY KEY(");
-        sql.push_str(&quoted.join(", "));
-        sql.push(')');
-    }
-
-    // Composite unique constraints
-    for uk in &table.unique_keys {
-        let quoted: Vec<String> = uk.iter().map(|k| quote_ident(k)).collect();
-        sql.push_str(",\n    UNIQUE(");
-        sql.push_str(&quoted.join(", "));
-        sql.push(')');
-    }
-
-    // Foreign keys
-    for col in &table.columns {
-        if let Some(ref refs) = col.references {
-            sql.push_str(",\n    FOREIGN KEY (");
-            sql.push_str(&quote_ident(&col.name));
-            sql.push_str(") REFERENCES ");
-            sql.push_str(&quote_ident(&refs.table));
-            sql.push('(');
-            sql.push_str(&quote_ident(&refs.column));
-            sql.push(')');
-            if !refs.on_delete.is_empty() {
-                sql.push_str(" ON DELETE ");
-                sql.push_str(&sanitize_ident(&refs.on_delete));
-            }
-            if !refs.on_update.is_empty() {
-                sql.push_str(" ON UPDATE ");
-                sql.push_str(&sanitize_ident(&refs.on_update));
-            }
-        }
-    }
-
-    sql.push_str("\n)");
-    sql
-}
-
-fn schema_generate_create_index(table_name: &str, idx: &Index) -> String {
-    let mut sql = String::from("CREATE ");
-    if idx.unique {
-        sql.push_str("UNIQUE ");
-    }
-    sql.push_str("INDEX IF NOT EXISTS ");
-
-    let name = if idx.name.is_empty() {
-        format!(
-            "idx_{}_{}",
-            sanitize_ident(table_name),
-            idx.columns
-                .iter()
-                .map(|c| sanitize_ident(c))
-                .collect::<Vec<_>>()
-                .join("_")
-        )
-    } else {
-        sanitize_ident(&idx.name)
-    };
-    sql.push_str(&name);
-    sql.push_str(" ON ");
-    sql.push_str(&quote_ident(table_name));
-    sql.push('(');
-    let quoted_cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c)).collect();
-    sql.push_str(&quoted_cols.join(", "));
-    sql.push(')');
-
-    sql
-}
 
 // ---------------------------------------------------------------------------
 // Trait implementation — direct async
@@ -837,19 +689,6 @@ impl DatabaseService for PostgresDatabaseService {
 // ---------------------------------------------------------------------------
 // Free functions: query building, type mapping, row conversion
 // ---------------------------------------------------------------------------
-
-/// Sanitize an identifier to prevent SQL injection. Only allows
-/// alphanumeric characters and underscores.
-fn sanitize_ident(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .collect()
-}
-
-/// Quote an identifier for use in DDL (double-quote escaping).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
 
 /// Map a `serde_json::Value` to the appropriate PostgreSQL column type name.
 fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
@@ -1118,31 +957,6 @@ fn bind_json_value_query<'q>(
     }
 }
 
-/// Simple base64 encoder (no external dependency).
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((n >> 18) & 63) as usize] as char);
-        result.push(CHARS[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((n >> 6) & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(n & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1373,56 +1187,5 @@ mod tests {
         assert_eq!(params.len(), 3);
     }
 
-    // --- Schema DDL tests (ported from wafer-run/src/schema/postgres.rs) ---
-
-    #[test]
-    fn test_schema_data_type_mapping() {
-        let mappings = vec![
-            (DataType::String, "TEXT"),
-            (DataType::Text, "TEXT"),
-            (DataType::Int, "INTEGER"),
-            (DataType::Int64, "BIGINT"),
-            (DataType::Float, "DOUBLE PRECISION"),
-            (DataType::Bool, "BOOLEAN"),
-            (DataType::DateTime, "TIMESTAMPTZ"),
-            (DataType::Json, "JSONB"),
-            (DataType::Blob, "BYTEA"),
-        ];
-
-        for (dt, expected) in mappings {
-            assert_eq!(
-                schema_data_type_to_sql(dt),
-                expected,
-                "DataType::{:?} should map to {}",
-                dt,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_schema_default_to_sql_logic() {
-        // NULL default
-        let d = default_null();
-        assert_eq!(schema_default_to_sql(&d), "NULL");
-
-        // Raw default (CURRENT_TIMESTAMP -> NOW())
-        let d = default_now();
-        assert_eq!(schema_default_to_sql(&d), "NOW()");
-
-        // Bool defaults
-        let d = default_true();
-        assert_eq!(schema_default_to_sql(&d), "TRUE");
-
-        let d = default_false();
-        assert_eq!(schema_default_to_sql(&d), "FALSE");
-
-        // Int default
-        let d = default_int(42);
-        assert_eq!(schema_default_to_sql(&d), "42");
-
-        // String default
-        let d = default_string("hello");
-        assert_eq!(schema_default_to_sql(&d), "'hello'");
-    }
+    // Schema DDL tests now live in wafer-sql-utils::ddl::tests
 }

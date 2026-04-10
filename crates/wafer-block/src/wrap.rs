@@ -35,7 +35,7 @@ pub fn resource_prefix(block_id: &str) -> String {
 
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
-/// Rules (evaluated in order):
+/// For namespace-based resources (Db, Config, Crypto, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
 /// 2. `SOLOBASE_SHARED__*` → any block reads, admin-only writes
 /// 3. Own resource (`resource_owner(resource) == caller_id`) → Ok
@@ -43,6 +43,11 @@ pub fn resource_prefix(block_id: &str) -> String {
 /// 5. Grant match (grantee + resource pattern + write flag) → Ok
 /// 6. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 7. Otherwise → Err
+///
+/// For non-namespace resources (Network, Storage):
+/// 4. Admin → Ok
+/// 5. Grant match → Ok
+/// 7. Otherwise → Err (default deny)
 pub fn check_access(
     caller_id: Option<&str>,
     resource: &str,
@@ -51,46 +56,104 @@ pub fn check_access(
     grants: &[ResourceGrant],
     admin_block: &str,
 ) -> Result<(), WaferError> {
-    // Rule 1: raw SQL is admin-only
-    if resource == "__raw_sql__" {
-        return match caller_id {
-            Some(c) if c == admin_block => Ok(()),
-            _ => Err(WaferError::new(
-                ErrorCode::PERMISSION_DENIED,
-                format!(
-                    "WRAP: raw SQL access denied (caller: {:?}, admin: {})",
-                    caller_id, admin_block
-                ),
-            )),
-        };
-    }
+    // Namespace-based rules only apply to Db, Config, Crypto, or untyped resources.
+    // Network and Storage resources use URLs/paths, not the {org}__{block}__{name} convention.
+    let namespace_based = !matches!(
+        resource_type,
+        Some(crate::types::ResourceType::Network) | Some(crate::types::ResourceType::Storage)
+    );
 
-    // Rule 2: SOLOBASE_SHARED__ resources
-    let lower = resource.to_lowercase();
-    if lower.starts_with("solobase_shared__") {
-        if is_write {
+    if namespace_based {
+        // Rule 1: raw SQL is admin-only
+        if resource == "__raw_sql__" {
             return match caller_id {
                 Some(c) if c == admin_block => Ok(()),
                 _ => Err(WaferError::new(
                     ErrorCode::PERMISSION_DENIED,
                     format!(
-                        "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {:?})",
-                        caller_id
+                        "WRAP: raw SQL access denied (caller: {:?}, admin: {})",
+                        caller_id, admin_block
                     ),
                 )),
             };
         }
-        return Ok(());
-    }
 
-    let owner = resource_owner(resource);
-
-    // Rule 3: own resource
-    if let Some(ref owner) = owner {
-        if caller_id == Some(owner.as_str()) {
+        // Rule 2: SOLOBASE_SHARED__ resources
+        let lower = resource.to_lowercase();
+        if lower.starts_with("solobase_shared__") {
+            if is_write {
+                return match caller_id {
+                    Some(c) if c == admin_block => Ok(()),
+                    _ => Err(WaferError::new(
+                        ErrorCode::PERMISSION_DENIED,
+                        format!(
+                            "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {:?})",
+                            caller_id
+                        ),
+                    )),
+                };
+            }
             return Ok(());
         }
+
+        // Rule 3: own resource
+        let owner = resource_owner(resource);
+        if let Some(ref owner) = owner {
+            if caller_id == Some(owner.as_str()) {
+                return Ok(());
+            }
+        }
+
+        // Rule 4: admin block has full access
+        if caller_id == Some(admin_block) {
+            return Ok(());
+        }
+
+        // Rule 5: grant match
+        if let Some(caller) = caller_id {
+            for grant in grants {
+                if !grant_matches_grantee(&grant.grantee, caller) {
+                    continue;
+                }
+                if !grant_matches_resource(&grant.resource, resource) {
+                    continue;
+                }
+                if is_write && !grant.write {
+                    continue;
+                }
+                if let Some(ref grant_type) = grant.resource_type {
+                    match resource_type {
+                        Some(req_type) if grant_type == req_type => {}
+                        _ => continue,
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        // Rule 6: unnamespaced resource → deny
+        if owner.is_none() {
+            return Err(WaferError::new(
+                ErrorCode::PERMISSION_DENIED,
+                format!(
+                    "WRAP: unnamespaced resource '{}' denied (caller: {:?})",
+                    resource, caller_id
+                ),
+            ));
+        }
+
+        // Rule 7: no match → deny
+        return Err(WaferError::new(
+            ErrorCode::PERMISSION_DENIED,
+            format!(
+                "WRAP: access denied on '{}' (caller: {:?})",
+                resource, caller_id
+            ),
+        ));
     }
+
+    // --- Non-namespace resources (Network, Storage) ---
+    // Only admin check + grant matching, default deny.
 
     // Rule 4: admin block has full access
     if caller_id == Some(admin_block) {
@@ -109,9 +172,6 @@ pub fn check_access(
             if is_write && !grant.write {
                 continue;
             }
-            // Type check: if grant specifies a type, it must match.
-            // Untyped requests must use untyped grants — a typed grant
-            // never satisfies an untyped request.
             if let Some(ref grant_type) = grant.resource_type {
                 match resource_type {
                     Some(req_type) if grant_type == req_type => {}
@@ -122,23 +182,12 @@ pub fn check_access(
         }
     }
 
-    // Rule 6: unnamespaced resource → deny
-    if owner.is_none() {
-        return Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
-            format!(
-                "WRAP: unnamespaced resource '{}' denied (caller: {:?})",
-                resource, caller_id
-            ),
-        ));
-    }
-
-    // Rule 7: no match → deny
+    // Default deny
     Err(WaferError::new(
         ErrorCode::PERMISSION_DENIED,
         format!(
-            "WRAP: access denied on '{}' (caller: {:?})",
-            resource, caller_id
+            "WRAP: access denied on '{}' (caller: {:?}, type: {:?})",
+            resource, caller_id, resource_type
         ),
     ))
 }
@@ -147,17 +196,53 @@ fn grant_matches_grantee(grantee: &str, caller: &str) -> bool {
     grantee == "*" || grantee == caller
 }
 
+/// Glob-style pattern matching for grant resource patterns.
+///
+/// Supports multiple `*` wildcards:
+/// - `*` alone matches everything
+/// - `https://api.stripe.com/*` matches any path under that domain
+/// - `https://*.example.com/*` matches any subdomain + path
+/// - `wafer-run/web/public/*` matches any key under that storage path
+/// - No wildcard = exact match
 fn grant_matches_resource(pattern: &str, resource: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        resource.starts_with(prefix)
-    } else {
-        pattern == resource
+    if pattern == "*" {
+        return true;
     }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        // No wildcard — exact match
+        return resource == pattern;
+    }
+
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(found) = resource[pos..].find(part) {
+            if i == 0 && found != 0 {
+                // First segment must match at start
+                return false;
+            }
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+
+    // If pattern doesn't end with *, resource must end at pos
+    if !pattern.ends_with('*') {
+        return pos == resource.len();
+    }
+
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ResourceType;
 
     #[test]
     fn test_resource_owner() {
@@ -379,6 +464,73 @@ mod tests {
     }
 
     #[test]
+    fn test_grant_matches_resource_glob() {
+        // Wildcard all
+        assert!(grant_matches_resource("*", "https://example.com"));
+        assert!(grant_matches_resource("*", "anything"));
+
+        // Exact match
+        assert!(grant_matches_resource(
+            "https://api.stripe.com/v1",
+            "https://api.stripe.com/v1"
+        ));
+        assert!(!grant_matches_resource(
+            "https://api.stripe.com/v1",
+            "https://api.stripe.com/v2"
+        ));
+
+        // Trailing wildcard (URL)
+        assert!(grant_matches_resource(
+            "https://api.stripe.com/*",
+            "https://api.stripe.com/v1/charges"
+        ));
+        assert!(!grant_matches_resource(
+            "https://api.stripe.com/*",
+            "https://evil.com/api.stripe.com/"
+        ));
+
+        // Middle wildcard (subdomain)
+        assert!(grant_matches_resource(
+            "https://*.example.com/*",
+            "https://api.example.com/v1"
+        ));
+        assert!(!grant_matches_resource(
+            "https://*.example.com/*",
+            "http://api.example.com/v1"
+        ));
+
+        // Storage path patterns
+        assert!(grant_matches_resource(
+            "wafer-run/web/*",
+            "wafer-run/web/public"
+        ));
+        assert!(grant_matches_resource(
+            "wafer-run/web/*",
+            "wafer-run/web/public/index.html"
+        ));
+        assert!(!grant_matches_resource(
+            "wafer-run/web/*",
+            "suppers-ai/files/uploads"
+        ));
+
+        // No match
+        assert!(!grant_matches_resource(
+            "https://safe.com/*",
+            "https://evil.com/safe.com/"
+        ));
+
+        // Namespace patterns (backward compat)
+        assert!(grant_matches_resource(
+            "suppers_ai__auth__*",
+            "suppers_ai__auth__users"
+        ));
+        assert!(grant_matches_resource(
+            "suppers_ai__auth__*",
+            "suppers_ai__auth__tokens"
+        ));
+    }
+
+    #[test]
     fn test_read_write_grant() {
         let grants = vec![ResourceGrant::read_write(
             "suppers-ai/auth",
@@ -405,5 +557,137 @@ mod tests {
             admin
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_network_resource_type() {
+        let admin = "suppers-ai/admin";
+        let net = Some(&ResourceType::Network);
+
+        // No grants → denied (default deny for network)
+        assert!(check_access(
+            Some("suppers-ai/products"),
+            "https://api.stripe.com/v1/charges",
+            false,
+            net,
+            &[],
+            admin
+        )
+        .is_err());
+
+        // Wildcard grant for all blocks → allowed
+        let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Network)];
+        assert!(check_access(
+            Some("suppers-ai/products"),
+            "https://api.stripe.com/v1/charges",
+            false,
+            net,
+            &grants,
+            admin
+        )
+        .is_ok());
+
+        // Specific URL grant
+        let grants = vec![
+            ResourceGrant::read("suppers-ai/products", "https://api.stripe.com/*")
+                .typed(ResourceType::Network),
+        ];
+        assert!(check_access(
+            Some("suppers-ai/products"),
+            "https://api.stripe.com/v1/charges",
+            false,
+            net,
+            &grants,
+            admin
+        )
+        .is_ok());
+        // Different block → denied
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "https://api.stripe.com/v1/charges",
+            false,
+            net,
+            &grants,
+            admin
+        )
+        .is_err());
+        // Different URL → denied
+        assert!(check_access(
+            Some("suppers-ai/products"),
+            "https://evil.com/steal",
+            false,
+            net,
+            &grants,
+            admin
+        )
+        .is_err());
+
+        // Admin always allowed
+        assert!(check_access(Some(admin), "https://anything.com", false, net, &[], admin).is_ok());
+
+        // Network grant doesn't satisfy Db request
+        let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Network)];
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "auth_users",
+            false,
+            None, // untyped / Db
+            &grants,
+            admin
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_storage_resource_type() {
+        let admin = "suppers-ai/admin";
+        let storage = Some(&ResourceType::Storage);
+
+        // No grants → denied
+        assert!(check_access(
+            Some("suppers-ai/files"),
+            "wafer-run/web/public",
+            false,
+            storage,
+            &[],
+            admin
+        )
+        .is_err());
+
+        // Grant for specific path
+        let grants =
+            vec![ResourceGrant::read("suppers-ai/files", "wafer-run/web/*")
+                .typed(ResourceType::Storage)];
+        assert!(check_access(
+            Some("suppers-ai/files"),
+            "wafer-run/web/public",
+            false,
+            storage,
+            &grants,
+            admin
+        )
+        .is_ok());
+        // Write denied (read-only grant)
+        assert!(check_access(
+            Some("suppers-ai/files"),
+            "wafer-run/web/public",
+            true,
+            storage,
+            &grants,
+            admin
+        )
+        .is_err());
+
+        // URL-like resource should NOT be treated as namespaced
+        // (no "own resource" shortcut for storage paths)
+        assert!(check_access(
+            Some("wafer-run/web"),
+            "wafer-run/web/public",
+            false,
+            storage,
+            &[], // no grants
+            admin
+        )
+        .is_err());
     }
 }

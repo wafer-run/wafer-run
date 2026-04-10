@@ -66,18 +66,18 @@ struct DeleteFolderReq<'a> {
 
 dual_api! {
     pub fn put(ctx, folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), WaferError> {
-        svc!(ctx, BLOCK, ServiceOp::STORAGE_PUT, &PutReq { folder, key, data, content_type }, Some(folder), true, Some("storage"))?;
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_PUT, &PutReq { folder, key, data, content_type }, None::<&str>, true, Some("storage"))?;
         Ok(())
     }
 
     pub fn get(ctx, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key }, Some(folder), false, Some("storage"))?;
+        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_GET, &GetReq { folder, key }, None::<&str>, false, Some("storage"))?;
         let resp: GetResp = decode(&data)?;
         Ok((resp.data, resp.info))
     }
 
     pub fn delete(ctx, folder: &str, key: &str) -> Result<(), WaferError> {
-        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE, &DeleteReq { folder, key }, Some(folder), true, Some("storage"))?;
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE, &DeleteReq { folder, key }, None::<&str>, true, Some("storage"))?;
         Ok(())
     }
 
@@ -86,7 +86,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::STORAGE_LIST,
             &ListReq { folder, prefix: &opts.prefix, limit: opts.limit, offset: opts.offset },
-            Some(folder),
+            None::<&str>,
             false,
             Some("storage")
         )?;

@@ -204,6 +204,17 @@ impl Wafer {
         self.wrap_admin_block = Arc::new(block_id.into());
     }
 
+    /// Get the collected WRAP grants (read-only).
+    /// Available after `start()` / `start_without_bind()`.
+    pub fn wrap_grants(&self) -> &Arc<Vec<wafer_block::types::ResourceGrant>> {
+        &self.wrap_grants
+    }
+
+    /// Get the admin block ID (read-only).
+    pub fn wrap_admin_block(&self) -> &Arc<String> {
+        &self.wrap_admin_block
+    }
+
     /// Register an interface specification. Overwrites any existing spec
     /// with the same name.
     pub fn register_interface(&mut self, spec: wafer_block::InterfaceSpec) {

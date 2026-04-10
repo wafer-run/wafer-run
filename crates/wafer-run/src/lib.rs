@@ -23,6 +23,9 @@ pub mod types;
 pub mod waferflow;
 pub mod wasm;
 
+// Re-export the WRAP access control module from wafer-block
+pub use wafer_block::wrap;
+
 // Re-exports for convenience
 pub use block::{AsyncFuncBlock, FuncBlock};
 pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};

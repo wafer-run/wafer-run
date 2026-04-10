@@ -51,7 +51,7 @@ pub async fn do_request(
             headers,
             body,
         },
-        None,
+        Some(url),
         false,
         Some("network"),
     )
@@ -82,7 +82,7 @@ pub async fn do_request_via(
             headers,
             body,
         },
-        None,
+        Some(url),
         false,
         Some("network"),
     )
@@ -110,7 +110,7 @@ pub fn do_request(
             headers,
             body,
         },
-        None,
+        Some(url),
         false,
         Some("network"),
     )?;

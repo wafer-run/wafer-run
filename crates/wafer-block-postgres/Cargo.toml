@@ -8,6 +8,7 @@ description = "PostgreSQL database block for WAFER"
 [dependencies]
 wafer-run = { workspace = true }
 wafer-core = { path = "../wafer-core", default-features = false }
+wafer-sql-utils = { path = "../wafer-sql-utils" }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }

@@ -26,12 +26,28 @@ impl Wafer {
     /// Collect and validate WRAP grants from all registered blocks.
     /// Called during resolve() after blocks are registered, so that Init
     /// lifecycle events can access cross-block resources via grants.
+    ///
+    /// Preserves any grants previously added via `add_wrap_grants()` (e.g.
+    /// grants loaded from a database before `start()`).
     pub(crate) fn collect_wrap_grants(&mut self) {
-        let mut all_grants = Vec::new();
+        // Preserve DB-loaded grants added before start()
+        let mut all_grants = (*self.wrap_grants).clone();
         for block in self.blocks.values() {
             let info = block.info();
             for grant in &info.grants {
-                // SECURITY: blocks can only grant access to resources they own
+                // Network/Storage typed grants use URLs/paths, not namespaced
+                // resources — skip ownership validation for these.
+                if matches!(
+                    grant.resource_type,
+                    Some(wafer_block::types::ResourceType::Network)
+                        | Some(wafer_block::types::ResourceType::Storage)
+                ) {
+                    all_grants.push(grant.clone());
+                    continue;
+                }
+
+                // SECURITY: namespace-based grants — blocks can only grant
+                // access to resources they own.
                 let grant_owner = if grant.resource.ends_with('*') {
                     let base = grant.resource.trim_end_matches('*');
                     wafer_block::wrap::resource_owner(&format!("{base}x"))
