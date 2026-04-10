@@ -145,14 +145,8 @@ mod tests {
             .expect("block_capabilities() should return Some for WasmiBlock");
 
         // The returned capabilities should match what we provided.
-        assert!(
-            !returned.network,
-            "network capability should be false"
-        );
-        assert!(
-            !returned.raw_sql,
-            "raw_sql capability should be false"
-        );
+        assert!(!returned.network, "network capability should be false");
+        assert!(!returned.raw_sql, "raw_sql capability should be false");
         assert!(!returned.crypto, "crypto capability should be false");
     }
 }
