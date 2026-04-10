@@ -4093,6 +4093,7 @@ dependencies = [
  "wafer-block",
  "wafer-flow",
  "wasmi",
+ "wat",
  "web-time",
 ]
 
@@ -4354,6 +4355,7 @@ checksum = "4f08c9adee0428b7bddf3890fc27e015ac4b761cc608c822667102b8bfd6995e"
 dependencies = [
  "bitflags",
  "indexmap",
+ "semver",
 ]
 
 [[package]]
