@@ -567,7 +567,8 @@ impl Block for WasmiBlock {
         })();
 
         match result {
-            Ok(info) => {
+            Ok(mut info) => {
+                info.runtime = crate::block::BlockRuntime::Wasm;
                 if let Ok(mut guard) = self.info_cache.lock() {
                     *guard = Some(info.clone());
                 }

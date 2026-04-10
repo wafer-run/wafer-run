@@ -91,7 +91,11 @@ pub fn call_block(name: &str, msg: &Message) -> BlockResult {
         );
         let (ptr, len) = unpack_ptr_len(packed);
         let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
-        serde_json::from_slice(bytes).expect("failed to deserialize BlockResult")
+        let result: BlockResult =
+            serde_json::from_slice(bytes).expect("failed to deserialize BlockResult");
+        // Reclaim the allocation made by __wafer_alloc to avoid leaking guest memory.
+        let _ = Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
+        result
     }
 }
 

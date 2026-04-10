@@ -605,10 +605,12 @@ impl Wafer {
     }
 
     /// Get or create the shared WASM engine.
-    #[cfg(feature = "wasm")]
+    #[cfg(feature = "wasmi")]
     pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, String> {
         if self.wasm_engine.is_none() {
-            let engine = wasmi::Engine::default();
+            let mut config = wasmi::Config::default();
+            config.consume_fuel(true);
+            let engine = wasmi::Engine::new(&config);
             self.wasm_engine = Some(Arc::new(engine));
         }
         Ok(self
