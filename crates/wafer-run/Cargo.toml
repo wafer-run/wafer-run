@@ -8,7 +8,8 @@ repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
 default = ["wasm"]
-wasm = ["dep:wasmi", "dep:reqwest", "dep:tokio"]
+wasmi = ["dep:wasmi"]
+wasm = ["wasmi", "dep:reqwest", "dep:tokio"]
 full = ["wasm", "dep:tracing-subscriber"]
 
 [dependencies]
@@ -31,11 +32,11 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 url = "2"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-web-time = "1"
-
 # WASM (wasmi interpreter engine)
 wasmi = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+web-time = "1"
 
 # Network (reqwest for WASM remote block downloads)
 reqwest = { workspace = true, optional = true }

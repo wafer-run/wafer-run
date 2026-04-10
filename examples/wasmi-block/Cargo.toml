@@ -1,0 +1,15 @@
+[package]
+name = "wafer-example-wasmi-echo"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-sdk = { path = "../../crates/wafer-sdk-rs" }
+wafer-block = { path = "../../crates/wafer-block" }
+serde_json = "1"
+
+[workspace]
+# Standalone workspace to avoid polluting the main workspace

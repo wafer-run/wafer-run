@@ -39,6 +39,9 @@ struct PackageEntry {
     repo_url: String,
     package_type: String,
     runtime_type: String,
+    manifest_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<serde_json::Value>,
     versions: Vec<VersionInfo>,
 }
 
@@ -72,6 +75,8 @@ struct ManifestVersion {
     flow_url: Option<String>,
     #[serde(default, rename = "crate")]
     crate_name: Option<String>,
+    #[serde(default)]
+    capabilities: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +240,25 @@ impl RegistryBlock {
         }
         .to_string();
 
+        // Build the manifest URL from the package name (format: "org/block").
+        let manifest_url = {
+            let parts: Vec<&str> = manifest.name.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                format!(
+                    "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
+                    parts[0], parts[1]
+                )
+            } else {
+                String::new()
+            }
+        };
+
+        // Pull capabilities from the latest version entry if present.
+        let capabilities = manifest
+            .versions
+            .get(&manifest.latest)
+            .and_then(|v| v.capabilities.clone());
+
         let mut versions: Vec<VersionInfo> = manifest
             .versions
             .iter()
@@ -255,6 +279,8 @@ impl RegistryBlock {
             repo_url,
             package_type,
             runtime_type,
+            manifest_url,
+            capabilities,
             versions,
         }
     }

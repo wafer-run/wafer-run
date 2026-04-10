@@ -165,6 +165,9 @@
                 const runtimeType = pkg.runtime_type || '';
                 const latest = pkg.latest || '';
 
+                const manifestUrl = pkg.manifest_url || '';
+                const isWasm = runtimeType === 'wasm' || runtimeType === 'both';
+
                 return '<li class="package-card">'
                     + '<h3><a href="' + esc(repoUrl) + '" target="_blank" rel="noopener">' + formatPackageName(name) + '</a></h3>'
                     + '<p class="description">' + esc(desc) + '</p>'
@@ -176,6 +179,7 @@
                     + (latest ? '<span class="badge badge-version">v' + esc(latest) + '</span>' : '')
                     + '<a class="repo-link" href="' + esc(repoUrl) + '" target="_blank" rel="noopener">View on GitHub</a>'
                     + '</div>'
+                    + (isWasm && manifestUrl ? '<div class="manifest-url" style="margin-top: 0.5rem;"><input type="text" readonly value="' + esc(manifestUrl) + '" onclick="this.select()" style="width: 100%; font-size: 0.8rem; font-family: monospace; padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: 0.25rem; background: var(--bg-white); cursor: pointer;" title="Click to select"></div>' : '')
                     + '</li>';
             }).join('');
         }

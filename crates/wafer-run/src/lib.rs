@@ -54,5 +54,5 @@ pub use types::{
 };
 
 pub use wasm::capabilities::BlockCapabilities;
-#[cfg(feature = "wasm")]
+#[cfg(feature = "wasmi")]
 pub use wasm::WasmiBlock;

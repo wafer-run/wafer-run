@@ -1,8 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// BlockCapabilities declares what platform services a WASM block may access.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockCapabilities {
     /// Allowed database collections. "*" = all, empty = none.
     #[serde(default)]

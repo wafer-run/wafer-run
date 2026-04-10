@@ -39,8 +39,7 @@ pub use registry::BlockRegistry;
 pub use router::Router;
 
 // Re-export the proc macro.
-// TODO: Re-enable once wafer-block-macro is updated for native types (Task 5).
-// pub use wafer_block_macro::wafer_block;
+pub use wafer_block_macro::wafer_block;
 
 // Re-export core types at crate root.
 pub use core_types::{

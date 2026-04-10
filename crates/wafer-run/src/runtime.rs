@@ -155,7 +155,7 @@ pub struct Wafer {
     /// WRAP: the block ID that has admin privileges (exact match).
     pub(crate) wrap_admin_block: Arc<String>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
-    #[cfg(feature = "wasm")]
+    #[cfg(feature = "wasmi")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
 }
 
@@ -182,7 +182,7 @@ impl Wafer {
             interface_specs_snapshot: Arc::new(Vec::new()),
             wrap_grants: Arc::new(Vec::new()),
             wrap_admin_block: Arc::new(String::new()),
-            #[cfg(feature = "wasm")]
+            #[cfg(feature = "wasmi")]
             wasm_engine: None,
         }
     }
