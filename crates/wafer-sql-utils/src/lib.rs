@@ -7,6 +7,10 @@ pub mod query;
 pub mod upsert;
 pub mod value;
 
+/// Re-export sea_query::Value so consumers can reference the param type
+/// without adding sea-query as a direct dependency.
+pub use sea_query::Value as SeaValue;
+
 /// Database backend dialect for SQL rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {

@@ -6,6 +6,7 @@ use wafer_core::interfaces::database::service::*;
 use wafer_sql_utils::base64::base64_encode;
 use wafer_sql_utils::ddl;
 use wafer_sql_utils::ident::sanitize_ident;
+use wafer_sql_utils::value::sea_values_to_json;
 use wafer_sql_utils::Backend;
 
 /// SQLite implementation of the DatabaseService.
@@ -83,6 +84,15 @@ impl SQLiteDatabaseService {
     }
 }
 
+/// Convert sea_query::Value params (from wafer-sql-utils builders) to rusqlite params
+/// via JSON round-trip: sea_query::Value -> serde_json::Value -> rusqlite::types::Value.
+fn sea_to_sql_params(sea_vals: Vec<wafer_sql_utils::SeaValue>) -> Vec<SqlValue> {
+    sea_values_to_json(sea_vals)
+        .iter()
+        .map(json_to_sql_value)
+        .collect()
+}
+
 fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::Null => SqlValue::Null,
@@ -99,42 +109,6 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
         serde_json::Value::String(s) => SqlValue::Text(s.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => SqlValue::Text(v.to_string()),
     }
-}
-
-fn build_where_clause(filters: &[Filter]) -> (String, Vec<SqlValue>) {
-    if filters.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let mut clauses = Vec::new();
-    let mut values = Vec::new();
-
-    for filter in filters {
-        let safe_field = sanitize_ident(&filter.field);
-        match filter.operator {
-            FilterOp::IsNull => {
-                clauses.push(format!("{} IS NULL", safe_field));
-            }
-            FilterOp::IsNotNull => {
-                clauses.push(format!("{} IS NOT NULL", safe_field));
-            }
-            FilterOp::In => {
-                if let serde_json::Value::Array(arr) = &filter.value {
-                    let placeholders: Vec<String> = arr.iter().map(|_| "?".to_string()).collect();
-                    clauses.push(format!("{} IN ({})", safe_field, placeholders.join(", ")));
-                    for v in arr {
-                        values.push(json_to_sql_value(v));
-                    }
-                }
-            }
-            _ => {
-                clauses.push(format!("{} {} ?", safe_field, filter.operator.as_sql()));
-                values.push(json_to_sql_value(&filter.value));
-            }
-        }
-    }
-
-    (format!(" WHERE {}", clauses.join(" AND ")), values)
 }
 
 /// Auto-create a table with columns matching the provided data keys.
@@ -244,26 +218,6 @@ fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], so
     }
 }
 
-fn build_order_clause(sort: &[SortField]) -> String {
-    if sort.is_empty() {
-        return String::new();
-    }
-
-    let parts: Vec<String> = sort
-        .iter()
-        .map(|s| {
-            let safe_field = sanitize_ident(&s.field);
-            if s.desc {
-                format!("{} DESC", safe_field)
-            } else {
-                format!("{} ASC", safe_field)
-            }
-        })
-        .collect();
-
-    format!(" ORDER BY {}", parts.join(", "))
-}
-
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DatabaseService for SQLiteDatabaseService {
@@ -303,32 +257,22 @@ impl DatabaseService for SQLiteDatabaseService {
         // Ensure filter/sort columns exist (add them if missing)
         ensure_columns_for_query(&db, collection, &opts.filters, &opts.sort);
 
-        let (where_clause, params) = build_where_clause(&opts.filters);
-        let order_clause = build_order_clause(&opts.sort);
-
         // Count total
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", collection, where_clause);
-        let count_params: Vec<&dyn rusqlite::types::ToSql> = params
+        let (count_sql, count_sea_vals) =
+            wafer_sql_utils::aggregate::build_count(collection, &opts.filters, Backend::Sqlite);
+        let count_params = sea_to_sql_params(count_sea_vals);
+        let count_refs: Vec<&dyn rusqlite::types::ToSql> = count_params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
         let total_count: i64 = db
-            .query_row(&count_sql, count_params.as_slice(), |row| row.get(0))
+            .query_row(&count_sql, count_refs.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
 
         // Query records
-        let mut sql = format!(
-            "SELECT * FROM {}{}{}",
-            collection, where_clause, order_clause
-        );
-
-        if opts.limit > 0 {
-            sql.push_str(&format!(" LIMIT {}", opts.limit));
-        }
-        if opts.offset > 0 {
-            sql.push_str(&format!(" OFFSET {}", opts.offset));
-        }
-
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_select(collection, opts, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
@@ -527,8 +471,9 @@ impl DatabaseService for SQLiteDatabaseService {
             return Ok(0);
         }
         ensure_columns_for_query(&db, &table, filters, &[]);
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!("SELECT COUNT(*) FROM {}{}", table, where_clause);
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
@@ -548,12 +493,9 @@ impl DatabaseService for SQLiteDatabaseService {
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        let safe_field = sanitize_ident(field);
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!(
-            "SELECT COALESCE(SUM({}), 0) FROM {}{}",
-            safe_field, table, where_clause
-        );
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
@@ -631,8 +573,9 @@ impl DatabaseService for SQLiteDatabaseService {
         if !table_exists(&db, &table) {
             return Ok(());
         }
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!("DELETE FROM {}{}", table, where_clause);
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
@@ -665,23 +608,15 @@ impl DatabaseService for SQLiteDatabaseService {
             );
         }
 
-        let set_clauses: Vec<String> = data
-            .keys()
-            .enumerate()
-            .map(|(i, k)| format!("{} = ?{}", sanitize_ident(k), i + 1))
-            .collect();
-
-        let mut values: Vec<SqlValue> = data.values().map(json_to_sql_value).collect();
-        let (where_clause, where_params) = build_where_clause(filters);
-        values.extend(where_params);
-
-        let sql = format!(
-            "UPDATE {} SET {}{}",
-            table,
-            set_clauses.join(", "),
-            where_clause
+        let data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
+            &table,
+            &data_pairs,
+            filters,
+            Backend::Sqlite,
         );
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = values
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
@@ -760,5 +695,280 @@ impl DatabaseService for SQLiteDatabaseService {
         let sql = ddl::build_add_column(table, column, Backend::Sqlite);
         db.execute_batch(&sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+
+    // -----------------------------------------------------------------------
+    // json_to_sql_value type conversion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_to_sql_null() {
+        assert_eq!(json_to_sql_value(&serde_json::Value::Null), SqlValue::Null);
+    }
+
+    #[test]
+    fn test_json_to_sql_bool() {
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!(true)),
+            SqlValue::Integer(1)
+        );
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!(false)),
+            SqlValue::Integer(0)
+        );
+    }
+
+    #[test]
+    fn test_json_to_sql_integer() {
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!(42)),
+            SqlValue::Integer(42)
+        );
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!(-7)),
+            SqlValue::Integer(-7)
+        );
+    }
+
+    #[test]
+    fn test_json_to_sql_float() {
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!(3.14)),
+            SqlValue::Real(3.14)
+        );
+    }
+
+    #[test]
+    fn test_json_to_sql_string() {
+        assert_eq!(
+            json_to_sql_value(&serde_json::json!("hello")),
+            SqlValue::Text("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_json_to_sql_array() {
+        let v = serde_json::json!([1, 2, 3]);
+        match json_to_sql_value(&v) {
+            SqlValue::Text(s) => assert_eq!(s, "[1,2,3]"),
+            other => panic!("expected Text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_to_sql_object() {
+        let v = serde_json::json!({"key": "val"});
+        match json_to_sql_value(&v) {
+            SqlValue::Text(s) => {
+                let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+                assert_eq!(parsed, serde_json::json!({"key": "val"}));
+            }
+            other => panic!("expected Text, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // sea_to_sql_params bridge tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sea_to_sql_params_mixed_types() {
+        use wafer_sql_utils::SeaValue;
+        let sea_vals = vec![
+            SeaValue::String(Some(Box::new("hello".to_string()))),
+            SeaValue::BigInt(Some(42)),
+            SeaValue::Double(Some(3.14)),
+            SeaValue::Bool(Some(true)),
+            SeaValue::String(None), // NULL
+        ];
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[0], SqlValue::Text("hello".to_string()));
+        assert_eq!(params[1], SqlValue::Integer(42));
+        assert_eq!(params[2], SqlValue::Real(3.14));
+        assert_eq!(params[3], SqlValue::Integer(1)); // bool true → 1
+        assert_eq!(params[4], SqlValue::Null);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sea-query builder integration tests (SQLite dialect)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sea_query_select_with_filters() {
+        let opts = ListOptions {
+            filters: vec![Filter {
+                field: "name".to_string(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("alice"),
+            }],
+            sort: vec![],
+            limit: 0,
+            offset: 0,
+        };
+        let (sql, sea_vals) = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
+        assert!(sql.contains("WHERE"));
+        // SQLite uses ? placeholders, not $N
+        assert!(sql.contains("?"), "SQLite should use ? placeholders");
+        assert!(!sql.contains("$1"), "SQLite should not use $N placeholders");
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0], SqlValue::Text("alice".to_string()));
+    }
+
+    #[test]
+    fn test_sea_query_select_with_sort_and_pagination() {
+        let opts = ListOptions {
+            filters: vec![],
+            sort: vec![
+                SortField {
+                    field: "created_at".to_string(),
+                    desc: true,
+                },
+                SortField {
+                    field: "name".to_string(),
+                    desc: false,
+                },
+            ],
+            limit: 10,
+            offset: 20,
+        };
+        let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
+        assert!(sql.contains("ORDER BY"));
+        assert!(sql.contains("LIMIT"));
+        assert!(sql.contains("OFFSET"));
+    }
+
+    #[test]
+    fn test_sea_query_count_with_filters() {
+        let filters = vec![Filter {
+            field: "active".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(true),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        assert!(sql.contains("COUNT(*)"));
+        assert!(sql.contains("WHERE"));
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_sea_query_sum() {
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("active"),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Sqlite);
+        assert!(sql.contains("SUM"));
+        assert!(sql.contains("COALESCE"));
+        assert!(sql.contains("WHERE"));
+        let params = sea_to_sql_params(sea_vals);
+        assert!(!params.is_empty());
+    }
+
+    #[test]
+    fn test_sea_query_delete_where() {
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::In,
+            value: serde_json::json!(["active", "pending"]),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("IN"));
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], SqlValue::Text("active".to_string()));
+        assert_eq!(params[1], SqlValue::Text("pending".to_string()));
+    }
+
+    #[test]
+    fn test_sea_query_update_where() {
+        let data = vec![("status".to_string(), serde_json::json!("active"))];
+        let filters = vec![Filter {
+            field: "id".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("123"),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Sqlite);
+        assert!(sql.contains("UPDATE"));
+        assert!(sql.contains("SET"));
+        assert!(sql.contains("WHERE"));
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_sea_query_is_null_filter() {
+        let filters = vec![Filter {
+            field: "deleted_at".to_string(),
+            operator: FilterOp::IsNull,
+            value: serde_json::Value::Null,
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        assert!(sql.contains("IS NULL"));
+        let params = sea_to_sql_params(sea_vals);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_sea_query_is_not_null_filter() {
+        let filters = vec![Filter {
+            field: "email".to_string(),
+            operator: FilterOp::IsNotNull,
+            value: serde_json::Value::Null,
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        assert!(sql.contains("IS NOT NULL"));
+        let params = sea_to_sql_params(sea_vals);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_sea_query_like_filter() {
+        let filters = vec![Filter {
+            field: "name".to_string(),
+            operator: FilterOp::Like,
+            value: serde_json::json!("%alice%"),
+        }];
+        let (sql, _sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        assert!(sql.contains("LIKE"));
+    }
+
+    #[test]
+    fn test_sea_query_comparison_ops() {
+        let filters = vec![
+            Filter {
+                field: "age".to_string(),
+                operator: FilterOp::GreaterEqual,
+                value: serde_json::json!(18),
+            },
+            Filter {
+                field: "score".to_string(),
+                operator: FilterOp::LessThan,
+                value: serde_json::json!(100),
+            },
+        ];
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        assert!(sql.contains(">="));
+        assert!(sql.contains("<"));
+        let params = sea_to_sql_params(sea_vals);
+        assert_eq!(params.len(), 2);
     }
 }

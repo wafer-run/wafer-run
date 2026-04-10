@@ -6,6 +6,7 @@ use wafer_core::interfaces::database::service::*;
 use wafer_sql_utils::base64::base64_encode;
 use wafer_sql_utils::ddl;
 use wafer_sql_utils::ident::sanitize_ident;
+use wafer_sql_utils::value::sea_values_to_json;
 use wafer_sql_utils::Backend;
 
 /// PostgreSQL implementation of the DatabaseService.
@@ -67,13 +68,12 @@ impl PostgresDatabaseService {
         self.ensure_columns_for_query(&table, &opts.filters, &opts.sort)
             .await?;
 
-        let (where_clause, params) = build_where_clause(&opts.filters);
-        let order_clause = build_order_clause(&opts.sort);
-
         // Count total
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", table, where_clause);
+        let (count_sql, count_sea_vals) =
+            wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Backend::Postgres);
+        let count_params = sea_values_to_json(count_sea_vals);
         let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-        for p in &params {
+        for p in &count_params {
             count_q = bind_json_value(count_q, p);
         }
         let total_count: i64 = count_q
@@ -82,14 +82,8 @@ impl PostgresDatabaseService {
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
 
         // Query records
-        let mut sql = format!("SELECT * FROM {}{}{}", table, where_clause, order_clause);
-        if opts.limit > 0 {
-            sql.push_str(&format!(" LIMIT {}", opts.limit));
-        }
-        if opts.offset > 0 {
-            sql.push_str(&format!(" OFFSET {}", opts.offset));
-        }
-
+        let (sql, sea_vals) = wafer_sql_utils::query::build_select(&table, opts, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
         let mut q = sqlx::query(&sql);
         for p in &params {
             q = bind_json_value_query(q, p);
@@ -261,8 +255,9 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!("SELECT COUNT(*) FROM {}{}", table, where_clause);
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
         let mut q = sqlx::query_scalar::<_, i64>(&sql);
         for p in &params {
             q = bind_json_value(q, p);
@@ -279,12 +274,9 @@ impl PostgresDatabaseService {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let table = sanitize_ident(collection);
-        let field_name = sanitize_ident(field);
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!(
-            "SELECT COALESCE(SUM({}), 0) FROM {}{}",
-            field_name, table, where_clause
-        );
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
         let mut q = sqlx::query_scalar::<_, f64>(&sql);
         for p in &params {
             q = bind_json_value(q, p);
@@ -342,8 +334,9 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (where_clause, params) = build_where_clause(filters);
-        let sql = format!("DELETE FROM {}{}", table, where_clause);
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
         let mut q = sqlx::query(&sql);
         for p in &params {
             q = bind_json_value_query(q, p);
@@ -376,30 +369,16 @@ impl PostgresDatabaseService {
         self.ensure_columns_from_data(&table, &data).await?;
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let keys: Vec<String> = data.keys().cloned().collect();
-        let set_clauses: Vec<String> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, k)| format!("{} = ${}", sanitize_ident(k), i + 1))
-            .collect();
-
-        let (raw_where, where_params) = build_where_clause(filters);
-        // Renumber the WHERE clause placeholders to continue after the SET params.
-        let offset = keys.len();
-        let renumbered_where = renumber_placeholders(&raw_where, offset);
-
-        let sql = format!(
-            "UPDATE {} SET {}{}",
-            table,
-            set_clauses.join(", "),
-            renumbered_where
+        let data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
+            &table,
+            &data_pairs,
+            filters,
+            Backend::Postgres,
         );
-
+        let params = sea_values_to_json(sea_vals);
         let mut q = sqlx::query(&sql);
-        for k in &keys {
-            q = bind_json_value_query(q, &data[k]);
-        }
-        for p in &where_params {
+        for p in &params {
             q = bind_json_value_query(q, p);
         }
         q.execute(&self.pool)
@@ -707,107 +686,6 @@ fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Build a WHERE clause with `$N` placeholders from the given filters.
-/// Returns `(clause_string, values)`. The clause string includes the
-/// leading ` WHERE ` when there are filters.
-fn build_where_clause(filters: &[Filter]) -> (String, Vec<serde_json::Value>) {
-    if filters.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let mut clauses = Vec::new();
-    let mut values: Vec<serde_json::Value> = Vec::new();
-
-    for filter in filters {
-        match filter.operator {
-            FilterOp::IsNull => {
-                clauses.push(format!("{} IS NULL", sanitize_ident(&filter.field)));
-            }
-            FilterOp::IsNotNull => {
-                clauses.push(format!("{} IS NOT NULL", sanitize_ident(&filter.field)));
-            }
-            FilterOp::In => {
-                if let serde_json::Value::Array(arr) = &filter.value {
-                    let placeholders: Vec<String> = arr
-                        .iter()
-                        .map(|v| {
-                            values.push(v.clone());
-                            format!("${}", values.len())
-                        })
-                        .collect();
-                    clauses.push(format!(
-                        "{} IN ({})",
-                        sanitize_ident(&filter.field),
-                        placeholders.join(", ")
-                    ));
-                }
-            }
-            _ => {
-                values.push(filter.value.clone());
-                clauses.push(format!(
-                    "{} {} ${}",
-                    sanitize_ident(&filter.field),
-                    filter.operator.as_sql(),
-                    values.len()
-                ));
-            }
-        }
-    }
-
-    (format!(" WHERE {}", clauses.join(" AND ")), values)
-}
-
-/// Renumber `$N` placeholders in a SQL fragment by adding `offset` to each N.
-/// E.g. `renumber_placeholders(" WHERE a = $1 AND b = $2", 3)` returns
-/// `" WHERE a = $4 AND b = $5"`.
-fn renumber_placeholders(sql: &str, offset: usize) -> String {
-    let mut result = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '$' {
-            let mut num_str = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    num_str.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if let Ok(n) = num_str.parse::<usize>() {
-                result.push('$');
-                result.push_str(&(n + offset).to_string());
-            } else {
-                result.push('$');
-                result.push_str(&num_str);
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
-/// Build an ORDER BY clause from sort directives.
-fn build_order_clause(sort: &[SortField]) -> String {
-    if sort.is_empty() {
-        return String::new();
-    }
-
-    let parts: Vec<String> = sort
-        .iter()
-        .map(|s| {
-            if s.desc {
-                format!("{} DESC", sanitize_ident(&s.field))
-            } else {
-                format!("{} ASC", sanitize_ident(&s.field))
-            }
-        })
-        .collect();
-
-    format!(" ORDER BY {}", parts.join(", "))
-}
-
 /// Convert a PgRow to a Record, mapping column types to serde_json::Value.
 fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     use sqlx::Column as SqlxColumn;
@@ -966,27 +844,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_where_clause_empty() {
-        let (clause, params) = build_where_clause(&[]);
-        assert_eq!(clause, "");
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_build_where_clause_equal() {
-        let filters = vec![Filter {
-            field: "name".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::Value::String("alice".to_string()),
-        }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE name = $1");
+    fn test_sea_query_select_with_filters() {
+        let opts = ListOptions {
+            filters: vec![Filter {
+                field: "name".to_string(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("alice"),
+            }],
+            sort: vec![],
+            limit: 0,
+            offset: 0,
+        };
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+        let params = sea_values_to_json(sea_vals);
         assert_eq!(params.len(), 1);
-        assert_eq!(params[0], serde_json::Value::String("alice".to_string()));
+        assert_eq!(params[0], serde_json::json!("alice"));
     }
 
     #[test]
-    fn test_build_where_clause_multiple() {
+    fn test_sea_query_select_with_sort_and_pagination() {
+        let opts = ListOptions {
+            filters: vec![],
+            sort: vec![
+                SortField {
+                    field: "created_at".to_string(),
+                    desc: true,
+                },
+                SortField {
+                    field: "name".to_string(),
+                    desc: false,
+                },
+            ],
+            limit: 10,
+            offset: 20,
+        };
+        let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
+        assert!(sql.contains("ORDER BY"));
+        assert!(sql.contains("LIMIT"));
+        assert!(sql.contains("OFFSET"));
+    }
+
+    #[test]
+    fn test_sea_query_count_with_filters() {
         let filters = vec![
             Filter {
                 field: "age".to_string(),
@@ -999,111 +901,139 @@ mod tests {
                 value: serde_json::json!(true),
             },
         ];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE age > $1 AND active = $2");
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        assert!(sql.contains("COUNT(*)"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        let params = sea_values_to_json(sea_vals);
         assert_eq!(params.len(), 2);
     }
 
     #[test]
-    fn test_build_where_clause_in() {
+    fn test_sea_query_delete_where() {
         let filters = vec![Filter {
             field: "status".to_string(),
             operator: FilterOp::In,
             value: serde_json::json!(["active", "pending", "review"]),
         }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE status IN ($1, $2, $3)");
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("IN"));
+        let params = sea_values_to_json(sea_vals);
         assert_eq!(params.len(), 3);
-        assert_eq!(params[0], serde_json::Value::String("active".to_string()));
-        assert_eq!(params[1], serde_json::Value::String("pending".to_string()));
-        assert_eq!(params[2], serde_json::Value::String("review".to_string()));
+        assert_eq!(params[0], serde_json::json!("active"));
+        assert_eq!(params[1], serde_json::json!("pending"));
+        assert_eq!(params[2], serde_json::json!("review"));
     }
 
     #[test]
-    fn test_build_where_clause_is_null() {
+    fn test_sea_query_update_where() {
+        let data = vec![("status".to_string(), serde_json::json!("active"))];
+        let filters = vec![Filter {
+            field: "id".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("123"),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Postgres);
+        assert!(sql.contains("UPDATE"));
+        assert!(sql.contains("SET"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        let params = sea_values_to_json(sea_vals);
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_sea_query_sum() {
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("active"),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Postgres);
+        assert!(sql.contains("SUM"));
+        assert!(sql.contains("COALESCE"));
+        assert!(sql.contains("WHERE"));
+        // 2 params: the COALESCE default (0) + the filter value
+        let params = sea_values_to_json(sea_vals);
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_sea_query_is_null_filter() {
         let filters = vec![Filter {
             field: "deleted_at".to_string(),
             operator: FilterOp::IsNull,
             value: serde_json::Value::Null,
         }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE deleted_at IS NULL");
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        assert!(sql.contains("IS NULL"));
+        let params = sea_values_to_json(sea_vals);
         assert!(params.is_empty());
     }
 
     #[test]
-    fn test_build_where_clause_is_not_null() {
+    fn test_sea_query_is_not_null_filter() {
         let filters = vec![Filter {
             field: "email".to_string(),
             operator: FilterOp::IsNotNull,
             value: serde_json::Value::Null,
         }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE email IS NOT NULL");
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        assert!(sql.contains("IS NOT NULL"));
+        let params = sea_values_to_json(sea_vals);
         assert!(params.is_empty());
     }
 
     #[test]
-    fn test_build_where_clause_like() {
+    fn test_sea_query_like_filter() {
         let filters = vec![Filter {
             field: "name".to_string(),
             operator: FilterOp::Like,
-            value: serde_json::Value::String("%alice%".to_string()),
+            value: serde_json::json!("%alice%"),
         }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE name LIKE $1");
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        assert!(sql.contains("LIKE"));
+        assert!(sql.contains("$1"));
+        let params = sea_values_to_json(sea_vals);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
-    fn test_build_where_clause_mixed_in_and_equal() {
+    fn test_sea_query_comparison_ops() {
         let filters = vec![
             Filter {
-                field: "status".to_string(),
-                operator: FilterOp::In,
-                value: serde_json::json!(["a", "b"]),
+                field: "age".to_string(),
+                operator: FilterOp::GreaterEqual,
+                value: serde_json::json!(18),
             },
             Filter {
-                field: "name".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!("test"),
+                field: "score".to_string(),
+                operator: FilterOp::LessThan,
+                value: serde_json::json!(100),
+            },
+            Filter {
+                field: "rank".to_string(),
+                operator: FilterOp::LessEqual,
+                value: serde_json::json!(10),
             },
         ];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE status IN ($1, $2) AND name = $3");
+        let (sql, sea_vals) =
+            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        assert!(sql.contains("$3"));
+        let params = sea_values_to_json(sea_vals);
         assert_eq!(params.len(), 3);
-    }
-
-    #[test]
-    fn test_build_order_clause_empty() {
-        let clause = build_order_clause(&[]);
-        assert_eq!(clause, "");
-    }
-
-    #[test]
-    fn test_build_order_clause_single_asc() {
-        let sort = vec![SortField {
-            field: "name".to_string(),
-            desc: false,
-        }];
-        let clause = build_order_clause(&sort);
-        assert_eq!(clause, " ORDER BY name ASC");
-    }
-
-    #[test]
-    fn test_build_order_clause_multiple() {
-        let sort = vec![
-            SortField {
-                field: "created_at".to_string(),
-                desc: true,
-            },
-            SortField {
-                field: "name".to_string(),
-                desc: false,
-            },
-        ];
-        let clause = build_order_clause(&sort);
-        assert_eq!(clause, " ORDER BY created_at DESC, name ASC");
     }
 
     #[test]
@@ -1151,41 +1081,6 @@ mod tests {
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 
-    #[test]
-    fn test_build_where_clause_not_equal() {
-        let filters = vec![Filter {
-            field: "status".to_string(),
-            operator: FilterOp::NotEqual,
-            value: serde_json::json!("deleted"),
-        }];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE status != $1");
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
-    fn test_build_where_clause_comparison_ops() {
-        let filters = vec![
-            Filter {
-                field: "age".to_string(),
-                operator: FilterOp::GreaterEqual,
-                value: serde_json::json!(18),
-            },
-            Filter {
-                field: "score".to_string(),
-                operator: FilterOp::LessThan,
-                value: serde_json::json!(100),
-            },
-            Filter {
-                field: "rank".to_string(),
-                operator: FilterOp::LessEqual,
-                value: serde_json::json!(10),
-            },
-        ];
-        let (clause, params) = build_where_clause(&filters);
-        assert_eq!(clause, " WHERE age >= $1 AND score < $2 AND rank <= $3");
-        assert_eq!(params.len(), 3);
-    }
-
+    // Filter/clause/order tests now covered by wafer-sql-utils::query::tests
     // Schema DDL tests now live in wafer-sql-utils::ddl::tests
 }
