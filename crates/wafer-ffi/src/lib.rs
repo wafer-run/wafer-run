@@ -11,7 +11,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
-use wafer_run::{Message, Result_, WASMBlock, Wafer};
+use wafer_run::{Message, Result_, Wafer, WasmiBlock};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn wafer_register(
         };
 
         if path_str.ends_with(".wasm") {
-            match WASMBlock::load(path_str) {
+            match WasmiBlock::load(path_str) {
                 Ok(block) => {
                     match rt
                         .inner

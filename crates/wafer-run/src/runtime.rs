@@ -156,7 +156,7 @@ pub struct Wafer {
     pub(crate) wrap_admin_block: Arc<String>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasm")]
-    pub(crate) wasm_engine: Option<Arc<wasmtime::Engine>>,
+    pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
 }
 
 impl Wafer {

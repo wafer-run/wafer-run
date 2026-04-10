@@ -116,3 +116,35 @@ pub struct LifecycleEvent {
 
 /// Alias for BlockResult — common in block handler return types.
 pub type Result_ = BlockResult;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_action_serialization() {
+        let json = serde_json::to_string(&Action::Continue).unwrap();
+        assert_eq!(json, "\"Continue\"");
+
+        let action: Action = serde_json::from_str("\"Continue\"").unwrap();
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn test_error_code_serialization() {
+        let json = serde_json::to_string(&ErrorCode::Internal).unwrap();
+        assert_eq!(json, "\"Internal\"");
+
+        let code: ErrorCode = serde_json::from_str("\"InvalidArgument\"").unwrap();
+        assert_eq!(code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn test_instance_mode_serialization() {
+        let json = serde_json::to_string(&InstanceMode::PerNode).unwrap();
+        assert_eq!(json, "\"PerNode\"");
+
+        let mode: InstanceMode = serde_json::from_str("\"Singleton\"").unwrap();
+        assert_eq!(mode, InstanceMode::Singleton);
+    }
+}

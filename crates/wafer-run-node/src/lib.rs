@@ -7,7 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use wafer_run::{Message, WASMBlock, Wafer};
+use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
 ///
@@ -54,7 +54,7 @@ impl WaferRuntime {
     #[napi]
     pub fn register(&mut self, name: String, path: String) -> Result<()> {
         if path.ends_with(".wasm") {
-            let block = WASMBlock::load(&path)
+            let block = WasmiBlock::load(&path)
                 .map_err(|e| Error::from_reason(format!("failed to load WASM block: {}", e)))?;
             self.inner
                 .register_block(&name, Arc::new(block))

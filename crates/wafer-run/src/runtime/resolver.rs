@@ -490,7 +490,7 @@ impl Wafer {
         name: &str,
     ) -> Result<Arc<dyn Block>, String> {
         use crate::wasm::capabilities::BlockCapabilities;
-        use crate::wasm::WASMBlock;
+        use crate::wasm::WasmiBlock;
 
         let resp = client
             .get(url)
@@ -520,7 +520,7 @@ impl Wafer {
         }
 
         let engine = self.wasm_engine()?.clone();
-        let block = WASMBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
+        let block = WasmiBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
             .map_err(|e| format!("failed to load remote block {}: {}", name, e))?;
 
         Ok(Arc::new(block))
@@ -604,16 +604,11 @@ impl Wafer {
         }
     }
 
-    /// Get or create the shared WASM engine with fuel metering.
+    /// Get or create the shared WASM engine.
     #[cfg(feature = "wasm")]
-    pub fn wasm_engine(&mut self) -> Result<&wasmtime::Engine, String> {
+    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, String> {
         if self.wasm_engine.is_none() {
-            let mut config = wasmtime::Config::default();
-            config.consume_fuel(true);
-            config.wasm_component_model(true);
-            config.max_wasm_stack(1024 * 1024); // 1 MiB stack limit
-            let engine = wasmtime::Engine::new(&config)
-                .map_err(|e| format!("failed to create wasmtime engine: {}", e))?;
+            let engine = wasmi::Engine::default();
             self.wasm_engine = Some(Arc::new(engine));
         }
         Ok(self
