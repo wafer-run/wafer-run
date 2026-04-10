@@ -11,6 +11,7 @@ pub mod common;
 pub mod compat;
 pub mod config;
 pub mod context;
+pub mod core_types;
 pub mod executor;
 pub mod hash;
 pub mod helpers;
@@ -38,33 +39,14 @@ pub use registry::BlockRegistry;
 pub use router::Router;
 
 // Re-export the proc macro.
-pub use wafer_block_macro::wafer_block;
+// TODO: Re-enable once wafer-block-macro is updated for native types (Task 5).
+// pub use wafer_block_macro::wafer_block;
 
-wit_bindgen::generate!({
-    world: "wafer-block",
-    path: "../../wit/wit",
-    pub_export_macro: true,
-    export_macro_name: "export_wafer_block",
-    additional_derives: [serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash],
-});
-
-// Re-export WIT types at crate root (skip WIT BlockInfo — runtime version is in types.rs).
-pub use wafer::block_world::types::{
+// Re-export core types at crate root.
+pub use core_types::{
     Action, BlockResult, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, Response,
     WaferError,
 };
-
-// Re-export the WIT Guest trait for WASM block authors.
-pub use exports::wafer::block_world::block::Guest;
-
-/// WIT runtime host imports — only usable from WASM components.
-///
-/// These functions trap to the host runtime for inter-block calls, cancellation
-/// checks, and logging. They are only available when targeting `wasm32`.
-#[cfg(target_arch = "wasm32")]
-pub mod runtime {
-    pub use super::wafer::block_world::runtime::{call_block, is_cancelled, log};
-}
 
 // Re-export runtime-specific types.
 pub use types::{
@@ -74,4 +56,4 @@ pub use types::{
 };
 
 /// Alias for BlockResult — common in block handler return types.
-pub type Result_ = BlockResult;
+pub use core_types::Result_;

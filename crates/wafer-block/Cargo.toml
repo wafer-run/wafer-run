@@ -16,4 +16,3 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 wafer-flow = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
-wit-bindgen = { workspace = true }

@@ -1,2 +1,2 @@
-// Re-export ErrorCode from the WIT-generated types.
-pub use crate::wafer::block_world::types::ErrorCode;
+// Re-export ErrorCode from native type definitions.
+pub use crate::core_types::ErrorCode;
