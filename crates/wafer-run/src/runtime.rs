@@ -310,7 +310,7 @@ fn block_name_to_var_prefix(name: &str) -> String {
 /// - Each segment: lowercase `[a-z0-9-]`, no `_`, no consecutive `--`,
 ///   not starting or ending with `-`
 /// - Minimum 1 char per segment
-fn validate_block_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_block_name(name: &str) -> Result<(), String> {
     let (org, block) = name
         .split_once('/')
         .ok_or_else(|| format!("block name '{}' must be {{org}}/{{block}}", name))?;

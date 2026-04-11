@@ -136,6 +136,7 @@ impl Wafer {
         block: Arc<dyn Block>,
     ) -> Result<(), String> {
         let name = type_name.into();
+        super::validate_block_name(&name)?;
         if self.blocks.contains_key(&name) {
             return Err(format!("block '{}' already registered", name));
         }
@@ -297,5 +298,45 @@ impl Wafer {
         })?;
         self.add_flow(flow);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Wafer;
+    use std::sync::Arc;
+    use wafer_block::types::BlockInfo;
+
+    struct NoopBlock;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::block::Block for NoopBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("noop", "0.0.1", "noop.handle", "noop block for testing")
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            msg: &mut wafer_block::Message,
+        ) -> wafer_block::Result_ {
+            msg.cont_ref()
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _event: wafer_block::LifecycleEvent,
+        ) -> std::result::Result<(), wafer_block::WaferError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn register_block_rejects_invalid_name() {
+        let mut wafer = Wafer::new();
+        let block = Arc::new(NoopBlock);
+        assert!(wafer.register_block("my_org/block", block.clone()).is_err());
+        assert!(wafer.register_block("noSlash", block.clone()).is_err());
+        assert!(wafer.register_block("my-org/block", block.clone()).is_ok());
     }
 }

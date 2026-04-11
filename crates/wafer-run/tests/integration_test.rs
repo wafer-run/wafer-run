@@ -115,9 +115,9 @@ fn test_create_runtime() {
 #[test]
 fn test_register_inline_block() {
     let mut w = Wafer::new();
-    w.register_block_func("echo", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/echo", |_ctx, msg| msg.clone().cont())
         .unwrap();
-    assert!(w.has_block("echo"));
+    assert!(w.has_block("test/echo"));
     assert!(!w.has_block("nonexistent"));
 }
 
@@ -129,7 +129,7 @@ fn test_register_inline_block() {
 async fn test_single_block_flow() {
     let mut w = Wafer::new();
 
-    w.register_block_func("upper", |_ctx, msg| {
+    w.register_block_func("test/upper", |_ctx, msg| {
         let text = String::from_utf8_lossy(&msg.data).to_uppercase();
         let mut out = msg.clone();
         out.data = text.into_bytes();
@@ -137,7 +137,7 @@ async fn test_single_block_flow() {
     })
     .unwrap();
 
-    w.add_flow(single_step_flow("to-upper", "upper"));
+    w.add_flow(single_step_flow("to-upper", "test/upper"));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("text", "hello world");
@@ -156,7 +156,7 @@ async fn test_sequential_flow() {
     let mut w = Wafer::new();
 
     // Block A: append "-A"
-    w.register_block_func("append-a", |_ctx, msg| {
+    w.register_block_func("test/append-a", |_ctx, msg| {
         let mut out = msg.clone();
         let mut text = String::from_utf8_lossy(&out.data).to_string();
         text.push_str("-A");
@@ -166,7 +166,7 @@ async fn test_sequential_flow() {
     .unwrap();
 
     // Block B: append "-B"
-    w.register_block_func("append-b", |_ctx, msg| {
+    w.register_block_func("test/append-b", |_ctx, msg| {
         let mut out = msg.clone();
         let mut text = String::from_utf8_lossy(&out.data).to_string();
         text.push_str("-B");
@@ -176,7 +176,7 @@ async fn test_sequential_flow() {
     .unwrap();
 
     // Block C: append "-C"
-    w.register_block_func("append-c", |_ctx, msg| {
+    w.register_block_func("test/append-c", |_ctx, msg| {
         let mut out = msg.clone();
         let mut text = String::from_utf8_lossy(&out.data).to_string();
         text.push_str("-C");
@@ -189,9 +189,9 @@ async fn test_sequential_flow() {
     w.add_flow(make_flow(
         "abc",
         vec![
-            step("a", "append-a"),
-            step("b", "append-b"),
-            step("c", "append-c"),
+            step("a", "test/append-a"),
+            step("b", "test/append-b"),
+            step("c", "test/append-c"),
         ],
     ));
     w.resolve().await.expect("resolve failed");
@@ -469,10 +469,10 @@ async fn test_observability_flow_hooks() {
         ce.fetch_add(1, Ordering::SeqCst);
     });
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
-    w.add_flow(single_step_flow("observed", "noop"));
+    w.add_flow(single_step_flow("observed", "test/noop"));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "data");
@@ -505,14 +505,14 @@ async fn test_observability_block_hooks() {
         bd.lock().push(duration);
     });
 
-    w.register_block_func("step-1", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/step-1", |_ctx, msg| msg.clone().cont())
         .unwrap();
-    w.register_block_func("step-2", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/step-2", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
     w.add_flow(make_flow(
         "two-steps",
-        vec![step("s1", "step-1"), step("s2", "step-2")],
+        vec![step("s1", "test/step-1"), step("s2", "test/step-2")],
     ));
     w.resolve().await.expect("resolve failed");
 
@@ -521,8 +521,8 @@ async fn test_observability_block_hooks() {
 
     let names = block_names.lock();
     assert_eq!(names.len(), 2);
-    assert_eq!(names[0], "step-1");
-    assert_eq!(names[1], "step-2");
+    assert_eq!(names[0], "test/step-1");
+    assert_eq!(names[1], "test/step-2");
 
     let durations = block_durations.lock();
     assert_eq!(durations.len(), 2);
@@ -536,14 +536,14 @@ async fn test_observability_block_hooks() {
 async fn test_flow_reference() {
     let mut w = Wafer::new();
 
-    w.register_block_func("validate", |_ctx, msg| {
+    w.register_block_func("test/validate", |_ctx, msg| {
         let mut out = msg.clone();
         out.set_meta("validated", "true");
         out.cont()
     })
     .unwrap();
 
-    w.register_block_func("store", |_ctx, msg| {
+    w.register_block_func("test/store", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"stored".to_vec();
         out.cont()
@@ -551,10 +551,10 @@ async fn test_flow_reference() {
     .unwrap();
 
     // Inner flow: validate
-    w.add_flow(single_step_flow("validation-flow", "validate"));
+    w.add_flow(single_step_flow("validation-flow", "test/validate"));
 
     // Outer flow: validate step routes to validation-flow, then store
-    let mut validate_step = step("validate-ref", "validate");
+    let mut validate_step = step("validate-ref", "test/validate");
     validate_step.next = Some(vec![wafer_flow::NextEntry {
         when: None,
         step: None,
@@ -566,7 +566,7 @@ async fn test_flow_reference() {
     // just use two steps
     w.add_flow(make_flow(
         "main-flow",
-        vec![step("v", "validate"), step("s", "store")],
+        vec![step("v", "test/validate"), step("s", "test/store")],
     ));
     w.resolve().await.expect("resolve failed");
 
@@ -583,12 +583,12 @@ async fn test_flow_reference_short_circuit() {
     let mut w = Wafer::new();
 
     // The first step responds immediately (short-circuits)
-    w.register_block_func("responder", |_ctx, msg| {
+    w.register_block_func("test/responder", |_ctx, msg| {
         respond(msg, b"early-response".to_vec(), "text/plain")
     })
     .unwrap();
 
-    w.register_block_func("should-not-run", |_ctx, msg| {
+    w.register_block_func("test/should-not-run", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"this should never appear".to_vec();
         out.cont()
@@ -597,7 +597,10 @@ async fn test_flow_reference_short_circuit() {
 
     w.add_flow(make_flow(
         "short-circuit",
-        vec![step("r", "responder"), step("s", "should-not-run")],
+        vec![
+            step("r", "test/responder"),
+            step("s", "test/should-not-run"),
+        ],
     ));
     w.resolve().await.expect("resolve failed");
 
@@ -613,11 +616,11 @@ async fn test_flow_reference_short_circuit() {
 async fn test_flow_reference_not_found() {
     let mut w = Wafer::new();
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
     // Create a flow with next routing to non-existent flow
-    let mut s = step("root", "noop");
+    let mut s = step("root", "test/noop");
     s.next = Some(vec![wafer_flow::NextEntry {
         when: None,
         step: None,
@@ -647,13 +650,13 @@ async fn test_flow_reference_not_found() {
 async fn test_on_error_stop() {
     let mut w = Wafer::new();
 
-    w.register_block_func("fail", |_ctx, msg| {
+    w.register_block_func("test/fail", |_ctx, msg| {
         msg.clone()
             .err(WaferError::new("test_error", "intentional failure"))
     })
     .unwrap();
 
-    w.register_block_func("after-fail", |_ctx, msg| {
+    w.register_block_func("test/after-fail", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"should-not-run".to_vec();
         out.cont()
@@ -662,7 +665,7 @@ async fn test_on_error_stop() {
 
     w.add_flow(make_flow_with_on_error(
         "stop-flow",
-        vec![step("f", "fail"), step("a", "after-fail")],
+        vec![step("f", "test/fail"), step("a", "test/after-fail")],
         "stop",
     ));
     w.resolve().await.expect("resolve failed");
@@ -684,14 +687,14 @@ async fn test_on_error_continue() {
     let fail_count = Arc::new(AtomicUsize::new(0));
     let fc = fail_count.clone();
 
-    w.register_block_func("fail", move |_ctx, msg| {
+    w.register_block_func("test/fail", move |_ctx, msg| {
         fc.fetch_add(1, Ordering::SeqCst);
         msg.clone()
             .err(WaferError::new("test_error", "intentional failure"))
     })
     .unwrap();
 
-    w.register_block_func("after-fail", |_ctx, msg| {
+    w.register_block_func("test/after-fail", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"recovered".to_vec();
         out.cont()
@@ -700,7 +703,7 @@ async fn test_on_error_continue() {
 
     w.add_flow(make_flow_with_on_error(
         "cont-flow",
-        vec![step("f", "fail"), step("a", "after-fail")],
+        vec![step("f", "test/fail"), step("a", "test/after-fail")],
         "continue",
     ));
     w.resolve().await.expect("resolve failed");
@@ -718,7 +721,7 @@ async fn test_on_error_continue() {
 async fn test_on_error_continue_no_more_nodes() {
     let mut w = Wafer::new();
 
-    w.register_block_func("fail-at-end", |_ctx, msg| {
+    w.register_block_func("test/fail-at-end", |_ctx, msg| {
         msg.clone()
             .err(WaferError::new("terminal_error", "error at tail"))
     })
@@ -726,7 +729,7 @@ async fn test_on_error_continue_no_more_nodes() {
 
     w.add_flow(make_flow_with_on_error(
         "cont-end",
-        vec![step("f", "fail-at-end")],
+        vec![step("f", "test/fail-at-end")],
         "continue",
     ));
     w.resolve().await.expect("resolve failed");
@@ -746,12 +749,12 @@ async fn test_on_error_continue_no_more_nodes() {
 async fn test_respond_short_circuits() {
     let mut w = Wafer::new();
 
-    w.register_block_func("early-respond", |_ctx, msg| {
+    w.register_block_func("test/early-respond", |_ctx, msg| {
         respond(msg, b"early".to_vec(), "text/plain")
     })
     .unwrap();
 
-    w.register_block_func("unreachable", |_ctx, msg| {
+    w.register_block_func("test/unreachable", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"unreachable".to_vec();
         out.cont()
@@ -760,7 +763,10 @@ async fn test_respond_short_circuits() {
 
     w.add_flow(make_flow(
         "short-circuit",
-        vec![step("r", "early-respond"), step("u", "unreachable")],
+        vec![
+            step("r", "test/early-respond"),
+            step("u", "test/unreachable"),
+        ],
     ));
     w.resolve().await.expect("resolve failed");
 
@@ -779,10 +785,10 @@ async fn test_respond_short_circuits() {
 async fn test_drop_action() {
     let mut w = Wafer::new();
 
-    w.register_block_func("dropper", |_ctx, msg| msg.clone().drop_msg())
+    w.register_block_func("test/dropper", |_ctx, msg| msg.clone().drop_msg())
         .unwrap();
 
-    w.register_block_func("unreachable", |_ctx, msg| {
+    w.register_block_func("test/unreachable", |_ctx, msg| {
         let mut out = msg.clone();
         out.data = b"unreachable".to_vec();
         out.cont()
@@ -791,7 +797,7 @@ async fn test_drop_action() {
 
     w.add_flow(make_flow(
         "drop-flow",
-        vec![step("d", "dropper"), step("u", "unreachable")],
+        vec![step("d", "test/dropper"), step("u", "test/unreachable")],
     ));
     w.resolve().await.expect("resolve failed");
 
@@ -825,7 +831,7 @@ async fn test_execute_nonexistent_flow() {
 async fn test_block_with_config() {
     let mut w = Wafer::new();
 
-    w.register_block_func("configurable", |ctx, msg| {
+    w.register_block_func("test/configurable", |ctx, msg| {
         let prefix = ctx.config_get("prefix").unwrap_or("default");
         let mut out = msg.clone();
         let text = format!("{}-{}", prefix, String::from_utf8_lossy(&out.data));
@@ -838,7 +844,7 @@ async fn test_block_with_config() {
         "config-flow",
         vec![step_with_config(
             "root",
-            "configurable",
+            "test/configurable",
             serde_json::json!({"prefix": "hello"}),
         )],
     ));
@@ -932,7 +938,7 @@ async fn test_resolve_missing_block() {
 async fn test_add_flow_json() {
     let mut w = Wafer::new();
 
-    w.register_block_func("echo", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/echo", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
     w.add_flow_json(
@@ -940,7 +946,7 @@ async fn test_add_flow_json() {
         "id": "from-json",
         "name": "From JSON",
         "version": "0.1.0",
-        "steps": [{ "id": "root", "block": "echo" }],
+        "steps": [{ "id": "root", "block": "test/echo" }],
         "config": { "on_error": "stop", "timeout": "30s" }
     }"#,
     )
@@ -960,12 +966,12 @@ async fn test_add_flow_json() {
 async fn test_panic_recovery() {
     let mut w = Wafer::new();
 
-    w.register_block_func("panicker", |_ctx, _msg| {
+    w.register_block_func("test/panicker", |_ctx, _msg| {
         panic!("block went wrong");
     })
     .unwrap();
 
-    w.add_flow(single_step_flow("panic-flow", "panicker"));
+    w.add_flow(single_step_flow("panic-flow", "test/panicker"));
     w.resolve().await.expect("resolve failed");
 
     let mut msg = Message::new("test", "");
@@ -986,11 +992,11 @@ async fn test_panic_recovery() {
 fn test_flows_info() {
     let mut w = Wafer::new();
 
-    w.register_block_func("noop", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
-    w.add_flow(single_step_flow("flow-a", "noop"));
-    w.add_flow(single_step_flow("flow-b", "noop"));
+    w.add_flow(single_step_flow("flow-a", "test/noop"));
+    w.add_flow(single_step_flow("flow-b", "test/noop"));
 
     let info = w.flows_info();
     assert_eq!(info.len(), 2);
@@ -1008,10 +1014,10 @@ fn test_flows_info() {
 async fn test_start_and_stop() {
     let mut w = Wafer::new();
 
-    w.register_block_func("lifecycle-block", |_ctx, msg| msg.clone().cont())
+    w.register_block_func("test/lifecycle-block", |_ctx, msg| msg.clone().cont())
         .unwrap();
 
-    w.add_flow(single_step_flow("lifecycle-test", "lifecycle-block"));
+    w.add_flow(single_step_flow("lifecycle-test", "test/lifecycle-block"));
 
     // Start implicitly resolves if not already resolved
     w.start_without_bind().await.expect("start failed");
@@ -1255,7 +1261,7 @@ async fn test_waferflow_simple_pipeline() {
     let mut w = Wafer::new();
 
     // Block that uppercases the "text" field
-    w.register_block_func("uppercase", |_ctx, msg| {
+    w.register_block_func("test/uppercase", |_ctx, msg| {
         let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
         let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let output = serde_json::json!({ "text": text.to_uppercase() });
@@ -1266,7 +1272,7 @@ async fn test_waferflow_simple_pipeline() {
     .unwrap();
 
     // Block that wraps text in a greeting
-    w.register_block_func("greet", |_ctx, msg| {
+    w.register_block_func("test/greet", |_ctx, msg| {
         let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
         let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let output = serde_json::json!({ "greeting": format!("Hello, {}!", text) });
@@ -1285,12 +1291,12 @@ async fn test_waferflow_simple_pipeline() {
         "steps": [
             {
                 "id": "upper",
-                "block": "uppercase",
+                "block": "test/uppercase",
                 "input": { "text": "$.input.name" }
             },
             {
                 "id": "greet",
-                "block": "greet",
+                "block": "test/greet",
                 "input": { "text": "$.upper.text" }
             }
         ]
@@ -1314,7 +1320,7 @@ async fn test_waferflow_simple_pipeline() {
 async fn test_waferflow_conditional_routing() {
     let mut w = Wafer::new();
 
-    w.register_block_func("check-sign", |_ctx, msg| {
+    w.register_block_func("test/check-sign", |_ctx, msg| {
         let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
         let n = input.get("n").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let output = serde_json::json!({ "positive": n > 0.0 });
@@ -1324,7 +1330,7 @@ async fn test_waferflow_conditional_routing() {
     })
     .unwrap();
 
-    w.register_block_func("format-positive", |_ctx, msg| {
+    w.register_block_func("test/format-positive", |_ctx, msg| {
         let output = serde_json::json!({ "result": "positive" });
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
@@ -1332,7 +1338,7 @@ async fn test_waferflow_conditional_routing() {
     })
     .unwrap();
 
-    w.register_block_func("format-negative", |_ctx, msg| {
+    w.register_block_func("test/format-negative", |_ctx, msg| {
         let output = serde_json::json!({ "result": "non-positive" });
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
@@ -1349,7 +1355,7 @@ async fn test_waferflow_conditional_routing() {
         "steps": [
             {
                 "id": "check",
-                "block": "check-sign",
+                "block": "test/check-sign",
                 "input": { "n": "$.input.number" },
                 "next": [
                     { "when": "$.check.positive == true", "step": "pos" },
@@ -1358,12 +1364,12 @@ async fn test_waferflow_conditional_routing() {
             },
             {
                 "id": "pos",
-                "block": "format-positive",
+                "block": "test/format-positive",
                 "input": {}
             },
             {
                 "id": "neg",
-                "block": "format-negative",
+                "block": "test/format-negative",
                 "input": {}
             }
         ]
@@ -1412,7 +1418,7 @@ async fn test_waferflow_validation_errors() {
 async fn test_waferflow_max_steps_limit() {
     let mut w = Wafer::new();
 
-    w.register_block_func("loop-block", |_ctx, msg| {
+    w.register_block_func("test/loop-block", |_ctx, msg| {
         let output = serde_json::json!({ "ok": true });
         let mut out = msg.clone();
         out.data = serde_json::to_vec(&output).unwrap();
@@ -1430,7 +1436,7 @@ async fn test_waferflow_max_steps_limit() {
         "steps": [
             {
                 "id": "loop",
-                "block": "loop-block",
+                "block": "test/loop-block",
                 "input": {},
                 "next": [{ "step": "loop" }]
             }
