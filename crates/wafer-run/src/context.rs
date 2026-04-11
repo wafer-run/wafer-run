@@ -146,6 +146,49 @@ impl Context for RuntimeContext {
             }
         }
 
+        // Capability check: if the calling block is a WASM block with restricted
+        // capabilities, verify it has permission for this service call.
+        if let Some(caller_block) = self.all_blocks.get(&self.node_id) {
+            if let Some(caps) = caller_block.block_capabilities() {
+                // Check call_block capability
+                if !caps.allows_call_block(block_name) {
+                    return err_result(
+                        ErrorCode::PERMISSION_DENIED,
+                        format!("block capability denies call to '{}'", block_name),
+                    );
+                }
+
+                // Check resource-specific capabilities based on resource_type meta
+                let wrap_rt_str = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE_TYPE);
+                if !wrap_rt_str.is_empty() {
+                    let wrap_resource = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE);
+                    let allowed = match wrap_rt_str {
+                        "db" => {
+                            if wrap_resource == "__raw_sql__" {
+                                caps.raw_sql
+                            } else {
+                                caps.allows_collection(wrap_resource)
+                            }
+                        }
+                        "storage" => caps.allows_storage_folder(wrap_resource),
+                        "config" => caps.config && caps.allows_config_key(wrap_resource),
+                        "crypto" => caps.crypto,
+                        "network" => caps.allows_network_url(wrap_resource),
+                        _ => true,
+                    };
+                    if !allowed {
+                        return err_result(
+                            ErrorCode::PERMISSION_DENIED,
+                            format!(
+                                "block capability denies access to {} '{}'",
+                                wrap_rt_str, wrap_resource
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         // Look up the block
         let block = match self.all_blocks.get(block_name) {
             Some(b) => b.clone(),

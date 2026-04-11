@@ -83,6 +83,17 @@ impl Wafer {
     }
 
     /// Run a single block by name, bypassing flows.
+    ///
+    /// # Security
+    ///
+    /// This method bypasses WRAP access control. It is the trusted entry point
+    /// for processing external HTTP requests — the HTTP adapter calls this to
+    /// dispatch to the first block in the chain.
+    ///
+    /// `RuntimeHandle` (which exposes this method) must NEVER be passed to
+    /// WASM blocks or untrusted code. Native blocks receive it via `bind()`
+    /// during lifecycle, which is acceptable because native blocks are trusted
+    /// (they run in the same process).
     pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
         // Resolve alias
         let resolved = self

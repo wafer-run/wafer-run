@@ -92,18 +92,14 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     }
 }
 
-/// Meta key to opt in to per-block HKDF key derivation.
-/// Set to the block ID (e.g. `"suppers-ai/auth"`) to derive a per-block key.
-/// When absent, the master key is used.
-const META_CRYPTO_BLOCK_KEY: &str = "crypto.block_key";
-
 /// Handle a crypto message by delegating to the given service.
 ///
-/// By default, JWT sign/verify use the master key. To opt in to per-block
-/// derived keys, set `crypto.block_key` meta on the message to the block ID.
+/// JWT sign/verify use per-block HKDF-derived keys when `caller_id` is set
+/// (the runtime provides this from the calling block's identity).
+/// When `caller_id` is None, the master key is used.
 pub fn handle_message(
     service: &dyn CryptoService,
-    _caller_id: Option<&str>,
+    caller_id: Option<&str>,
     msg: &mut Message,
 ) -> Result_ {
     match msg.kind.as_str() {
@@ -151,11 +147,9 @@ pub fn handle_message(
                 }
             };
             let expiry = Duration::from_secs(req.expiry_secs);
-            let block_key = msg.get_meta(META_CRYPTO_BLOCK_KEY);
-            let result = if block_key.is_empty() {
-                service.sign(req.claims, expiry)
-            } else {
-                service.sign_for(block_key, req.claims, expiry)
+            let result = match caller_id {
+                Some(id) => service.sign_for(id, req.claims, expiry),
+                None => service.sign(req.claims, expiry),
             };
             match result {
                 Ok(token) => respond_json(msg, &SignResponse { token }),
@@ -172,11 +166,9 @@ pub fn handle_message(
                     ))
                 }
             };
-            let block_key = msg.get_meta(META_CRYPTO_BLOCK_KEY);
-            let result = if block_key.is_empty() {
-                service.verify(&req.token)
-            } else {
-                service.verify_for(block_key, &req.token)
+            let result = match caller_id {
+                Some(id) => service.verify_for(id, &req.token),
+                None => service.verify(&req.token),
             };
             match result {
                 Ok(claims) => respond_json(msg, &VerifyResponse { claims }),
