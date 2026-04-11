@@ -7,6 +7,10 @@ description = "Shared types, traits, and macros for WAFER block authors"
 repository = "https://github.com/wafer-run/wafer-run"
 keywords = ["wafer", "blocks", "types", "sdk"]
 
+[features]
+default = []
+json-schema = ["schemars"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,3 +20,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 wafer-flow = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
+schemars = { version = "1", optional = true }

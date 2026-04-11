@@ -333,43 +333,156 @@ impl BlockInfo {
 pub struct BlockEndpoint {
     pub method: HttpMethod,
     pub path: String,
+    #[serde(default)]
     pub summary: String,
     #[serde(default)]
     pub auth: AuthLevel,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_params: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_params: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deprecated: bool,
+}
+
+impl Default for BlockEndpoint {
+    fn default() -> Self {
+        Self {
+            method: HttpMethod::Get,
+            path: String::new(),
+            summary: String::new(),
+            auth: AuthLevel::default(),
+            description: String::new(),
+            input_schema: None,
+            output_schema: None,
+            path_params: None,
+            query_params: None,
+            tags: Vec::new(),
+            deprecated: false,
+        }
+    }
 }
 
 impl BlockEndpoint {
-    pub fn get(path: &str, summary: &str, auth: AuthLevel) -> Self {
+    fn new(method: HttpMethod, path: &str) -> Self {
         Self {
-            method: HttpMethod::Get,
+            method,
             path: path.into(),
-            summary: summary.into(),
-            auth,
+            summary: String::new(),
+            auth: AuthLevel::default(),
+            description: String::new(),
+            input_schema: None,
+            output_schema: None,
+            path_params: None,
+            query_params: None,
+            tags: Vec::new(),
+            deprecated: false,
         }
     }
-    pub fn post(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self {
-            method: HttpMethod::Post,
-            path: path.into(),
-            summary: summary.into(),
-            auth,
-        }
+
+    pub fn get(path: &str) -> Self {
+        Self::new(HttpMethod::Get, path)
     }
-    pub fn patch(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self {
-            method: HttpMethod::Patch,
-            path: path.into(),
-            summary: summary.into(),
-            auth,
-        }
+
+    pub fn post(path: &str) -> Self {
+        Self::new(HttpMethod::Post, path)
     }
-    pub fn delete(path: &str, summary: &str, auth: AuthLevel) -> Self {
-        Self {
-            method: HttpMethod::Delete,
-            path: path.into(),
-            summary: summary.into(),
-            auth,
-        }
+
+    pub fn patch(path: &str) -> Self {
+        Self::new(HttpMethod::Patch, path)
+    }
+
+    pub fn delete(path: &str) -> Self {
+        Self::new(HttpMethod::Delete, path)
+    }
+
+    pub fn summary(mut self, summary: &str) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    pub fn description(mut self, description: &str) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn auth(mut self, auth: AuthLevel) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    pub fn input_schema(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema = Some(schema);
+        self
+    }
+
+    pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    pub fn path_params_schema(mut self, schema: serde_json::Value) -> Self {
+        self.path_params = Some(schema);
+        self
+    }
+
+    pub fn query_params_schema(mut self, schema: serde_json::Value) -> Self {
+        self.query_params = Some(schema);
+        self
+    }
+
+    pub fn tags(mut self, tags: &[&str]) -> Self {
+        self.tags = tags.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn deprecated(mut self) -> Self {
+        self.deprecated = true;
+        self
+    }
+
+    /// Returns true if any schema field is set.
+    pub fn has_schema(&self) -> bool {
+        self.input_schema.is_some()
+            || self.output_schema.is_some()
+            || self.path_params.is_some()
+            || self.query_params.is_some()
+    }
+
+    #[cfg(feature = "json-schema")]
+    pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
+        let schema = schemars::schema_for!(T);
+        self.input_schema = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self
+    }
+
+    #[cfg(feature = "json-schema")]
+    pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
+        let schema = schemars::schema_for!(T);
+        self.output_schema = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self
+    }
+
+    #[cfg(feature = "json-schema")]
+    pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
+        let schema = schemars::schema_for!(T);
+        self.path_params = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self
+    }
+
+    #[cfg(feature = "json-schema")]
+    pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
+        let schema = schemars::schema_for!(T);
+        self.query_params = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self
     }
 }
 
@@ -1037,5 +1150,65 @@ impl crate::BlockResult {
             error: None,
             message: Some(msg),
         }
+    }
+}
+
+#[cfg(test)]
+mod block_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn builder_basic() {
+        let ep = BlockEndpoint::post("/b/auth/api/login")
+            .summary("Authenticate user")
+            .description("Login with email/password")
+            .auth(AuthLevel::Public)
+            .tags(&["auth"]);
+        assert_eq!(ep.method, HttpMethod::Post);
+        assert_eq!(ep.path, "/b/auth/api/login");
+        assert_eq!(ep.summary, "Authenticate user");
+        assert_eq!(ep.description, "Login with email/password");
+        assert_eq!(ep.auth, AuthLevel::Public);
+        assert_eq!(ep.tags, vec!["auth".to_string()]);
+        assert!(ep.input_schema.is_none());
+        assert!(!ep.deprecated);
+    }
+
+    #[test]
+    fn builder_with_manual_schemas() {
+        let ep = BlockEndpoint::get("/b/files/api/objects")
+            .summary("List objects")
+            .auth(AuthLevel::Authenticated)
+            .input_schema(serde_json::json!({"type": "object", "properties": {"prefix": {"type": "string"}}}))
+            .output_schema(serde_json::json!({"type": "array", "items": {"type": "object"}}))
+            .path_params_schema(serde_json::json!({"type": "object", "properties": {"bucket": {"type": "string"}}, "required": ["bucket"]}))
+            .query_params_schema(serde_json::json!({"type": "object", "properties": {"limit": {"type": "integer"}}}));
+        assert!(ep.input_schema.is_some());
+        assert!(ep.output_schema.is_some());
+        assert!(ep.path_params.is_some());
+        assert!(ep.query_params.is_some());
+    }
+
+    #[test]
+    fn builder_defaults() {
+        let ep = BlockEndpoint::get("/health").summary("Health check");
+        assert_eq!(ep.auth, AuthLevel::Public);
+        assert!(ep.description.is_empty());
+        assert!(ep.tags.is_empty());
+        assert!(!ep.deprecated);
+    }
+
+    #[test]
+    fn has_schema_false_when_no_schemas() {
+        let ep = BlockEndpoint::get("/health").summary("Health check");
+        assert!(!ep.has_schema());
+    }
+
+    #[test]
+    fn has_schema_true_with_output() {
+        let ep = BlockEndpoint::get("/health")
+            .summary("Health check")
+            .output_schema(serde_json::json!({"type": "object"}));
+        assert!(ep.has_schema());
     }
 }

@@ -52,6 +52,27 @@ export enum InstanceMode {
   PerExecution = "per-execution",
 }
 
+/** HTTP method for an endpoint. */
+export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+
+/** Auth level required for an endpoint. */
+export type EndpointAuthLevel = "public" | "authenticated" | "admin";
+
+/** An HTTP endpoint exposed by a block, with optional JSON Schema metadata. */
+export interface BlockEndpoint {
+  method: HttpMethod;
+  path: string;
+  summary?: string;
+  auth?: EndpointAuthLevel;
+  description?: string;
+  input_schema?: Record<string, unknown>;
+  output_schema?: Record<string, unknown>;
+  path_params?: Record<string, unknown>;
+  query_params?: Record<string, unknown>;
+  tags?: string[];
+  deprecated?: boolean;
+}
+
 /** Metadata describing a block. */
 export interface BlockInfo {
   name: string;
@@ -60,6 +81,8 @@ export interface BlockInfo {
   summary: string;
   instanceMode: InstanceMode;
   allowedModes: InstanceMode[];
+  description?: string;
+  endpoints?: BlockEndpoint[];
 }
 
 /** The kind of lifecycle event. */

@@ -6,6 +6,7 @@
 //! - `mime` — MIME type detection utility
 
 pub mod clients;
+pub mod discovery;
 pub mod interfaces;
 pub mod mime;
 pub mod service_blocks;

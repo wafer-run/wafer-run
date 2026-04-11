@@ -157,6 +157,23 @@ type BlockInfo struct {
 	Summary      string
 	InstanceMode InstanceMode
 	AllowedModes []InstanceMode
+	Description  string          `json:"description,omitempty"`
+	Endpoints    []BlockEndpoint `json:"endpoints,omitempty"`
+}
+
+// BlockEndpoint declares an HTTP endpoint exposed by a block.
+type BlockEndpoint struct {
+	Method       string                 `json:"method"`
+	Path         string                 `json:"path"`
+	Summary      string                 `json:"summary,omitempty"`
+	Auth         string                 `json:"auth,omitempty"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  map[string]any `json:"input_schema,omitempty"`
+	OutputSchema map[string]any `json:"output_schema,omitempty"`
+	PathParams   map[string]any `json:"path_params,omitempty"`
+	QueryParams  map[string]any `json:"query_params,omitempty"`
+	Tags         []string               `json:"tags,omitempty"`
+	Deprecated   bool                   `json:"deprecated,omitempty"`
 }
 
 // LifecycleEvent represents a lifecycle event delivered to a block.
