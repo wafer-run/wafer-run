@@ -79,9 +79,10 @@ wasmi = "0.44"
 
 # Crypto
 argon2 = { version = "0.5", features = ["std"] }
-jsonwebtoken = "9"
+hmac = "0.12"
 sha2 = "0.10"
 hkdf = "0.12"
+base64ct = { version = "1", features = ["alloc"] }
 
 # Storage
 aws-sdk-s3 = "1"

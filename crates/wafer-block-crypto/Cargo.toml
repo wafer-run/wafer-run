@@ -15,6 +15,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 argon2 = { workspace = true }
-jsonwebtoken = { workspace = true }
-hkdf = { workspace = true }
+hmac = { workspace = true }
 sha2 = { workspace = true }
+hkdf = { workspace = true }
+base64ct = { workspace = true }

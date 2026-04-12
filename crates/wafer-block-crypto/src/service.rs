@@ -11,7 +11,8 @@ pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 /// Argon2 + JWT crypto service.
 ///
 /// Password hashing uses argon2id with default parameters.
-/// Token signing uses HMAC-SHA256 via the `jsonwebtoken` crate.
+/// Token signing uses HMAC-SHA256 (HS256) implemented manually with the
+/// `hmac`, `sha2`, and `base64ct` crates — all pure Rust, wasm32-compatible.
 pub struct Argon2JwtCryptoService {
     jwt_secret: String,
 }
@@ -20,6 +21,113 @@ impl Argon2JwtCryptoService {
     pub fn new(jwt_secret: String) -> Self {
         Self { jwt_secret }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pure-Rust HS256 JWT helpers
+// ---------------------------------------------------------------------------
+
+/// Standard JWT header for HS256, base64url-encoded (no padding).
+/// {"alg":"HS256","typ":"JWT"}
+const JWT_HEADER_B64: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+
+/// Encode bytes as base64url without padding (as required by JWT RFC 7515).
+fn b64url_encode(data: &[u8]) -> String {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    Base64UrlUnpadded::encode_string(data)
+}
+
+/// Decode a base64url (no-padding) string into bytes.
+fn b64url_decode(s: &str) -> Result<Vec<u8>, CryptoError> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    Base64UrlUnpadded::decode_vec(s)
+        .map_err(|e| CryptoError::VerifyError(format!("base64 decode: {e}")))
+}
+
+/// Compute HMAC-SHA256 over `data` using `key`.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Sign a claims map as a compact JWT (HS256).
+fn jwt_sign(
+    claims: &HashMap<String, serde_json::Value>,
+    secret: &[u8],
+) -> Result<String, CryptoError> {
+    let payload_json =
+        serde_json::to_string(claims).map_err(|e| CryptoError::SignError(e.to_string()))?;
+    let payload_b64 = b64url_encode(payload_json.as_bytes());
+
+    let signing_input = format!("{JWT_HEADER_B64}.{payload_b64}");
+    let sig = hmac_sha256(secret, signing_input.as_bytes());
+    let sig_b64 = b64url_encode(&sig);
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Verify a compact JWT (HS256) and return the claims.
+///
+/// Validates:
+/// - Three-part structure
+/// - Header matches expected HS256/JWT header
+/// - Signature is correct (constant-time comparison via HMAC verify)
+/// - `exp` claim has not passed
+fn jwt_verify(
+    token: &str,
+    secret: &[u8],
+) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return Err(CryptoError::VerifyError(
+            "invalid JWT structure".to_string(),
+        ));
+    }
+    let (header_b64, payload_b64, sig_b64) = (parts[0], parts[1], parts[2]);
+
+    // Verify header (we only support HS256 tokens produced by this service).
+    if header_b64 != JWT_HEADER_B64 {
+        // Fall back: decode and check alg field to allow minor whitespace variants.
+        let header_bytes = b64url_decode(header_b64)?;
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+            .map_err(|e| CryptoError::VerifyError(format!("header decode: {e}")))?;
+        let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("");
+        if alg != "HS256" {
+            return Err(CryptoError::VerifyError(format!(
+                "unsupported algorithm: {alg}"
+            )));
+        }
+    }
+
+    // Verify signature (constant-time via hmac::Mac::verify_slice).
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let sig_bytes = b64url_decode(sig_b64)?;
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(signing_input.as_bytes());
+    mac.verify_slice(&sig_bytes)
+        .map_err(|_| CryptoError::VerifyError("signature mismatch".to_string()))?;
+
+    // Decode payload.
+    let payload_bytes = b64url_decode(payload_b64)?;
+    let claims: HashMap<String, serde_json::Value> = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| CryptoError::VerifyError(format!("payload decode: {e}")))?;
+
+    // Validate expiry.
+    let now = chrono::Utc::now().timestamp();
+    if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
+        if now > exp {
+            return Err(CryptoError::VerifyError("token expired".to_string()));
+        }
+    }
+
+    Ok(claims)
 }
 
 impl Argon2JwtCryptoService {
@@ -64,8 +172,6 @@ impl CryptoService for Argon2JwtCryptoService {
         claims: HashMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError> {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-
         let now = chrono::Utc::now();
         let exp = now + chrono::Duration::from_std(expiry).unwrap_or(chrono::Duration::hours(1));
 
@@ -73,21 +179,11 @@ impl CryptoService for Argon2JwtCryptoService {
         payload.insert("iat".to_string(), serde_json::json!(now.timestamp()));
         payload.insert("exp".to_string(), serde_json::json!(exp.timestamp()));
 
-        let key = EncodingKey::from_secret(self.jwt_secret.as_bytes());
-        encode(&Header::default(), &payload, &key)
-            .map_err(|e| CryptoError::SignError(e.to_string()))
+        jwt_sign(&payload, self.jwt_secret.as_bytes())
     }
 
     fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-
-        let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
-        let validation = Validation::new(Algorithm::HS256);
-
-        let data = decode::<HashMap<String, serde_json::Value>>(token, &key, &validation)
-            .map_err(|e| CryptoError::VerifyError(e.to_string()))?;
-
-        Ok(data.claims)
+        jwt_verify(token, self.jwt_secret.as_bytes())
     }
 
     fn sign_for(
