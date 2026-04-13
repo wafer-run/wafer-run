@@ -230,10 +230,11 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
             Ok(()) => {}
             Err(e) => {
                 let msg = e.to_string();
-                if !msg.contains("proc_exit") {
+                if msg.contains("guest called proc_exit(0)") {
+                    // proc_exit(0) — normal WASI shutdown for TinyGo modules.
+                } else {
                     bail!("WASM _start function failed: {e}");
                 }
-                // proc_exit(0) — expected for TinyGo/WASI modules.
             }
         }
     }

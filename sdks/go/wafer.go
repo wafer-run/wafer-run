@@ -29,7 +29,44 @@
 //	func main() { wafer.Register(&EchoBlock{}) }
 package wafer
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strconv"
+)
+
+// ByteArray is a []byte that serializes as a JSON array of numbers,
+// matching Rust's serde serialization of Vec<u8>.
+// Go's encoding/json marshals []byte as base64; this type corrects that.
+type ByteArray []byte
+
+// MarshalJSON encodes the byte slice as a JSON array of unsigned integers,
+// e.g. [104,101,108,108,111]. A nil slice encodes as [].
+func (b ByteArray) MarshalJSON() ([]byte, error) {
+	if b == nil {
+		return []byte("[]"), nil
+	}
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, v := range b {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(strconv.Itoa(int(v)))
+	}
+	buf.WriteByte(']')
+	return buf.Bytes(), nil
+}
+
+// UnmarshalJSON decodes a JSON array of unsigned integers into a ByteArray.
+func (b *ByteArray) UnmarshalJSON(data []byte) error {
+	var arr []uint8
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return err
+	}
+	*b = ByteArray(arr)
+	return nil
+}
 
 // MetaEntry is a key-value metadata entry attached to a Message or Response.
 // Matches the Rust MetaEntry struct (serde field names: "key", "value").
@@ -42,7 +79,7 @@ type MetaEntry struct {
 // Matches the Rust Message struct exactly.
 type Message struct {
 	Kind string      `json:"kind"`
-	Data []byte      `json:"data"`
+	Data ByteArray   `json:"data"`
 	Meta []MetaEntry `json:"meta"`
 }
 
@@ -65,7 +102,7 @@ const (
 // Response is the payload returned when a block short-circuits the pipeline.
 // Matches the Rust Response struct.
 type Response struct {
-	Data []byte      `json:"data"`
+	Data ByteArray   `json:"data"`
 	Meta []MetaEntry `json:"meta"`
 }
 
@@ -137,24 +174,26 @@ type BlockInfo struct {
 // ---------------------------------------------------------------------------
 
 // Respond JSON-encodes v and returns a BlockResult with ActionRespond.
-// If v is already a []byte it is used as-is (raw JSON or binary data).
+// If v is already a []byte or ByteArray it is used as-is (raw JSON or binary data).
 func Respond(v any) BlockResult {
-	var data []byte
+	var data ByteArray
 	switch val := v.(type) {
-	case []byte:
+	case ByteArray:
 		data = val
+	case []byte:
+		data = ByteArray(val)
 	default:
-		var err error
-		data, err = json.Marshal(v)
+		encoded, err := json.Marshal(v)
 		if err != nil {
 			panic("wafer: Respond marshal: " + err.Error())
 		}
+		data = ByteArray(encoded)
 	}
 	return RespondBytes(data)
 }
 
 // RespondBytes returns a BlockResult with ActionRespond carrying raw bytes.
-func RespondBytes(data []byte) BlockResult {
+func RespondBytes(data ByteArray) BlockResult {
 	return BlockResult{
 		Action:   ActionRespond,
 		Response: &Response{Data: data, Meta: nil},

@@ -5,6 +5,16 @@ import (
 	"unsafe"
 )
 
+// pinned prevents the GC from collecting allocations that the host hasn't read
+// yet. WASM blocks are short-lived (one Handle() call per instantiation in
+// wasmi), so the accumulated memory is freed when the module is unloaded.
+var pinned [][]byte
+
+// pin keeps data alive by holding a reference in the global pinned slice.
+func pin(data []byte) {
+	pinned = append(pinned, data)
+}
+
 // packPtrLen encodes a (ptr, length) pair as a single int64 using the
 // WAFER ABI convention: high 32 bits = ptr, low 32 bits = length.
 func packPtrLen(ptr, length uint32) int64 {
@@ -21,8 +31,7 @@ func unpackPtrLen(packed int64) (uint32, uint32) {
 // jsonToPtr JSON-marshals value and returns a packed (ptr, len) int64
 // pointing to the encoded bytes in guest (WASM linear) memory.
 //
-// The returned pointer is only valid for the lifetime of the current call.
-// The host reads it before the guest function returns.
+// The allocation is pinned to prevent GC collection before the host reads it.
 func jsonToPtr(value any) int64 {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -32,9 +41,8 @@ func jsonToPtr(value any) int64 {
 		// json.Marshal(nil) → "null"; should not produce empty slice.
 		panic("wafer: jsonToPtr produced empty slice")
 	}
+	pin(data)
 	ptr := unsafe.Pointer(&data[0])
-	// Keep data alive until after packPtrLen returns.
-	_ = data
 	return packPtrLen(uint32(uintptr(ptr)), uint32(len(data)))
 }
 
@@ -47,9 +55,11 @@ func ptrToBytes(ptr int32, length int32) []byte {
 // waferAlloc is the guest allocator exported as __wafer_alloc.
 // The host calls this to reserve space in guest memory before writing data
 // that will be passed to the guest (e.g. the serialized Message).
+// The allocation is pinned to prevent GC collection before the host writes.
 //
 //go:export __wafer_alloc
 func waferAlloc(size int32) int32 {
 	buf := make([]byte, size)
+	pin(buf)
 	return int32(uintptr(unsafe.Pointer(&buf[0])))
 }

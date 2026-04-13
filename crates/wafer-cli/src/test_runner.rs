@@ -8,6 +8,11 @@ use wasmi::{Caller, Engine, Linker, Module, Store};
 struct TestState {
     /// block-name -> mock BlockResult JSON bytes
     mock_results: HashMap<String, Vec<u8>>,
+    /// Current write offset for mock responses in guest memory.
+    /// Starts at MOCK_BUF_OFFSET and advances after each call_block call
+    /// so that multiple calls within one Handle() invocation don't overwrite
+    /// each other.
+    mock_write_offset: u32,
 }
 
 const DEFAULT_CONTINUE: &[u8] =
@@ -99,9 +104,9 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
 
     // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
     //
-    // Looks up the block name in mock_results. If found, writes the mock JSON
-    // into guest memory at MOCK_BUF_OFFSET and returns the packed ptr/len.
-    // If not found, writes the default "continue" response and returns that.
+    // Looks up the block name in mock_results. Writes the mock JSON into guest
+    // memory at the current mock_write_offset (starting at MOCK_BUF_OFFSET) and
+    // advances the offset so multiple calls don't overwrite each other.
     linker
         .func_wrap(
             "wafer",
@@ -130,12 +135,19 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
                     .cloned()
                     .unwrap_or_else(|| DEFAULT_CONTINUE.to_vec());
 
-                // Write payload into guest memory at the fixed offset
+                // Write payload into guest memory at the current advancing offset.
+                // Using an incrementing offset means multiple call_block calls within
+                // a single Handle() invocation don't overwrite each other's results.
+                let write_offset = caller.data().mock_write_offset as usize;
                 if let Some(wasmi::Extern::Memory(mem)) = caller.get_export("memory") {
-                    let _ = mem.write(&mut caller, MOCK_BUF_OFFSET, &payload);
+                    let _ = mem.write(&mut caller, write_offset, &payload);
                 }
 
-                let ptr = MOCK_BUF_OFFSET as i64;
+                // Advance the offset past this payload (align to 8 bytes for safety).
+                let advance = payload.len().div_ceil(8) * 8;
+                caller.data_mut().mock_write_offset += advance as u32;
+
+                let ptr = write_offset as i64;
                 let len = payload.len() as i64;
                 (ptr << 32) | len
             },
@@ -305,7 +317,13 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     // -----------------------------------------------------------------------
     // 5. Instantiate
     // -----------------------------------------------------------------------
-    let mut store = Store::new(&engine, TestState { mock_results });
+    let mut store = Store::new(
+        &engine,
+        TestState {
+            mock_results,
+            mock_write_offset: MOCK_BUF_OFFSET as u32,
+        },
+    );
 
     let instance = linker
         .instantiate(&mut store, &module)
@@ -331,10 +349,11 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
             Ok(()) => {}
             Err(e) => {
                 let msg = e.to_string();
-                if !msg.contains("proc_exit") {
+                if msg.contains("guest called proc_exit(0)") {
+                    // proc_exit(0) — normal WASI shutdown for TinyGo modules.
+                } else {
                     bail!("WASM _start function failed: {e}");
                 }
-                // proc_exit(0) — expected for TinyGo/WASI modules.
             }
         }
     }

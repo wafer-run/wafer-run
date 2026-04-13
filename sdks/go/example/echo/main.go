@@ -43,7 +43,7 @@ func (b *EchoBlock) Handle(msg wafer.Message) wafer.BlockResult {
 	return wafer.BlockResult{
 		Action: wafer.ActionRespond,
 		Response: &wafer.Response{
-			Data: data,
+			Data: wafer.ByteArray(data),
 			Meta: []wafer.MetaEntry{
 				{Key: "content-type", Value: "application/json"},
 			},
