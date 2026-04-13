@@ -67,10 +67,10 @@ pub fn http_to_message(
             .unwrap_or(""),
     );
 
-    // Copy headers to meta
+    // Copy headers to meta (normalize names to lowercase for case-insensitive lookup)
     for (name, value) in headers {
         if let Ok(v) = value.to_str() {
-            msg.set_meta(format!("http.header.{}", name), v);
+            msg.set_meta(format!("http.header.{}", name.as_str().to_lowercase()), v);
         }
     }
 
