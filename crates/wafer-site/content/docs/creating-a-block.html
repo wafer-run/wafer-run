@@ -8,13 +8,173 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 -->
 
 <h2>Creating a Block</h2>
-<p>There are two ways to create blocks: native Rust blocks that compile into your binary, or WASM blocks written in any supported language and loaded at runtime. Both share the same <code>wafer-block</code> types (Message, BlockResult, BlockInfo, etc.).</p>
+<p>There are two ways to create blocks: <strong>WASM blocks</strong> written in any supported language and loaded at runtime, or <strong>native Rust blocks</strong> that compile directly into your binary. Both share the same <code>wafer-block</code> types (Message, BlockResult, BlockInfo, etc.).</p>
 
-<h2>Native Blocks (Rust)</h2>
-<p>A native block is a Rust struct that implements the <code>Block</code> trait. No CLI or SDK needed — just write Rust and import it directly.</p>
+<table style="width:100%;border-collapse:collapse;margin-bottom:1.5rem;font-size:0.9rem">
+    <tr>
+        <th style="text-align:left;padding:0.5rem 0.75rem;border-bottom:2px solid var(--border)"></th>
+        <th style="text-align:left;padding:0.5rem 0.75rem;border-bottom:2px solid var(--border)">WASM Blocks</th>
+        <th style="text-align:left;padding:0.5rem 0.75rem;border-bottom:2px solid var(--border)">Native Rust Blocks</th>
+    </tr>
+    <tr>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><strong>Languages</strong></td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">Rust, Go, TypeScript</td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">Rust only</td>
+    </tr>
+    <tr>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><strong>Sandboxed</strong></td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">Yes — capability model, requires list</td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">No — full OS access</td>
+    </tr>
+    <tr>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><strong>Deployable to CF</strong></td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">Yes</td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)">No — local only</td>
+    </tr>
+    <tr>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><strong>Build step</strong></td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><code>wafer build</code></td>
+        <td style="padding:0.4rem 0.75rem;border-bottom:1px solid var(--border);color:var(--text-secondary)"><code>cargo build</code> (included in binary)</td>
+    </tr>
+    <tr>
+        <td style="padding:0.4rem 0.75rem;color:var(--text-secondary)"><strong>Use when</strong></td>
+        <td style="padding:0.4rem 0.75rem;color:var(--text-secondary)">Business logic, third-party integrations, tenant code</td>
+        <td style="padding:0.4rem 0.75rem;color:var(--text-secondary)">Infrastructure, platform services, full performance</td>
+    </tr>
+</table>
 
-<h3>1. Create Your Block</h3>
-<pre><code>// blocks/greet.rs
+<h2>WASM Blocks</h2>
+<p>WASM blocks are the recommended path for most use cases. They are sandboxed, deployable to Cloudflare Workers, and support multiple languages. Use the <code>wafer</code> CLI to scaffold and build them.</p>
+
+<h3>1. Scaffold a Block Project</h3>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="rust">
+<pre><code>wafer new myorg/greet --lang rust
+cd myorg-greet</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>wafer new myorg/greet --lang go
+cd myorg-greet</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="ts" style="display:none">
+<pre><code>wafer new myorg/greet --lang ts
+cd myorg-greet</code></pre>
+    </div>
+</div>
+
+<p>This creates a project with a <code>manifest.json</code>, source file, and test fixtures.</p>
+
+<h3>2. Edit Your Block</h3>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="rust">
+<pre><code>// src/lib.rs
+use wafer_sdk::*;
+
+struct GreetBlock;
+
+#[wafer_block(
+    name = "myorg/greet",
+    version = "0.1.0",
+    interface = "handler@v1",
+    summary = "Returns a greeting"
+)]
+impl GreetBlock {
+    fn handle(msg: Message) -&gt; BlockResult {
+        json_respond(&amp;msg, &amp;serde_json::json!({"greeting": "hi there"}))
+    }
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>// main.go
+package main
+
+import wafer "github.com/wafer-run/wafer-sdk-go"
+
+type GreetBlock struct{}
+
+func (b *GreetBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
+        Name:      "myorg/greet",
+        Version:   "0.1.0",
+        Interface: "handler@v1",
+        Summary:   "Returns a greeting",
+    }
+}
+
+func (b *GreetBlock) Handle(ctx *wafer.Context, msg *wafer.Message) *wafer.Result {
+    return wafer.JSONRespond(msg, map[string]string{"greeting": "hi there"})
+}
+
+func (b *GreetBlock) Lifecycle(ctx *wafer.Context, event wafer.LifecycleEvent) error {
+    return nil
+}
+
+func main() {
+    wafer.Export(&amp;GreetBlock{})
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="ts" style="display:none">
+<pre><code>// src/index.ts
+import { block, Message, BlockResult } from "@wafer-run/sdk";
+
+export default block({
+    name: "myorg/greet",
+    version: "0.1.0",
+    interface: "handler@v1",
+    summary: "Returns a greeting",
+    handle(msg: Message): BlockResult {
+        return msg.jsonRespond({ greeting: "hi there" });
+    },
+});</code></pre>
+    </div>
+</div>
+
+<h3>3. Build and Test</h3>
+<pre><code>wafer build   # compile to target/block.wasm
+wafer test    # run tests/ fixtures against the block</code></pre>
+
+<h3>4. Place in blocks/ for Auto-Discovery</h3>
+<p>Solobase scans <code>blocks/**/target/block.wasm</code> on startup. Copy or build your block inside the <code>blocks/</code> directory and restart Solobase:</p>
+<pre><code>cp -r myorg-greet /path/to/solobase/blocks/
+# or build in place
+cd /path/to/solobase/blocks/myorg-greet &amp;&amp; wafer build</code></pre>
+<p>See <a href="/docs/wasm-blocks">WASM Blocks</a> for the full manifest.json format and auto-discovery details.</p>
+
+<h2>Native Rust Blocks</h2>
+<p>A native block is a Rust struct that implements the <code>Block</code> trait and is compiled directly into your binary. No CLI needed — just implement the trait and register it at startup. Native blocks have full OS access but cannot be deployed to Cloudflare Workers.</p>
+
+<h3>1. Implement the Block Trait</h3>
+<pre><code>// src/blocks/greet.rs
 use wafer_run::*;
 
 pub struct GreetBlock;
@@ -23,7 +183,7 @@ pub struct GreetBlock;
 impl Block for GreetBlock {
     fn info(&amp;self) -&gt; BlockInfo {
         BlockInfo {
-            name: "greet".to_string(),
+            name: "myorg/greet".to_string(),
             version: "1.0.0".to_string(),
             interface: "handler@v1".to_string(),
             summary: "Returns a greeting".to_string(),
@@ -45,161 +205,16 @@ impl Block for GreetBlock {
 
 <h3>2. Register It</h3>
 <pre><code>// main.rs
-mod blocks;
+use std::sync::Arc;
 
 let mut w = Wafer::new();
-w.register_block("greet", Arc::new(blocks::greet::GreetBlock));</code></pre>
+w.register_block("myorg/greet", Arc::new(GreetBlock))?;</code></pre>
+
+<p><code>register_block()</code> returns <code>Result&lt;(), String&gt;</code> and rejects duplicate block names. Block names use the same <code>{org}/{block}</code> format as WASM blocks.</p>
+
+<p>For simple blocks you can skip the struct and register an inline handler:</p>
+<pre><code>w.register_func("myorg/greet", |_ctx, msg| {
+    json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
+})?;</code></pre>
 
 <p>Native blocks compile directly into your binary — no <code>.wasm</code> file, no runtime loading, zero overhead.</p>
-
-<p>For simple blocks you can skip the struct entirely and register an inline handler:</p>
-<pre><code>w.register_func("greet", |_ctx, msg| {
-    json_respond(msg, &amp;serde_json::json!({"greeting": "hi there"}))
-});</code></pre>
-
-<h2>WASM Blocks</h2>
-<p>WASM blocks can be written in any supported language and are loaded by the runtime at startup. Use the CLI to scaffold them.</p>
-
-<h3>1. Add a Block</h3>
-
-<div class="lang-tabs">
-    <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('ts')">
-            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
-            TypeScript
-        </button>
-        <button class="tab" onclick="switchTab('go')">
-            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
-            Go
-        </button>
-        <button class="tab" onclick="switchTab('rust')">
-            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
-            Rust
-        </button>
-    </div>
-    <div class="tab-panel" data-lang="ts">
-<pre><code>wafer block greet --lang typescript</code></pre>
-    </div>
-    <div class="tab-panel" data-lang="go" style="display:none">
-<pre><code>wafer block greet --lang go</code></pre>
-    </div>
-    <div class="tab-panel" data-lang="rust" style="display:none">
-<pre><code>wafer block greet --lang rust</code></pre>
-    </div>
-</div>
-
-<p>This creates a block folder with an entry point and adds it to <code>wafer.json</code>.</p>
-
-<h3>2. Edit Your Block</h3>
-
-<div class="lang-tabs">
-    <div class="tab-bar">
-        <button class="tab active" onclick="switchTab('ts')">
-            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
-            TypeScript
-        </button>
-        <button class="tab" onclick="switchTab('go')">
-            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
-            Go
-        </button>
-        <button class="tab" onclick="switchTab('rust')">
-            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
-            Rust
-        </button>
-    </div>
-    <div class="tab-panel" data-lang="ts">
-<pre><code>// blocks/greet/index.ts
-import { Block, BlockInfo, Context, Message, BlockResult, defineBlock } from "wafer-sdk-ts";
-
-class GreetBlock extends Block {
-    info(): BlockInfo {
-        return { name: "greet", version: "1.0.0", interface: "handler@v1", summary: "Returns a greeting" };
-    }
-
-    handle(ctx: Context, msg: Message): BlockResult {
-        return msg.jsonRespond({"greeting": "hi there"});
-    }
-}
-
-defineBlock(new GreetBlock());</code></pre>
-    </div>
-    <div class="tab-panel" data-lang="go" style="display:none">
-<pre><code>// blocks/greet/index.go
-package main
-
-import wafer "github.com/wafer-run/wafer-sdk-go"
-
-type GreetBlock struct{}
-
-func (b *GreetBlock) Info() wafer.BlockInfo {
-    return wafer.BlockInfo{
-        Name:      "greet",
-        Version:   "1.0.0",
-        Interface: "handler@v1",
-        Summary:   "Returns a greeting",
-    }
-}
-
-func (b *GreetBlock) Handle(ctx *wafer.Context, msg *wafer.Message) *wafer.Result {
-    return wafer.JSONRespond(msg, map[string]string{"greeting": "hi there"})
-}
-
-func (b *GreetBlock) Lifecycle(ctx *wafer.Context, event wafer.LifecycleEvent) error {
-    return nil
-}
-
-func main() {
-    wafer.Export(&amp;GreetBlock{})
-}</code></pre>
-    </div>
-    <div class="tab-panel" data-lang="rust" style="display:none">
-<pre><code>// blocks/greet/src/lib.rs
-use wafer_sdk::*;
-
-struct GreetBlock;
-
-#[wafer_block(
-    name = "greet",
-    version = "1.0.0",
-    interface = "handler@v1",
-    summary = "Returns a greeting",
-    instance_mode = "singleton"
-)]
-impl GreetBlock {
-    fn handle(msg: Message) -&gt; BlockResult {
-        json_respond(&amp;msg, &amp;serde_json::json!({"greeting": "hi there"}))
-    }
-}</code></pre>
-    </div>
-</div>
-
-<h3>3. Build</h3>
-<pre><code>wafer build</code></pre>
-<p>This compiles your block to WebAssembly and outputs it to <code>dist/greet.wasm</code>.</p>
-
-<p>Your <code>wafer.json</code> now includes the new block:</p>
-<pre><code>{
-  "name": "my-app",
-  "version": "0.1.0",
-  "blocks": [
-    { "name": "hello", "source": "blocks/hello" },
-    { "name": "greet", "source": "blocks/greet" }
-  ],
-  "flows": [
-    { "name": "main", "source": "flows/main.json" }
-  ]
-}</code></pre>
-
-<h3>Interface References</h3>
-<p>A block's <code>input</code> and <code>output</code> fields in <code>block.json</code> accept either an inline JSON Schema object or a string reference to an <a href="/docs/registry">interface package</a>:</p>
-<pre><code>{
-  "actions": {
-    "POST:/api/data": {
-      "input": "github.com/wafer-run/interfaces/http-request@v1.0.0",
-      "output": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
-    }
-  }
-}</code></pre>
-<p>Use <code>wafer types add</code> to fetch interface packages locally. See the <a href="/docs/cli">CLI docs</a> for details.</p>
-
-<p>See <a href="/docs/running-a-block">Running a Block</a> to load your <code>.wasm</code> into a runtime and serve it over HTTP.</p>

@@ -1,0 +1,161 @@
+<!--
+TITLE: Quick Start — wafer.run docs
+ACTIVE: quick-start
+EXTRA_STYLES: lang_tabs.css
+EXTRA_STYLES_MOBILE: lang_tabs_mobile.css
+AFTER_BODY_OPEN: svg_icons.html
+BEFORE_BODY_CLOSE: switch_tab_script.html
+-->
+
+<h2>Quick Start</h2>
+<p>Create and run your first WASM block in under five minutes using the <code>wafer</code> CLI.</p>
+
+<h3>1. Install the CLI</h3>
+<p>The <code>wafer</code> CLI is a native Rust binary. Install it with cargo:</p>
+<pre><code>cargo install wafer-cli</code></pre>
+<p>Verify the installation:</p>
+<pre><code>wafer --version</code></pre>
+
+<h3>2. Scaffold a Block Project</h3>
+<p>Use <code>wafer new</code> to scaffold a block project. Specify your org/block name and language:</p>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="rust">
+<pre><code>wafer new myorg/hello --lang rust
+cd myorg-hello</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>wafer new myorg/hello --lang go
+cd myorg-hello</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="ts" style="display:none">
+<pre><code>wafer new myorg/hello --lang ts
+cd myorg-hello</code></pre>
+    </div>
+</div>
+
+<p>This creates a project with a <code>manifest.json</code>, source file, and test fixtures.</p>
+
+<h3>3. Edit the Handler</h3>
+<p>Open the generated source file and edit the <code>handle</code> function:</p>
+
+<div class="lang-tabs">
+    <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('rust')">
+            <svg viewBox="0 0 24 24"><use href="#icon-rust"/></svg>
+            Rust
+        </button>
+        <button class="tab" onclick="switchTab('go')">
+            <svg viewBox="0 0 24 24" fill="#00ADD8"><use href="#icon-go"/></svg>
+            Go
+        </button>
+        <button class="tab" onclick="switchTab('ts')">
+            <svg viewBox="0 0 24 24" fill="#3178C6"><use href="#icon-ts"/></svg>
+            TypeScript
+        </button>
+    </div>
+    <div class="tab-panel" data-lang="rust">
+<pre><code>// src/lib.rs
+use wafer_sdk::*;
+
+struct HelloBlock;
+
+#[wafer_block(
+    name = "myorg/hello",
+    version = "0.1.0",
+    interface = "handler@v1",
+    summary = "Says hello"
+)]
+impl HelloBlock {
+    fn handle(msg: Message) -&gt; BlockResult {
+        json_respond(&amp;msg, &amp;serde_json::json!({"hello": "world"}))
+    }
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="go" style="display:none">
+<pre><code>// main.go
+package main
+
+import wafer "github.com/wafer-run/wafer-sdk-go"
+
+type HelloBlock struct{}
+
+func (b *HelloBlock) Info() wafer.BlockInfo {
+    return wafer.BlockInfo{
+        Name:      "myorg/hello",
+        Version:   "0.1.0",
+        Interface: "handler@v1",
+        Summary:   "Says hello",
+    }
+}
+
+func (b *HelloBlock) Handle(ctx *wafer.Context, msg *wafer.Message) *wafer.Result {
+    return wafer.JSONRespond(msg, map[string]string{"hello": "world"})
+}
+
+func (b *HelloBlock) Lifecycle(ctx *wafer.Context, event wafer.LifecycleEvent) error {
+    return nil
+}
+
+func main() {
+    wafer.Export(&amp;HelloBlock{})
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-lang="ts" style="display:none">
+<pre><code>// src/index.ts
+import { block, Message, BlockResult } from "@wafer-run/sdk";
+
+export default block({
+    name: "myorg/hello",
+    version: "0.1.0",
+    interface: "handler@v1",
+    summary: "Says hello",
+    handle(msg: Message): BlockResult {
+        return msg.jsonRespond({ hello: "world" });
+    },
+});</code></pre>
+    </div>
+</div>
+
+<h3>4. Build to WASM</h3>
+<pre><code>wafer build</code></pre>
+<p>The CLI compiles your block to WebAssembly with validation. Output lands in <code>target/block.wasm</code>.</p>
+
+<h3>5. Run Tests</h3>
+<pre><code>wafer test</code></pre>
+<p>Test fixtures from the <code>tests/</code> directory are run against the compiled block. Each fixture is a JSON file with <code>input</code> and <code>expected</code> fields.</p>
+
+<h3>6. Place in blocks/ Directory</h3>
+<p>Solobase auto-discovers WASM blocks by scanning <code>blocks/**/target/block.wasm</code> on startup. Copy or symlink your project into the <code>blocks/</code> directory:</p>
+<pre><code># from your Solobase project root
+cp -r ../myorg-hello blocks/myorg-hello
+# or build in place
+cd blocks/myorg-hello &amp;&amp; wafer build</code></pre>
+
+<h3>7. Run Solobase</h3>
+<p>Start Solobase — it will auto-discover and load your block:</p>
+<pre><code>cargo run   # or ./solobase</code></pre>
+<pre><code>[INFO] Discovered block: myorg/hello (blocks/myorg-hello/target/block.wasm)
+[INFO] Registered 1 WASM block(s)</code></pre>
+
+<h3>Next Steps</h3>
+<ul>
+    <li><a href="/docs/wasm-blocks">WASM Blocks</a> — manifest.json format, auto-discovery, instance modes</li>
+    <li><a href="/docs/creating-a-block">Creating a Block</a> — full guide: WASM vs native Rust blocks</li>
+    <li><a href="/docs/api-sdk">Guest SDK</a> — full API reference for all three SDKs</li>
+    <li><a href="/docs/cli">CLI</a> — full command reference for <code>wafer</code></li>
+</ul>

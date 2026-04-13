@@ -344,6 +344,69 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
         )
         .map_err(|e| format!("linking environ_get stub: {e}"))?;
 
+    // args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
+    // TinyGo WASM runtime imports this to enumerate command-line arguments.
+    // We expose zero arguments.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "args_sizes_get",
+            |mut caller: Caller<WasmiHostState>, argc_ptr: i32, argv_buf_size_ptr: i32| -> i32 {
+                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
+                    let _ = memory.write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes());
+                    let _ =
+                        memory.write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes());
+                }
+                0
+            },
+        )
+        .map_err(|e| format!("linking args_sizes_get stub: {e}"))?;
+
+    // args_get(argv_ptr, argv_buf_ptr) -> errno
+    // TinyGo WASM runtime imports this to read command-line arguments.
+    // We expose zero arguments so this is a no-op.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "args_get",
+            |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
+        )
+        .map_err(|e| format!("linking args_get stub: {e}"))?;
+
+    // clock_time_get(id, precision, time_ptr) -> errno
+    // TinyGo WASM runtime imports this for time.Now() etc.
+    // We return 0 nanoseconds — blocks should not rely on wall-clock time.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "clock_time_get",
+            |mut caller: Caller<WasmiHostState>, _id: i32, _precision: i64, time_ptr: i32| -> i32 {
+                // Write 0u64 (nanoseconds) at time_ptr.
+                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
+                    let _ = memory.write(&mut caller, time_ptr as usize, &0u64.to_le_bytes());
+                }
+                0
+            },
+        )
+        .map_err(|e| format!("linking clock_time_get stub: {e}"))?;
+
+    // random_get(buf_ptr, buf_len) -> errno
+    // TinyGo WASM runtime imports this for crypto/rand and map seed initialisation.
+    // We fill the buffer with zeros — sufficient for initialisation, not for crypto use.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "random_get",
+            |mut caller: Caller<WasmiHostState>, buf_ptr: i32, buf_len: i32| -> i32 {
+                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
+                    let zeros = vec![0u8; buf_len as usize];
+                    let _ = memory.write(&mut caller, buf_ptr as usize, &zeros);
+                }
+                0
+            },
+        )
+        .map_err(|e| format!("linking random_get stub: {e}"))?;
+
     Ok(linker)
 }
 
@@ -352,6 +415,15 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
 // ---------------------------------------------------------------------------
 
 /// Create a fresh store + instance from the pre-built linker and module.
+///
+/// For TinyGo WASM modules (wasi target) the exported `_start` function must
+/// be called after instantiation to initialise the Go runtime (allocator,
+/// goroutine scheduler, global vars) and to invoke `main()` (which calls
+/// `wafer.Register`). Without it every WAFER export traps with `unreachable`.
+///
+/// `_start` terminates by calling `proc_exit(0)` — that traps with our stub.
+/// We treat a trap message containing "proc_exit" as expected WASI shutdown.
+/// Rust-compiled blocks have no `_start` export and are unaffected.
 fn instantiate(
     engine: &Engine,
     linker: &Linker<WasmiHostState>,
@@ -378,6 +450,24 @@ fn instantiate(
     let instance = pre
         .start(&mut store)
         .map_err(|e| format!("running start function: {e}"))?;
+
+    // Call `_start` if exported — required for TinyGo WASM modules.
+    if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&store, "_start") {
+        match start_fn.call(&mut store, ()) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("proc_exit") {
+                    return Err(format!("WASM _start failed: {e}"));
+                }
+                // proc_exit(0) is the normal WASI shutdown path — expected.
+            }
+        }
+        // Re-fill fuel so the subsequent guest call has a full budget.
+        store
+            .set_fuel(DEFAULT_FUEL)
+            .map_err(|e| format!("refilling fuel after _start: {e}"))?;
+    }
 
     Ok((store, instance))
 }

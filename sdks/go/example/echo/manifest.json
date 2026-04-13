@@ -1,0 +1,6 @@
+{
+  "name": "example/echo-go",
+  "version": "0.1.0",
+  "interface": "handler@v1",
+  "summary": "Echo block written in Go"
+}

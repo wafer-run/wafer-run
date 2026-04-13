@@ -1,0 +1,8 @@
+{
+  "kind": "http.request",
+  "data": [],
+  "meta": [
+    { "key": "method", "value": "GET" },
+    { "key": "path", "value": "/hello" }
+  ]
+}

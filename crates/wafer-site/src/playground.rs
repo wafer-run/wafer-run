@@ -142,7 +142,7 @@ fn main() {
 "#;
 
 const GO_TEMPLATE: &str = r#"// A wafer block: receives a message, returns a response.
-// In a real block you'd use the wafer-sdk-go package.
+// In a real block you'd use the wafer-sdk-go SDK (sdks/go/).
 package main
 
 import "fmt"
@@ -161,7 +161,7 @@ func main() {
 "#;
 
 const JS_TEMPLATE: &str = r#"// A wafer block: receives a message, returns a response.
-// In a real block you'd use the wafer-sdk-ts package.
+// In a real block you'd use the @wafer-run/sdk package (sdks/js/).
 
 function handle(input) {
     return { greeting: "Hello, " + input.name + "!" };

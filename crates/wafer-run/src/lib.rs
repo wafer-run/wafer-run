@@ -9,6 +9,7 @@ pub mod common;
 pub mod compat;
 pub mod config;
 pub mod context;
+pub mod discovery;
 pub mod executor;
 pub mod helpers;
 pub mod manifest;

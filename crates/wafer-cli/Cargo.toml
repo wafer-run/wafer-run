@@ -1,0 +1,20 @@
+[package]
+name = "wafer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for creating, building, testing, and packaging WAFER blocks"
+
+[[bin]]
+name = "wafer"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1"
+wasmi = { workspace = true }
+wafer-block = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"

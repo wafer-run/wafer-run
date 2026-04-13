@@ -10,6 +10,57 @@ BEFORE_BODY_CLOSE: switch_tab_script.html
 <h2>WASM Blocks</h2>
 <p>Write blocks in any language that compiles to WebAssembly. WASM blocks set <code>runtime: Wasm</code> in their <code>BlockInfo</code> and declare what services they need via a capability model and the <code>requires</code> list. The runtime provides only the declared services. This is the guest-side counterpart to the <a href="/docs/creating-a-block">native Block trait</a> — same interface, but compiled to <code>.wasm</code> and loaded by the runtime at startup.</p>
 
+<h3>Language Support</h3>
+<ul>
+    <li><strong>Rust</strong> — full support. Use the <code>wafer-sdk</code> crate with the <code>#[wafer_block]</code> proc macro.</li>
+    <li><strong>Go</strong> — full support via TinyGo. Use the <code>wafer-sdk-go</code> module and <code>wafer.Export()</code>.</li>
+    <li><strong>TypeScript</strong> — SDK types available (<code>@wafer-run/sdk</code>). WASM compilation coming soon.</li>
+</ul>
+
+<h3>manifest.json</h3>
+<p>Every WASM block project must have a <code>manifest.json</code> at its root. The runtime reads this file when loading blocks:</p>
+<pre><code>{
+  "name": "myorg/hello",
+  "version": "0.1.0",
+  "interface": "handler@v1",
+  "summary": "Returns a hello world response",
+  "runtime": "wasm",
+  "instance_mode": "singleton",
+  "requires": []
+}</code></pre>
+<ul>
+    <li><code>name</code> — two-segment <code>{org}/{block}</code> identifier. Must be unique in the runtime.</li>
+    <li><code>version</code> — semver string</li>
+    <li><code>interface</code> — the interface this block implements</li>
+    <li><code>runtime</code> — must be <code>"wasm"</code> for WASM blocks</li>
+    <li><code>instance_mode</code> — <code>singleton</code>, <code>per-flow</code>, <code>per-node</code>, or <code>per-execution</code></li>
+    <li><code>requires</code> — list of block names this block may call via <code>call_block()</code>. If non-empty, calls to unlisted blocks return <code>PERMISSION_DENIED</code>.</li>
+</ul>
+<p>Use <code>wafer new &lt;name&gt; --lang &lt;rust|go|ts&gt;</code> to scaffold a project with a pre-filled manifest.</p>
+
+<h3>Auto-Discovery</h3>
+<p>Solobase automatically discovers WASM blocks on startup by scanning the <code>blocks/</code> directory for built artifacts. Any path matching <code>blocks/**/target/block.wasm</code> is loaded — no explicit registration required.</p>
+<pre><code>blocks/
+  myorg-hello/
+    manifest.json
+    target/
+      block.wasm      # auto-discovered on startup
+  myorg-greet/
+    manifest.json
+    target/
+      block.wasm      # also discovered</code></pre>
+<p>Each discovered <code>block.wasm</code> is paired with the <code>manifest.json</code> in the same project directory. Blocks with duplicate names are rejected at startup with an error.</p>
+
+<h3>Developer Workflow</h3>
+<ol>
+    <li>Edit your block source code</li>
+    <li>Run <code>wafer build</code> in the block directory — produces <code>target/block.wasm</code></li>
+    <li>Restart Solobase — it re-scans <code>blocks/</code> and loads the updated block</li>
+</ol>
+<pre><code># In the block directory
+wafer build
+# Then restart solobase (Ctrl+C and re-run, or use cargo-watch)</code></pre>
+
 <h3>Guest SDKs</h3>
 
 <div class="lang-tabs">

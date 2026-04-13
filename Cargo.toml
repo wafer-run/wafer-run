@@ -36,6 +36,7 @@ members = [
     "examples/api-server",
     "examples/multi-flow",
     "examples/middleware-chain",
+    "crates/wafer-cli",
 ]
 
 [workspace.package]

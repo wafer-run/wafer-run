@@ -4,6 +4,15 @@ ACTIVE: flow-configuration
 -->
 
 <h2>Flow Configuration</h2>
+
+<h3>Auto-Discovery</h3>
+<p>Solobase scans <code>flows/**/*.json</code> recursively on startup and loads every file it finds as a flow definition. No explicit registration is required — drop a <code>.json</code> file anywhere under the <code>flows/</code> directory and it will be picked up automatically on the next restart.</p>
+<pre><code>flows/
+  api.json          # loaded as flow "api"
+  admin/panel.json  # loaded as flow "admin/panel"
+  v2/api.json       # loaded as flow "v2/api"
+</code></pre>
+<p>Each file must contain a valid <code>FlowDef</code> object with an <code>id</code> field. The <code>id</code> in the JSON is authoritative — the file path is used only for discovery.</p>
 <p>Flows are defined in JSON using the <code>FlowDef</code> format:</p>
 <pre><code>{
     "id": "api",
