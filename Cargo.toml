@@ -29,7 +29,7 @@ members = [
     "crates/wafer-core",
     "crates/wafer-ffi",
     "crates/wafer-run-node",
-    "crates/wafer-sdk-rs",
+    "sdks/rust",
     "crates/wafer-site",
     "examples/hello-world",
     "examples/static-site",

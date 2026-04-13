@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wafer-sdk = { path = "../../crates/wafer-sdk-rs" }
+wafer-sdk = { path = "../../sdks/rust" }
 wafer-block = { path = "../../crates/wafer-block" }
 serde_json = "1"
 
