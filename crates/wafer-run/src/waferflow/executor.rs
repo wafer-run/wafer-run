@@ -1,28 +1,31 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::{OutputStream, TerminalNotResponse};
 use wafer_flow::{Accumulator, WaferFlow};
 
 use crate::config::parse_config_map;
 use crate::observability::ObservabilityContext;
 use crate::platform::Instant;
-use crate::runtime::{run_block_with_recovery, Wafer};
+use crate::runtime::Wafer;
 use crate::types::*;
 
 /// Execute a WaferFlow definition.
 ///
-/// Two modes per step:
-/// - **Middleware mode** (step has no `input`): pass `msg` through directly.
-///   Short-circuit on Respond/Drop/Error.
-/// - **Data pipeline mode** (step has `input`): resolve from accumulator into
-///   `msg.data`, store output in accumulator.
+/// Each step receives the previous step's output as its input (data pipeline mode
+/// when the step has an `input` template) or passes the message through (middleware
+/// mode when no `input` is specified).
+///
+/// Short-circuits on Error or Drop terminals from any step.
 pub async fn execute(
     flow: &WaferFlow,
-    msg: &mut Message,
+    msg: Message,
+    input: InputStream,
     wafer: &Wafer,
     cancelled: &Arc<AtomicBool>,
     deadline: Option<Instant>,
-) -> Result_ {
+) -> OutputStream {
     let max_steps = flow
         .config
         .as_ref()
@@ -37,18 +40,23 @@ pub async fn execute(
 
     let mut acc = Accumulator::new();
 
-    // Seed accumulator with initial message data for pipeline mode
+    // Collect initial input bytes for pipeline mode
     let has_pipeline_steps = flow.steps.iter().any(|s| s.input.is_some());
-    if has_pipeline_steps {
-        let input_val: serde_json::Value = match serde_json::from_slice(&msg.data) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
-                serde_json::Value::Null
-            }
-        };
+    let mut current_body: Vec<u8> = if has_pipeline_steps {
+        let bytes = input.collect_to_bytes().await;
+        let input_val: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        if let Err(e) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
+        }
         acc.set("input", input_val);
-    }
+        bytes
+    } else {
+        // In middleware mode we still need to pass the input to the first step
+        input.collect_to_bytes().await
+    };
+
+    let mut current_msg = msg;
 
     let steps = &flow.steps;
     let mut current = 0;
@@ -57,36 +65,21 @@ pub async fn execute(
 
     while current < steps.len() {
         if step_count >= max_steps {
-            return Result_ {
-                action: Action::Error,
-                error: Some(WaferError::new(
-                    "deadline_exceeded",
-                    format!("max steps ({max_steps}) exceeded in flow '{}'", flow.id),
-                )),
-                response: None,
-                message: Some(msg.clone()),
-            };
+            return OutputStream::error(WaferError::new(
+                ErrorCode::RESOURCE_EXHAUSTED,
+                format!("max steps ({max_steps}) exceeded in flow '{}'", flow.id),
+            ));
         }
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return Result_ {
-                action: Action::Error,
-                error: Some(WaferError::new("cancelled", "flow cancelled")),
-                response: None,
-                message: Some(msg.clone()),
-            };
+            return OutputStream::error(WaferError::new(ErrorCode::CANCELLED, "flow cancelled"));
         }
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "deadline_exceeded",
-                        format!("flow '{}' timed out", flow.id),
-                    )),
-                    response: None,
-                    message: Some(msg.clone()),
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::DEADLINE_EXCEEDED,
+                    format!("flow '{}' timed out", flow.id),
+                ));
             }
         }
 
@@ -100,32 +93,19 @@ pub async fn execute(
                 let resolved = acc.resolve_input(input_template).map_err(|e| e.to_string());
                 match resolved {
                     Ok(val) => match serde_json::to_vec(&val) {
-                        Ok(data) => msg.data = data,
+                        Ok(data) => current_body = data,
                         Err(e) => {
-                            return Result_ {
-                                action: Action::Error,
-                                error: Some(WaferError::new(
-                                    "internal",
-                                    format!(
-                                        "failed to serialize input for step '{}': {}",
-                                        step.id, e
-                                    ),
-                                )),
-                                response: None,
-                                message: Some(msg.clone()),
-                            };
+                            return OutputStream::error(WaferError::new(
+                                ErrorCode::INTERNAL,
+                                format!("failed to serialize input for step '{}': {}", step.id, e),
+                            ));
                         }
                     },
                     Err(e) => {
-                        return Result_ {
-                            action: Action::Error,
-                            error: Some(WaferError::new(
-                                "invalid_argument",
-                                format!("input resolution failed in step '{}': {}", step.id, e),
-                            )),
-                            response: None,
-                            message: Some(msg.clone()),
-                        };
+                        return OutputStream::error(WaferError::new(
+                            ErrorCode::INVALID_ARGUMENT,
+                            format!("input resolution failed in step '{}': {}", step.id, e),
+                        ));
                     }
                 }
             }
@@ -152,15 +132,10 @@ pub async fn execute(
         {
             Some(b) => b.clone(),
             None => {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "not_found",
-                        format!("block '{}' not found in step '{}'", step.block, step.id),
-                    )),
-                    response: None,
-                    message: Some(msg.clone()),
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::NOT_FOUND,
+                    format!("block '{}' not found in step '{}'", step.block, step.id),
+                ));
             }
         };
 
@@ -169,47 +144,76 @@ pub async fn execute(
             flow_id: flow.id.clone(),
             node_path: step.id.clone(),
             block_name: step.block.clone(),
-            trace_id: msg.get_meta("trace_id").to_string(),
-            message: Some(msg.clone()),
+            trace_id: current_msg.get_meta("trace_id").to_string(),
+            message: Some(current_msg.clone()),
         };
         wafer.hooks.fire_block_start(&obs_ctx);
         let start = Instant::now();
 
-        // --- Execute block ---
-        let result = run_block_with_recovery(&*block, &ctx, msg).await;
+        // --- Execute block with panic recovery ---
+        let step_input = InputStream::from_bytes(current_body.clone());
+        let out = crate::runtime::run_block_with_recovery(
+            block.as_ref(),
+            &ctx,
+            current_msg.clone(),
+            step_input,
+        )
+        .await;
+
+        // --- Collect result ---
+        let buf = out.collect_buffered().await;
 
         // --- Observability: block end ---
-        wafer
-            .hooks
-            .fire_block_end(&obs_ctx, &result, start.elapsed());
+        wafer.hooks.fire_block_end(&obs_ctx, start.elapsed());
 
         // --- Process result ---
-        match result.action {
-            Action::Respond | Action::Drop => return result,
-            Action::Error => {
-                if on_error == "stop" {
-                    return result;
+        match buf {
+            Ok(response) => {
+                current_body = response.body;
+
+                // Apply trailing meta to the message
+                for entry in response.meta {
+                    current_msg.set_meta(entry.key, entry.value);
                 }
-                // on_error=continue: fall through
+
+                // Store in accumulator for pipeline mode
+                if is_pipeline {
+                    let output: serde_json::Value =
+                        serde_json::from_slice(&current_body).unwrap_or(serde_json::Value::Null);
+                    acc.set(&step.id, output);
+                }
             }
-            Action::Continue => {}
-        }
-
-        // Update message from result
-        if let Some(ref result_msg) = result.message {
-            *msg = result_msg.clone();
-        }
-
-        // Store in accumulator for pipeline mode
-        if is_pipeline {
-            let output: serde_json::Value = match serde_json::from_slice(&msg.data) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(step = %step.id, error = %e, "block output is not valid JSON, defaulting to null");
-                    serde_json::Value::Null
+            Err(TerminalNotResponse::Error(e)) => {
+                if on_error == "stop" {
+                    return OutputStream::error(e);
                 }
-            };
-            acc.set(&step.id, output);
+                // on_error=continue: clear body, fall through
+                current_body = Vec::new();
+                if is_pipeline {
+                    acc.set(&step.id, serde_json::Value::Null);
+                }
+            }
+            Err(TerminalNotResponse::Drop) => {
+                // Short-circuit: block requested drop
+                return OutputStream::drop_request();
+            }
+            Err(TerminalNotResponse::Continue(next_msg)) => {
+                // Block forwarded to another block - update current message
+                current_msg = next_msg;
+                current_body = Vec::new();
+                if is_pipeline {
+                    acc.set(&step.id, serde_json::Value::Null);
+                }
+            }
+            Err(TerminalNotResponse::Malformed) => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!(
+                        "block '{}' in step '{}' produced malformed output stream",
+                        step.block, step.id
+                    ),
+                ));
+            }
         }
 
         // --- Advance ---
@@ -229,20 +233,20 @@ pub async fn execute(
                                 routed = true;
                             }
                             None => {
-                                return Result_ {
-                                    action: Action::Error,
-                                    error: Some(WaferError::new(
-                                        "not_found",
-                                        format!("next target step '{}' not found", target_step),
-                                    )),
-                                    response: None,
-                                    message: Some(msg.clone()),
-                                };
+                                return OutputStream::error(WaferError::new(
+                                    ErrorCode::NOT_FOUND,
+                                    format!("next target step '{}' not found", target_step),
+                                ));
                             }
                         }
                     } else if let Some(target_flow) = &entry.flow {
                         // Flow transfer: execute the target flow (boxed to break recursion)
-                        let flow_result = Box::pin(wafer.run(target_flow, msg)).await;
+                        let flow_result = Box::pin(wafer.run(
+                            target_flow,
+                            current_msg,
+                            InputStream::from_bytes(current_body),
+                        ))
+                        .await;
                         return flow_result;
                     }
                     break;
@@ -259,11 +263,6 @@ pub async fn execute(
         }
     }
 
-    // Terminal result
-    if step_count == 0 {
-        // Empty flow
-        return Result_::continue_with(msg.clone());
-    }
-
-    Result_::continue_with(msg.clone())
+    // Terminal result — respond with the last accumulated body
+    OutputStream::respond(current_body)
 }

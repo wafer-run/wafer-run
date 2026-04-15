@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+#[cfg(feature = "wasm")]
 use crate::block::Block;
 use crate::types::*;
 

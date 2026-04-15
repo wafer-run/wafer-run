@@ -9,7 +9,9 @@ use wafer_block::common::ErrorCode;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
 use wafer_block::meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE};
-use wafer_block::{Action, Message, WaferError};
+#[cfg(not(feature = "wasm-component"))]
+use wafer_block::streams::input::InputStream;
+use wafer_block::{Message, WaferError};
 
 // ---------------------------------------------------------------------------
 // Macros for generating cfg-gated native-async / wasm-sync function pairs.
@@ -89,7 +91,7 @@ pub(crate) async fn call_service(
 ) -> Result<Vec<u8>, WaferError> {
     let payload = serde_json::to_vec(data)
         .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e.to_string()))?;
-    let mut msg = Message::new(kind, payload);
+    let mut msg = Message::new(kind);
     if let Some(res) = resource {
         msg.set_meta(META_WRAP_RESOURCE, res);
         msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
@@ -97,17 +99,27 @@ pub(crate) async fn call_service(
             msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
         }
     }
-    let result = ctx.call_block(block, &mut msg).await;
-    match result.action {
-        Action::Error => Err(result
-            .error
-            .unwrap_or_else(|| WaferError::new(ErrorCode::INTERNAL, "unknown error"))),
-        _ => Ok(result.response.map(|r| r.data).unwrap_or_default()),
+    let out = ctx
+        .call_block(block, msg, InputStream::from_bytes(payload))
+        .await;
+    match out.collect_buffered().await {
+        Ok(buf) => Ok(buf.body),
+        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => Err(e),
+        Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
+            Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
+        }
+        Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
+            WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
+        ),
+        Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            "malformed output stream",
+        )),
     }
 }
 
 /// Call a block and return the raw response bytes (WASM sync variant).
-/// Uses the WIT `runtime::call-block` host import instead of `ctx.call_block()`.
+/// Uses the WASM ABI host import to call another block synchronously.
 ///
 /// If `resource` is `Some`, sets WRAP meta so the runtime can enforce access control.
 /// `resource_type` scopes the grant check to a specific service (e.g. `Some("db")`).
@@ -120,23 +132,13 @@ pub(crate) fn call_service(
     is_write: bool,
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
-    let payload = serde_json::to_vec(data)
-        .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e.to_string()))?;
-    let mut msg = Message::new(kind, payload);
-    if let Some(res) = resource {
-        msg.set_meta(META_WRAP_RESOURCE, res);
-        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
-        if let Some(rt) = resource_type {
-            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
-        }
-    }
-    let result = wafer_block::runtime::call_block(block, &msg);
-    match result.action {
-        Action::Error => Err(result
-            .error
-            .unwrap_or_else(|| WaferError::new(ErrorCode::INTERNAL, "unknown error"))),
-        _ => Ok(result.response.map(|r| r.data).unwrap_or_default()),
-    }
+    let _ = (block, kind, data, resource, is_write, resource_type);
+    // TODO: implement WASM sync call_block via ABI host import when redesigning
+    // the WASM component path for the streaming protocol.
+    Err(WaferError::new(
+        ErrorCode::UNIMPLEMENTED,
+        "wasm-component call_service not yet implemented for streaming protocol",
+    ))
 }
 
 /// Deserialize JSON bytes into a typed value.

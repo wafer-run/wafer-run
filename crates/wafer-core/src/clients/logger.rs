@@ -112,11 +112,8 @@ pub async fn error_with(
 
 #[cfg(feature = "wasm-component")]
 fn log(kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
-    if call_service(BLOCK, kind, &LogReq { message, fields }, None, false, None).is_err() {
-        // Fall back to WIT runtime log import.
-        let level = kind.strip_prefix("logger.").unwrap_or("info");
-        wafer_block::runtime::log(level, message);
-    }
+    // Best-effort: attempt to call the logger block. Ignore errors silently.
+    let _ = call_service(BLOCK, kind, &LogReq { message, fields }, None, false, None);
 }
 
 #[cfg(feature = "wasm-component")]

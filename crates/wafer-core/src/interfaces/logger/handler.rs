@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use wafer_block::common::{ErrorCode, ServiceOp};
+use wafer_block::streams::output::OutputStream;
 use wafer_block::*;
 
 use super::service::{Field, FieldValue, LoggerService};
@@ -44,21 +45,12 @@ fn json_fields_to_service_fields(fields: &HashMap<String, serde_json::Value>) ->
         .collect()
 }
 
-fn respond_ok(msg: &Message) -> Result_ {
-    Result_ {
-        action: Action::Continue,
-        response: None,
-        error: None,
-        message: Some(msg.clone()),
-    }
-}
-
 /// Handle a logger message by delegating to the given service.
-pub fn handle_message(service: &dyn LoggerService, msg: &mut Message) -> Result_ {
-    let (log_msg, fields) = match msg.decode::<LogRequest>() {
+pub fn handle_message(service: &dyn LoggerService, msg: &Message, body: &[u8]) -> OutputStream {
+    let (log_msg, fields) = match serde_json::from_slice::<LogRequest>(body) {
         Ok(req) => (req.message, json_fields_to_service_fields(&req.fields)),
         Err(_) => {
-            let text = String::from_utf8_lossy(&msg.data).to_string();
+            let text = String::from_utf8_lossy(body).to_string();
             (text, Vec::new())
         }
     };
@@ -66,21 +58,21 @@ pub fn handle_message(service: &dyn LoggerService, msg: &mut Message) -> Result_
     match msg.kind.as_str() {
         ServiceOp::LOGGER_DEBUG => {
             service.debug(&log_msg, &fields);
-            respond_ok(msg)
+            OutputStream::respond(vec![])
         }
         ServiceOp::LOGGER_INFO => {
             service.info(&log_msg, &fields);
-            respond_ok(msg)
+            OutputStream::respond(vec![])
         }
         ServiceOp::LOGGER_WARN => {
             service.warn(&log_msg, &fields);
-            respond_ok(msg)
+            OutputStream::respond(vec![])
         }
         ServiceOp::LOGGER_ERROR => {
             service.error(&log_msg, &fields);
-            respond_ok(msg)
+            OutputStream::respond(vec![])
         }
-        other => Result_::error(WaferError::new(
+        other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown logger operation: {other}"),
         )),

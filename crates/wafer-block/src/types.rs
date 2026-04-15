@@ -889,11 +889,10 @@ impl crate::WaferError {
 // ---------------------------------------------------------------------------
 
 impl crate::Message {
-    /// Create a new message with the given kind and data (empty meta).
-    pub fn new(kind: impl Into<String>, data: impl AsRef<[u8]>) -> Self {
+    /// Create a new message with the given kind (empty meta).
+    pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
-            data: data.as_ref().to_vec(),
             meta: Vec::new(),
         }
     }
@@ -916,31 +915,6 @@ impl crate::Message {
         } else {
             self.meta.push(crate::MetaEntry { key, value });
         }
-    }
-
-    /// Return a Drop result (like `drop_msg` but takes `&self` instead of consuming).
-    pub fn drop_msg_ref(&self) -> crate::BlockResult {
-        crate::BlockResult {
-            action: crate::Action::Drop,
-            response: None,
-            error: None,
-            message: Some(self.clone()),
-        }
-    }
-
-    /// Return a Continue result carrying a clone of this message.
-    pub fn cont_ref(&self) -> crate::BlockResult {
-        crate::BlockResult {
-            action: crate::Action::Continue,
-            response: None,
-            error: None,
-            message: Some(self.clone()),
-        }
-    }
-
-    /// Deserialize `data` as JSON into `T`.
-    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
-        serde_json::from_slice(&self.data).map_err(|e| e.to_string())
     }
 
     /// Shortcut for `get_meta(META_REQ_ACTION)`.
@@ -1003,17 +977,6 @@ impl crate::Message {
         self.get_meta(&key)
     }
 
-    /// Get the raw body bytes.
-    pub fn body(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Set data from a serializable value.
-    pub fn set_data<T: serde::Serialize>(&mut self, data: &T) -> Result<(), String> {
-        self.data = serde_json::to_vec(data).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     /// Collect all query parameters into a HashMap.
     pub fn query_params(&self) -> HashMap<String, String> {
         let prefix = crate::meta::META_REQ_QUERY_PREFIX;
@@ -1034,22 +997,6 @@ impl crate::Message {
             .min(100);
         let offset = (page - 1) * page_size;
         (page, page_size, offset)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BlockResult helpers
-// ---------------------------------------------------------------------------
-
-impl crate::BlockResult {
-    /// Create an error result with no message.
-    pub fn error(err: crate::WaferError) -> Self {
-        Self {
-            action: crate::Action::Error,
-            response: None,
-            error: Some(err),
-            message: None,
-        }
     }
 }
 
@@ -1133,22 +1080,6 @@ impl crate::InstanceMode {
             "per-flow" => Self::PerFlow,
             "per-execution" => Self::PerExecution,
             _ => Self::PerNode,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BlockResult helpers (continued)
-// ---------------------------------------------------------------------------
-
-impl crate::BlockResult {
-    /// Create a continue result carrying the given message.
-    pub fn continue_with(msg: crate::Message) -> Self {
-        Self {
-            action: crate::Action::Continue,
-            response: None,
-            error: None,
-            message: Some(msg),
         }
     }
 }

@@ -108,13 +108,23 @@ pub struct RuntimeHandle {
 #[cfg(not(target_arch = "wasm32"))]
 impl RuntimeHandle {
     /// Run a flow by ID.
-    pub async fn run(&self, flow_id: &str, msg: &mut Message) -> Result_ {
-        self.inner.run(flow_id, msg).await
+    pub async fn run(
+        &self,
+        flow_id: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run(flow_id, msg, input).await
     }
 
     /// Run a single block by name (bypasses flows).
-    pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
-        self.inner.run_block(block_name, msg).await
+    pub async fn run_block(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run_block(block_name, msg, input).await
     }
 }
 

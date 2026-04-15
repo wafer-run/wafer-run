@@ -12,8 +12,8 @@
 //! struct MyBlock;
 //!
 //! impl MyBlock {
-//!     fn handle(msg: Message) -> BlockResult {
-//!         msg.cont()
+//!     async fn handle(msg: Message, input: InputStream) -> OutputStream {
+//!         OutputStream::continue_with(msg)
 //!     }
 //! }
 //! ```
@@ -24,5 +24,5 @@ pub mod pure;
 // Re-export everything from wafer-block (types, traits, helpers, macros).
 pub use wafer_block::*;
 
-// Re-export runtime functions for block authors.
-pub use core_abi::{call_block, is_cancelled, log};
+// Re-export runtime functions and guest result types for block authors.
+pub use core_abi::{call_block, is_cancelled, log, GuestResponse, GuestResult};

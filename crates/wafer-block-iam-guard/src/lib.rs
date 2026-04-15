@@ -70,11 +70,15 @@ impl Block for IAMBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Check that user is authenticated
         let user_id = msg.user_id().to_string();
         if user_id.is_empty() {
-            return err_unauthorized(msg, "Authentication required");
+            return OutputStream::error(WaferError {
+                code: ErrorCode::Unauthenticated,
+                message: "Authentication required".to_string(),
+                meta: vec![],
+            });
         }
 
         // Get required role from config (default: "admin")
@@ -83,13 +87,17 @@ impl Block for IAMBlock {
         // Try database lookup first, fall back to meta roles
         let has_role = match Self::has_role_db(ctx, &user_id, &required_role).await {
             Some(result) => result,
-            None => Self::has_role_meta(msg, &required_role),
+            None => Self::has_role_meta(&msg, &required_role),
         };
 
         if has_role {
-            msg.cont_ref()
+            OutputStream::continue_with(msg)
         } else {
-            err_forbidden(msg, &format!("Requires '{}' role", required_role))
+            OutputStream::error(WaferError {
+                code: ErrorCode::PermissionDenied,
+                message: format!("Requires '{}' role", required_role),
+                meta: vec![],
+            })
         }
     }
 

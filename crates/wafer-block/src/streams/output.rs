@@ -337,7 +337,6 @@ mod tests {
         let (mut rx, sink, _cancel) = new_streaming_channel(16);
         let msg = Message {
             kind: "next".into(),
-            data: vec![],
             meta: vec![],
         };
         sink.continue_with(msg.clone()).await.unwrap();
@@ -378,7 +377,6 @@ mod tests {
     async fn continue_with_is_single_terminal() {
         let msg = Message {
             kind: "next".into(),
-            data: vec![],
             meta: vec![],
         };
         let stream = OutputStream::continue_with(msg.clone());
@@ -468,7 +466,6 @@ mod tests {
     async fn collect_buffered_errors_on_continue_terminal() {
         let msg = Message {
             kind: "next".into(),
-            data: vec![],
             meta: vec![],
         };
         let stream = OutputStream::continue_with(msg);
@@ -549,7 +546,6 @@ mod tests {
         let _ = sink
             .continue_with(Message {
                 kind: "next".into(),
-                data: vec![],
                 meta: vec![],
             })
             .await;
@@ -566,7 +562,6 @@ mod tests {
         let (_rx, sink, _cancel) = new_streaming_channel(16);
         sink.continue_with(Message {
             kind: "next".into(),
-            data: vec![],
             meta: vec![],
         })
         .await

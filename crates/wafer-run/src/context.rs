@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use wafer_block::types::ResourceGrant;
 
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::OutputStream;
+
 use crate::block::Block;
 use crate::platform::Instant;
 use crate::types::*;
@@ -52,15 +55,10 @@ pub struct RuntimeContext {
     pub wrap_admin_block: Arc<String>,
 }
 
-// --- Result helpers (used by RuntimeContext impl) ---
+// --- Output helpers (used by RuntimeContext impl) ---
 
-fn err_result(code: ErrorCode, message: impl Into<String>) -> Result_ {
-    Result_ {
-        action: Action::Error,
-        response: None,
-        error: Some(WaferError::new(code, message)),
-        message: None,
-    }
+fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
+    OutputStream::error(WaferError::new(code, message))
 }
 
 /// RAII guard that decrements `call_depth` on drop, even if the block panics.
@@ -75,7 +73,7 @@ impl Drop for CallDepthGuard {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
-    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+    async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
         // Recursion depth check — the RAII guard ensures the counter is
         // decremented even if the block panics.
         let depth = self
@@ -84,7 +82,7 @@ impl Context for RuntimeContext {
         let _depth_guard = CallDepthGuard(self.call_depth.clone());
 
         if depth >= self.max_call_depth {
-            return err_result(
+            return err_output(
                 ErrorCode::RESOURCE_EXHAUSTED,
                 format!(
                     "call_block depth exceeded maximum of {} (calling '{}')",
@@ -95,7 +93,7 @@ impl Context for RuntimeContext {
 
         // Cancellation check
         if self.is_cancelled() {
-            return err_result(ErrorCode::CANCELLED, "execution cancelled");
+            return err_output(ErrorCode::CANCELLED, "execution cancelled");
         }
 
         // Enforce requires: if the caller declared a requires list, check it
@@ -109,7 +107,7 @@ impl Context for RuntimeContext {
                 .iter()
                 .any(|r| r == block_name || r == resolved_name)
             {
-                return err_result(
+                return err_output(
                     ErrorCode::PERMISSION_DENIED,
                     format!(
                         "block '{}' not in requires list — call_block denied",
@@ -142,7 +140,7 @@ impl Context for RuntimeContext {
                 &self.wrap_grants,
                 &self.wrap_admin_block,
             ) {
-                return err_result(e.code, e.message);
+                return err_output(e.code, e.message);
             }
         }
 
@@ -152,7 +150,7 @@ impl Context for RuntimeContext {
             if let Some(caps) = caller_block.block_capabilities() {
                 // Check call_block capability
                 if !caps.allows_call_block(block_name) {
-                    return err_result(
+                    return err_output(
                         ErrorCode::PERMISSION_DENIED,
                         format!("block capability denies call to '{}'", block_name),
                     );
@@ -177,7 +175,7 @@ impl Context for RuntimeContext {
                         _ => true,
                     };
                     if !allowed {
-                        return err_result(
+                        return err_output(
                             ErrorCode::PERMISSION_DENIED,
                             format!(
                                 "block capability denies access to {} '{}'",
@@ -189,11 +187,20 @@ impl Context for RuntimeContext {
             }
         }
 
-        // Look up the block
-        let block = match self.all_blocks.get(block_name) {
+        // Look up the block (try aliases then direct name)
+        let resolved_block_name = self
+            .aliases
+            .get(block_name)
+            .map(|s| s.as_str())
+            .unwrap_or(block_name);
+        let block = match self
+            .all_blocks
+            .get(resolved_block_name)
+            .or_else(|| self.all_blocks.get(block_name))
+        {
             Some(b) => b.clone(),
             None => {
-                return err_result(
+                return err_output(
                     ErrorCode::NOT_FOUND,
                     format!("block '{}' not found", block_name),
                 );
@@ -233,7 +240,7 @@ impl Context for RuntimeContext {
         };
 
         // Call the block — _depth_guard drops after this, decrementing counter
-        block.handle(&sub_ctx, msg).await
+        block.handle(&sub_ctx, msg, input).await
     }
 
     fn is_cancelled(&self) -> bool {

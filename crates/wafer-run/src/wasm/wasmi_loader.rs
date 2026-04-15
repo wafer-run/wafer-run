@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use tracing::{debug, warn};
 use wasmi::{Caller, Engine, Error as WasmiError, Linker, Module, Store, TypedResumableCall, Val};
 
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::OutputStream;
+
 use crate::block::{Block, BlockInfo};
 use crate::context::Context;
 use crate::types::*;
@@ -584,13 +587,71 @@ impl WasmiBlock {
                 "resolving call_block from WASM guest"
             );
 
-            // Deserialize the message, call the block, serialize the result.
-            let mut msg: Message = serde_json::from_slice(&pending.msg_bytes)
+            // Deserialize the message, call the block, collect and serialize the result.
+            let msg: Message = serde_json::from_slice(&pending.msg_bytes)
                 .map_err(|e| format!("deserializing call_block message: {e}"))?;
 
-            let result = ctx.call_block(&pending.block_name, &mut msg).await;
-            let result_bytes = serde_json::to_vec(&result)
-                .map_err(|e| format!("serializing call_block result: {e}"))?;
+            let out = ctx
+                .call_block(&pending.block_name, msg, InputStream::empty())
+                .await;
+            let buf = out.collect_buffered().await;
+            // Serialize the outcome for the WASM guest.
+            // The guest expects a Result_-shaped JSON with action/response/error.
+            // We map BufferedResponse → respond, Error → error terminal.
+            use wafer_block::streams::output::TerminalNotResponse;
+            let result_bytes = match buf {
+                Ok(response) => {
+                    // Build a legacy-compatible response JSON the WASM guest can decode
+                    let payload = serde_json::json!({
+                        "action": "Respond",
+                        "response": { "data": response.body, "meta": response.meta },
+                        "error": null,
+                        "message": null
+                    });
+                    serde_json::to_vec(&payload)
+                        .map_err(|e| format!("serializing call_block result: {e}"))?
+                }
+                Err(TerminalNotResponse::Error(e)) => {
+                    let payload = serde_json::json!({
+                        "action": "Error",
+                        "response": null,
+                        "error": { "code": format!("{:?}", e.code), "message": e.message, "meta": [] },
+                        "message": null
+                    });
+                    serde_json::to_vec(&payload)
+                        .map_err(|e| format!("serializing call_block error: {e}"))?
+                }
+                Err(TerminalNotResponse::Drop) => {
+                    let payload = serde_json::json!({
+                        "action": "Drop",
+                        "response": null,
+                        "error": null,
+                        "message": null
+                    });
+                    serde_json::to_vec(&payload)
+                        .map_err(|e| format!("serializing call_block drop: {e}"))?
+                }
+                Err(TerminalNotResponse::Continue(next_msg)) => {
+                    let payload = serde_json::json!({
+                        "action": "Continue",
+                        "response": null,
+                        "error": null,
+                        "message": next_msg
+                    });
+                    serde_json::to_vec(&payload)
+                        .map_err(|e| format!("serializing call_block continue: {e}"))?
+                }
+                Err(TerminalNotResponse::Malformed) => {
+                    let payload = serde_json::json!({
+                        "action": "Error",
+                        "response": null,
+                        "error": { "code": "Internal", "message": "malformed output stream", "meta": [] },
+                        "message": null
+                    });
+                    serde_json::to_vec(&payload)
+                        .map_err(|e| format!("serializing malformed error: {e}"))?
+                }
+            };
 
             // Provide the result for phase 2.
             store.data_mut().pending_result = Some(result_bytes);
@@ -671,19 +732,19 @@ impl Block for WasmiBlock {
         }
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        let msg_bytes = match serde_json::to_vec(msg) {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        // Combine message + input body into a single JSON payload for the WASM guest.
+        // The guest's __wafer_handle expects serialized Message bytes.
+        // We collect the input stream and embed it into a wrapper so the guest
+        // can decode both the message and the body.
+        let body = input.collect_to_bytes().await;
+        let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
             Ok(b) => b,
             Err(e) => {
-                return Result_ {
-                    action: Action::Error,
-                    response: None,
-                    error: Some(WaferError::new(
-                        ErrorCode::Internal,
-                        format!("serializing message: {e}"),
-                    )),
-                    message: None,
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("serializing message: {e}"),
+                ));
             }
         };
 
@@ -707,35 +768,51 @@ impl Block for WasmiBlock {
         {
             Ok(bytes) => bytes,
             Err(e) => {
-                return Result_ {
-                    action: Action::Error,
-                    response: None,
-                    error: Some(WaferError::new(
-                        ErrorCode::Internal,
-                        format!("WASM handle error: {e}"),
-                    )),
-                    message: None,
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("WASM handle error: {e}"),
+                ));
             }
         };
 
-        match serde_json::from_slice::<Result_>(&result_bytes) {
-            Ok(result) => {
-                // Update the caller's message if the guest returned one.
-                if let Some(ref new_msg) = result.message {
-                    *msg = new_msg.clone();
+        // The guest returns a Result_-shaped JSON. Map it back to OutputStream.
+        #[derive(serde::Deserialize)]
+        struct LegacyResult {
+            action: String,
+            response: Option<LegacyResponse>,
+            error: Option<WaferError>,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyResponse {
+            data: Vec<u8>,
+        }
+
+        match serde_json::from_slice::<LegacyResult>(&result_bytes) {
+            Ok(result) => match result.action.as_str() {
+                "Respond" => {
+                    let data = result.response.map(|r| r.data).unwrap_or_default();
+                    OutputStream::respond(data)
                 }
-                result
-            }
-            Err(e) => Result_ {
-                action: Action::Error,
-                response: None,
-                error: Some(WaferError::new(
+                "Error" => {
+                    let e = result.error.unwrap_or_else(|| {
+                        WaferError::new(
+                            ErrorCode::Internal,
+                            "WASM block returned error with no details",
+                        )
+                    });
+                    OutputStream::error(e)
+                }
+                "Drop" => OutputStream::drop_request(),
+                "Continue" => OutputStream::respond(vec![]), // best-effort: treat as empty respond
+                _ => OutputStream::error(WaferError::new(
                     ErrorCode::Internal,
-                    format!("deserializing WASM handle result: {e}"),
+                    format!("unknown action from WASM guest: {}", result.action),
                 )),
-                message: None,
             },
+            Err(e) => OutputStream::error(WaferError::new(
+                ErrorCode::Internal,
+                format!("deserializing WASM handle result: {e}"),
+            )),
         }
     }
 

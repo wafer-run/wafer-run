@@ -11,7 +11,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
-use wafer_run::{Message, Result_, Wafer, WasmiBlock};
+use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -39,6 +39,49 @@ fn error_json(msg: &str) -> *mut c_char {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
     let json = format!(r#"{{"error":"{}"}}"#, escaped);
     to_c_string(&json)
+}
+
+/// Build a JSON result string from a collected OutputStream.
+async fn output_to_json(output: wafer_run::OutputStream) -> String {
+    use wafer_block::streams::output::TerminalNotResponse;
+    match output.collect_buffered().await {
+        Ok(buf) => {
+            // Return body as base64-encoded string for FFI safety, or raw JSON if it parses.
+            // For simplicity, return body as a JSON value alongside meta.
+            let body_str = String::from_utf8(buf.body).unwrap_or_default();
+            let meta_obj: serde_json::Value = buf
+                .meta
+                .iter()
+                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            serde_json::json!({
+                "action": "respond",
+                "body": body_str,
+                "meta": meta_obj,
+            })
+            .to_string()
+        }
+        Err(TerminalNotResponse::Error(err)) => serde_json::json!({
+            "action": "error",
+            "error": {
+                "code": format!("{:?}", err.code),
+                "message": err.message,
+            }
+        })
+        .to_string(),
+        Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
+        Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
+            "action": "continue",
+            "message": serde_json::to_value(&msg).unwrap_or_default(),
+        })
+        .to_string(),
+        Err(TerminalNotResponse::Malformed) => serde_json::json!({
+            "action": "error",
+            "error": { "code": "Internal", "message": "stream ended without terminal event" }
+        })
+        .to_string(),
+    }
 }
 
 /// Safely dereference a `*mut WaferRuntime`.
@@ -198,7 +241,7 @@ pub unsafe extern "C" fn wafer_register(
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Run a flow with the given message.
+/// Run a flow with the given message (body-less).
 /// Returns a JSON result string (always non-NULL).
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
@@ -211,11 +254,7 @@ pub unsafe extern "C" fn wafer_run(
             Some(r) => r,
             None => {
                 return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "null runtime pointer",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"null runtime pointer"}}"#.to_string()),
+                    r#"{"action":"error","error":{"code":"Internal","message":"null runtime pointer"}}"#,
                 );
             }
         };
@@ -223,11 +262,7 @@ pub unsafe extern "C" fn wafer_run(
             Some(s) => s,
             None => {
                 return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "invalid flow_id",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid flow_id"}}"#.to_string()),
+                    r#"{"action":"error","error":{"code":"Internal","message":"invalid flow_id"}}"#,
                 );
             }
         };
@@ -235,39 +270,30 @@ pub unsafe extern "C" fn wafer_run(
             Some(s) => s,
             None => {
                 return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "invalid message_json",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid message_json"}}"#.to_string()),
+                    r#"{"action":"error","error":{"code":"Internal","message":"invalid message_json"}}"#,
                 );
             }
         };
 
-        let mut msg: Message = match serde_json::from_str(msg_str) {
+        let msg: Message = match serde_json::from_str(msg_str) {
             Ok(m) => m,
             Err(e) => {
-                let err_result = Result_::error(wafer_run::WaferError::new(
-                    "ffi_error",
-                    format!("invalid Message JSON: {}", e),
-                ));
-                return to_c_string(&serde_json::to_string(&err_result).unwrap_or_else(|_| {
-                    r#"{"action":"error","error":{"code":"ffi_error","message":"json error"}}"#
-                        .to_string()
-                }));
+                let json = format!(
+                    r#"{{"action":"error","error":{{"code":"InvalidArgument","message":"invalid Message JSON: {}"}}}}"#,
+                    e.to_string().replace('"', "\\\"")
+                );
+                return to_c_string(&json);
             }
         };
 
-        let result = rt.rt.block_on(rt.inner.run(fid, &mut msg));
-
-        to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
-            r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#
-                .to_string()
-        }))
+        let input = wafer_run::InputStream::empty();
+        let output = rt.rt.block_on(rt.inner.run(fid, msg, input));
+        let json = rt.rt.block_on(output_to_json(output));
+        to_c_string(&json)
     }));
     result.unwrap_or_else(|_| {
         to_c_string(
-            r#"{"action":"error","error":{"code":"ffi_error","message":"panic in wafer_run"}}"#,
+            r#"{"action":"error","error":{"code":"Internal","message":"panic in wafer_run"}}"#,
         )
     })
 }

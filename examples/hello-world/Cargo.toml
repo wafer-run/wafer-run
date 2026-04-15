@@ -11,6 +11,7 @@ edition = "2021"
 wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
 wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }
 
+async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

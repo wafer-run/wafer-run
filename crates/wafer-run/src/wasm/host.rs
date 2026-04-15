@@ -1,5 +1,8 @@
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::OutputStream;
+use wafer_block::Message;
+
 use crate::context::Context;
-use crate::types::*;
 use std::sync::Arc;
 
 /// ContextGuard — scoped wrapper for passing a borrowed Context into wasmi.
@@ -38,8 +41,8 @@ unsafe impl Sync for ContextWrapper {}
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for ContextWrapper {
-    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
-        unsafe { &*self.0 }.call_block(block_name, msg).await
+    async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
+        unsafe { &*self.0 }.call_block(block_name, msg, input).await
     }
     fn is_cancelled(&self) -> bool {
         unsafe { &*self.0 }.is_cancelled()

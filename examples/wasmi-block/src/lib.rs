@@ -9,7 +9,7 @@ struct EchoBlock;
     summary = "Echo block for wasmi testing"
 )]
 impl EchoBlock {
-    fn handle(msg: Message) -> BlockResult {
+    fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
         let response_data = serde_json::to_vec(&serde_json::json!({
             "echo": true,
             "kind": msg.kind,
@@ -17,17 +17,12 @@ impl EchoBlock {
         }))
         .unwrap();
 
-        BlockResult {
-            action: Action::Respond,
-            response: Some(Response {
-                data: response_data,
-                meta: vec![MetaEntry {
-                    key: "content-type".to_string(),
-                    value: "application/json".to_string(),
-                }],
-            }),
-            error: None,
-            message: None,
-        }
+        GuestResult::respond_with_meta(
+            response_data,
+            vec![MetaEntry {
+                key: "content-type".to_string(),
+                value: "application/json".to_string(),
+            }],
+        )
     }
 }

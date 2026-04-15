@@ -13,9 +13,157 @@
 //!   curl http://localhost:8080/_inspector/ui
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use wafer_run::*;
 
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Custom middleware blocks
+// ---------------------------------------------------------------------------
+
+/// Request logger: logs method + path, always passes through.
+struct RequestLoggerBlock;
+
+#[async_trait::async_trait]
+impl Block for RequestLoggerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("request-logger", "0.0.1", "middleware@v1", "Request logger")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let n = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let method = msg.action().to_string();
+        let path = msg.path().to_string();
+        tracing::info!(req = n, method = %method, path = %path, "incoming request");
+        let mut out_msg = msg;
+        out_msg.set_meta("request.number", n.to_string());
+        OutputStream::continue_with(out_msg)
+    }
+}
+
+/// API key check: requires X-Api-Key header for /api/** routes.
+struct ApiKeyCheckBlock;
+
+#[async_trait::async_trait]
+impl Block for ApiKeyCheckBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("api-key-check", "0.0.1", "middleware@v1", "API key check")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let path = msg.path().to_string();
+        // Skip auth for non-API routes
+        if !path.starts_with("/api/") {
+            return OutputStream::continue_with(msg);
+        }
+        let key = msg.header("X-Api-Key").to_string();
+        if key.is_empty() {
+            return OutputStream::error(WaferError {
+                code: ErrorCode::Unauthenticated,
+                message: "missing X-Api-Key header".to_string(),
+                meta: vec![MetaEntry {
+                    key: "resp.status".into(),
+                    value: "401".into(),
+                }],
+            });
+        }
+        if key != "secret123" {
+            return OutputStream::error(WaferError {
+                code: ErrorCode::PermissionDenied,
+                message: "invalid API key".to_string(),
+                meta: vec![MetaEntry {
+                    key: "resp.status".into(),
+                    value: "403".into(),
+                }],
+            });
+        }
+        let mut out_msg = msg;
+        out_msg.set_meta("auth.api_key_valid", "true");
+        OutputStream::continue_with(out_msg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler blocks
+// ---------------------------------------------------------------------------
+
+/// Echo handler: echoes back the request info.
+struct EchoHandlerBlock;
+
+#[async_trait::async_trait]
+impl Block for EchoHandlerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("echo-handler", "0.0.1", "http-handler@v1", "Echo handler")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        let body_bytes = input.collect_to_bytes().await;
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+        let req_num = msg.get_meta("request.number").to_string();
+        let resp = serde_json::to_vec(&serde_json::json!({
+            "echo": {
+                "path": msg.path(),
+                "action": msg.action(),
+                "body": body,
+                "request_number": req_num,
+            },
+            "message": "request passed all middleware checks!"
+        }))
+        .unwrap_or_default();
+        OutputStream::respond(resp)
+    }
+}
+
+/// Stats endpoint.
+struct StatsBlock;
+
+#[async_trait::async_trait]
+impl Block for StatsBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("stats", "0.0.1", "http-handler@v1", "Stats endpoint")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
+        }))
+        .unwrap_or_default();
+        OutputStream::respond(body)
+    }
+}
+
+/// 404 fallback.
+struct FallbackBlock;
+
+#[async_trait::async_trait]
+impl Block for FallbackBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("fallback", "0.0.1", "http-handler@v1", "404 fallback")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let path = msg.path().to_string();
+        OutputStream::error(WaferError {
+            code: ErrorCode::NotFound,
+            message: format!("path '{}' not found", path),
+            meta: vec![MetaEntry {
+                key: "resp.status".into(),
+                value: "404".into(),
+            }],
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() {
@@ -26,9 +174,6 @@ async fn main() {
     let mut wafer = Wafer::new();
 
     // --- Custom HTTP server flow with extra middleware ---
-    // Instead of using the standard wafer-flow-http-server, we define our own
-    // flow that inserts custom middleware (request-logger, api-key-check) between
-    // the standard infra blocks and the router.
     wafer.add_flow_json(r#"{
         "id": "custom-http-server",
         "name": "Custom HTTP Server",
@@ -57,17 +202,14 @@ async fn main() {
         }
     }"#).expect("valid flow JSON");
 
-    // Register the standard infra blocks that the flow references
+    // Register standard infra blocks
     wafer_block_inspector::register(&mut wafer).expect("register inspector");
-
-    // Register standard blocks needed by the flow
-    // Register the standard infra blocks that the flow references
     wafer_block_http_listener::register(&mut wafer).expect("register http-listener");
     wafer_block_security_headers::register(&mut wafer).expect("register security-headers");
     wafer_block_cors::register(&mut wafer).expect("register cors");
     wafer_block_router::register(&mut wafer).expect("register router");
 
-    // Flow-level config (same shape as wafer-flow-http-server::register)
+    // Flow-level config
     wafer.add_block_config(
         "custom-http-server",
         serde_json::json!({
@@ -84,110 +226,24 @@ async fn main() {
 
     wafer.add_block_config(
         "wafer-run/inspector",
-        serde_json::json!({
-            "allow_anonymous": true
-        }),
+        serde_json::json!({ "allow_anonymous": true }),
     );
 
-    // --- Custom middleware blocks ---
-
-    // Request logger: logs method + path, always passes through
+    // Register custom blocks
     wafer
-        .register_func("request-logger", |_ctx, msg| {
-            let n = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            let method = msg.action().to_string();
-            let path = msg.path().to_string();
-            tracing::info!(req = n, method = %method, path = %path, "incoming request");
-            msg.set_meta("request.number", n.to_string());
-            msg.cont_ref()
-        })
+        .register_block("request-logger", Arc::new(RequestLoggerBlock))
         .expect("register request-logger");
-
-    // API key check: requires X-Api-Key header for /api/** routes
-    // Skips auth for inspector and stats endpoints
     wafer
-        .register_func("api-key-check", |_ctx, msg| {
-            let path = msg.path().to_string();
-            // Skip auth for non-API routes
-            if !path.starts_with("/api/") {
-                return msg.cont_ref();
-            }
-            let key = msg.header("X-Api-Key").to_string();
-            if key.is_empty() {
-                msg.set_meta("resp.status", "401");
-                return json_respond(
-                    msg,
-                    &serde_json::json!({
-                        "error": "unauthorized",
-                        "message": "missing X-Api-Key header"
-                    }),
-                );
-            }
-            if key != "secret123" {
-                msg.set_meta("resp.status", "403");
-                return json_respond(
-                    msg,
-                    &serde_json::json!({
-                        "error": "forbidden",
-                        "message": "invalid API key"
-                    }),
-                );
-            }
-            msg.set_meta("auth.api_key_valid", "true");
-            msg.cont_ref()
-        })
+        .register_block("api-key-check", Arc::new(ApiKeyCheckBlock))
         .expect("register api-key-check");
-
-    // --- Handler blocks ---
-
-    // Echo handler: echoes back the request info
     wafer
-        .register_func("echo-handler", |_ctx, msg| {
-            let body: serde_json::Value = msg.decode().unwrap_or(serde_json::Value::Null);
-            let req_num = msg.get_meta("request.number").to_string();
-            json_respond(
-                msg,
-                &serde_json::json!({
-                    "echo": {
-                        "path": msg.path(),
-                        "action": msg.action(),
-                        "body": body,
-                        "request_number": req_num,
-                    },
-                    "message": "request passed all middleware checks!"
-                }),
-            )
-        })
+        .register_block("echo-handler", Arc::new(EchoHandlerBlock))
         .expect("register echo-handler");
-
-    // Stats endpoint
     wafer
-        .register_func("stats", |_ctx, msg| {
-            json_respond(
-                msg,
-                &serde_json::json!({
-                    "total_requests": REQUEST_COUNT.load(Ordering::Relaxed),
-                }),
-            )
-        })
+        .register_block("stats", Arc::new(StatsBlock))
         .expect("register stats");
-
-    // 404 fallback
     wafer
-        .register_func("fallback", |_ctx, msg| {
-            msg.set_meta("resp.status", "404");
-            json_respond(
-                msg,
-                &serde_json::json!({
-                    "error": "not found",
-                    "endpoints": [
-                        "POST /api/echo -H 'X-Api-Key: secret123'",
-                        "GET /stats",
-                        "GET /_inspector/ui"
-                    ]
-                }),
-            )
-        })
+        .register_block("fallback", Arc::new(FallbackBlock))
         .expect("register fallback");
 
     tracing::info!("middleware-chain example on http://localhost:8080");

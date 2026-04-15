@@ -59,7 +59,6 @@ mod tests {
         let _e = StreamEvent::Drop;
         let _f = StreamEvent::Continue(Message {
             kind: "forward".into(),
-            data: vec![],
             meta: vec![],
         });
     }

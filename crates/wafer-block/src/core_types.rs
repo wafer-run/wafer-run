@@ -19,23 +19,6 @@ pub struct MetaEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Message {
     pub kind: String,
-    pub data: Vec<u8>,
-    pub meta: Vec<MetaEntry>,
-}
-
-/// The action a block wants the runtime to take after processing a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Action {
-    Continue,
-    Respond,
-    Drop,
-    Error,
-}
-
-/// A response payload returned when a block short-circuits the flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Response {
-    pub data: Vec<u8>,
     pub meta: Vec<MetaEntry>,
 }
 
@@ -81,15 +64,6 @@ impl fmt::Display for WaferError {
     }
 }
 
-/// The result of processing a message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlockResult {
-    pub action: Action,
-    pub response: Option<Response>,
-    pub error: Option<WaferError>,
-    pub message: Option<Message>,
-}
-
 /// How many block instances are created and when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceMode {
@@ -114,21 +88,9 @@ pub struct LifecycleEvent {
     pub data: Vec<u8>,
 }
 
-/// Alias for BlockResult — common in block handler return types.
-pub type Result_ = BlockResult;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_action_serialization() {
-        let json = serde_json::to_string(&Action::Continue).unwrap();
-        assert_eq!(json, "\"Continue\"");
-
-        let action: Action = serde_json::from_str("\"Continue\"").unwrap();
-        assert_eq!(action, Action::Continue);
-    }
 
     #[test]
     fn test_error_code_serialization() {
@@ -146,5 +108,18 @@ mod tests {
 
         let mode: InstanceMode = serde_json::from_str("\"Singleton\"").unwrap();
         assert_eq!(mode, InstanceMode::Singleton);
+    }
+
+    #[test]
+    fn message_has_no_data_field() {
+        let m = Message {
+            kind: "POST".to_string(),
+            meta: vec![MetaEntry {
+                key: "k".into(),
+                value: "v".into(),
+            }],
+        };
+        assert_eq!(m.kind, "POST");
+        assert_eq!(m.meta.len(), 1);
     }
 }

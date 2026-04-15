@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use futures::FutureExt;
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::OutputStream;
 
 use crate::block::Block;
 use crate::config::*;
@@ -15,24 +15,19 @@ use super::Wafer;
 
 impl Wafer {
     /// Run a flow by ID with the given message.
-    pub async fn run(&self, flow_id: &str, msg: &mut Message) -> Result_ {
+    pub async fn run(&self, flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
         let flow = match self.flows.get(flow_id) {
             Some(f) => f,
             None => {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "flow_not_found",
-                        format!("flow not found: {}", flow_id),
-                    )),
-                    response: None,
-                    message: None,
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::NOT_FOUND,
+                    format!("flow not found: {}", flow_id),
+                ));
             }
         };
 
         // Observability: flow start
-        self.hooks.fire_flow_start(flow_id, msg);
+        self.hooks.fire_flow_start(flow_id, &msg);
         let start = Instant::now();
 
         // Set up flow-level timeout via deadline
@@ -56,28 +51,10 @@ impl Wafer {
         });
 
         let result =
-            crate::waferflow::execute_waferflow(flow, msg, self, &cancelled, deadline).await;
-
-        // Check timeout
-        let result = if deadline.is_some()
-            && cancelled.load(Ordering::Relaxed)
-            && result.action != Action::Error
-        {
-            Result_ {
-                action: Action::Error,
-                error: Some(WaferError::new(
-                    "deadline_exceeded",
-                    format!("flow {:?} timed out after {:?}", flow_id, timeout),
-                )),
-                response: None,
-                message: result.message,
-            }
-        } else {
-            result
-        };
+            crate::waferflow::execute_waferflow(flow, msg, input, self, &cancelled, deadline).await;
 
         // Observability: flow end
-        self.hooks.fire_flow_end(flow_id, &result, start.elapsed());
+        self.hooks.fire_flow_end(flow_id, start.elapsed());
 
         result
     }
@@ -94,7 +71,12 @@ impl Wafer {
     /// WASM blocks or untrusted code. Native blocks receive it via `bind()`
     /// during lifecycle, which is acceptable because native blocks are trusted
     /// (they run in the same process).
-    pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
+    pub async fn run_block(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: InputStream,
+    ) -> OutputStream {
         // Resolve alias
         let resolved = self
             .aliases
@@ -109,15 +91,10 @@ impl Wafer {
         {
             Some(b) => b.clone(),
             None => {
-                return Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "block_not_found",
-                        format!("block not found: {}", block_name),
-                    )),
-                    response: None,
-                    message: None,
-                };
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::NOT_FOUND,
+                    format!("block not found: {}", block_name),
+                ));
             }
         };
 
@@ -144,10 +121,9 @@ impl Wafer {
         self.hooks.fire_block_start(&obs_ctx);
         let start = Instant::now();
 
-        let result = run_block_with_recovery(&*block, &ctx, msg).await;
+        let result = block.handle(&ctx, msg, input).await;
 
-        self.hooks
-            .fire_block_end(&obs_ctx, &result, start.elapsed());
+        self.hooks.fire_block_end(&obs_ctx, start.elapsed());
 
         result
     }
@@ -176,15 +152,17 @@ impl Wafer {
 pub async fn run_block_with_recovery(
     block: &dyn Block,
     ctx: &dyn crate::context::Context,
-    msg: &mut Message,
-) -> Result_ {
+    msg: Message,
+    input: InputStream,
+) -> OutputStream {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let result = std::panic::AssertUnwindSafe(block.handle(ctx, msg))
+        use futures::FutureExt;
+        let result = std::panic::AssertUnwindSafe(block.handle(ctx, msg, input))
             .catch_unwind()
             .await;
         match result {
-            Ok(r) => r,
+            Ok(out) => out,
             Err(panic_info) => {
                 let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     s.to_string()
@@ -193,21 +171,16 @@ pub async fn run_block_with_recovery(
                 } else {
                     "unknown panic".to_string()
                 };
-                Result_ {
-                    action: Action::Error,
-                    error: Some(WaferError::new(
-                        "panic",
-                        format!("block panicked: {}", panic_msg),
-                    )),
-                    response: None,
-                    message: Some(msg.clone()),
-                }
+                OutputStream::error(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("block panicked: {}", panic_msg),
+                ))
             }
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     {
-        block.handle(ctx, msg).await
+        block.handle(ctx, msg, input).await
     }
 }

@@ -3,7 +3,27 @@
 //! Run with: cargo run
 //! Test with: curl http://localhost:8080
 
+use std::sync::Arc;
 use wafer_run::*;
+
+struct HelloBlock;
+
+#[async_trait::async_trait]
+impl Block for HelloBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("hello", "0.0.1", "http-handler@v1", "Hello World block")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "message": "Hello, World!",
+            "path": msg.path(),
+        }))
+        .unwrap_or_default();
+        OutputStream::respond(body)
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -23,15 +43,7 @@ async fn main() {
 
     // Register a simple inline block that responds with JSON
     wafer
-        .register_func("hello", |_ctx, msg| {
-            json_respond(
-                msg,
-                &serde_json::json!({
-                    "message": "Hello, World!",
-                    "path": msg.path(),
-                }),
-            )
-        })
+        .register_block("hello", Arc::new(HelloBlock))
         .expect("register hello");
 
     tracing::info!("starting on http://localhost:8080");

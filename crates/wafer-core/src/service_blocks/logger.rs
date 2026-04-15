@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use wafer_block::block::Block;
 use wafer_block::context::Context;
+use wafer_block::streams::input::InputStream;
+use wafer_block::streams::output::OutputStream;
 use wafer_block::types::BlockInfo;
 use wafer_block::BlockRegistry;
 use wafer_block::*;
@@ -32,8 +34,9 @@ impl Block for LoggerBlock {
         .category(BlockCategory::Service)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        handler::handle_message(self.service.as_ref(), msg)
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        let body = input.collect_to_bytes().await;
+        handler::handle_message(self.service.as_ref(), &msg, &body)
     }
 
     async fn lifecycle(

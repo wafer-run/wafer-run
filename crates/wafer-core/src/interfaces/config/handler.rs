@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::helpers::{respond_empty, respond_json};
+use wafer_block::streams::output::OutputStream;
 use wafer_block::*;
 
 use super::service::ConfigService;
@@ -28,18 +28,28 @@ struct GetResponse {
     value: String,
 }
 
+fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
+    match serde_json::to_vec(&val) {
+        Ok(bytes) => OutputStream::respond(bytes),
+        Err(e) => OutputStream::error(WaferError::new(
+            ErrorCode::INTERNAL,
+            format!("serialize response: {e}"),
+        )),
+    }
+}
+
 /// Handle a config message by delegating to the given service.
 ///
 /// Access control is handled by WRAP in `call_block()` before this is called.
-pub fn handle_message(service: &dyn ConfigService, msg: &mut Message) -> Result_ {
+pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::CONFIG_GET => {
-            let key = match msg.decode::<GetRequest>() {
+            let key = match serde_json::from_slice::<GetRequest>(body) {
                 Ok(req) => req.key,
                 Err(_) => {
                     let meta_key = msg.get_meta("key");
                     if meta_key.is_empty() {
-                        return Result_::error(WaferError::new(
+                        return OutputStream::error(WaferError::new(
                             ErrorCode::INVALID_ARGUMENT,
                             "config.get requires a 'key' in data or meta",
                         ));
@@ -49,18 +59,18 @@ pub fn handle_message(service: &dyn ConfigService, msg: &mut Message) -> Result_
             };
 
             match service.get(&key) {
-                Some(val) => respond_json(msg, &GetResponse { value: val }),
-                None => Result_::error(WaferError::new(
+                Some(val) => to_output(&GetResponse { value: val }),
+                None => OutputStream::error(WaferError::new(
                     ErrorCode::NOT_FOUND,
                     format!("config key not found: {key}"),
                 )),
             }
         }
         ServiceOp::CONFIG_SET => {
-            let req: SetRequest = match msg.decode() {
+            let req: SetRequest = match serde_json::from_slice(body) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Result_::error(WaferError::new(
+                    return OutputStream::error(WaferError::new(
                         ErrorCode::INVALID_ARGUMENT,
                         format!("invalid config.set request: {e}"),
                     ))
@@ -68,9 +78,9 @@ pub fn handle_message(service: &dyn ConfigService, msg: &mut Message) -> Result_
             };
 
             service.set(&req.key, &req.value);
-            respond_empty(msg)
+            OutputStream::respond(vec![])
         }
-        other => Result_::error(WaferError::new(
+        other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown config operation: {other}"),
         )),

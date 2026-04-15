@@ -1,14 +1,16 @@
 //! The Context trait — runtime capabilities provided to blocks.
 
+use crate::core_types::Message;
+use crate::streams::input::InputStream;
+use crate::streams::output::OutputStream;
 use crate::types::BlockInfo;
-use crate::{Message, Result_};
 
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// Call another block by name.
-    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
+    async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream;
 
     /// Check if the context has been cancelled.
     fn is_cancelled(&self) -> bool;

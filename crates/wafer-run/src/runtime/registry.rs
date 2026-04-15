@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use crate::block::{Block, FuncBlock};
-use crate::types::*;
+use crate::block::Block;
 
 use super::Wafer;
 
@@ -144,143 +143,6 @@ impl Wafer {
         Ok(())
     }
 
-    /// RegisterBlockFunc registers a synchronous inline handler function as a block.
-    /// The block is also pre-resolved so it is available via `call_block()`.
-    ///
-    /// For handlers that need to perform async work, use `register_block_func_async`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_block_func(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) -> Result<(), String> {
-        use crate::block::BlockInfo;
-        let name = type_name.into();
-        let block: Arc<dyn Block> = Arc::new(FuncBlock {
-            info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
-            handler: Box::new(handler),
-        });
-        self.register_block(name, block)
-    }
-
-    /// RegisterBlockFunc (wasm32 variant — no Send + Sync bounds).
-    #[cfg(target_arch = "wasm32")]
-    pub fn register_block_func(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
-    ) -> Result<(), String> {
-        use crate::block::BlockInfo;
-        let name = type_name.into();
-        let block: Arc<dyn Block> = Arc::new(FuncBlock {
-            info: BlockInfo::new(name.clone(), "0.0.0", "inline", "Inline function block"),
-            handler: Box::new(handler),
-        });
-        self.register_block(name, block)
-    }
-
-    /// RegisterBlockFuncAsync registers an async inline handler function as a block.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_block_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) -> Result<(), String>
-    where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
-            + Send
-            + Sync
-            + 'static,
-        Fut: std::future::Future<Output = Result_> + Send + 'static,
-    {
-        use crate::block::{AsyncFuncBlock, BlockInfo};
-        let name = type_name.into();
-        let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo::new(
-                name.clone(),
-                "0.0.0",
-                "inline-async",
-                "Inline async function block",
-            ),
-            handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
-        });
-        self.register_block(name, block)
-    }
-
-    /// RegisterBlockFuncAsync (wasm32 variant — Sync only, no Send).
-    #[cfg(target_arch = "wasm32")]
-    pub fn register_block_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) -> Result<(), String>
-    where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
-        Fut: std::future::Future<Output = Result_> + 'static,
-    {
-        use crate::block::{AsyncFuncBlock, BlockInfo};
-        let name = type_name.into();
-        let block: Arc<dyn Block> = Arc::new(AsyncFuncBlock {
-            info: BlockInfo::new(
-                name.clone(),
-                "0.0.0",
-                "inline-async",
-                "Inline async function block",
-            ),
-            handler: Box::new(move |ctx, msg| Box::pin(handler(ctx, msg))),
-        });
-        self.register_block(name, block)
-    }
-
-    /// Shorthand for [`register_block_func`](Self::register_block_func).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_func(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + Send + Sync + 'static,
-    ) -> Result<(), String> {
-        self.register_block_func(type_name, handler)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn register_func(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: impl Fn(&dyn crate::context::Context, &mut Message) -> Result_ + 'static,
-    ) -> Result<(), String> {
-        self.register_block_func(type_name, handler)
-    }
-
-    /// Shorthand for [`register_block_func_async`](Self::register_block_func_async).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn register_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) -> Result<(), String>
-    where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut
-            + Send
-            + Sync
-            + 'static,
-        Fut: std::future::Future<Output = Result_> + Send + 'static,
-    {
-        self.register_block_func_async(type_name, handler)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn register_func_async<F, Fut>(
-        &mut self,
-        type_name: impl Into<String>,
-        handler: F,
-    ) -> Result<(), String>
-    where
-        F: for<'a> Fn(&'a dyn crate::context::Context, &'a mut Message) -> Fut + Sync + 'static,
-        Fut: std::future::Future<Output = Result_> + 'static,
-    {
-        self.register_block_func_async(type_name, handler)
-    }
-
     /// Register a WaferFlow definition.
     pub fn add_flow(&mut self, flow: wafer_flow::WaferFlow) {
         self.flows.insert(flow.id.clone(), flow);
@@ -305,7 +167,10 @@ impl Wafer {
 mod tests {
     use crate::Wafer;
     use std::sync::Arc;
+    use wafer_block::streams::input::InputStream;
+    use wafer_block::streams::output::OutputStream;
     use wafer_block::types::BlockInfo;
+    use wafer_block::{Message, WaferError};
 
     struct NoopBlock;
 
@@ -318,15 +183,16 @@ mod tests {
         async fn handle(
             &self,
             _ctx: &dyn wafer_block::context::Context,
-            msg: &mut wafer_block::Message,
-        ) -> wafer_block::Result_ {
-            msg.cont_ref()
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(vec![])
         }
         async fn lifecycle(
             &self,
             _ctx: &dyn wafer_block::context::Context,
             _event: wafer_block::LifecycleEvent,
-        ) -> std::result::Result<(), wafer_block::WaferError> {
+        ) -> std::result::Result<(), WaferError> {
             Ok(())
         }
     }

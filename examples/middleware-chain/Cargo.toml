@@ -11,6 +11,7 @@ wafer-block-security-headers = { path = "../../crates/wafer-block-security-heade
 wafer-block-cors = { path = "../../crates/wafer-block-cors" }
 wafer-block-router = { path = "../../crates/wafer-block-router" }
 
+async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

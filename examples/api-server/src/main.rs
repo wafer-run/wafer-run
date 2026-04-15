@@ -84,11 +84,11 @@ struct NotesHandler;
 #[async_trait::async_trait]
 impl Block for NotesHandler {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("api-handler", "0.0.1", "http.handler", "Notes CRUD API")
+        BlockInfo::new("api-handler", "0.0.1", "http-handler@v1", "Notes CRUD API")
             .instance_mode(InstanceMode::Singleton)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
 
@@ -97,19 +97,26 @@ impl Block for NotesHandler {
             ("retrieve", "/api/notes") => {
                 let opts = db::ListOptions::default();
                 match db::list(ctx, "notes", &opts).await {
-                    Ok(result) => json_respond(
-                        msg,
-                        &serde_json::json!({
+                    Ok(result) => {
+                        let body = serde_json::to_vec(&serde_json::json!({
                             "notes": result.records,
                             "total": result.total_count,
-                        }),
-                    ),
-                    Err(e) => err_internal(msg, &e.to_string()),
+                        }))
+                        .unwrap_or_default();
+                        OutputStream::respond(body)
+                    }
+                    Err(e) => OutputStream::error(WaferError {
+                        code: ErrorCode::Internal,
+                        message: e.to_string(),
+                        meta: vec![],
+                    }),
                 }
             }
             // Create note
             ("create", "/api/notes") => {
-                let body: serde_json::Value = msg.decode().unwrap_or_default();
+                let body_bytes = input.collect_to_bytes().await;
+                let body: serde_json::Value =
+                    serde_json::from_slice(&body_bytes).unwrap_or_default();
                 let mut data = std::collections::HashMap::new();
                 data.insert(
                     "title".to_string(),
@@ -121,19 +128,27 @@ impl Block for NotesHandler {
                 );
 
                 match db::create(ctx, "notes", data).await {
-                    Ok(record) => json_respond(msg, &record),
-                    Err(e) => err_internal(msg, &e.to_string()),
+                    Ok(record) => {
+                        let resp = serde_json::to_vec(&record).unwrap_or_default();
+                        OutputStream::respond(resp)
+                    }
+                    Err(e) => OutputStream::error(WaferError {
+                        code: ErrorCode::Internal,
+                        message: e.to_string(),
+                        meta: vec![],
+                    }),
                 }
             }
             // Fallback
-            _ => json_respond(
-                msg,
-                &serde_json::json!({
+            _ => {
+                let body = serde_json::to_vec(&serde_json::json!({
                     "error": "not found",
                     "path": path,
                     "hint": "try GET /api/notes or POST /api/notes"
-                }),
-            ),
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
         }
     }
 
