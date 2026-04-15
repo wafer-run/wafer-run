@@ -131,6 +131,24 @@ impl OutputStream {
         }
     }
 
+    /// Buffered helper: emits one Chunk (if non-empty) then Complete with the
+    /// given trailing meta. Convenience wrapper around `new_streaming` for
+    /// callers that need to include response headers.
+    pub fn respond_with_meta(bytes: Vec<u8>, meta: Vec<crate::core_types::MetaEntry>) -> Self {
+        let (tx, rx) = mpsc::channel::<StreamEvent>(2);
+        let cancel = CancellationToken::new();
+        tokio::spawn(async move {
+            if !bytes.is_empty() {
+                let _ = tx.send(StreamEvent::Chunk(bytes)).await;
+            }
+            let _ = tx.send(StreamEvent::Complete { meta }).await;
+        });
+        Self {
+            rx: ReceiverStream::new(rx),
+            cancel,
+        }
+    }
+
     /// Buffered helper: emits a single Error terminal event.
     pub fn error(err: WaferError) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(1);

@@ -48,8 +48,9 @@ pub use types::{
     AuthLevel, ErrorCode, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType, Message,
     MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
 };
+pub use wafer_block::streams;
 pub use wafer_block::streams::input::InputStream;
-pub use wafer_block::streams::output::OutputStream;
+pub use wafer_block::streams::output::{OutputSink, OutputStream, TerminalNotResponse};
 
 pub use wasm::capabilities::BlockCapabilities;
 #[cfg(feature = "wasmi")]
