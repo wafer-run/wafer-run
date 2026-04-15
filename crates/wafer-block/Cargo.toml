@@ -23,8 +23,19 @@ wafer-block-macro = { path = "../wafer-block-macro" }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
 
-# Async runtime — not needed for WASM guest builds (wasm32 targets).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tokio-stream = { workspace = true }
+# Async primitives — `tokio` channels, CancellationToken, and ReceiverStream
+# are used on both native and wasm32. We explicitly avoid tokio's `net`/`io`
+# features (which pull in `mio`) so this builds for wasm32.
+#
+# Background tasks driving the producer side of an OutputStream are spawned
+# via `tokio::spawn` on native and `wasm_bindgen_futures::spawn_local` on wasm32
+# (see `streams::output::spawn_producer`).
+tokio = { version = "1", default-features = false, features = ["sync", "rt"] }
+tokio-util = { version = "0.7", default-features = false }
+tokio-stream = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"

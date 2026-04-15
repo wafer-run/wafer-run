@@ -24,67 +24,41 @@ pub use types::{
     MetaAccess, RequestAction, ResourceGrant, ResourceType, UiRoute,
 };
 
-// The following modules are only available on non-WASM targets (they require tokio).
-#[cfg(not(target_arch = "wasm32"))]
+// All modules below are now wasm32-compatible: streams use
+// `spawn_producer` (tokio::spawn on native, spawn_local on wasm32), and other
+// modules either never used tokio or use only wasm32-safe tokio primitives
+// (channels, CancellationToken).
 pub mod block;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod capabilities;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod common;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod compat;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod config;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod context;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod executor;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod hash;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod helpers;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod interfaces;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod router;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod stream;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod streams;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod wrap;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use block::Block;
-#[cfg(not(target_arch = "wasm32"))]
 pub use capabilities::BlockCapabilities;
-#[cfg(not(target_arch = "wasm32"))]
 pub use common::{ServiceName, ServiceOp};
-#[cfg(not(target_arch = "wasm32"))]
 pub use compat::{MaybeSend, MaybeSync};
-#[cfg(not(target_arch = "wasm32"))]
 pub use config::{BlockConfig, DispatchTarget};
-#[cfg(not(target_arch = "wasm32"))]
 pub use context::Context;
-#[cfg(not(target_arch = "wasm32"))]
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
-#[cfg(not(target_arch = "wasm32"))]
 pub use hash::{hex_encode, sha256, sha256_hex};
-#[cfg(not(target_arch = "wasm32"))]
 pub use helpers::*;
-#[cfg(not(target_arch = "wasm32"))]
 pub use registry::BlockRegistry;
-#[cfg(not(target_arch = "wasm32"))]
 pub use router::Router;
-#[cfg(not(target_arch = "wasm32"))]
 pub use stream::StreamEvent;
-#[cfg(not(target_arch = "wasm32"))]
 pub use streams::input::InputStream;
-#[cfg(not(target_arch = "wasm32"))]
 pub use streams::output::{
     BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse,
 };

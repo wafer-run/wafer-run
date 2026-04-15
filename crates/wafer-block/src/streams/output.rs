@@ -8,6 +8,27 @@ use tokio_util::sync::CancellationToken;
 use crate::core_types::{Message, MetaEntry, WaferError};
 use crate::stream::StreamEvent;
 
+/// Spawn a !Send future on whichever runtime is available for the target.
+///
+/// On wasm32 this uses `wasm_bindgen_futures::spawn_local` (single-threaded).
+/// On native targets this uses `tokio::spawn` (multi-threaded). Either way the
+/// background task drives the producer side of an `OutputStream` channel.
+#[cfg(target_arch = "wasm32")]
+fn spawn_producer<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_producer<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
+}
+
 /// Signals that the consumer dropped the stream.
 #[derive(Debug, thiserror::Error)]
 #[error("output sink closed: consumer dropped")]
@@ -121,7 +142,7 @@ impl OutputStream {
     pub fn respond(bytes: Vec<u8>) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(2);
         let cancel = CancellationToken::new();
-        tokio::spawn(async move {
+        spawn_producer(async move {
             let _ = tx.send(StreamEvent::Chunk(bytes)).await;
             let _ = tx.send(StreamEvent::Complete { meta: vec![] }).await;
         });
@@ -137,7 +158,7 @@ impl OutputStream {
     pub fn respond_with_meta(bytes: Vec<u8>, meta: Vec<crate::core_types::MetaEntry>) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(2);
         let cancel = CancellationToken::new();
-        tokio::spawn(async move {
+        spawn_producer(async move {
             if !bytes.is_empty() {
                 let _ = tx.send(StreamEvent::Chunk(bytes)).await;
             }
@@ -153,7 +174,7 @@ impl OutputStream {
     pub fn error(err: WaferError) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(1);
         let cancel = CancellationToken::new();
-        tokio::spawn(async move {
+        spawn_producer(async move {
             let _ = tx.send(StreamEvent::Error(err)).await;
         });
         Self {
@@ -166,7 +187,7 @@ impl OutputStream {
     pub fn drop_request() -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(1);
         let cancel = CancellationToken::new();
-        tokio::spawn(async move {
+        spawn_producer(async move {
             let _ = tx.send(StreamEvent::Drop).await;
         });
         Self {
@@ -179,7 +200,7 @@ impl OutputStream {
     pub fn continue_with(msg: Message) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(1);
         let cancel = CancellationToken::new();
-        tokio::spawn(async move {
+        spawn_producer(async move {
             let _ = tx.send(StreamEvent::Continue(msg)).await;
         });
         Self {

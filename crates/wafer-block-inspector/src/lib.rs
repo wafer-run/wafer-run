@@ -34,35 +34,24 @@ impl InspectorBlock {
 
 /// Build a JSON OutputStream response (bytes already serialized).
 fn json_respond(json: Vec<u8>) -> OutputStream {
-    // Emit content-type as a mid-stream Meta event so the HTTP listener sees it.
-    let (os, sink, _cancel) = OutputStream::new_streaming_with_capacity(3);
-    tokio::spawn(async move {
-        let _ = sink
-            .send_meta(MetaEntry {
-                key: META_RESP_CONTENT_TYPE.to_string(),
-                value: "application/json".to_string(),
-            })
-            .await;
-        let _ = sink.send_chunk(json).await;
-        let _ = sink.complete(vec![]).await;
-    });
-    os
+    OutputStream::respond_with_meta(
+        json,
+        vec![MetaEntry {
+            key: META_RESP_CONTENT_TYPE.to_string(),
+            value: "application/json".to_string(),
+        }],
+    )
 }
 
 /// Build an HTML OutputStream response.
 fn html_respond(html: Vec<u8>) -> OutputStream {
-    let (os, sink, _cancel) = OutputStream::new_streaming_with_capacity(3);
-    tokio::spawn(async move {
-        let _ = sink
-            .send_meta(MetaEntry {
-                key: META_RESP_CONTENT_TYPE.to_string(),
-                value: "text/html; charset=utf-8".to_string(),
-            })
-            .await;
-        let _ = sink.send_chunk(html).await;
-        let _ = sink.complete(vec![]).await;
-    });
-    os
+    OutputStream::respond_with_meta(
+        html,
+        vec![MetaEntry {
+            key: META_RESP_CONTENT_TYPE.to_string(),
+            value: "text/html; charset=utf-8".to_string(),
+        }],
+    )
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

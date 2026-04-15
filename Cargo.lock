@@ -3931,6 +3931,7 @@ dependencies = [
  "tracing",
  "wafer-block-macro",
  "wafer-flow",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -4018,7 +4019,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
- "tokio",
  "tracing",
  "wafer-block",
 ]
