@@ -19,6 +19,8 @@ pub mod interfaces;
 pub mod meta;
 pub mod registry;
 pub mod router;
+pub mod stream;
+pub mod streams;
 pub mod types;
 pub mod wrap;
 
@@ -56,3 +58,9 @@ pub use types::{
 
 /// Alias for BlockResult — common in block handler return types.
 pub use core_types::Result_;
+
+pub use stream::StreamEvent;
+pub use streams::input::InputStream;
+pub use streams::output::{
+    BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse,
+};

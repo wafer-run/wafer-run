@@ -3916,11 +3916,15 @@ name = "wafer-block"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tracing",
  "wafer-block-macro",
  "wafer-flow",
