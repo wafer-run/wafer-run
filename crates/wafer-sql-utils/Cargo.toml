@@ -9,3 +9,6 @@ description = "Shared SQL query builders for WAFER database backends"
 wafer-core = { path = "../wafer-core" }
 sea-query = "0.32"
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

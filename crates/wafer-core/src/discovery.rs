@@ -243,7 +243,7 @@ pub fn generate_agent_card(
             }
         ],
         "capabilities": {
-            "streaming": false,
+            "streaming": true,
             "pushNotifications": false
         },
         "security_schemes": {
@@ -265,8 +265,9 @@ pub fn generate_agent_card(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn test_block() -> BlockInfo {
         BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "A test block")
@@ -463,8 +464,7 @@ mod tests {
             let id = skill["id"].as_str().unwrap();
             assert!(
                 id.starts_with("test/block/"),
-                "skill id '{}' should start with block name 'test/block/'",
-                id
+                "skill id '{id}' should start with block name 'test/block/'"
             );
         }
     }
@@ -475,7 +475,7 @@ mod tests {
         let block = test_block();
         let card = generate_agent_card(&[block], "P", "", "https://x.com");
 
-        assert_eq!(card["capabilities"]["streaming"], false);
+        assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
     }
 }

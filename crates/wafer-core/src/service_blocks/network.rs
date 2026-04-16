@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use wafer_block::block::Block;
-use wafer_block::context::Context;
-use wafer_block::types::BlockInfo;
-use wafer_block::BlockRegistry;
-use wafer_block::*;
+use wafer_block::{
+    block::Block,
+    context::Context,
+    streams::{input::InputStream, output::OutputStream},
+    types::BlockInfo,
+    BlockRegistry, RuntimeError, *,
+};
 
 use crate::interfaces::network::{handler, service::NetworkService};
 
@@ -32,8 +34,9 @@ impl Block for NetworkBlock {
         .category(BlockCategory::Service)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
-        handler::handle_message(self.service.as_ref(), msg).await
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        let body = input.collect_to_bytes().await;
+        handler::handle_message(self.service.as_ref(), &msg, &body).await
     }
 
     async fn lifecycle(
@@ -49,6 +52,6 @@ impl Block for NetworkBlock {
 pub fn register_with(
     w: &mut dyn BlockRegistry,
     service: Arc<dyn NetworkService>,
-) -> Result<(), String> {
+) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/network", Arc::new(NetworkBlock::new(service)))
 }

@@ -1,6 +1,7 @@
+use std::path::Path;
+
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// The manifest.json format for a WAFER block project.
 ///

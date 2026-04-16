@@ -1,5 +1,4 @@
-use crate::ident::sanitize_ident;
-use crate::Backend;
+use crate::{ident::sanitize_ident, Backend};
 
 /// Build query to list all user tables (excludes system tables).
 ///
@@ -20,7 +19,7 @@ pub fn build_list_tables(backend: Backend) -> String {
 ///
 /// Returns (sql, params) with one parameter for the LIKE pattern.
 pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
-    let pattern = format!("{}%", prefix);
+    let pattern = format!("{prefix}%");
     match backend {
         Backend::Sqlite => (
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ORDER BY name"
@@ -47,7 +46,7 @@ pub fn build_table_info(table: &str, backend: Backend) -> (String, Vec<serde_jso
         Backend::Sqlite => {
             let safe = sanitize_ident(table);
             (
-                format!("PRAGMA table_info(\"{}\")", safe),
+                format!("PRAGMA table_info(\"{safe}\")"),
                 vec![],
             )
         }
@@ -62,7 +61,7 @@ pub fn build_table_info(table: &str, backend: Backend) -> (String, Vec<serde_jso
 /// Build query to count rows in a table.
 pub fn build_table_row_count(table: &str, _backend: Backend) -> String {
     let safe = sanitize_ident(table);
-    format!("SELECT COUNT(*) AS cnt FROM \"{}\"", safe)
+    format!("SELECT COUNT(*) AS cnt FROM \"{safe}\"")
 }
 
 #[cfg(test)]

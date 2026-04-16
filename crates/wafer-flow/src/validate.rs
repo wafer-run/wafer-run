@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use crate::error::ValidationError;
-use crate::expr;
-use crate::types::WaferFlow;
+use crate::{error::ValidationError, expr, types::WaferFlow};
 
 /// Validate a parsed WaferFlow definition for semantic correctness.
 pub fn validate(flow: &WaferFlow) -> Result<(), Vec<ValidationError>> {

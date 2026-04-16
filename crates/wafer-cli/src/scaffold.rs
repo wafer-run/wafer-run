@@ -1,7 +1,8 @@
-use crate::detect::Lang;
-use crate::manifest::Manifest;
-use anyhow::{bail, Context};
 use std::path::Path;
+
+use anyhow::{bail, Context};
+
+use crate::{detect::Lang, manifest::Manifest};
 
 /// Create a new block project directory for the given `name` and `lang`.
 ///
@@ -19,7 +20,7 @@ pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     let dir = Path::new(block_name);
 
     if dir.exists() {
-        bail!("Directory {:?} already exists", dir);
+        bail!("Directory {dir:?} already exists");
     }
 
     std::fs::create_dir_all(dir)
@@ -104,8 +105,8 @@ struct {struct_name};
     summary = "A WAFER block"
 )]
 impl {struct_name} {{
-    fn handle(msg: Message) -> BlockResult {{
-        msg.cont()
+    fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {{
+        GuestResult::respond(vec![])
     }}
 }}
 "#,
@@ -171,9 +172,6 @@ func main() {{
 	wafer.Register(&{struct_name}{{}})
 }}
 "#,
-        block_name = block_name,
-        full_name = full_name,
-        struct_name = struct_name,
     );
     write_file(dir, "main.go", &main_go)?;
 
@@ -229,7 +227,7 @@ fn scaffold_typescript(dir: &Path, full_name: &str, block_name: &str) -> anyhow:
 
     // Use struct_name as a comment-only label; the block variable name is camelCase.
     let var_name = {
-        let mut s = struct_name.clone();
+        let mut s = struct_name;
         if let Some(first) = s.get_mut(0..1) {
             first.make_ascii_lowercase();
         }

@@ -8,10 +8,12 @@
 //! - Functions that can fail return NULL on success, or a JSON error string.
 //! - Panics are caught at every FFI boundary.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
+use std::{
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int},
+};
 
-use wafer_run::{Message, Result_, Wafer, WasmiBlock};
+use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -37,8 +39,51 @@ fn to_c_string(s: &str) -> *mut c_char {
 /// Build a JSON error string: `{"error":"<msg>"}`.
 fn error_json(msg: &str) -> *mut c_char {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let json = format!(r#"{{"error":"{}"}}"#, escaped);
+    let json = format!(r#"{{"error":"{escaped}"}}"#);
     to_c_string(&json)
+}
+
+/// Build a JSON result string from a collected OutputStream.
+async fn output_to_json(output: wafer_run::OutputStream) -> String {
+    use wafer_block::streams::output::TerminalNotResponse;
+    match output.collect_buffered().await {
+        Ok(buf) => {
+            // Return body as base64-encoded string for FFI safety, or raw JSON if it parses.
+            // For simplicity, return body as a JSON value alongside meta.
+            let body_str = String::from_utf8(buf.body).unwrap_or_default();
+            let meta_obj: serde_json::Value = buf
+                .meta
+                .iter()
+                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            serde_json::json!({
+                "action": "respond",
+                "body": body_str,
+                "meta": meta_obj,
+            })
+            .to_string()
+        }
+        Err(TerminalNotResponse::Error(err)) => serde_json::json!({
+            "action": "error",
+            "error": {
+                "code": format!("{:?}", err.code),
+                "message": err.message,
+            }
+        })
+        .to_string(),
+        Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
+        Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
+            "action": "continue",
+            "message": serde_json::to_value(&msg).unwrap_or_default(),
+        })
+        .to_string(),
+        Err(TerminalNotResponse::Malformed) => serde_json::json!({
+            "action": "error",
+            "error": { "code": "Internal", "message": "stream ended without terminal event" }
+        })
+        .to_string(),
+    }
 }
 
 /// Safely dereference a `*mut WaferRuntime`.
@@ -101,13 +146,12 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 #[no_mangle]
 pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_mut(w) {
-            Some(r) => r,
-            None => return error_json("null runtime pointer"),
+        let Some(rt) = deref_mut(w) else {
+            return error_json("null runtime pointer");
         };
         match rt.rt.block_on(rt.inner.resolve()) {
             Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e),
+            Err(e) => error_json(&e.to_string()),
         }
     }));
     result.unwrap_or_else(|_| error_json("panic in wafer_resolve"))
@@ -118,13 +162,12 @@ pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_mut(w) {
-            Some(r) => r,
-            None => return error_json("null runtime pointer"),
+        let Some(rt) = deref_mut(w) else {
+            return error_json("null runtime pointer");
         };
         match rt.rt.block_on(rt.inner.start_without_bind()) {
             Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e),
+            Err(e) => error_json(&e.to_string()),
         }
     }));
     result.unwrap_or_else(|_| error_json("panic in wafer_start"))
@@ -155,17 +198,14 @@ pub unsafe extern "C" fn wafer_register(
     path: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_mut(w) {
-            Some(r) => r,
-            None => return error_json("null runtime pointer"),
+        let Some(rt) = deref_mut(w) else {
+            return error_json("null runtime pointer");
         };
-        let name_str = match c_str_to_str(name) {
-            Some(s) => s,
-            None => return error_json("invalid name"),
+        let Some(name_str) = c_str_to_str(name) else {
+            return error_json("invalid name");
         };
-        let path_str = match c_str_to_str(path) {
-            Some(s) => s,
-            None => return error_json("invalid path"),
+        let Some(path_str) = c_str_to_str(path) else {
+            return error_json("invalid path");
         };
 
         if path_str.ends_with(".wasm") {
@@ -176,18 +216,18 @@ pub unsafe extern "C" fn wafer_register(
                         .register_block(name_str, std::sync::Arc::new(block))
                     {
                         Ok(()) => std::ptr::null_mut(),
-                        Err(e) => error_json(&e),
+                        Err(e) => error_json(&e.to_string()),
                     }
                 }
-                Err(e) => error_json(&e),
+                Err(e) => error_json(&e.to_string()),
             }
         } else {
             match std::fs::read_to_string(path_str) {
                 Ok(json) => match rt.inner.add_flow_json(&json) {
                     Ok(()) => std::ptr::null_mut(),
-                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {}", e)),
+                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {e}")),
                 },
-                Err(e) => error_json(&format!("failed to read file: {}", e)),
+                Err(e) => error_json(&format!("failed to read file: {e}")),
             }
         }
     }));
@@ -198,7 +238,7 @@ pub unsafe extern "C" fn wafer_register(
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Run a flow with the given message.
+/// Run a flow with the given message (body-less).
 /// Returns a JSON result string (always non-NULL).
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
@@ -207,67 +247,41 @@ pub unsafe extern "C" fn wafer_run(
     message_json: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_mut(w) {
-            Some(r) => r,
-            None => {
-                return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "null runtime pointer",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"null runtime pointer"}}"#.to_string()),
-                );
-            }
+        let Some(rt) = deref_mut(w) else {
+            return to_c_string(
+                r#"{"action":"error","error":{"code":"Internal","message":"null runtime pointer"}}"#,
+            );
         };
-        let fid = match c_str_to_str(flow_id) {
-            Some(s) => s,
-            None => {
-                return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "invalid flow_id",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid flow_id"}}"#.to_string()),
-                );
-            }
+        let Some(fid) = c_str_to_str(flow_id) else {
+            return to_c_string(
+                r#"{"action":"error","error":{"code":"Internal","message":"invalid flow_id"}}"#,
+            );
         };
-        let msg_str = match c_str_to_str(message_json) {
-            Some(s) => s,
-            None => {
-                return to_c_string(
-                    &serde_json::to_string(&Result_::error(wafer_run::WaferError::new(
-                        "ffi_error",
-                        "invalid message_json",
-                    )))
-                    .unwrap_or_else(|_| r#"{"action":"error","error":{"code":"ffi_error","message":"invalid message_json"}}"#.to_string()),
-                );
-            }
+        let Some(msg_str) = c_str_to_str(message_json) else {
+            return to_c_string(
+                r#"{"action":"error","error":{"code":"Internal","message":"invalid message_json"}}"#,
+            );
         };
 
-        let mut msg: Message = match serde_json::from_str(msg_str) {
+        let msg: Message = match serde_json::from_str(msg_str) {
             Ok(m) => m,
             Err(e) => {
-                let err_result = Result_::error(wafer_run::WaferError::new(
-                    "ffi_error",
-                    format!("invalid Message JSON: {}", e),
-                ));
-                return to_c_string(&serde_json::to_string(&err_result).unwrap_or_else(|_| {
-                    r#"{"action":"error","error":{"code":"ffi_error","message":"json error"}}"#
-                        .to_string()
-                }));
+                let json = format!(
+                    r#"{{"action":"error","error":{{"code":"InvalidArgument","message":"invalid Message JSON: {}"}}}}"#,
+                    e.to_string().replace('"', "\\\"")
+                );
+                return to_c_string(&json);
             }
         };
 
-        let result = rt.rt.block_on(rt.inner.run(fid, &mut msg));
-
-        to_c_string(&serde_json::to_string(&result).unwrap_or_else(|_| {
-            r#"{"action":"error","error":{"code":"ffi_error","message":"failed to serialize result"}}"#
-                .to_string()
-        }))
+        let input = wafer_run::InputStream::empty();
+        let output = rt.rt.block_on(rt.inner.run(fid, msg, input));
+        let json = rt.rt.block_on(output_to_json(output));
+        to_c_string(&json)
     }));
     result.unwrap_or_else(|_| {
         to_c_string(
-            r#"{"action":"error","error":{"code":"ffi_error","message":"panic in wafer_run"}}"#,
+            r#"{"action":"error","error":{"code":"Internal","message":"panic in wafer_run"}}"#,
         )
     })
 }
@@ -280,9 +294,8 @@ pub unsafe extern "C" fn wafer_run(
 #[no_mangle]
 pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_ref(w) {
-            Some(r) => r,
-            None => return to_c_string("[]"),
+        let Some(rt) = deref_ref(w) else {
+            return to_c_string("[]");
         };
         let info = rt.inner.flows_info();
         to_c_string(&serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string()))
@@ -295,13 +308,11 @@ pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const c_char) -> c_int {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match deref_ref(w) {
-            Some(r) => r,
-            None => return 0,
+        let Some(rt) = deref_ref(w) else {
+            return 0;
         };
-        let name = match c_str_to_str(type_name) {
-            Some(s) => s,
-            None => return 0,
+        let Some(name) = c_str_to_str(type_name) else {
+            return 0;
         };
         if rt.inner.has_block(name) {
             1

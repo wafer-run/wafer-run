@@ -5,6 +5,7 @@
 //! GET  /playground/templates/{lang} - get template code per language
 
 use std::sync::Arc;
+
 use wafer_run::*;
 
 pub struct PlaygroundBlock;
@@ -28,7 +29,7 @@ impl Block for PlaygroundBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
 
@@ -36,14 +37,21 @@ impl Block for PlaygroundBlock {
             // Serve playground page
             (_, "/playground") | (_, "/playground/") => {
                 let html = include_str!("../content/playground.html");
-                respond(msg, html.as_bytes().to_vec(), "text/html")
+                OutputStream::respond(html.as_bytes().to_vec())
             }
 
             // --- Proxy: Rust Playground ---
             ("create", "/playground/run/rust") => {
-                let body: serde_json::Value = match msg.decode() {
+                let body_bytes = input.collect_to_bytes().await;
+                let body: serde_json::Value = match serde_json::from_slice(&body_bytes) {
                     Ok(v) => v,
-                    Err(_) => return err_bad_request(msg, "Invalid JSON body"),
+                    Err(_) => {
+                        return OutputStream::error(WaferError {
+                            code: ErrorCode::InvalidArgument,
+                            message: "Invalid JSON body".to_string(),
+                            meta: vec![],
+                        })
+                    }
                 };
 
                 let source = body
@@ -53,7 +61,11 @@ impl Block for PlaygroundBlock {
                     .to_string();
 
                 if source.is_empty() {
-                    return err_bad_request(msg, "No source code provided");
+                    return OutputStream::error(WaferError {
+                        code: ErrorCode::InvalidArgument,
+                        message: "No source code provided".to_string(),
+                        meta: vec![],
+                    });
                 }
 
                 let payload = serde_json::json!({
@@ -66,17 +78,28 @@ impl Block for PlaygroundBlock {
                     "backtrace": false
                 });
 
-                match proxy_post_json("https://play.rust-lang.org/execute", &payload) {
-                    Ok(bytes) => respond(msg, bytes, "application/json"),
-                    Err(e) => error(msg, "unavailable", &format!("Rust Playground error: {}", e)),
+                match proxy_post_json("https://play.rust-lang.org/execute", &payload).await {
+                    Ok(bytes) => OutputStream::respond(bytes),
+                    Err(e) => OutputStream::error(WaferError {
+                        code: ErrorCode::Internal,
+                        message: format!("Rust Playground error: {e}"),
+                        meta: vec![],
+                    }),
                 }
             }
 
             // --- Proxy: Go Playground ---
             ("create", "/playground/run/go") => {
-                let body: serde_json::Value = match msg.decode() {
+                let body_bytes = input.collect_to_bytes().await;
+                let body: serde_json::Value = match serde_json::from_slice(&body_bytes) {
                     Ok(v) => v,
-                    Err(_) => return err_bad_request(msg, "Invalid JSON body"),
+                    Err(_) => {
+                        return OutputStream::error(WaferError {
+                            code: ErrorCode::InvalidArgument,
+                            message: "Invalid JSON body".to_string(),
+                            meta: vec![],
+                        })
+                    }
                 };
 
                 let source = body
@@ -86,35 +109,61 @@ impl Block for PlaygroundBlock {
                     .to_string();
 
                 if source.is_empty() {
-                    return err_bad_request(msg, "No source code provided");
+                    return OutputStream::error(WaferError {
+                        code: ErrorCode::InvalidArgument,
+                        message: "No source code provided".to_string(),
+                        meta: vec![],
+                    });
                 }
 
                 match proxy_post_form(
                     "https://go.dev/_/compile",
                     &[("version", "2"), ("body", &source), ("withVet", "true")],
-                ) {
-                    Ok(bytes) => respond(msg, bytes, "application/json"),
-                    Err(e) => error(msg, "unavailable", &format!("Go Playground error: {}", e)),
+                )
+                .await
+                {
+                    Ok(bytes) => OutputStream::respond(bytes),
+                    Err(e) => OutputStream::error(WaferError {
+                        code: ErrorCode::Internal,
+                        message: format!("Go Playground error: {e}"),
+                        meta: vec![],
+                    }),
                 }
             }
 
             // --- Templates ---
-            ("retrieve", "/playground/templates/rust") => json_respond(
-                msg,
-                &serde_json::json!({ "language": "rust", "template": RUST_TEMPLATE }),
-            ),
+            ("retrieve", "/playground/templates/rust") => {
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "language": "rust",
+                    "template": RUST_TEMPLATE,
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
 
-            ("retrieve", "/playground/templates/go") => json_respond(
-                msg,
-                &serde_json::json!({ "language": "go", "template": GO_TEMPLATE }),
-            ),
+            ("retrieve", "/playground/templates/go") => {
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "language": "go",
+                    "template": GO_TEMPLATE,
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
 
-            ("retrieve", "/playground/templates/javascript") => json_respond(
-                msg,
-                &serde_json::json!({ "language": "javascript", "template": JS_TEMPLATE }),
-            ),
+            ("retrieve", "/playground/templates/javascript") => {
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "language": "javascript",
+                    "template": JS_TEMPLATE,
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
 
-            _ => err_not_found(msg, &format!("Playground endpoint not found: {}", path)),
+            _ => OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("Playground endpoint not found: {path}"),
+                meta: vec![],
+            }),
         }
     }
 
@@ -186,54 +235,38 @@ fn playground_client() -> &'static reqwest::Client {
     })
 }
 
-/// Proxy a JSON POST request using async reqwest, bridged via block_in_place.
-fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, String> {
-    let handle = tokio::runtime::Handle::current();
-    let url = url.to_string();
-    let body = payload.to_string();
-    tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            let client = playground_client();
-            let resp = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            resp.bytes()
-                .await
-                .map(|b| b.to_vec())
-                .map_err(|e| e.to_string())
-        })
-    })
+/// Proxy a JSON POST request using async reqwest.
+async fn proxy_post_json(url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let client = playground_client();
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(payload.to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| e.to_string())
 }
 
-/// Proxy a form-encoded POST request using async reqwest, bridged via block_in_place.
-fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let handle = tokio::runtime::Handle::current();
-    let url = url.to_string();
-    let params: Vec<(String, String)> = params
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            let client = playground_client();
-            let resp = client
-                .post(&url)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            resp.bytes()
-                .await
-                .map(|b| b.to_vec())
-                .map_err(|e| e.to_string())
-        })
-    })
+/// Proxy a form-encoded POST request using async reqwest.
+async fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    let client = playground_client();
+    let params: Vec<(&str, &str)> = params.to_vec();
+    let resp = client
+        .post(url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| e.to_string())
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-site/playground", Arc::new(PlaygroundBlock::new()))
 }

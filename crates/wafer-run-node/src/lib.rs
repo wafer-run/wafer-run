@@ -3,10 +3,10 @@
 //! This calls wafer-run directly (no C FFI hop) for maximum efficiency.
 //! All complex data crosses the boundary as JSON strings.
 
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
 use std::sync::Arc;
 
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
 use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
@@ -40,7 +40,7 @@ impl WaferRuntime {
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {}", e)))?;
+            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {e}")))?;
         Ok(Self {
             inner: Wafer::new(),
             rt,
@@ -55,16 +55,16 @@ impl WaferRuntime {
     pub fn register(&mut self, name: String, path: String) -> Result<()> {
         if path.ends_with(".wasm") {
             let block = WasmiBlock::load(&path)
-                .map_err(|e| Error::from_reason(format!("failed to load WASM block: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("failed to load WASM block: {e}")))?;
             self.inner
                 .register_block(&name, Arc::new(block))
-                .map_err(Error::from_reason)?;
+                .map_err(|e| Error::from_reason(e.to_string()))?;
         } else {
             let json = std::fs::read_to_string(&path)
-                .map_err(|e| Error::from_reason(format!("failed to read file: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("failed to read file: {e}")))?;
             self.inner
                 .add_flow_json(&json)
-                .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {e}")))?;
         }
         Ok(())
     }
@@ -74,7 +74,7 @@ impl WaferRuntime {
     pub fn resolve(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.resolve())
-            .map_err(Error::from_reason)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Start the runtime. Calls resolve() if not already resolved.
@@ -85,7 +85,7 @@ impl WaferRuntime {
     pub fn start(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.start_without_bind())
-            .map_err(Error::from_reason)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Stop the runtime and shut down all block instances.
@@ -94,19 +94,67 @@ impl WaferRuntime {
         self.rt.block_on(self.inner.stop());
     }
 
-    /// Run a flow with the given message.
+    /// Run a flow with the given message (body-less).
     ///
     /// Takes the flow ID and a JSON message string. Returns a JSON result string:
-    /// `{"action":"continue|respond|drop|error","response":{...},"error":{...}}`
+    /// `{"action":"respond|drop|error|continue","body":"...","meta":{...}}`
     #[napi]
     pub fn run(&self, flow_id: String, message_json: String) -> Result<String> {
-        let mut msg: Message = serde_json::from_str(&message_json)
-            .map_err(|e| Error::from_reason(format!("invalid Message JSON: {}", e)))?;
+        let msg: Message = serde_json::from_str(&message_json)
+            .map_err(|e| Error::from_reason(format!("invalid Message JSON: {e}")))?;
 
-        let result = self.rt.block_on(self.inner.run(&flow_id, &mut msg));
+        let input = wafer_run::InputStream::empty();
+        let output = self.rt.block_on(self.inner.run(&flow_id, msg, input));
 
-        serde_json::to_string(&result)
-            .map_err(|e| Error::from_reason(format!("failed to serialize result: {}", e)))
+        // Collect the streaming output to a buffered JSON response.
+        let json = self.rt.block_on(async {
+            match output.collect_buffered().await {
+                Ok(buf) => {
+                    let body_str = String::from_utf8(buf.body).unwrap_or_default();
+                    let meta_obj: serde_json::Value = buf
+                        .meta
+                        .iter()
+                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                    serde_json::json!({
+                        "action": "respond",
+                        "body": body_str,
+                        "meta": meta_obj,
+                    })
+                    .to_string()
+                }
+                Err(wafer_block::streams::output::TerminalNotResponse::Error(err)) => {
+                    serde_json::json!({
+                        "action": "error",
+                        "error": {
+                            "code": format!("{:?}", err.code),
+                            "message": err.message,
+                        }
+                    })
+                    .to_string()
+                }
+                Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
+                    serde_json::json!({ "action": "drop" }).to_string()
+                }
+                Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
+                    serde_json::json!({
+                        "action": "continue",
+                        "message": serde_json::to_value(&msg).unwrap_or_default(),
+                    })
+                    .to_string()
+                }
+                Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => {
+                    serde_json::json!({
+                        "action": "error",
+                        "error": { "code": "Internal", "message": "stream ended without terminal event" }
+                    })
+                    .to_string()
+                }
+            }
+        });
+
+        Ok(json)
     }
 
     /// Get info about all registered flows as a JSON array.
@@ -114,7 +162,7 @@ impl WaferRuntime {
     pub fn flows_info(&self) -> Result<String> {
         let info = self.inner.flows_info();
         serde_json::to_string(&info)
-            .map_err(|e| Error::from_reason(format!("failed to serialize flows info: {}", e)))
+            .map_err(|e| Error::from_reason(format!("failed to serialize flows info: {e}")))
     }
 
     /// Check whether a block type is registered.

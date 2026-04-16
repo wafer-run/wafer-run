@@ -1,5 +1,6 @@
-use anyhow::bail;
 use std::path::Path;
+
+use anyhow::bail;
 
 /// The programming language of a block project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

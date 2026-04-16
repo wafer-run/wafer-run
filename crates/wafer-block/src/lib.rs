@@ -5,54 +5,63 @@
 //! type definitions, and optionally use the `#[wafer_block]` proc macro for
 //! reduced boilerplate.
 
+pub mod core_types;
+pub mod error;
+pub mod meta;
+pub mod types;
+
+// Re-export the proc macro.
+// Re-export core types at crate root.
+pub use core_types::{
+    ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
+};
+pub use meta::*;
+// Re-export runtime-specific types (needed by block authors for BlockInfo etc.)
+pub use types::{
+    ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
+    CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
+    MetaAccess, RequestAction, ResourceGrant, ResourceType, UiRoute,
+};
+pub use wafer_block_macro::wafer_block;
+
+// All modules below are now wasm32-compatible: streams use
+// `spawn_producer` (tokio::spawn on native, spawn_local on wasm32), and other
+// modules either never used tokio or use only wasm32-safe tokio primitives
+// (channels, CancellationToken).
 pub mod block;
 pub mod capabilities;
 pub mod common;
 pub mod compat;
 pub mod config;
 pub mod context;
-pub mod core_types;
 pub mod executor;
 pub mod hash;
 pub mod helpers;
 pub mod interfaces;
-pub mod meta;
 pub mod registry;
 pub mod router;
-pub mod types;
+pub mod spawn;
+pub mod stream;
+pub mod streams;
 pub mod wrap;
 
-// Re-export everything at the crate root for convenience.
-pub use block::{AsyncFuncBlock, Block, FuncBlock};
+pub use block::Block;
 pub use capabilities::BlockCapabilities;
-pub use common::{ErrorCode, ServiceName, ServiceOp};
+pub use common::{ServiceName, ServiceOp};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::Context;
+pub use error::RuntimeError;
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
 pub use hash::{hex_encode, sha256, sha256_hex};
 pub use helpers::*;
-pub use meta::*;
 pub use registry::BlockRegistry;
 pub use router::Router;
-
-// Re-export the proc macro.
-pub use wafer_block_macro::wafer_block;
-
-// Re-export core types at crate root.
-pub use core_types::{
-    Action, BlockResult, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, Response,
-    WaferError,
+pub use spawn::spawn_producer;
+pub use stream::StreamEvent;
+pub use streams::{
+    input::InputStream,
+    output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };
-
-// Re-export runtime-specific types.
-pub use types::{
-    ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
-    CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
-    MetaAccess, RequestAction, ResourceGrant, ResourceType, UiRoute,
-};
-
-/// Alias for BlockResult — common in block handler return types.
-pub use core_types::Result_;

@@ -3,12 +3,12 @@
 
 #[cfg(feature = "wasm")]
 mod tests {
-    use wafer_run::types::{
-        Action, ErrorCode, LifecycleEvent, LifecycleType, Message, MetaEntry, Result_, WaferError,
+    use wafer_block::streams::output::TerminalNotResponse;
+    use wafer_run::{
+        types::{ErrorCode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError},
+        wasm::{capabilities::BlockCapabilities, WasmiBlock},
+        Block, InputStream, OutputStream,
     };
-    use wafer_run::wasm::capabilities::BlockCapabilities;
-    use wafer_run::wasm::WasmiBlock;
-    use wafer_run::Block;
 
     const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");
 
@@ -20,16 +20,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl wafer_run::context::Context for MockContext {
-        async fn call_block(&self, _name: &str, msg: &mut Message) -> Result_ {
-            Result_ {
-                action: Action::Error,
-                response: None,
-                error: Some(WaferError::new(
-                    ErrorCode::Unimplemented,
-                    "mock context: call_block not supported",
-                )),
-                message: Some(msg.clone()),
-            }
+        async fn call_block(
+            &self,
+            _name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::error(WaferError::new(
+                ErrorCode::Unimplemented,
+                "mock context: call_block not supported",
+            ))
         }
 
         fn is_cancelled(&self) -> bool {
@@ -65,28 +65,25 @@ mod tests {
         let block = WasmiBlock::load_from_bytes(ECHO_WASM).expect("echo_block.wasm should load");
 
         let ctx = MockContext;
-        let mut msg = Message {
-            kind: "test.echo".to_string(),
-            data: vec![],
-            meta: vec![MetaEntry {
-                key: "x-test".to_string(),
-                value: "hello".to_string(),
-            }],
-        };
+        let mut msg = Message::new("test.echo");
+        msg.meta.push(MetaEntry {
+            key: "x-test".to_string(),
+            value: "hello".to_string(),
+        });
 
-        let result = block.handle(&ctx, &mut msg).await;
+        let result = block.handle(&ctx, msg, InputStream::empty()).await;
 
         // The echo block always responds.
-        assert_eq!(result.action, Action::Respond, "expected Respond action");
+        let buf = result.collect_buffered().await;
         assert!(
-            result.error.is_none(),
-            "unexpected error: {:?}",
-            result.error
+            buf.is_ok(),
+            "expected Respond (Ok), got error: {:?}",
+            buf.err()
         );
 
-        let response = result.response.expect("expected a response payload");
+        let response = buf.unwrap();
         let body: serde_json::Value =
-            serde_json::from_slice(&response.data).expect("response data should be valid JSON");
+            serde_json::from_slice(&response.body).expect("response body should be valid JSON");
 
         assert_eq!(body["echo"], true, "echo flag should be true");
         assert_eq!(body["kind"], "test.echo", "kind should be echoed");
@@ -110,8 +107,7 @@ mod tests {
         let result: std::result::Result<(), WaferError> = block.lifecycle(&ctx, event).await;
         assert!(
             result.is_ok(),
-            "lifecycle Init should return Ok(()), got: {:?}",
-            result
+            "lifecycle Init should return Ok(()), got: {result:?}"
         );
     }
 
@@ -137,7 +133,7 @@ mod tests {
     fn test_capabilities_returned() {
         // Load with a restricted capability set (no network, no storage).
         let caps = BlockCapabilities::none();
-        let block = WasmiBlock::load_with_capabilities(ECHO_WASM, caps.clone())
+        let block = WasmiBlock::load_with_capabilities(ECHO_WASM, caps)
             .expect("echo_block.wasm should load with restricted capabilities");
 
         let returned = block
@@ -176,25 +172,20 @@ mod tests {
             WasmiBlock::load_from_bytes(&wasm_bytes).expect("fuel-exhaustion module should load");
 
         let ctx = MockContext;
-        let mut msg = Message {
-            kind: "test.fuel".to_string(),
-            data: vec![],
-            meta: vec![],
-        };
+        let msg = Message::new("test.fuel");
 
-        let result = block.handle(&ctx, &mut msg).await;
+        let result = block.handle(&ctx, msg, InputStream::empty()).await;
 
-        assert_eq!(
-            result.action,
-            Action::Error,
-            "infinite loop should produce an error, not succeed"
-        );
-        let err = result.error.expect("should have an error payload");
-        let err_msg = format!("{:?}", err);
-        assert!(
-            err_msg.contains("fuel"),
-            "error should mention fuel exhaustion, got: {err_msg}"
-        );
+        match result.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                assert!(
+                    err_msg.contains("fuel"),
+                    "error should mention fuel exhaustion, got: {err_msg}"
+                );
+            }
+            other => panic!("infinite loop should produce an error, got: {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -230,25 +221,22 @@ mod tests {
             .expect("capability-denial module should load");
 
         let ctx = MockContext;
-        let mut msg = Message {
-            kind: "test.cap".to_string(),
-            data: vec![],
-            meta: vec![],
-        };
+        let msg = Message::new("test.cap");
 
-        let result = block.handle(&ctx, &mut msg).await;
+        let result = block.handle(&ctx, msg, InputStream::empty()).await;
 
-        assert_eq!(
-            result.action,
-            Action::Error,
-            "call_block with no capabilities should produce an error"
-        );
-        let err = result.error.expect("should have an error payload");
-        let err_msg = format!("{:?}", err);
-        assert!(
-            err_msg.contains("denied by block capabilities"),
-            "error should mention capability denial, got: {err_msg}"
-        );
+        match result.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                assert!(
+                    err_msg.contains("denied by block capabilities"),
+                    "error should mention capability denial, got: {err_msg}"
+                );
+            }
+            other => {
+                panic!("call_block with no capabilities should produce an error, got: {other:?}")
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -287,28 +275,22 @@ mod tests {
             WasmiBlock::load_from_bytes(&wasm_bytes).expect("memory-limit module should load");
 
         let ctx = MockContext;
-        let mut msg = Message {
-            kind: "test.mem".to_string(),
-            data: vec![],
-            meta: vec![],
-        };
+        let msg = Message::new("test.mem");
 
-        let result = block.handle(&ctx, &mut msg).await;
+        let result = block.handle(&ctx, msg, InputStream::empty()).await;
 
-        assert_eq!(
-            result.action,
-            Action::Error,
-            "exceeding memory limit should produce an error, not succeed"
-        );
-        let err = result.error.expect("should have an error payload");
-        let err_msg = format!("{:?}", err);
-        // The error should indicate an out-of-bounds memory access (the growth was denied,
-        // so the subsequent store traps).
-        assert!(
-            err_msg.contains("WASM handle error")
-                || err_msg.contains("out of bounds")
-                || err_msg.contains("memory"),
-            "error should indicate memory-related failure, got: {err_msg}"
-        );
+        match result.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                // The error should indicate an out-of-bounds memory access
+                assert!(
+                    err_msg.contains("WASM handle error")
+                        || err_msg.contains("out of bounds")
+                        || err_msg.contains("memory"),
+                    "error should indicate memory-related failure, got: {err_msg}"
+                );
+            }
+            other => panic!("exceeding memory limit should produce an error, got: {other:?}"),
+        }
     }
 }

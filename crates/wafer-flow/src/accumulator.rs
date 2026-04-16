@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::error::ExprError;
-use crate::expr;
+use crate::{error::ExprError, expr};
 
 /// Stores step outputs and resolves `$.` references against stored data.
 #[derive(Debug, Clone)]
@@ -124,8 +123,9 @@ impl Default for Accumulator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn set_and_resolve() {

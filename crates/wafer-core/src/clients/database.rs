@@ -1,17 +1,14 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-
-use wafer_block::common::{ErrorCode, ServiceOp};
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::WaferError;
-
-// Re-export the data types so callers can use `clients::database::Record` etc.
-pub use crate::interfaces::database::service::{
-    Filter, FilterOp, ListOptions, Record, RecordList, SortField,
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    WaferError,
 };
 
+use super::{call_service, decode, dual_api, svc, svc_fn};
 // Re-export schema types for declarative table management.
 pub use crate::interfaces::database::service::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
@@ -19,8 +16,10 @@ pub use crate::interfaces::database::service::{
     default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
     DefaultVal, DefaultValue, Index, Reference, Table,
 };
-
-use super::{call_service, decode, dual_api, svc, svc_fn};
+// Re-export the data types so callers can use `clients::database::Record` etc.
+pub use crate::interfaces::database::service::{
+    Filter, FilterOp, ListOptions, Record, RecordList, SortField,
+};
 
 const BLOCK: &str = "wafer-run/database";
 

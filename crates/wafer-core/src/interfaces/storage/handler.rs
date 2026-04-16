@@ -4,10 +4,11 @@
 //! functions to avoid duplicating the message protocol handling.
 
 use serde::{Deserialize, Serialize};
-
-use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::helpers::{respond_empty, respond_json};
-use wafer_block::*;
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    streams::output::OutputStream,
+    *,
+};
 
 use super::service::{StorageError, StorageService};
 
@@ -79,112 +80,70 @@ fn storage_error_to_wafer(e: StorageError) -> WaferError {
     }
 }
 
+use crate::interfaces::handler_util::{decode_or_err, to_output};
+
 /// Handle a storage message using the given service.
-pub async fn handle_message(service: &dyn StorageService, msg: &mut Message) -> Result_ {
+pub async fn handle_message(
+    service: &dyn StorageService,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::STORAGE_PUT => {
-            let req: PutRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.put request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, PutRequest, "storage.put");
             match service
                 .put(&req.folder, &req.key, &req.data, &req.content_type)
                 .await
             {
-                Ok(()) => respond_empty(msg),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok(()) => OutputStream::respond(vec![]),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_GET => {
-            let req: GetRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.get request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, GetRequest, "storage.get");
             match service.get(&req.folder, &req.key).await {
-                Ok((data, info)) => respond_json(msg, &GetResponse { data, info }),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok((data, info)) => to_output(&GetResponse { data, info }),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_DELETE => {
-            let req: DeleteRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.delete request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, DeleteRequest, "storage.delete");
             match service.delete(&req.folder, &req.key).await {
-                Ok(()) => respond_empty(msg),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok(()) => OutputStream::respond(vec![]),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_LIST => {
-            let req: ListRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.list request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, ListRequest, "storage.list");
             let opts = super::service::ListOptions {
                 prefix: req.prefix,
                 limit: req.limit,
                 offset: req.offset,
             };
             match service.list(&req.folder, &opts).await {
-                Ok(list) => respond_json(msg, &list),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok(list) => to_output(&list),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_CREATE_FOLDER => {
-            let req: CreateFolderRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.create_folder request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, CreateFolderRequest, "storage.create_folder");
             match service.create_folder(&req.name, req.public).await {
-                Ok(()) => respond_empty(msg),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok(()) => OutputStream::respond(vec![]),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_DELETE_FOLDER => {
-            let req: DeleteFolderRequest = match msg.decode() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Result_::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid storage.delete_folder request: {e}"),
-                    ))
-                }
-            };
+            let req = decode_or_err!(body, DeleteFolderRequest, "storage.delete_folder");
             match service.delete_folder(&req.name).await {
-                Ok(()) => respond_empty(msg),
-                Err(e) => Result_::error(storage_error_to_wafer(e)),
+                Ok(()) => OutputStream::respond(vec![]),
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_LIST_FOLDERS => match service.list_folders().await {
-            Ok(folders) => respond_json(msg, &folders),
-            Err(e) => Result_::error(storage_error_to_wafer(e)),
+            Ok(folders) => to_output(&folders),
+            Err(e) => OutputStream::error(storage_error_to_wafer(e)),
         },
-        other => Result_::error(WaferError::new(
+        other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown storage operation: {other}"),
         )),

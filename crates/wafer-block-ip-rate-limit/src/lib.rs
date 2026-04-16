@@ -1,7 +1,10 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use wafer_run::*;
 
 /// RateLimitBlock provides per-IP rate limiting.
@@ -46,10 +49,10 @@ impl Block for RateLimitBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Allow disabling via env var (useful for tests)
         if std::env::var("RATE_LIMIT_IP").ok().as_deref() == Some("0") {
-            return msg.cont_ref();
+            return OutputStream::continue_with(msg);
         }
 
         let max = ctx
@@ -58,7 +61,7 @@ impl Block for RateLimitBlock {
             .unwrap_or(self.max_requests);
 
         if max == 0 {
-            return msg.cont_ref();
+            return OutputStream::continue_with(msg);
         }
 
         let window_secs = ctx
@@ -69,7 +72,11 @@ impl Block for RateLimitBlock {
 
         let client_ip = msg.remote_addr().to_string();
         if client_ip.is_empty() {
-            return err_bad_request(msg, "Client IP could not be determined");
+            return OutputStream::error(WaferError {
+                code: ErrorCode::InvalidArgument,
+                message: "Client IP could not be determined".to_string(),
+                meta: vec![],
+            });
         }
 
         let mut buckets = self.buckets.lock();
@@ -104,19 +111,26 @@ impl Block for RateLimitBlock {
                 .unwrap_or(Duration::ZERO);
             let retry_after = remaining.as_secs().to_string();
 
-            let mut m = msg.clone();
-            m.set_meta("resp.header.Retry-After", retry_after);
-            m.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
-            m.set_meta("resp.header.X-RateLimit-Remaining", "0");
+            let mut err_msg = msg;
+            err_msg.set_meta("resp.header.Retry-After", retry_after);
+            err_msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
+            err_msg.set_meta("resp.header.X-RateLimit-Remaining", "0");
 
-            return error(&m, "resource_exhausted", "Too many requests");
+            // Emit an error with the rate-limit meta attached
+            let err = WaferError {
+                code: ErrorCode::ResourceExhausted,
+                message: "Too many requests".to_string(),
+                meta: err_msg.meta,
+            };
+            return OutputStream::error(err);
         }
 
         let remaining = max - bucket.count;
-        msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
-        msg.set_meta("resp.header.X-RateLimit-Remaining", remaining.to_string());
+        let mut out_msg = msg;
+        out_msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
+        out_msg.set_meta("resp.header.X-RateLimit-Remaining", remaining.to_string());
 
-        msg.cont_ref()
+        OutputStream::continue_with(out_msg)
     }
 
     async fn lifecycle(
@@ -128,6 +142,6 @@ impl Block for RateLimitBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
 }

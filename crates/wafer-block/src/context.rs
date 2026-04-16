@@ -1,14 +1,40 @@
 //! The Context trait — runtime capabilities provided to blocks.
 
-use crate::types::BlockInfo;
-use crate::{Message, Result_};
+use crate::{
+    core_types::{Message, WaferError},
+    streams::{
+        input::InputStream,
+        output::{BufferedResponse, OutputStream},
+    },
+    types::BlockInfo,
+};
 
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// Call another block by name.
-    async fn call_block(&self, block_name: &str, msg: &mut Message) -> Result_;
+    async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream;
+
+    /// Call another block and collect the full buffered response.
+    ///
+    /// Convenience wrapper: builds an `InputStream` from `body`, calls the block,
+    /// and drains the `OutputStream` into a [`BufferedResponse`]. Returns `Err` if
+    /// the stream terminates with anything other than `Complete`.
+    async fn call_block_buffered(
+        &self,
+        block_name: &str,
+        msg: Message,
+        body: &[u8],
+    ) -> Result<BufferedResponse, WaferError> {
+        let input = if body.is_empty() {
+            InputStream::empty()
+        } else {
+            InputStream::from_bytes(body.to_vec())
+        };
+        let output = self.call_block(block_name, msg, input).await;
+        output.collect_buffered().await.map_err(WaferError::from)
+    }
 
     /// Check if the context has been cancelled.
     fn is_cancelled(&self) -> bool;

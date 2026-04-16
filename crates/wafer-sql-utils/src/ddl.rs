@@ -2,8 +2,7 @@ use wafer_core::interfaces::database::service::{
     Column, DataType, DefaultVal, DefaultValue, Index, Table,
 };
 
-use crate::ident::sanitize_ident;
-use crate::Backend;
+use crate::{ident::sanitize_ident, Backend};
 
 /// Quote an identifier for use in DDL (double-quote escaping).
 fn quote_ident(name: &str) -> String {
@@ -66,9 +65,9 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
 
     if col.auto_increment {
         sql = match backend {
-            Backend::Sqlite => format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", qname),
+            Backend::Sqlite => format!("{qname} INTEGER PRIMARY KEY AUTOINCREMENT"),
             Backend::Postgres => {
-                let s = format!("{} SERIAL PRIMARY KEY", qname);
+                let s = format!("{qname} SERIAL PRIMARY KEY");
                 if let Some(ref default) = col.default {
                     return format!("{} DEFAULT {}", s, default_to_sql(default, backend));
                 }
@@ -96,7 +95,7 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
 /// Generate a CREATE TABLE IF NOT EXISTS statement from a schema Table definition.
 pub fn build_create_table(table: &Table, backend: Backend) -> String {
     let qtable = quote_ident(&table.name);
-    let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", qtable);
+    let mut sql = format!("CREATE TABLE IF NOT EXISTS {qtable} (\n");
 
     for (i, col) in table.columns.iter().enumerate() {
         if i > 0 {
@@ -196,8 +195,9 @@ pub fn build_drop_table(table_name: &str, _backend: Backend) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_core::interfaces::database::service::{col_string, pk, timestamps};
+
+    use super::*;
 
     fn test_table() -> Table {
         Table {

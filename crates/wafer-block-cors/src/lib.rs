@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use wafer_block::*;
 
 /// CorsBlock handles CORS preflight and sets CORS headers.
@@ -40,7 +41,7 @@ impl Block for CorsBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let origins = ctx
             .config_get("allowed_origins")
             .map(|s| s.to_string())
@@ -57,35 +58,37 @@ impl Block for CorsBlock {
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.allowed_headers.clone());
 
+        let mut out_msg = msg;
+
         // Set CORS headers on the message meta (bridge will apply them)
-        let origin = msg.header("Origin").to_string();
+        let origin = out_msg.header("Origin").to_string();
         let mut credentials = false;
         if !origin.is_empty() {
             if origins == "*" {
                 // Wildcard: reflect origin but credentials MUST stay false per spec
-                msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
+                out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
             } else if origins.split(',').any(|o| o.trim() == origin) {
                 // Origin explicitly in allowlist: safe to enable credentials
-                msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
+                out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
                 credentials = true;
             }
         } else {
-            msg.set_meta("resp.header.Access-Control-Allow-Origin", &origins);
+            out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origins);
         }
 
-        msg.set_meta("resp.header.Access-Control-Allow-Methods", &methods);
-        msg.set_meta("resp.header.Access-Control-Allow-Headers", &headers);
+        out_msg.set_meta("resp.header.Access-Control-Allow-Methods", &methods);
+        out_msg.set_meta("resp.header.Access-Control-Allow-Headers", &headers);
         if credentials {
-            msg.set_meta("resp.header.Access-Control-Allow-Credentials", "true");
+            out_msg.set_meta("resp.header.Access-Control-Allow-Credentials", "true");
         }
-        msg.set_meta("resp.header.Access-Control-Max-Age", &self.max_age);
+        out_msg.set_meta("resp.header.Access-Control-Max-Age", &self.max_age);
 
-        // Handle OPTIONS preflight
-        if msg.get_meta("http.method") == "OPTIONS" {
-            return msg.drop_msg_ref();
+        // Handle OPTIONS preflight — respond with empty 204
+        if out_msg.get_meta("http.method") == "OPTIONS" {
+            return OutputStream::drop_request();
         }
 
-        msg.cont_ref()
+        OutputStream::continue_with(out_msg)
     }
 
     async fn lifecycle(
@@ -97,6 +100,6 @@ impl Block for CorsBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/cors", Arc::new(CorsBlock::new()))
 }

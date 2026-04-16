@@ -7,8 +7,11 @@
 //! GET  /registry/search?q=term&type=block|flow — search packages
 //! GET  /registry/packages/{org}/{block}        — package details + versions
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+
 use wafer_run::*;
 
 fn github_token() -> Option<String> {
@@ -94,16 +97,17 @@ impl RegistryBlock {
         }
     }
 
-    fn handle_browse(msg: &mut Message) -> Result_ {
+    fn handle_browse(mut msg: Message) -> OutputStream {
         let html = include_str!("../content/registry.html");
         msg.set_meta(
             "resp.header.Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         );
-        respond(msg, html.as_bytes().to_vec(), "text/html")
+        msg.set_meta(META_RESP_CONTENT_TYPE, "text/html");
+        OutputStream::respond(html.as_bytes().to_vec())
     }
 
-    fn handle_search(&self, msg: &mut Message) -> Result_ {
+    fn handle_search(&self, msg: &Message) -> OutputStream {
         let query = msg.query("q").to_string().to_lowercase();
         let type_filter = msg.query("type").to_string();
 
@@ -118,33 +122,39 @@ impl RegistryBlock {
                     return false;
                 }
                 if !type_filter.is_empty() {
-                    let types: Vec<&str> = pkg.package_type.split(',').collect();
-                    return types.contains(&type_filter.as_str());
+                    return pkg
+                        .package_type
+                        .split(',')
+                        .any(|t| t == type_filter.as_str());
                 }
                 true
             })
             .collect();
 
-        json_respond(
-            msg,
-            &serde_json::json!({
-                "packages": filtered,
-                "total": filtered.len(),
-            }),
-        )
+        let body = serde_json::to_vec(&serde_json::json!({
+            "packages": filtered,
+            "total": filtered.len(),
+        }))
+        .unwrap_or_default();
+        OutputStream::respond(body)
     }
 
-    fn handle_get_package(&self, msg: &mut Message, name: &str) -> Result_ {
+    fn handle_get_package(&self, name: &str) -> OutputStream {
         let packages = self.packages.read().unwrap();
         match packages.iter().find(|p| p.name == name) {
-            Some(pkg) => json_respond(
-                msg,
-                &serde_json::json!({
+            Some(pkg) => {
+                let body = serde_json::to_vec(&serde_json::json!({
                     "package": pkg,
                     "versions": pkg.versions,
-                }),
-            ),
-            None => err_not_found(msg, &format!("Package '{}' not found", name)),
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
+            None => OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("Package '{name}' not found"),
+                meta: vec![],
+            }),
         }
     }
 
@@ -153,9 +163,8 @@ impl RegistryBlock {
     // -----------------------------------------------------------------------
 
     async fn load_registry(&self) {
-        let tree = match Self::fetch_registry_tree().await {
-            Some(t) => t,
-            None => return,
+        let Some(tree) = Self::fetch_registry_tree().await else {
+            return;
         };
 
         let mut entries = Vec::new();
@@ -193,8 +202,7 @@ impl RegistryBlock {
 
     async fn fetch_manifest(org: &str, block: &str) -> Option<RegistryManifest> {
         let url = format!(
-            "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
-            org, block
+            "https://raw.githubusercontent.com/wafer-run/registry/main/{org}/{block}/manifest.json"
         );
         let mut req = http_client().get(&url);
         if let Some(token) = github_token() {
@@ -263,7 +271,7 @@ impl RegistryBlock {
             .versions
             .iter()
             .map(|(ver, entry)| VersionInfo {
-                tag_name: format!("v{}", ver),
+                tag_name: format!("v{ver}"),
                 wasm_url: entry.wasm_url.clone(),
                 flow_url: entry.flow_url.clone(),
                 crate_name: entry.crate_name.clone(),
@@ -299,17 +307,21 @@ impl Block for RegistryBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
         match (action.as_str(), path.as_str()) {
             ("retrieve", "/registry") | ("retrieve", "/registry/") => Self::handle_browse(msg),
-            ("retrieve", "/registry/search") => self.handle_search(msg),
+            ("retrieve", "/registry/search") => self.handle_search(&msg),
             ("retrieve", p) if p.starts_with("/registry/packages/") => {
                 let name = &p["/registry/packages/".len()..];
-                self.handle_get_package(msg, name)
+                self.handle_get_package(name)
             }
-            _ => err_not_found(msg, &format!("Registry endpoint not found: {}", path)),
+            _ => OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("Registry endpoint not found: {path}"),
+                meta: vec![],
+            }),
         }
     }
 
@@ -325,6 +337,6 @@ impl Block for RegistryBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-site/registry", Arc::new(RegistryBlock::new()))
 }

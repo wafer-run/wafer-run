@@ -7,9 +7,8 @@
 /// (e.g. `http://user@127.0.0.1/`), percent-encoding (e.g. `%31%32%37`),
 /// or other URL tricks.
 pub fn is_blocked_url(raw: &str) -> bool {
-    let parsed = match url::Url::parse(raw) {
-        Ok(u) => u,
-        Err(_) => return true, // unparseable → block
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return true; // unparseable → block
     };
 
     // Only allow http and https schemes

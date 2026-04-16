@@ -1,13 +1,10 @@
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
+use sqlx::{postgres::PgRow, PgPool, Row};
 use wafer_core::interfaces::database::service::*;
-use wafer_sql_utils::base64::base64_encode;
-use wafer_sql_utils::ddl;
-use wafer_sql_utils::ident::sanitize_ident;
-use wafer_sql_utils::value::sea_values_to_json;
-use wafer_sql_utils::Backend;
+use wafer_sql_utils::{
+    base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
+};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -36,7 +33,7 @@ impl PostgresDatabaseService {
 
     async fn get_async(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
         let table = sanitize_ident(collection);
-        let sql = format!("SELECT * FROM {} WHERE id = $1", table);
+        let sql = format!("SELECT * FROM {table} WHERE id = $1");
         let row: PgRow = sqlx::query(&sql)
             .bind(id)
             .fetch_one(&self.pool)
@@ -148,7 +145,7 @@ impl PostgresDatabaseService {
         self.ensure_table_async(&table, &data).await?;
 
         let columns: Vec<String> = data.keys().cloned().collect();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
+        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
         let values: Vec<&serde_json::Value> = columns.iter().map(|k| &data[k]).collect();
 
         let col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
@@ -232,7 +229,7 @@ impl PostgresDatabaseService {
 
     async fn delete_async(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
         let table = sanitize_ident(collection);
-        let sql = format!("DELETE FROM {} WHERE id = $1", table);
+        let sql = format!("DELETE FROM {table} WHERE id = $1");
         let result = sqlx::query(&sql)
             .bind(id)
             .execute(&self.pool)
@@ -404,7 +401,7 @@ impl PostgresDatabaseService {
             sqlx::query(&sql)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| DatabaseError::Internal(format!("create index: {}", e)))?;
+                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }
 
         // Create indexes for columns with foreign keys
@@ -412,12 +409,12 @@ impl PostgresDatabaseService {
             if col.references.is_some() {
                 let tbl = sanitize_ident(&table.name);
                 let c = sanitize_ident(&col.name);
-                let idx_name = format!("idx_{}_{}", tbl, c);
-                let sql = format!("CREATE INDEX IF NOT EXISTS {} ON {}({})", idx_name, tbl, c);
+                let idx_name = format!("idx_{tbl}_{c}");
+                let sql = format!("CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({c})");
                 sqlx::query(&sql)
                     .execute(&self.pool)
                     .await
-                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {}", e)))?;
+                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
             }
         }
 
@@ -484,8 +481,7 @@ impl PostgresDatabaseService {
     ) -> Result<(), DatabaseError> {
         // Create the base table
         let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())",
-            table
+            "CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())"
         );
         sqlx::query(&create_sql)
             .execute(&self.pool)
@@ -688,8 +684,7 @@ fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
 
 /// Convert a PgRow to a Record, mapping column types to serde_json::Value.
 fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
-    use sqlx::Column as SqlxColumn;
-    use sqlx::TypeInfo;
+    use sqlx::{Column as SqlxColumn, TypeInfo};
 
     let columns = row.columns();
     let mut data = HashMap::new();

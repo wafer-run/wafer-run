@@ -1,14 +1,18 @@
 use std::sync::{Arc, OnceLock};
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{HeaderMap, Method, StatusCode},
+};
 use parking_lot::Mutex;
-
-use wafer_run::block::{Block, BlockCategory, BlockInfo};
-use wafer_run::common::ErrorCode;
-use wafer_run::meta::*;
-use wafer_run::types::*;
+use wafer_run::{
+    block::{Block, BlockCategory, BlockInfo},
+    common::ErrorCode,
+    meta::*,
+    types::*,
+    InputStream, OutputStream,
+};
 
 // ---------------------------------------------------------------------------
 // HTTP <-> Message conversion
@@ -24,16 +28,15 @@ fn http_method_to_action(method: &Method) -> &'static str {
     }
 }
 
-/// Convert an HTTP request into a WAFER Message.
+/// Convert an HTTP request into a WAFER Message (no body — body flows via InputStream).
 pub fn http_to_message(
     method: Method,
     uri_path: &str,
     raw_query: &str,
     headers: &HeaderMap,
     remote_addr: &str,
-    body: Vec<u8>,
 ) -> Message {
-    let mut msg = Message::new(format!("{}:{}", method, uri_path), body);
+    let mut msg = Message::new(format!("{method}:{uri_path}"));
 
     // HTTP-specific meta
     msg.set_meta("http.method", method.to_string());
@@ -80,8 +83,8 @@ pub fn http_to_message(
             let mut parts = pair.splitn(2, '=');
             if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
                 let decoded_val = urlencoding_decode(val);
-                msg.set_meta(format!("http.query.{}", key), decoded_val.clone());
-                msg.set_meta(format!("{}{}", META_REQ_QUERY_PREFIX, key), decoded_val);
+                msg.set_meta(format!("http.query.{key}"), decoded_val.clone());
+                msg.set_meta(format!("{META_REQ_QUERY_PREFIX}{key}"), decoded_val);
             }
         }
     }
@@ -191,116 +194,85 @@ fn get_error_status_code(error: Option<&WaferError>, meta: &[MetaEntry]) -> u16 
     500
 }
 
-/// Convert a WAFER Result to an HTTP response.
-pub fn wafer_result_to_response(result: Result_) -> axum::http::Response<Body> {
-    match result.action {
-        Action::Respond => {
-            let empty_meta: Vec<MetaEntry> = Vec::new();
-            let resp_meta = result
-                .response
-                .as_ref()
-                .map(|r| r.meta.as_slice())
-                .unwrap_or(&empty_meta);
+/// Convert a buffered OutputStream result to an HTTP response.
+/// Buffered approach: collect the entire OutputStream before responding.
+pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
+    use wafer_block::streams::output::TerminalNotResponse;
 
-            let status_code = get_status_code(resp_meta, 200);
+    match output.collect_buffered().await {
+        Ok(buf) => {
+            // Successful body response
+            let status_code = get_status_code(&buf.meta, 200);
             let mut builder = axum::http::Response::builder()
                 .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
 
-            builder = apply_response_meta(builder, resp_meta);
+            builder = apply_response_meta(builder, &buf.meta);
 
-            if let Some(ref msg) = result.message {
-                builder = apply_response_meta(builder, &msg.meta);
-            }
-
-            let has_ct = MetaAccess::contains_key(resp_meta, META_RESP_CONTENT_TYPE)
-                || MetaAccess::contains_key(resp_meta, "Content-Type");
+            // Set default content-type if not set
+            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE)
+                || MetaAccess::contains_key(&buf.meta, "Content-Type");
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
 
-            let body = result.response.map(|r| r.data).unwrap_or_default();
-
-            builder.body(Body::from(body)).unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("internal server error"))
-                    .unwrap()
-            })
+            builder
+                .body(Body::from(buf.body))
+                .unwrap_or_else(|_| internal_error_response())
         }
 
-        Action::Error => {
-            let empty_meta: Vec<MetaEntry> = Vec::new();
-            let err_meta = result
-                .error
-                .as_ref()
-                .map(|e| e.meta.as_slice())
-                .unwrap_or(&empty_meta);
-
-            let status_code = get_error_status_code(result.error.as_ref(), err_meta);
+        Err(TerminalNotResponse::Error(err)) => {
+            let err_meta = &err.meta;
+            let status_code = get_error_status_code(Some(&err), err_meta);
             let mut builder = axum::http::Response::builder().status(
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             );
 
             builder = apply_response_meta(builder, err_meta);
-
-            if let Some(ref msg) = result.message {
-                builder = apply_response_meta(builder, &msg.meta);
-            }
-
             builder = builder.header("Content-Type", "application/json");
 
-            let body = if let Some(ref err) = result.error {
-                serde_json::json!({
-                    "error": err.code,
-                    "message": err.message,
-                })
-                .to_string()
-            } else {
-                "{}".to_string()
-            };
-
-            builder.body(Body::from(body)).unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("internal server error"))
-                    .unwrap()
+            let body = serde_json::json!({
+                "error": err.code,
+                "message": err.message,
             })
+            .to_string();
+
+            builder
+                .body(Body::from(body))
+                .unwrap_or_else(|_| internal_error_response())
         }
 
-        Action::Drop => {
-            let mut builder = axum::http::Response::builder().status(StatusCode::NO_CONTENT);
-
-            if let Some(ref msg) = result.message {
-                builder = apply_response_meta(builder, &msg.meta);
-            }
-
-            builder.body(Body::empty()).unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("internal server error"))
-                    .unwrap()
-            })
+        Err(TerminalNotResponse::Drop) => {
+            // HTTP 204 No Content
+            axum::http::Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .unwrap_or_else(|_| internal_error_response())
         }
 
-        Action::Continue => {
+        Err(TerminalNotResponse::Continue(msg)) => {
+            // Continue means the flow should keep processing, but we're at the
+            // top-level HTTP boundary — treat as an empty 200.
             let mut builder = axum::http::Response::builder().status(StatusCode::OK);
-
-            if let Some(ref msg) = result.message {
-                builder = apply_response_meta(builder, &msg.meta);
-            }
-
+            builder = apply_response_meta(builder, &msg.meta);
             builder = builder.header("Content-Type", "application/json");
 
-            let body = result.message.map(|m| m.data).unwrap_or_default();
+            builder
+                .body(Body::empty())
+                .unwrap_or_else(|_| internal_error_response())
+        }
 
-            builder.body(Body::from(body)).unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("internal server error"))
-                    .unwrap()
-            })
+        Err(TerminalNotResponse::Malformed) => {
+            tracing::error!("wafer-run/http-listener: stream ended without terminal event");
+            internal_error_response()
         }
     }
+}
+
+fn internal_error_response() -> axum::http::Response<Body> {
+    axum::http::Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from("internal server error"))
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -345,8 +317,13 @@ impl Block for HttpListenerBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn wafer_run::context::Context, msg: &mut Message) -> Result_ {
-        msg.cont_ref()
+    async fn handle(
+        &self,
+        _ctx: &dyn wafer_run::context::Context,
+        msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        OutputStream::continue_with(msg)
     }
 
     async fn lifecycle(
@@ -372,13 +349,12 @@ impl Block for HttpListenerBlock {
     }
 
     fn bind(&self, handle: Box<dyn std::any::Any + Send + Sync>) {
-        let handle = match handle.downcast::<wafer_run::runtime::RuntimeHandle>() {
-            Ok(h) => *h,
-            Err(_) => return,
+        let Ok(handle) = handle.downcast::<wafer_run::runtime::RuntimeHandle>() else {
+            return;
         };
-        let target = match self.target.get().cloned() {
-            Some(t) => t,
-            None => return,
+        let handle = *handle;
+        let Some(target) = self.target.get().cloned() else {
+            return;
         };
         let listen = self.listen.get().cloned().unwrap_or_default();
         if listen.is_empty() {
@@ -420,20 +396,20 @@ impl Block for HttpListenerBlock {
                                     .unwrap_or_else(|| "unknown".to_string())
                             });
 
-                        let mut msg = http_to_message(
+                        let msg = http_to_message(
                             parts.method,
                             path,
                             query,
                             &parts.headers,
                             &remote_addr,
-                            body_bytes,
                         );
+                        let input = InputStream::from_bytes(body_bytes);
 
-                        let result = match &target {
-                            DispatchTarget::Flow(fid) => h.run(fid, &mut msg).await,
-                            DispatchTarget::Block(name) => h.run_block(name, &mut msg).await,
+                        let output = match &target {
+                            DispatchTarget::Flow(fid) => h.run(fid, msg, input).await,
+                            DispatchTarget::Block(name) => h.run_block(name, msg, input).await,
                         };
-                        wafer_result_to_response(result)
+                        wafer_output_to_response(output).await
                     }
                 })
             };
@@ -467,7 +443,7 @@ impl Block for HttpListenerBlock {
 // Registration
 // ---------------------------------------------------------------------------
 
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
     w.register_block(
         "wafer-run/http-listener",
         Arc::new(HttpListenerBlock::new()),

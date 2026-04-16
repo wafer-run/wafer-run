@@ -7,10 +7,14 @@ description = "WAFER block: HTTP transport — listens for HTTP requests and con
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
+wafer-block = { path = "../wafer-block" }
 axum = { workspace = true }
 parking_lot = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 hyper = { workspace = true }
+
+[lints]
+workspace = true

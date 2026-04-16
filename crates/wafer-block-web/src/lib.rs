@@ -1,7 +1,10 @@
 mod mime;
 
-use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+};
+
 use wafer_block::*;
 use wafer_core::clients::storage as store;
 
@@ -31,7 +34,7 @@ impl WebBlock {
         }
     }
 
-    async fn serve_file(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> Result_ {
+    async fn serve_file(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> OutputStream {
         let mut req_path = msg.path().to_string();
 
         // Strip prefix
@@ -54,7 +57,11 @@ impl WebBlock {
             .split('/')
             .any(|seg| seg.starts_with('.') && seg.len() > 1 && seg != ".well-known")
         {
-            return err_not_found(msg, "Not found");
+            return OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: "Not found".to_string(),
+                meta: vec![],
+            });
         }
 
         // Storage key: strip leading slash
@@ -65,7 +72,7 @@ impl WebBlock {
         let result = match store::get(ctx, &config.folder, key).await {
             Ok(r) => Ok(r),
             Err(_) if !key.is_empty() && Path::new(key).extension().is_none() => {
-                let html_key = format!("{}.html", key);
+                let html_key = format!("{key}.html");
                 match store::get(ctx, &config.folder, &html_key).await {
                     Ok(r) => Ok(r),
                     Err(_) => {
@@ -90,15 +97,20 @@ impl WebBlock {
 
                 let cc = cache_control(key, &content_type, config);
                 msg.set_meta("resp.header.Cache-Control", &cc);
+                msg.set_meta(META_RESP_CONTENT_TYPE, &content_type);
 
-                respond(msg, data, &content_type)
+                OutputStream::respond(data)
             }
             Err(_) => {
                 // File not found — if SPA mode, serve index
                 if config.spa {
                     return serve_index_spa(ctx, msg, config).await;
                 }
-                err_not_found(msg, "File not found")
+                OutputStream::error(WaferError {
+                    code: ErrorCode::NotFound,
+                    message: "File not found".to_string(),
+                    meta: vec![],
+                })
             }
         }
     }
@@ -191,13 +203,18 @@ fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
     format!("public, max-age={}", config.cache_max_age)
 }
 
-async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> Result_ {
+async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> OutputStream {
     match store::get(ctx, &config.folder, &config.index_file).await {
         Ok((data, _)) => {
             msg.set_meta("resp.header.Cache-Control", "no-cache");
-            respond(msg, data, "text/html; charset=utf-8")
+            msg.set_meta(META_RESP_CONTENT_TYPE, "text/html; charset=utf-8");
+            OutputStream::respond(data)
         }
-        Err(_) => err_not_found(msg, "Index file not found"),
+        Err(_) => OutputStream::error(WaferError {
+            code: ErrorCode::NotFound,
+            message: "Index file not found".to_string(),
+            meta: vec![],
+        }),
     }
 }
 
@@ -216,11 +233,15 @@ impl Block for WebBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Only handle GET requests
-        let action = msg.action();
+        let action = msg.action().to_string();
         if !action.is_empty() && action != "retrieve" {
-            return error(msg, "unimplemented", "Only retrieve action is supported");
+            return OutputStream::error(WaferError {
+                code: ErrorCode::Unimplemented,
+                message: "Only retrieve action is supported".to_string(),
+                meta: vec![],
+            });
         }
 
         let config = self.config.get().cloned().unwrap_or_else(|| WebConfig {
@@ -231,7 +252,10 @@ impl Block for WebBlock {
             cache_max_age: 3600,
             immutable_max_age: 31536000,
         });
-        Self::serve_file(ctx, msg, &config).await
+
+        // Need mutable msg for set_meta calls in serve_file
+        let mut msg = msg;
+        Self::serve_file(ctx, &mut msg, &config).await
     }
 
     async fn lifecycle(
@@ -253,6 +277,6 @@ impl Block for WebBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/web", Arc::new(WebBlock::new()))
 }

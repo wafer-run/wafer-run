@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use thiserror::Error;
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_run::schema::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,

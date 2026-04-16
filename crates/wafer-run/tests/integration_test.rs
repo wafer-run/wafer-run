@@ -1,11 +1,13 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use wafer_block::helpers::MessageExt;
-use wafer_block::types::MetaAccess;
-use wafer_run::types::ErrorCode;
-use wafer_run::*;
+use wafer_block::{streams::output::TerminalNotResponse, types::MetaAccess};
+use wafer_run::{types::ErrorCode, *};
 
 // ---------------------------------------------------------------------------
 // Helper: build a single-step WaferFlow
@@ -13,7 +15,7 @@ use wafer_run::*;
 fn single_step_flow(id: &str, block: &str) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -64,7 +66,7 @@ fn step_with_config(id: &str, block: &str, config: serde_json::Value) -> wafer_f
 fn make_flow(id: &str, steps: Vec<wafer_flow::Step>) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -84,7 +86,7 @@ fn make_flow_with_on_error(
 ) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -102,8 +104,63 @@ fn make_flow_with_on_error(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helper: run a flow and collect to a usable test result
+// ---------------------------------------------------------------------------
+
+/// Enumeration of the possible flow outcomes in tests.
+#[derive(Debug)]
+enum TestResult {
+    /// The flow completed with a body (OutputStream::respond).
+    Respond(Vec<u8>),
+    /// The flow completed with a Continue (all middleware passed through; message not captured).
+    Continue,
+    /// The flow completed with an error.
+    Error(WaferError),
+    /// The flow completed with a drop.
+    Drop,
+}
+
+impl TestResult {
+    fn is_respond(&self) -> bool {
+        matches!(self, Self::Respond(_))
+    }
+    fn is_error(&self) -> bool {
+        matches!(self, Self::Error(_))
+    }
+    fn is_drop(&self) -> bool {
+        matches!(self, Self::Drop)
+    }
+
+    fn body(&self) -> &[u8] {
+        match self {
+            Self::Respond(body) => body,
+            _ => panic!("TestResult is not Respond, was: {self:?}"),
+        }
+    }
+
+    fn error(&self) -> &WaferError {
+        match self {
+            Self::Error(e) => e,
+            _ => panic!("TestResult is not Error, was: {self:?}"),
+        }
+    }
+}
+
+async fn run_flow(w: &Wafer, flow_id: &str, msg: Message, body: Vec<u8>) -> TestResult {
+    let input = InputStream::from_bytes(body);
+    let output = w.run(flow_id, msg, input).await;
+    match output.collect_buffered().await {
+        Ok(buf) => TestResult::Respond(buf.body),
+        Err(TerminalNotResponse::Continue(_)) => TestResult::Continue,
+        Err(TerminalNotResponse::Error(e)) => TestResult::Error(e),
+        Err(TerminalNotResponse::Drop) => TestResult::Drop,
+        Err(TerminalNotResponse::Malformed) => panic!("malformed output stream"),
+    }
+}
+
 // ===========================================================================
-// 1. Basic runtime creation and inline block registration
+// 1. Basic runtime creation and block registration
 // ===========================================================================
 
 #[test]
@@ -112,11 +169,24 @@ fn test_create_runtime() {
     assert!(w.flows_info().is_empty());
 }
 
+struct EchoBlock;
+
+#[async_trait::async_trait]
+impl Block for EchoBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/echo", "0.0.1", "http-handler@v1", "Echo")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        let body = input.collect_to_bytes().await;
+        OutputStream::respond(body) // pass body through
+    }
+}
+
 #[test]
 fn test_register_inline_block() {
     let mut w = Wafer::new();
-    w.register_block_func("test/echo", |_ctx, msg| msg.clone().cont())
-        .unwrap();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
     assert!(w.has_block("test/echo"));
     assert!(!w.has_block("nonexistent"));
 }
@@ -125,67 +195,75 @@ fn test_register_inline_block() {
 // 2. Build and execute a single-block flow
 // ===========================================================================
 
+struct UpperBlock;
+
+#[async_trait::async_trait]
+impl Block for UpperBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/upper", "0.0.1", "http-handler@v1", "Upper")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        let bytes = input.collect_to_bytes().await;
+        let text = String::from_utf8_lossy(&bytes).to_uppercase();
+        OutputStream::respond(text.into_bytes())
+    }
+}
+
 #[tokio::test]
 async fn test_single_block_flow() {
     let mut w = Wafer::new();
-
-    w.register_block_func("test/upper", |_ctx, msg| {
-        let text = String::from_utf8_lossy(&msg.data).to_uppercase();
-        let mut out = msg.clone();
-        out.data = text.into_bytes();
-        out.cont()
-    })
-    .unwrap();
-
+    w.register_block("test/upper", Arc::new(UpperBlock))
+        .unwrap();
     w.add_flow(single_step_flow("to-upper", "test/upper"));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("text", "hello world");
-    let result = w.run("to-upper", &mut msg).await;
-
-    assert_eq!(result.action, Action::Continue);
-    assert_eq!(String::from_utf8_lossy(&msg.data), "HELLO WORLD");
+    let result = run_flow(
+        &w,
+        "to-upper",
+        Message::new("text"),
+        b"hello world".to_vec(),
+    )
+    .await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(String::from_utf8_lossy(result.body()), "HELLO WORLD");
 }
 
 // ===========================================================================
 // 3. Multi-block sequential flow (a -> b -> c) — middleware mode
 // ===========================================================================
 
+struct AppendBlock(String);
+
+#[async_trait::async_trait]
+impl Block for AppendBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/append", "0.0.1", "http-handler@v1", "Append")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        let bytes = input.collect_to_bytes().await;
+        let mut text = String::from_utf8_lossy(&bytes).to_string();
+        text.push_str(&self.0);
+        OutputStream::respond(text.into_bytes())
+    }
+}
+
 #[tokio::test]
 async fn test_sequential_flow() {
     let mut w = Wafer::new();
 
     // Block A: append "-A"
-    w.register_block_func("test/append-a", |_ctx, msg| {
-        let mut out = msg.clone();
-        let mut text = String::from_utf8_lossy(&out.data).to_string();
-        text.push_str("-A");
-        out.data = text.into_bytes();
-        out.cont()
-    })
-    .unwrap();
-
+    w.register_block("test/append-a", Arc::new(AppendBlock("-A".to_string())))
+        .unwrap();
     // Block B: append "-B"
-    w.register_block_func("test/append-b", |_ctx, msg| {
-        let mut out = msg.clone();
-        let mut text = String::from_utf8_lossy(&out.data).to_string();
-        text.push_str("-B");
-        out.data = text.into_bytes();
-        out.cont()
-    })
-    .unwrap();
-
+    w.register_block("test/append-b", Arc::new(AppendBlock("-B".to_string())))
+        .unwrap();
     // Block C: append "-C"
-    w.register_block_func("test/append-c", |_ctx, msg| {
-        let mut out = msg.clone();
-        let mut text = String::from_utf8_lossy(&out.data).to_string();
-        text.push_str("-C");
-        out.data = text.into_bytes();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/append-c", Arc::new(AppendBlock("-C".to_string())))
+        .unwrap();
 
-    // Build flow: A -> B -> C (sequential steps, middleware mode)
+    // Build flow: A -> B -> C (sequential steps)
     w.add_flow(make_flow(
         "abc",
         vec![
@@ -196,11 +274,9 @@ async fn test_sequential_flow() {
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "start");
-    let result = w.run("abc", &mut msg).await;
-
-    assert_eq!(result.action, Action::Continue);
-    assert_eq!(String::from_utf8_lossy(&msg.data), "start-A-B-C");
+    let result = run_flow(&w, "abc", Message::new("test"), b"start".to_vec()).await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(String::from_utf8_lossy(result.body()), "start-A-B-C");
 }
 
 // ===========================================================================
@@ -224,50 +300,64 @@ fn test_pattern_matching_http_style() {
 fn test_router_basic() {
     let mut router = Router::new();
 
-    router.retrieve("/items", |_ctx, msg| {
-        json_respond(msg, &serde_json::json!({"items": []}))
+    router.retrieve("/items", |_ctx, _msg: Message, _input: InputStream| {
+        let body = serde_json::to_vec(&serde_json::json!({"items": []})).unwrap();
+        OutputStream::respond(body)
     });
 
-    router.create("/items", |_ctx, msg| {
-        new_response(msg)
-            .status(201)
-            .json(&serde_json::json!({"id": "new-1"}))
+    router.create("/items", |_ctx, _msg: Message, _input: InputStream| {
+        let body = serde_json::to_vec(&serde_json::json!({"id": "new-1"})).unwrap();
+        OutputStream::respond(body)
     });
 
-    router.retrieve("/items/{id}", |_ctx, msg| {
+    router.retrieve("/items/{id}", |_ctx, msg: Message, _input: InputStream| {
         let id = msg.var("id").to_string();
-        json_respond(msg, &serde_json::json!({"id": id}))
+        let body = serde_json::to_vec(&serde_json::json!({"id": id})).unwrap();
+        OutputStream::respond(body)
     });
 
     // Simulate a GET /items request
     let ctx = make_test_context();
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/items");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["items"], serde_json::json!([]));
 
     // Simulate POST /items
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "create");
     msg.set_meta("req.resource", "/items");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["id"], "new-1");
 
     // Simulate GET /items/42
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/items/42");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["id"], "42");
 }
 
@@ -276,182 +366,134 @@ fn test_router_not_found() {
     let router = Router::new();
     let ctx = make_test_context();
 
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/nonexistent");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Error);
-    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::NotFound);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    match result {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::NotFound),
+        other => panic!("expected error, got {other:?}"),
+    }
 }
 
 #[test]
 fn test_router_update_delete() {
     let mut router = Router::new();
 
-    router.update("/items/{id}", |_ctx, msg| {
+    router.update("/items/{id}", |_ctx, msg: Message, _input: InputStream| {
         let id = msg.var("id").to_string();
-        json_respond(msg, &serde_json::json!({"updated": id}))
+        let body = serde_json::to_vec(&serde_json::json!({"updated": id})).unwrap();
+        OutputStream::respond(body)
     });
 
-    router.delete("/items/{id}", |_ctx, msg| msg.clone().drop_msg());
+    router.delete("/items/{id}", |_ctx, _msg: Message, _input: InputStream| {
+        OutputStream::drop_request()
+    });
 
     let ctx = make_test_context();
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Update
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "update");
     msg.set_meta("req.resource", "/items/99");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Respond);
-    let body: serde_json::Value = serde_json::from_slice(&result.response.unwrap().data).unwrap();
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["updated"], "99");
 
     // Delete
-    let mut msg = Message::new("http.request", "");
+    let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "delete");
     msg.set_meta("req.resource", "/items/99");
 
-    let result = router.route(&ctx, &mut msg);
-    assert_eq!(result.action, Action::Drop);
+    let result = rt.block_on(async {
+        router
+            .route(&ctx, msg, InputStream::empty())
+            .collect_buffered()
+            .await
+    });
+    assert!(matches!(result, Err(TerminalNotResponse::Drop)));
 }
 
 // ===========================================================================
-// 6. Helper functions (respond, error, json_respond, ResponseBuilder)
+// 6. OutputStream helpers
 // ===========================================================================
 
-#[test]
-fn test_respond_helper() {
-    let msg = Message::new("test", "payload");
-    let result = respond(&msg, b"ok".to_vec(), "text/plain");
-
-    assert_eq!(result.action, Action::Respond);
-    let resp = result.response.unwrap();
-    assert_eq!(resp.data, b"ok");
-    assert_eq!(resp.meta.get("resp.content_type").unwrap(), "text/plain");
+#[tokio::test]
+async fn test_respond_helper() {
+    let output = OutputStream::respond(b"ok".to_vec());
+    let buf = output.collect_buffered().await.unwrap();
+    assert_eq!(buf.body, b"ok");
 }
 
-#[test]
-fn test_error_helper() {
-    let msg = Message::new("test", "");
-    let result = error(&msg, "bad_request", "missing field");
-
-    assert_eq!(result.action, Action::Error);
-    let err = result.error.unwrap();
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
-    assert_eq!(err.message, "missing field");
-}
-
-#[test]
-fn test_json_respond_helper() {
-    #[derive(serde::Serialize)]
-    struct Item {
-        id: u32,
-        name: String,
+#[tokio::test]
+async fn test_error_helper() {
+    let output = OutputStream::error(WaferError {
+        code: ErrorCode::InvalidArgument,
+        message: "missing field".to_string(),
+        meta: vec![],
+    });
+    match output.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => {
+            assert_eq!(e.code, ErrorCode::InvalidArgument);
+            assert_eq!(e.message, "missing field");
+        }
+        other => panic!("expected error, got {other:?}"),
     }
-
-    let msg = Message::new("test", "");
-    let item = Item {
-        id: 1,
-        name: "Widget".to_string(),
-    };
-    let result = json_respond(&msg, &item);
-
-    assert_eq!(result.action, Action::Respond);
-    let resp = result.response.unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
-    assert_eq!(parsed["id"], 1);
-    assert_eq!(parsed["name"], "Widget");
-    assert_eq!(
-        resp.meta.get("resp.content_type").unwrap(),
-        "application/json"
-    );
 }
 
-#[test]
-fn test_standard_error_helpers() {
-    let msg = Message::new("test", "");
-    let r = err_bad_request(&msg, "bad");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::InvalidArgument);
-
-    let msg = Message::new("test", "");
-    let r = err_unauthorized(&msg, "no auth");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Unauthenticated);
-
-    let msg = Message::new("test", "");
-    let r = err_forbidden(&msg, "denied");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::PermissionDenied);
-
-    let msg = Message::new("test", "");
-    let r = err_not_found(&msg, "gone");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::NotFound);
-
-    let msg = Message::new("test", "");
-    let r = err_conflict(&msg, "exists");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::AlreadyExists);
-
-    let msg = Message::new("test", "");
-    let r = err_validation(&msg, "invalid");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::InvalidArgument);
-
-    let msg = Message::new("test", "");
-    let r = err_internal(&msg, "oops");
-    assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Internal);
+#[tokio::test]
+async fn test_drop_helper() {
+    let output = OutputStream::drop_request();
+    assert!(matches!(
+        output.collect_buffered().await,
+        Err(TerminalNotResponse::Drop)
+    ));
 }
 
-#[test]
-fn test_response_builder() {
-    let msg = Message::new("test", "");
-
-    let result = new_response(&msg)
-        .set_header("X-Request-Id", "abc-123")
-        .set_cookie("session=xyz; Path=/; HttpOnly")
-        .set_cookie("theme=dark; Path=/")
-        .json(&serde_json::json!({"ok": true}));
-
-    assert_eq!(result.action, Action::Respond);
-    let resp = result.response.unwrap();
-
-    let parsed: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
-    assert_eq!(parsed["ok"], true);
-    assert_eq!(
-        resp.meta.get("resp.content_type").unwrap(),
-        "application/json"
-    );
-    assert_eq!(
-        resp.meta.get("resp.header.X-Request-Id").unwrap(),
-        "abc-123"
-    );
-    assert_eq!(
-        resp.meta.get("resp.set_cookie.0").unwrap(),
-        "session=xyz; Path=/; HttpOnly"
-    );
-    assert_eq!(
-        resp.meta.get("resp.set_cookie.1").unwrap(),
-        "theme=dark; Path=/"
-    );
-}
-
-#[test]
-fn test_response_builder_body() {
-    let msg = Message::new("test", "");
-    let result = new_response(&msg)
-        .status(201)
-        .body(b"raw bytes here".to_vec(), "application/octet-stream");
-
-    assert_eq!(result.action, Action::Respond);
-    let resp = result.response.unwrap();
-    assert_eq!(resp.data, b"raw bytes here");
-    assert_eq!(
-        resp.meta.get("resp.content_type").unwrap(),
-        "application/octet-stream"
-    );
+#[tokio::test]
+async fn test_continue_helper() {
+    let mut msg = Message::new("test");
+    msg.set_meta("key", "value");
+    let output = OutputStream::continue_with(msg.clone());
+    match output.collect_buffered().await {
+        Err(TerminalNotResponse::Continue(m)) => {
+            assert_eq!(m.get_meta("key"), "value");
+        }
+        other => panic!("expected continue, got {other:?}"),
+    }
 }
 
 // ===========================================================================
 // 7. Observability hooks
 // ===========================================================================
+
+struct NoopBlock;
+
+#[async_trait::async_trait]
+impl Block for NoopBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/noop", "0.0.1", "http-handler@v1", "Noop")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        let body = input.collect_to_bytes().await;
+        OutputStream::respond(body)
+    }
+}
 
 #[tokio::test]
 async fn test_observability_flow_hooks() {
@@ -465,26 +507,49 @@ async fn test_observability_flow_hooks() {
     w.hooks.on_flow_start(move |_flow_id, _msg| {
         cs.fetch_add(1, Ordering::SeqCst);
     });
-    w.hooks.on_flow_end(move |_flow_id, _result, _dur| {
+    w.hooks.on_flow_end(move |_flow_id, _dur| {
         ce.fetch_add(1, Ordering::SeqCst);
     });
 
-    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
-        .unwrap();
+    w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
     w.add_flow(single_step_flow("observed", "test/noop"));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "data");
-    w.run("observed", &mut msg).await;
+    run_flow(&w, "observed", Message::new("test"), b"data".to_vec()).await;
 
     assert_eq!(flow_start_count.load(Ordering::SeqCst), 1);
     assert_eq!(flow_end_count.load(Ordering::SeqCst), 1);
 
     // Execute again
-    w.run("observed", &mut msg).await;
+    run_flow(&w, "observed", Message::new("test"), b"data".to_vec()).await;
     assert_eq!(flow_start_count.load(Ordering::SeqCst), 2);
     assert_eq!(flow_end_count.load(Ordering::SeqCst), 2);
+}
+
+struct Step1Block;
+struct Step2Block;
+
+#[async_trait::async_trait]
+impl Block for Step1Block {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/step-1", "0.0.1", "http-handler@v1", "Step 1")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        OutputStream::respond(input.collect_to_bytes().await)
+    }
+}
+
+#[async_trait::async_trait]
+impl Block for Step2Block {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/step-2", "0.0.1", "http-handler@v1", "Step 2")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        OutputStream::respond(input.collect_to_bytes().await)
+    }
 }
 
 #[tokio::test]
@@ -501,13 +566,13 @@ async fn test_observability_block_hooks() {
     let block_durations = Arc::new(parking_lot::Mutex::new(Vec::<Duration>::new()));
     let bd = block_durations.clone();
 
-    w.hooks.on_block_end(move |_ctx, _result, duration| {
+    w.hooks.on_block_end(move |_ctx, duration| {
         bd.lock().push(duration);
     });
 
-    w.register_block_func("test/step-1", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/step-1", Arc::new(Step1Block))
         .unwrap();
-    w.register_block_func("test/step-2", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/step-2", Arc::new(Step2Block))
         .unwrap();
 
     w.add_flow(make_flow(
@@ -516,8 +581,7 @@ async fn test_observability_block_hooks() {
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    w.run("two-steps", &mut msg).await;
+    run_flow(&w, "two-steps", Message::new("test"), vec![]).await;
 
     let names = block_names.lock();
     assert_eq!(names.len(), 2);
@@ -532,95 +596,122 @@ async fn test_observability_block_hooks() {
 // 8. Flow references via next routing with flow field
 // ===========================================================================
 
+struct ValidateBlock;
+struct StoreBlock;
+
+#[async_trait::async_trait]
+impl Block for ValidateBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/validate", "0.0.1", "http-handler@v1", "Validate")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(
+        &self,
+        _ctx: &dyn Context,
+        mut msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        msg.set_meta("validated", "true");
+        OutputStream::continue_with(msg)
+    }
+}
+
+#[async_trait::async_trait]
+impl Block for StoreBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/store", "0.0.1", "http-handler@v1", "Store")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(b"stored".to_vec())
+    }
+}
+
 #[tokio::test]
 async fn test_flow_reference() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/validate", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.set_meta("validated", "true");
-        out.cont()
-    })
-    .unwrap();
-
-    w.register_block_func("test/store", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"stored".to_vec();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/validate", Arc::new(ValidateBlock))
+        .unwrap();
+    w.register_block("test/store", Arc::new(StoreBlock))
+        .unwrap();
 
     // Inner flow: validate
     w.add_flow(single_step_flow("validation-flow", "test/validate"));
 
-    // Outer flow: validate step routes to validation-flow, then store
-    let mut validate_step = step("validate-ref", "test/validate");
-    validate_step.next = Some(vec![wafer_flow::NextEntry {
-        when: None,
-        step: None,
-        flow: Some("validation-flow".to_string()),
-    }]);
-
-    // We register a separate "main-flow" that just has validate + store
-    // Since flow references are done through next.flow, let's test with a simpler approach:
-    // just use two steps
+    // Outer flow: validate then store
     w.add_flow(make_flow(
         "main-flow",
         vec![step("v", "test/validate"), step("s", "test/store")],
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("user.create", "data");
-    let result = w.run("main-flow", &mut msg).await;
-
-    assert_eq!(result.action, Action::Continue);
-    assert_eq!(msg.get_meta("validated"), "true");
-    assert_eq!(String::from_utf8_lossy(&msg.data), "stored");
+    let result = run_flow(
+        &w,
+        "main-flow",
+        Message::new("user.create"),
+        b"data".to_vec(),
+    )
+    .await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(result.body(), b"stored");
 }
 
+struct ShouldNotRunBlock;
+
+#[async_trait::async_trait]
+impl Block for ShouldNotRunBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/should-not-run",
+            "0.0.1",
+            "http-handler@v1",
+            "Should Not Run",
+        )
+        .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(b"this should never appear".to_vec())
+    }
+}
+
+// In the new streaming model, ALL Ok(respond) results continue to the next step.
+// Drop is the only way to stop processing without an error.
 #[tokio::test]
-async fn test_flow_reference_short_circuit() {
+async fn test_drop_short_circuits_flow() {
     let mut w = Wafer::new();
 
-    // The first step responds immediately (short-circuits)
-    w.register_block_func("test/responder", |_ctx, msg| {
-        respond(msg, b"early-response".to_vec(), "text/plain")
-    })
-    .unwrap();
-
-    w.register_block_func("test/should-not-run", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"this should never appear".to_vec();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/dropper-2", Arc::new(DropperBlock))
+        .unwrap();
+    w.register_block("test/should-not-run-2", Arc::new(ShouldNotRunBlock))
+        .unwrap();
 
     w.add_flow(make_flow(
-        "short-circuit",
+        "drop-short-circuit",
         vec![
-            step("r", "test/responder"),
-            step("s", "test/should-not-run"),
+            step("d", "test/dropper-2"),
+            step("s", "test/should-not-run-2"),
         ],
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("short-circuit", &mut msg).await;
-
-    assert_eq!(result.action, Action::Respond);
-    let resp = result.response.unwrap();
-    assert_eq!(resp.data, b"early-response");
+    // Drop in step 1 causes the entire flow to stop with Drop result
+    let result = run_flow(&w, "drop-short-circuit", Message::new("test"), vec![]).await;
+    assert!(
+        result.is_drop(),
+        "expected drop to short-circuit flow, got: {result:?}"
+    );
 }
 
 #[tokio::test]
 async fn test_flow_reference_not_found() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/noop-2", Arc::new(NoopBlock))
         .unwrap();
 
     // Create a flow with next routing to non-existent flow
-    let mut s = step("root", "test/noop");
+    let mut s = step("root", "test/noop-2");
     s.next = Some(vec![wafer_flow::NextEntry {
         when: None,
         step: None,
@@ -630,38 +721,51 @@ async fn test_flow_reference_not_found() {
     w.add_flow(make_flow("bad-ref", vec![s]));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("bad-ref", &mut msg).await;
-
-    assert_eq!(result.action, Action::Error);
-    assert!(result
-        .error
-        .as_ref()
-        .unwrap()
-        .message
-        .contains("does-not-exist"));
+    let result = run_flow(&w, "bad-ref", Message::new("test"), vec![]).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
+    assert!(
+        result.error().message.contains("does-not-exist"),
+        "error: {:?}",
+        result.error().message
+    );
 }
 
 // ===========================================================================
 // 9. Error handling: on_error = stop vs continue
 // ===========================================================================
 
+struct FailBlock;
+struct AfterFailBlock;
+
+#[async_trait::async_trait]
+impl Block for FailBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/fail", "0.0.1", "http-handler@v1", "Fail")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::error(WaferError::new("test_error", "intentional failure"))
+    }
+}
+
+#[async_trait::async_trait]
+impl Block for AfterFailBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/after-fail", "0.0.1", "http-handler@v1", "After Fail")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(b"recovered".to_vec())
+    }
+}
+
 #[tokio::test]
 async fn test_on_error_stop() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/fail", |_ctx, msg| {
-        msg.clone()
-            .err(WaferError::new("test_error", "intentional failure"))
-    })
-    .unwrap();
-
-    w.register_block_func("test/after-fail", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"should-not-run".to_vec();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/fail", Arc::new(FailBlock)).unwrap();
+    w.register_block("test/after-fail", Arc::new(AfterFailBlock))
+        .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "stop-flow",
@@ -670,14 +774,10 @@ async fn test_on_error_stop() {
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("stop-flow", &mut msg).await;
-
-    assert_eq!(result.action, Action::Error);
+    let result = run_flow(&w, "stop-flow", Message::new("test"), vec![]).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
     // "test_error" is not a known ErrorCode variant, maps to Unknown
-    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::Unknown);
-    // "after-fail" should NOT have run
-    assert_ne!(String::from_utf8_lossy(&msg.data), "should-not-run");
+    assert_eq!(result.error().code, ErrorCode::Unknown);
 }
 
 #[tokio::test]
@@ -687,45 +787,76 @@ async fn test_on_error_continue() {
     let fail_count = Arc::new(AtomicUsize::new(0));
     let fc = fail_count.clone();
 
-    w.register_block_func("test/fail", move |_ctx, msg| {
-        fc.fetch_add(1, Ordering::SeqCst);
-        msg.clone()
-            .err(WaferError::new("test_error", "intentional failure"))
-    })
-    .unwrap();
+    struct CountingFailBlock(Arc<AtomicUsize>);
 
-    w.register_block_func("test/after-fail", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"recovered".to_vec();
-        out.cont()
-    })
-    .unwrap();
+    #[async_trait::async_trait]
+    impl Block for CountingFailBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/fail-counting",
+                "0.0.1",
+                "http-handler@v1",
+                "CountingFail",
+            )
+            .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            OutputStream::error(WaferError::new("test_error", "intentional failure"))
+        }
+    }
+
+    w.register_block("test/fail-counting", Arc::new(CountingFailBlock(fc)))
+        .unwrap();
+    w.register_block("test/after-fail-2", Arc::new(AfterFailBlock))
+        .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "cont-flow",
-        vec![step("f", "test/fail"), step("a", "test/after-fail")],
+        vec![
+            step("f", "test/fail-counting"),
+            step("a", "test/after-fail-2"),
+        ],
         "continue",
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("cont-flow", &mut msg).await;
+    let result = run_flow(&w, "cont-flow", Message::new("test"), vec![]).await;
 
     // With on_error=continue, the flow proceeds past the error
     assert_eq!(fail_count.load(Ordering::SeqCst), 1);
-    assert_eq!(result.action, Action::Continue);
-    assert_eq!(String::from_utf8_lossy(&msg.data), "recovered");
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(result.body(), b"recovered");
 }
 
 #[tokio::test]
 async fn test_on_error_continue_no_more_nodes() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/fail-at-end", |_ctx, msg| {
-        msg.clone()
-            .err(WaferError::new("terminal_error", "error at tail"))
-    })
-    .unwrap();
+    struct FailAtEndBlock;
+    #[async_trait::async_trait]
+    impl Block for FailAtEndBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/fail-at-end", "0.0.1", "http-handler@v1", "FailAtEnd")
+                .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::error(WaferError::new("terminal_error", "error at tail"))
+        }
+    }
+
+    w.register_block("test/fail-at-end", Arc::new(FailAtEndBlock))
+        .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "cont-end",
@@ -734,77 +865,49 @@ async fn test_on_error_continue_no_more_nodes() {
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("cont-end", &mut msg).await;
+    let result = run_flow(&w, "cont-end", Message::new("test"), vec![]).await;
 
-    // on_error=continue with no more steps means the flow continues
-    assert_eq!(result.action, Action::Continue);
+    // on_error=continue with no more steps means the flow continues with empty body
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
 }
 
 // ===========================================================================
-// 10. Respond short-circuits the flow
+// 10. Drop action
 // ===========================================================================
 
-#[tokio::test]
-async fn test_respond_short_circuits() {
-    let mut w = Wafer::new();
+struct DropperBlock;
 
-    w.register_block_func("test/early-respond", |_ctx, msg| {
-        respond(msg, b"early".to_vec(), "text/plain")
-    })
-    .unwrap();
-
-    w.register_block_func("test/unreachable", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"unreachable".to_vec();
-        out.cont()
-    })
-    .unwrap();
-
-    w.add_flow(make_flow(
-        "short-circuit",
-        vec![
-            step("r", "test/early-respond"),
-            step("u", "test/unreachable"),
-        ],
-    ));
-    w.resolve().await.expect("resolve failed");
-
-    let mut msg = Message::new("test", "");
-    let result = w.run("short-circuit", &mut msg).await;
-
-    assert_eq!(result.action, Action::Respond);
-    assert_eq!(result.response.unwrap().data, b"early");
+#[async_trait::async_trait]
+impl Block for DropperBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/dropper", "0.0.1", "http-handler@v1", "Dropper")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::drop_request()
+    }
 }
-
-// ===========================================================================
-// 11. Drop action
-// ===========================================================================
 
 #[tokio::test]
 async fn test_drop_action() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/dropper", |_ctx, msg| msg.clone().drop_msg())
+    w.register_block("test/dropper", Arc::new(DropperBlock))
         .unwrap();
-
-    w.register_block_func("test/unreachable", |_ctx, msg| {
-        let mut out = msg.clone();
-        out.data = b"unreachable".to_vec();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/unreachable-after-drop", Arc::new(ShouldNotRunBlock))
+        .unwrap();
 
     w.add_flow(make_flow(
         "drop-flow",
-        vec![step("d", "test/dropper"), step("u", "test/unreachable")],
+        vec![
+            step("d", "test/dropper"),
+            step("u", "test/unreachable-after-drop"),
+        ],
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "data");
-    let result = w.run("drop-flow", &mut msg).await;
-
-    assert_eq!(result.action, Action::Drop);
+    let result = run_flow(&w, "drop-flow", Message::new("test"), b"data".to_vec()).await;
+    assert!(result.is_drop(), "expected drop, got: {result:?}");
 }
 
 // ===========================================================================
@@ -815,30 +918,43 @@ async fn test_drop_action() {
 async fn test_execute_nonexistent_flow() {
     let w = Wafer::new();
 
-    let mut msg = Message::new("test", "data");
-    let result = w.run("nonexistent", &mut msg).await;
-
-    assert_eq!(result.action, Action::Error);
-    // "flow_not_found" is not a known ErrorCode variant, maps to Unknown
-    assert_eq!(result.error.as_ref().unwrap().code, ErrorCode::Unknown);
+    let result = run_flow(&w, "nonexistent", Message::new("test"), b"data".to_vec()).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
+    // "flow not found" maps to NotFound
+    assert_eq!(result.error().code, ErrorCode::NotFound);
 }
 
 // ===========================================================================
 // 13. Block with config
 // ===========================================================================
 
+struct ConfigurableBlock;
+
+#[async_trait::async_trait]
+impl Block for ConfigurableBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/configurable",
+            "0.0.1",
+            "http-handler@v1",
+            "Configurable",
+        )
+        .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        let prefix = ctx.config_get("prefix").unwrap_or("default").to_string();
+        let bytes = input.collect_to_bytes().await;
+        let text = format!("{}-{}", prefix, String::from_utf8_lossy(&bytes));
+        OutputStream::respond(text.into_bytes())
+    }
+}
+
 #[tokio::test]
 async fn test_block_with_config() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/configurable", |ctx, msg| {
-        let prefix = ctx.config_get("prefix").unwrap_or("default");
-        let mut out = msg.clone();
-        let text = format!("{}-{}", prefix, String::from_utf8_lossy(&out.data));
-        out.data = text.into_bytes();
-        out.cont()
-    })
-    .unwrap();
+    w.register_block("test/configurable", Arc::new(ConfigurableBlock))
+        .unwrap();
 
     w.add_flow(make_flow(
         "config-flow",
@@ -850,11 +966,9 @@ async fn test_block_with_config() {
     ));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "world");
-    let result = w.run("config-flow", &mut msg).await;
-
-    assert_eq!(result.action, Action::Continue);
-    assert_eq!(String::from_utf8_lossy(&msg.data), "hello-world");
+    let result = run_flow(&w, "config-flow", Message::new("test"), b"world".to_vec()).await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(String::from_utf8_lossy(result.body()), "hello-world");
 }
 
 // ===========================================================================
@@ -863,7 +977,7 @@ async fn test_block_with_config() {
 
 #[test]
 fn test_message_methods() {
-    let mut msg = Message::new("user.create", r#"{"name":"Alice"}"#);
+    let mut msg = Message::new("user.create");
     msg.set_meta("req.action", "create");
     msg.set_meta("req.resource", "/users");
     msg.set_meta("req.param.id", "42");
@@ -889,7 +1003,6 @@ fn test_message_methods() {
     assert_eq!(msg.cookie("session"), "abc");
     assert_eq!(msg.cookie("theme"), "dark");
     assert_eq!(msg.cookie("nonexistent"), "");
-    assert_eq!(msg.body(), b"{\"name\":\"Alice\"}");
 
     let params = msg.query_params();
     assert_eq!(*params.get("page").unwrap(), "2");
@@ -898,22 +1011,6 @@ fn test_message_methods() {
     assert_eq!(page, 2);
     assert_eq!(page_size, 20);
     assert_eq!(offset, 20);
-
-    // Decode/unmarshal
-    #[derive(serde::Deserialize)]
-    struct User {
-        name: String,
-    }
-    let user: User = msg.decode().unwrap();
-    assert_eq!(user.name, "Alice");
-
-    // SetData
-    #[derive(serde::Serialize)]
-    struct Response {
-        ok: bool,
-    }
-    msg.set_data(&Response { ok: true }).unwrap();
-    assert_eq!(String::from_utf8_lossy(&msg.data), r#"{"ok":true}"#);
 }
 
 // ===========================================================================
@@ -926,8 +1023,8 @@ async fn test_resolve_missing_block() {
 
     w.add_flow(single_step_flow("broken", "unregistered-block"));
 
-    let err = w.resolve().await.unwrap_err();
-    assert!(err.contains("unregistered-block"), "Error: {}", err);
+    let err = w.resolve().await.unwrap_err().to_string();
+    assert!(err.contains("unregistered-block"), "Error: {err}");
 }
 
 // ===========================================================================
@@ -938,7 +1035,7 @@ async fn test_resolve_missing_block() {
 async fn test_add_flow_json() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/echo", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/echo-2", Arc::new(EchoBlock))
         .unwrap();
 
     w.add_flow_json(
@@ -946,41 +1043,51 @@ async fn test_add_flow_json() {
         "id": "from-json",
         "name": "From JSON",
         "version": "0.1.0",
-        "steps": [{ "id": "root", "block": "test/echo" }],
+        "steps": [{ "id": "root", "block": "test/echo-2" }],
         "config": { "on_error": "stop", "timeout": "30s" }
     }"#,
     )
     .expect("add_flow_json failed");
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "hello");
-    let result = w.run("from-json", &mut msg).await;
-    assert_eq!(result.action, Action::Continue);
+    let result = run_flow(&w, "from-json", Message::new("test"), b"hello".to_vec()).await;
+    // EchoBlock passes body through, so responds with "hello"
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(result.body(), b"hello");
 }
 
 // ===========================================================================
 // 17. Panic recovery
 // ===========================================================================
 
+struct PanickerBlock;
+
+#[async_trait::async_trait]
+impl Block for PanickerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/panicker", "0.0.1", "http-handler@v1", "Panicker")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        panic!("block went wrong");
+    }
+}
+
 #[tokio::test]
 async fn test_panic_recovery() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/panicker", |_ctx, _msg| {
-        panic!("block went wrong");
-    })
-    .unwrap();
+    w.register_block("test/panicker", Arc::new(PanickerBlock))
+        .unwrap();
 
     w.add_flow(single_step_flow("panic-flow", "test/panicker"));
     w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("panic-flow", &mut msg).await;
-
-    assert_eq!(result.action, Action::Error);
-    let err = result.error.unwrap();
-    // "panic" is not a known ErrorCode variant, maps to Unknown
-    assert_eq!(err.code, ErrorCode::Unknown);
+    let result = run_flow(&w, "panic-flow", Message::new("test"), vec![]).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
+    let err = result.error();
+    // "panic" maps to Internal (block panicked)
+    assert_eq!(err.code, ErrorCode::Internal);
     assert!(err.message.contains("block went wrong"));
 }
 
@@ -992,11 +1099,11 @@ async fn test_panic_recovery() {
 fn test_flows_info() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/noop", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/noop-3", Arc::new(NoopBlock))
         .unwrap();
 
-    w.add_flow(single_step_flow("flow-a", "test/noop"));
-    w.add_flow(single_step_flow("flow-b", "test/noop"));
+    w.add_flow(single_step_flow("flow-a", "test/noop-3"));
+    w.add_flow(single_step_flow("flow-b", "test/noop-3"));
 
     let info = w.flows_info();
     assert_eq!(info.len(), 2);
@@ -1010,11 +1117,29 @@ fn test_flows_info() {
 // 19. Start / Stop lifecycle
 // ===========================================================================
 
+struct LifecycleBlock;
+
+#[async_trait::async_trait]
+impl Block for LifecycleBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/lifecycle-block",
+            "0.0.1",
+            "http-handler@v1",
+            "Lifecycle block",
+        )
+        .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        OutputStream::respond(input.collect_to_bytes().await)
+    }
+}
+
 #[tokio::test]
 async fn test_start_and_stop() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/lifecycle-block", |_ctx, msg| msg.clone().cont())
+    w.register_block("test/lifecycle-block", Arc::new(LifecycleBlock))
         .unwrap();
 
     w.add_flow(single_step_flow("lifecycle-test", "test/lifecycle-block"));
@@ -1022,9 +1147,8 @@ async fn test_start_and_stop() {
     // Start implicitly resolves if not already resolved
     w.start_without_bind().await.expect("start failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("lifecycle-test", &mut msg).await;
-    assert_eq!(result.action, Action::Continue);
+    let result = run_flow(&w, "lifecycle-test", Message::new("test"), vec![]).await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
 
     // Stop calls lifecycle(Stop) on all resolved blocks
     w.stop().await;
@@ -1054,13 +1178,15 @@ struct TestContext;
 
 #[async_trait::async_trait]
 impl Context for TestContext {
-    async fn call_block(&self, _block_name: &str, _msg: &mut Message) -> Result_ {
-        Result_ {
-            action: Action::Continue,
-            response: None,
-            error: None,
-            message: None,
-        }
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        input: InputStream,
+    ) -> OutputStream {
+        // Simple mock: echo back body
+        let body = input.collect_to_bytes().await;
+        OutputStream::respond(body)
     }
 
     fn is_cancelled(&self) -> bool {
@@ -1217,14 +1343,13 @@ async fn test_resolve_versioned_block_download_error() {
         "acme/nonexistent-block@v1.0.0",
     ));
 
-    let err = w.resolve().await.unwrap_err();
+    let err = w.resolve().await.unwrap_err().to_string();
     assert!(
-        err.contains("block type not found")
+        err.contains("not found")
             || err.contains("failed to download")
             || err.contains("failed to load remote block")
             || err.contains("failed to fetch registry"),
-        "Expected block-not-found or download error, got: {}",
-        err
+        "Expected block-not-found or download error, got: {err}"
     );
 }
 
@@ -1240,15 +1365,14 @@ async fn test_resolve_unversioned_block_download_error() {
         "acme/nonexistent-block",
     ));
 
-    let err = w.resolve().await.unwrap_err();
+    let err = w.resolve().await.unwrap_err().to_string();
     assert!(
-        err.contains("block type not found")
+        err.contains("not found")
             || err.contains("failed to fetch releases")
             || err.contains("failed to download")
             || err.contains("failed to fetch registry")
             || err.contains("HTTP"),
-        "Expected block-not-found or download error, got: {}",
-        err
+        "Expected block-not-found or download error, got: {err}"
     );
 }
 
@@ -1261,28 +1385,56 @@ async fn test_waferflow_simple_pipeline() {
     let mut w = Wafer::new();
 
     // Block that uppercases the "text" field
-    w.register_block_func("test/uppercase", |_ctx, msg| {
-        let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
-        let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let output = serde_json::json!({ "text": text.to_uppercase() });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct UppercaseBlock;
+    #[async_trait::async_trait]
+    impl Block for UppercaseBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/uppercase", "0.0.1", "http-handler@v1", "Uppercase")
+                .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            input: InputStream,
+        ) -> OutputStream {
+            let bytes = input.collect_to_bytes().await;
+            let input_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let text = input_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let output =
+                serde_json::to_vec(&serde_json::json!({ "text": text.to_uppercase() })).unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
     // Block that wraps text in a greeting
-    w.register_block_func("test/greet", |_ctx, msg| {
-        let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
-        let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let output = serde_json::json!({ "greeting": format!("Hello, {}!", text) });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct GreetBlock;
+    #[async_trait::async_trait]
+    impl Block for GreetBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/greet", "0.0.1", "http-handler@v1", "Greet")
+                .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            input: InputStream,
+        ) -> OutputStream {
+            let bytes = input.collect_to_bytes().await;
+            let input_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let text = input_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let output =
+                serde_json::to_vec(&serde_json::json!({ "greeting": format!("Hello, {}!", text) }))
+                    .unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
-    w.resolve().await.expect("resolve failed");
+    w.register_block("test/uppercase", Arc::new(UppercaseBlock))
+        .unwrap();
+    w.register_block("test/greet", Arc::new(GreetBlock))
+        .unwrap();
 
     let flow_json = r#"{
         "id": "greet-flow",
@@ -1303,16 +1455,14 @@ async fn test_waferflow_simple_pipeline() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
+    w.resolve().await.expect("resolve failed");
 
-    // Set up input as msg.data
-    let input = serde_json::json!({ "name": "world" });
-    let mut msg = Message::new("pipeline", "");
-    msg.data = serde_json::to_vec(&input).unwrap();
+    // Set up input as body bytes
+    let input = serde_json::to_vec(&serde_json::json!({ "name": "world" })).unwrap();
+    let result = run_flow(&w, "greet-flow", Message::new("pipeline"), input).await;
 
-    let result = w.run("greet-flow", &mut msg).await;
-    assert_eq!(result.action, Action::Continue);
-
-    let output: serde_json::Value = serde_json::from_slice(&msg.data).unwrap();
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "greeting": "Hello, WORLD!" }));
 }
 
@@ -1320,33 +1470,80 @@ async fn test_waferflow_simple_pipeline() {
 async fn test_waferflow_conditional_routing() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/check-sign", |_ctx, msg| {
-        let input: serde_json::Value = serde_json::from_slice(&msg.data).unwrap_or_default();
-        let n = input.get("n").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let output = serde_json::json!({ "positive": n > 0.0 });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct CheckSignBlock;
+    #[async_trait::async_trait]
+    impl Block for CheckSignBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/check-sign", "0.0.1", "http-handler@v1", "CheckSign")
+                .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            input: InputStream,
+        ) -> OutputStream {
+            let bytes = input.collect_to_bytes().await;
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let n = val.get("n").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let output = serde_json::to_vec(&serde_json::json!({ "positive": n > 0.0 })).unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
-    w.register_block_func("test/format-positive", |_ctx, msg| {
-        let output = serde_json::json!({ "result": "positive" });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct FormatPositiveBlock;
+    #[async_trait::async_trait]
+    impl Block for FormatPositiveBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/format-positive",
+                "0.0.1",
+                "http-handler@v1",
+                "FormatPositive",
+            )
+            .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let output = serde_json::to_vec(&serde_json::json!({ "result": "positive" })).unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
-    w.register_block_func("test/format-negative", |_ctx, msg| {
-        let output = serde_json::json!({ "result": "non-positive" });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct FormatNegativeBlock;
+    #[async_trait::async_trait]
+    impl Block for FormatNegativeBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "test/format-negative",
+                "0.0.1",
+                "http-handler@v1",
+                "FormatNegative",
+            )
+            .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let output =
+                serde_json::to_vec(&serde_json::json!({ "result": "non-positive" })).unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
-    w.resolve().await.expect("resolve failed");
+    w.register_block("test/check-sign", Arc::new(CheckSignBlock))
+        .unwrap();
+    w.register_block("test/format-positive", Arc::new(FormatPositiveBlock))
+        .unwrap();
+    w.register_block("test/format-negative", Arc::new(FormatNegativeBlock))
+        .unwrap();
 
     let flow_json = r#"{
         "id": "sign-check",
@@ -1376,21 +1573,26 @@ async fn test_waferflow_conditional_routing() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
+    w.resolve().await.expect("resolve failed");
 
     // Test positive
-    let mut msg = Message::new("pipeline", "");
-    msg.data = serde_json::to_vec(&serde_json::json!({ "number": 42 })).unwrap();
-    let result = w.run("sign-check", &mut msg).await;
-    assert_eq!(result.action, Action::Continue);
-    let output: serde_json::Value = serde_json::from_slice(&msg.data).unwrap();
+    let input = serde_json::to_vec(&serde_json::json!({ "number": 42 })).unwrap();
+    let result = run_flow(&w, "sign-check", Message::new("pipeline"), input).await;
+    assert!(
+        result.is_respond(),
+        "expected respond (positive), got: {result:?}"
+    );
+    let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "result": "positive" }));
 
     // Test negative
-    let mut msg = Message::new("pipeline", "");
-    msg.data = serde_json::to_vec(&serde_json::json!({ "number": -5 })).unwrap();
-    let result = w.run("sign-check", &mut msg).await;
-    assert_eq!(result.action, Action::Continue);
-    let output: serde_json::Value = serde_json::from_slice(&msg.data).unwrap();
+    let input = serde_json::to_vec(&serde_json::json!({ "number": -5 })).unwrap();
+    let result = run_flow(&w, "sign-check", Message::new("pipeline"), input).await;
+    assert!(
+        result.is_respond(),
+        "expected respond (negative), got: {result:?}"
+    );
+    let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "result": "non-positive" }));
 }
 
@@ -1411,22 +1613,33 @@ async fn test_waferflow_validation_errors() {
     }"#,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("duplicate"));
+    assert!(result.unwrap_err().to_string().contains("duplicate"));
 }
 
 #[tokio::test]
 async fn test_waferflow_max_steps_limit() {
     let mut w = Wafer::new();
 
-    w.register_block_func("test/loop-block", |_ctx, msg| {
-        let output = serde_json::json!({ "ok": true });
-        let mut out = msg.clone();
-        out.data = serde_json::to_vec(&output).unwrap();
-        out.cont()
-    })
-    .unwrap();
+    struct LoopBlock;
+    #[async_trait::async_trait]
+    impl Block for LoopBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/loop-block", "0.0.1", "http-handler@v1", "LoopBlock")
+                .instance_mode(InstanceMode::Singleton)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let output = serde_json::to_vec(&serde_json::json!({ "ok": true })).unwrap();
+            OutputStream::respond(output)
+        }
+    }
 
-    w.resolve().await.expect("resolve failed");
+    w.register_block("test/loop-block", Arc::new(LoopBlock))
+        .unwrap();
 
     let flow_json = r#"{
         "id": "infinite",
@@ -1444,18 +1657,25 @@ async fn test_waferflow_max_steps_limit() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
+    w.resolve().await.expect("resolve failed");
 
-    let mut msg = Message::new("test", "");
-    let result = w.run("infinite", &mut msg).await;
-    assert_eq!(result.action, Action::Error);
-    assert!(result.error.as_ref().unwrap().message.contains("max steps"));
+    let result = run_flow(&w, "infinite", Message::new("test"), vec![]).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
+    assert!(
+        result.error().message.contains("max steps"),
+        "error: {:?}",
+        result.error().message
+    );
 }
 
 #[tokio::test]
 async fn test_waferflow_not_found() {
     let w = Wafer::new();
-    let mut msg = Message::new("test", "");
-    let result = w.run("nonexistent", &mut msg).await;
-    assert_eq!(result.action, Action::Error);
-    assert!(result.error.as_ref().unwrap().message.contains("not found"));
+    let result = run_flow(&w, "nonexistent", Message::new("test"), vec![]).await;
+    assert!(result.is_error(), "expected error, got: {result:?}");
+    assert!(
+        result.error().message.contains("not found"),
+        "error: {:?}",
+        result.error().message
+    );
 }

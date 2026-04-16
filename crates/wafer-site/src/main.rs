@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use wafer_run::*;
 
 mod playground;
@@ -126,14 +128,25 @@ async fn main() {
     w.shutdown().await;
 }
 
-fn register_api_block(w: &mut Wafer) -> Result<(), String> {
-    w.register_block_func("wafer-site/api", |_ctx, msg| {
-        let path = msg.path();
-        match path {
-            "/api/health" => json_respond(msg, &serde_json::json!({ "status": "ok" })),
-            "/api/blocks" => json_respond(
-                msg,
-                &serde_json::json!({
+struct ApiBlock;
+
+#[async_trait::async_trait]
+impl Block for ApiBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("wafer-site/api", "0.0.1", "http-handler@v1", "Site API")
+            .instance_mode(InstanceMode::Singleton)
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let path = msg.path().to_string();
+        match path.as_str() {
+            "/api/health" => {
+                let body =
+                    serde_json::to_vec(&serde_json::json!({ "status": "ok" })).unwrap_or_default();
+                OutputStream::respond(body)
+            }
+            "/api/blocks" => {
+                let body = serde_json::to_vec(&serde_json::json!({
                     "blocks": [
                         {"name": "wafer-run/http-listener", "version": "0.1.0"},
                         {"name": "wafer-run/router", "version": "0.1.0"},
@@ -146,9 +159,27 @@ fn register_api_block(w: &mut Wafer) -> Result<(), String> {
                         {"name": "wafer-run/iam-guard", "version": "0.1.0"},
                         {"name": "wafer-run/web", "version": "0.2.0"}
                     ]
-                }),
-            ),
-            _ => err_not_found(msg, &format!("API endpoint not found: {}", path)),
+                }))
+                .unwrap_or_default();
+                OutputStream::respond(body)
+            }
+            _ => OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("API endpoint not found: {path}"),
+                meta: vec![],
+            }),
         }
-    })
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> std::result::Result<(), WaferError> {
+        Ok(())
+    }
+}
+
+fn register_api_block(w: &mut Wafer) -> Result<(), RuntimeError> {
+    w.register_block("wafer-site/api", Arc::new(ApiBlock))
 }

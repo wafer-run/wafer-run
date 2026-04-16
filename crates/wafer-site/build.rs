@@ -1,7 +1,8 @@
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")
@@ -25,7 +26,7 @@ fn main() {
         dist_dir.join("images"),
     ] {
         if let Err(e) = fs::create_dir_all(&dir) {
-            eprintln!("cargo:warning=failed to create directory {:?}: {}", dir, e);
+            eprintln!("cargo:warning=failed to create directory {dir:?}: {e}");
             return;
         }
     }
@@ -67,7 +68,7 @@ fn main() {
         let raw = match fs::read_to_string(&page_path) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("cargo:warning=failed to read {:?}: {}", page_path, e);
+                eprintln!("cargo:warning=failed to read {page_path:?}: {e}");
                 continue;
             }
         };
@@ -79,7 +80,7 @@ fn main() {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(e) = fs::write(&out_path, &assembled) {
-                eprintln!("cargo:warning=failed to write {:?}: {}", out_path, e);
+                eprintln!("cargo:warning=failed to write {out_path:?}: {e}");
             }
 
             // Write to dist/ (for web block serving)
@@ -88,7 +89,7 @@ fn main() {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(e) = fs::write(&dist_path, &assembled) {
-                eprintln!("cargo:warning=failed to write {:?}: {}", dist_path, e);
+                eprintln!("cargo:warning=failed to write {dist_path:?}: {e}");
             }
         }
     }
@@ -143,9 +144,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     if !src.exists() {
         return;
     }
-    let entries = match fs::read_dir(src) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(src) else {
+        return;
     };
     for entry in entries.flatten() {
         let src_path = entry.path();
@@ -280,7 +280,7 @@ fn assemble_doc_page(
         "waferflow-examples",
     ];
     for item in &sidebar_items {
-        let placeholder = format!("{{{{ACTIVE_{}}}}}", item);
+        let placeholder = format!("{{{{ACTIVE_{item}}}}}");
         let replacement = if *item == active {
             " class=\"active\""
         } else {

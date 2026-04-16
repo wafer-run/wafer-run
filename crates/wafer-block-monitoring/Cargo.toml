@@ -10,3 +10,6 @@ wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

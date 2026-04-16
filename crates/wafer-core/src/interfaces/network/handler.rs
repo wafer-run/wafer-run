@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-
-use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::helpers::respond_json;
-use wafer_block::*;
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    streams::output::OutputStream,
+    *,
+};
 
 use super::service::{NetworkError, NetworkService, Request};
 
@@ -40,18 +41,24 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
     }
 }
 
+use crate::interfaces::handler_util::to_output;
+
 /// Handle a network message by delegating to the given service.
 ///
 /// SSRF protection is NOT included here — it is platform-specific.
 /// Native callers should check `wafer_run::security::is_blocked_url` before
 /// calling the service. CF Workers are sandboxed by the runtime.
-pub async fn handle_message(service: &dyn NetworkService, msg: &mut Message) -> Result_ {
+pub async fn handle_message(
+    service: &dyn NetworkService,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::NETWORK_DO_REQUEST => {
-            let req: DoRequest = match msg.decode() {
+            let req: DoRequest = match serde_json::from_slice(body) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Result_::error(WaferError::new(
+                    return OutputStream::error(WaferError::new(
                         ErrorCode::INVALID_ARGUMENT,
                         format!("invalid network.do request: {e}"),
                     ))
@@ -66,18 +73,15 @@ pub async fn handle_message(service: &dyn NetworkService, msg: &mut Message) -> 
             };
 
             match service.do_request(&request).await {
-                Ok(resp) => respond_json(
-                    msg,
-                    &DoResponse {
-                        status_code: resp.status_code,
-                        headers: resp.headers,
-                        body: resp.body,
-                    },
-                ),
-                Err(e) => Result_::error(network_error_to_wafer(e)),
+                Ok(resp) => to_output(&DoResponse {
+                    status_code: resp.status_code,
+                    headers: resp.headers,
+                    body: resp.body,
+                }),
+                Err(e) => OutputStream::error(network_error_to_wafer(e)),
             }
         }
-        other => Result_::error(WaferError::new(
+        other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown network operation: {other}"),
         )),

@@ -7,9 +7,8 @@ pub mod service;
 
 use std::sync::{Arc, OnceLock};
 
-use wafer_block::*;
-
 use service::S3StorageService;
+use wafer_block::*;
 use wafer_core::interfaces::storage::service::StorageService;
 
 /// The S3-compatible storage block.
@@ -47,12 +46,14 @@ impl Block for S3StorageBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let service = self
             .service
             .get()
             .expect("wafer-run/s3: not initialized — call lifecycle(Init) first");
-        wafer_core::interfaces::storage::handler::handle_message(service.as_ref(), msg).await
+        let body = input.collect_to_bytes().await;
+        wafer_core::interfaces::storage::handler::handle_message(service.as_ref(), &msg, &body)
+            .await
     }
 
     async fn lifecycle(
@@ -81,7 +82,7 @@ impl Block for S3StorageBlock {
             } else {
                 S3StorageService::with_endpoint(&bucket, &prefix, &endpoint, &region).await
             }
-            .map_err(|e| WaferError::new("init", format!("wafer-run/s3: {}", e)))?;
+            .map_err(|e| WaferError::new("init", format!("wafer-run/s3: {e}")))?;
 
             tracing::info!(bucket = %bucket, "S3 storage service initialized");
             self.service.set(Arc::new(svc)).ok();
@@ -91,6 +92,6 @@ impl Block for S3StorageBlock {
 }
 
 /// Register the S3 storage block with the given block registry.
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/s3", Arc::new(S3StorageBlock::new()))
 }

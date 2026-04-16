@@ -10,3 +10,6 @@ wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core" }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+
+[lints]
+workspace = true

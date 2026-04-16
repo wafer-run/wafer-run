@@ -2,9 +2,11 @@
 //!
 //! Priority: runtime overrides > env vars > TOML file values > defaults.
 
-use super::service::ConfigService;
-use parking_lot::RwLock;
 use std::collections::HashMap;
+
+use parking_lot::RwLock;
+
+use super::service::ConfigService;
 
 /// Maps environment variable names to their TOML equivalents.
 const ENV_ALIASES: &[(&str, &str)] = &[

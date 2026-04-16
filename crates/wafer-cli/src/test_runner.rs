@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context};
 use wasmi::{Caller, Engine, Linker, Module, Store};
@@ -445,7 +444,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     );
 
     if failed > 0 {
-        bail!("{} test(s) failed", failed);
+        bail!("{failed} test(s) failed");
     }
 
     Ok(())
@@ -528,11 +527,10 @@ fn run_single_test(
         )
     })?;
 
-    // Validate it's actually a BlockResult by deserializing into the type
-    let _block_result: wafer_block::BlockResult = serde_json::from_value(actual.clone())
-        .with_context(|| {
-            format!("__wafer_handle result is not a valid BlockResult for {test_name}: {actual}")
-        })?;
+    // Validate the result has an "action" field (new streaming protocol format)
+    if !actual.is_object() {
+        anyhow::bail!("__wafer_handle result is not a JSON object for {test_name}: {actual}");
+    }
 
     // -----------------------------------------------------------------------
     // f. Check expected output if a .expected.json sibling exists

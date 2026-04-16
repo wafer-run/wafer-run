@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use wafer_block::*;
 
 /// ReadonlyGuardBlock blocks write operations when in read-only mode.
@@ -32,25 +33,27 @@ impl Block for ReadonlyGuardBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let readonly = ctx
             .config_get("readonly")
             .map(|s| s == "true" || s == "1")
             .unwrap_or(self.enabled);
 
         if !readonly {
-            return msg.cont_ref();
+            return OutputStream::continue_with(msg);
         }
 
-        let action = msg.action();
+        let action = msg.action().to_string();
         if action == "create" || action == "update" || action == "delete" {
-            return err_forbidden(
-                msg,
-                "This instance is in read-only mode. Write operations are not allowed.",
-            );
+            return OutputStream::error(WaferError {
+                code: ErrorCode::PermissionDenied,
+                message: "This instance is in read-only mode. Write operations are not allowed."
+                    .to_string(),
+                meta: vec![],
+            });
         }
 
-        msg.cont_ref()
+        OutputStream::continue_with(msg)
     }
 
     async fn lifecycle(
@@ -62,7 +65,7 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block(
         "wafer-run/readonly-guard",
         Arc::new(ReadonlyGuardBlock::new()),

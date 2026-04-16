@@ -1,9 +1,7 @@
 use sea_query::{Asterisk, Cond, Expr, Order, Query, SelectStatement, SimpleExpr};
 use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
 
-use crate::ident::DynCol;
-use crate::value::json_to_sea_value;
-use crate::Backend;
+use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
 /// Convert a slice of Filters into a sea_query Cond.
 /// Returns None if filters is empty.

@@ -1,9 +1,11 @@
-use parking_lot::RwLock;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use crate::compat::{MaybeSend, MaybeSync};
-use crate::types::*;
+use parking_lot::RwLock;
+
+use crate::{
+    compat::{MaybeSend, MaybeSync},
+    types::*,
+};
 
 /// ObservabilityContext provides metadata for observability hooks.
 #[derive(Clone)]
@@ -21,9 +23,9 @@ pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext) + Send + Sync>;
 pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext)>;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, &Result_, Duration) + Send + Sync>;
+pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration) + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
-pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, &Result_, Duration)>;
+pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration)>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type FlowStartHandler = Arc<dyn Fn(&str, &Message) + Send + Sync>;
@@ -31,9 +33,9 @@ pub type FlowStartHandler = Arc<dyn Fn(&str, &Message) + Send + Sync>;
 pub type FlowStartHandler = Arc<dyn Fn(&str, &Message)>;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type FlowEndHandler = Arc<dyn Fn(&str, &Result_, Duration) + Send + Sync>;
+pub type FlowEndHandler = Arc<dyn Fn(&str, Duration) + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
-pub type FlowEndHandler = Arc<dyn Fn(&str, &Result_, Duration)>;
+pub type FlowEndHandler = Arc<dyn Fn(&str, Duration)>;
 
 /// ObservabilityBus manages multiple observability hook subscribers.
 pub struct ObservabilityBus {
@@ -62,7 +64,7 @@ impl ObservabilityBus {
 
     pub fn on_block_end(
         &self,
-        h: impl Fn(&ObservabilityContext, &Result_, Duration) + MaybeSend + MaybeSync + 'static,
+        h: impl Fn(&ObservabilityContext, Duration) + MaybeSend + MaybeSync + 'static,
     ) {
         self.block_end_handlers.write().push(Arc::new(h));
     }
@@ -71,10 +73,7 @@ impl ObservabilityBus {
         self.flow_start_handlers.write().push(Arc::new(h));
     }
 
-    pub fn on_flow_end(
-        &self,
-        h: impl Fn(&str, &Result_, Duration) + MaybeSend + MaybeSync + 'static,
-    ) {
+    pub fn on_flow_end(&self, h: impl Fn(&str, Duration) + MaybeSend + MaybeSync + 'static) {
         self.flow_end_handlers.write().push(Arc::new(h));
     }
 
@@ -85,15 +84,10 @@ impl ObservabilityBus {
         }
     }
 
-    pub(crate) fn fire_block_end(
-        &self,
-        ctx: &ObservabilityContext,
-        result: &Result_,
-        duration: Duration,
-    ) {
+    pub(crate) fn fire_block_end(&self, ctx: &ObservabilityContext, duration: Duration) {
         let handlers = self.block_end_handlers.read();
         for h in handlers.iter() {
-            h(ctx, result, duration);
+            h(ctx, duration);
         }
     }
 
@@ -104,10 +98,10 @@ impl ObservabilityBus {
         }
     }
 
-    pub(crate) fn fire_flow_end(&self, flow_id: &str, result: &Result_, duration: Duration) {
+    pub(crate) fn fire_flow_end(&self, flow_id: &str, duration: Duration) {
         let handlers = self.flow_end_handlers.read();
         for h in handlers.iter() {
-            h(flow_id, result, duration);
+            h(flow_id, duration);
         }
     }
 }

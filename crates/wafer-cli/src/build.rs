@@ -1,11 +1,12 @@
-use std::path::Path;
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 use anyhow::{bail, Context};
 
-use crate::detect::{detect_language, Lang};
-use crate::manifest::Manifest;
-use crate::validate::validate_wasm;
+use crate::{
+    detect::{detect_language, Lang},
+    manifest::Manifest,
+    validate::validate_wasm,
+};
 
 /// Size threshold (in bytes) above which we warn the user.
 const WASM_SIZE_WARN_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB

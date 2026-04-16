@@ -10,5 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wafer-run = { path = "../wafer-run", features = ["full"] }
-tokio = { workspace = true }
+wafer-block = { path = "../wafer-block" }
+tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

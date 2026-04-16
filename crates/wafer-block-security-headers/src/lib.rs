@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use wafer_block::*;
 
 /// SecurityHeadersBlock adds standard security headers to responses.
@@ -34,31 +35,32 @@ impl Block for SecurityHeadersBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Read CSP from config if available
         let csp = ctx
             .config_get("csp")
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.csp.clone());
 
-        msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
-        msg.set_meta("resp.header.X-Frame-Options", "DENY");
-        msg.set_meta("resp.header.X-XSS-Protection", "1; mode=block");
-        msg.set_meta(
+        let mut out_msg = msg;
+        out_msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
+        out_msg.set_meta("resp.header.X-Frame-Options", "DENY");
+        out_msg.set_meta("resp.header.X-XSS-Protection", "1; mode=block");
+        out_msg.set_meta(
             "resp.header.Referrer-Policy",
             "strict-origin-when-cross-origin",
         );
-        msg.set_meta("resp.header.Content-Security-Policy", &csp);
-        msg.set_meta(
+        out_msg.set_meta("resp.header.Content-Security-Policy", &csp);
+        out_msg.set_meta(
             "resp.header.Strict-Transport-Security",
             "max-age=31536000; includeSubDomains",
         );
-        msg.set_meta(
+        out_msg.set_meta(
             "resp.header.Permissions-Policy",
             "camera=(), microphone=(), geolocation=()",
         );
 
-        msg.cont_ref()
+        OutputStream::continue_with(out_msg)
     }
 
     async fn lifecycle(
@@ -70,7 +72,7 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block(
         "wafer-run/security-headers",
         Arc::new(SecurityHeadersBlock::new()),

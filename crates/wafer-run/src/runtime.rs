@@ -1,12 +1,16 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
-use crate::block::Block;
-use crate::context::RuntimeContext;
-use crate::observability::ObservabilityBus;
-use crate::platform::{ConfigExpanderFn, Instant, RegistrarFn};
-use crate::types::*;
+use crate::{
+    block::Block,
+    context::RuntimeContext,
+    error::RuntimeError,
+    observability::ObservabilityBus,
+    platform::{ConfigExpanderFn, Instant, RegistrarFn},
+    types::*,
+};
 
 pub mod lifecycle;
 pub mod registry;
@@ -108,13 +112,23 @@ pub struct RuntimeHandle {
 #[cfg(not(target_arch = "wasm32"))]
 impl RuntimeHandle {
     /// Run a flow by ID.
-    pub async fn run(&self, flow_id: &str, msg: &mut Message) -> Result_ {
-        self.inner.run(flow_id, msg).await
+    pub async fn run(
+        &self,
+        flow_id: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run(flow_id, msg, input).await
     }
 
     /// Run a single block by name (bypasses flows).
-    pub async fn run_block(&self, block_name: &str, msg: &mut Message) -> Result_ {
-        self.inner.run_block(block_name, msg).await
+    pub async fn run_block(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run_block(block_name, msg, input).await
     }
 }
 
@@ -138,7 +152,7 @@ pub struct Wafer {
     pub(crate) block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
-    pub(crate) aliases: HashMap<String, String>,
+    pub(crate) aliases: Arc<HashMap<String, String>>,
     /// Config expanders: registered functions that split a composite config
     /// (e.g. `wafer-run/http-server`) into configs for individual blocks.
     pub(crate) config_expanders: HashMap<String, ConfigExpanderFn>,
@@ -167,7 +181,7 @@ impl Wafer {
             flows: HashMap::new(),
             block_configs: HashMap::new(),
             all_blocks: Arc::new(HashMap::new()),
-            aliases: HashMap::new(),
+            aliases: Arc::new(HashMap::new()),
             config_expanders: HashMap::new(),
             registrars: HashMap::new(),
             hooks: ObservabilityBus::new(),
@@ -195,7 +209,7 @@ impl Wafer {
     /// Register an alias mapping. When `call_block(alias)` is called,
     /// it resolves to the target block name.
     pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
-        self.aliases.insert(alias.into(), target.into());
+        Arc::make_mut(&mut self.aliases).insert(alias.into(), target.into());
     }
 
     /// Set the admin block ID for WRAP access control.
@@ -233,7 +247,7 @@ impl Wafer {
         RuntimeContext {
             flow_id: flow_id.into(),
             node_id: node_id.into(),
-            config,
+            config: Arc::new(config),
             cancelled,
             deadline,
             all_blocks: self.all_blocks_arc(),
@@ -244,7 +258,7 @@ impl Wafer {
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             block_configs_snapshot: self.block_configs_snapshot.clone(),
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
-            aliases: Arc::new(self.aliases.clone()),
+            aliases: self.aliases.clone(),
             caller_requires: None, // unrestricted by default
             caller_id: None,       // top-level call, no caller
             wrap_grants: self.wrap_grants.clone(),
@@ -260,7 +274,7 @@ impl Wafer {
             map.insert(name.clone(), block.clone());
         }
         // Insert alias entries — alias names point to the same Arc<dyn Block>
-        for (alias, target) in &self.aliases {
+        for (alias, target) in self.aliases.as_ref() {
             if let Some(block) = self.blocks.get(target) {
                 map.insert(alias.clone(), block.clone());
             }
@@ -310,52 +324,85 @@ fn block_name_to_var_prefix(name: &str) -> String {
 /// - Each segment: lowercase `[a-z0-9-]`, no `_`, no consecutive `--`,
 ///   not starting or ending with `-`
 /// - Minimum 1 char per segment
-pub(crate) fn validate_block_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_block_name(name: &str) -> Result<(), RuntimeError> {
     let (org, block) = name
         .split_once('/')
-        .ok_or_else(|| format!("block name '{}' must be {{org}}/{{block}}", name))?;
+        .ok_or_else(|| RuntimeError::InvalidBlockName {
+            name: name.to_string(),
+            reason: "must be {org}/{block}".to_string(),
+        })?;
     if name.matches('/').count() != 1 {
-        return Err(format!("block name '{}': exactly one / required", name));
+        return Err(RuntimeError::InvalidBlockName {
+            name: name.to_string(),
+            reason: "exactly one / required".to_string(),
+        });
     }
     for (label, segment) in [("org", org), ("block", block)] {
         if segment.is_empty() {
-            return Err(format!("block name '{}': empty {} segment", name, label));
+            return Err(RuntimeError::InvalidBlockName {
+                name: name.to_string(),
+                reason: format!("empty {label} segment"),
+            });
         }
         if segment.contains('_') {
-            return Err(format!(
-                "block name '{}': underscore not allowed in {} segment, use hyphen",
-                name, label
-            ));
+            return Err(RuntimeError::InvalidBlockName {
+                name: name.to_string(),
+                reason: format!("underscore not allowed in {label} segment, use hyphen"),
+            });
         }
         if segment.contains("--") {
-            return Err(format!(
-                "block name '{}': consecutive hyphens not allowed in {} segment",
-                name, label
-            ));
+            return Err(RuntimeError::InvalidBlockName {
+                name: name.to_string(),
+                reason: format!("consecutive hyphens not allowed in {label} segment"),
+            });
         }
         if segment.starts_with('-') || segment.ends_with('-') {
-            return Err(format!(
-                "block name '{}': {} segment cannot start or end with hyphen",
-                name, label
-            ));
+            return Err(RuntimeError::InvalidBlockName {
+                name: name.to_string(),
+                reason: format!("{label} segment cannot start or end with hyphen"),
+            });
         }
         if !segment
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         {
-            return Err(format!(
-                "block name '{}': only lowercase alphanumeric and hyphens allowed in {} segment",
-                name, label
-            ));
+            return Err(RuntimeError::InvalidBlockName {
+                name: name.to_string(),
+                reason: format!(
+                    "only lowercase alphanumeric and hyphens allowed in {label} segment"
+                ),
+            });
         }
     }
     Ok(())
 }
 
 impl wafer_block::registry::BlockRegistry for Wafer {
-    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), String> {
+    fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), RuntimeError> {
+        self.register_block_inner(name, block)
+    }
+
+    fn add_alias(&mut self, alias: &str, target: &str) {
+        Arc::make_mut(&mut self.aliases).insert(alias.to_string(), target.to_string());
+    }
+
+    fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
+        self.block_configs.insert(name.to_string(), config);
+    }
+}
+
+impl Wafer {
+    /// Shared validation + insertion logic used by both the `BlockRegistry`
+    /// trait impl and the inherent `register_block()` method.
+    fn register_block_inner(
+        &mut self,
+        name: &str,
+        block: Arc<dyn Block>,
+    ) -> Result<(), RuntimeError> {
         if self.blocks.contains_key(name) {
-            return Err(format!("block '{}' already registered", name));
+            return Err(RuntimeError::DuplicateBlock {
+                name: name.to_string(),
+            });
         }
 
         // Validate block name format
@@ -368,25 +415,17 @@ impl wafer_block::registry::BlockRegistry for Wafer {
             let expected_prefix = block_name_to_var_prefix(name);
             for var in &info.config_keys {
                 if !var.key.starts_with(&expected_prefix) {
-                    return Err(format!(
-                        "block '{}' declares config var '{}' which doesn't match its prefix '{}'. \
-                         Blocks can only declare variables with their own prefix.",
-                        name, var.key, expected_prefix
-                    ));
+                    return Err(RuntimeError::ConfigVarPrefix {
+                        name: name.to_string(),
+                        var: var.key.clone(),
+                        prefix: expected_prefix,
+                    });
                 }
             }
         }
 
         self.blocks.insert(name.to_string(), block);
         Ok(())
-    }
-
-    fn add_alias(&mut self, alias: &str, target: &str) {
-        self.aliases.insert(alias.to_string(), target.to_string());
-    }
-
-    fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
-        self.block_configs.insert(name.to_string(), config);
     }
 }
 

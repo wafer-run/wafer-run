@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

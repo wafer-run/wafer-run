@@ -1,4 +1,5 @@
 use std::sync::{Arc, OnceLock};
+
 use wafer_block::*;
 
 /// Normalize a value to a standard action. Accepts both action names
@@ -108,7 +109,7 @@ impl Block for RouterBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let routes = self.routes.get().map(|r| r.as_slice()).unwrap_or(&[]);
         let action = msg.action().to_string();
         let path = msg.path().to_string();
@@ -125,14 +126,19 @@ impl Block for RouterBlock {
             }
 
             // Extract path variables into req.param.* meta
-            extract_path_vars(&route.path, &path, msg);
+            let mut routed_msg = msg;
+            extract_path_vars(&route.path, &path, &mut routed_msg);
 
             // Dispatch to the matched handler block
-            return ctx.call_block(&route.block, msg).await;
+            return ctx.call_block(&route.block, routed_msg, input).await;
         }
 
         // No route matched — 404
-        err_not_found(msg, "no matching route")
+        OutputStream::error(WaferError {
+            code: ErrorCode::NotFound,
+            message: "no matching route".to_string(),
+            meta: vec![],
+        })
     }
 
     async fn lifecycle(
@@ -153,6 +159,6 @@ impl Block for RouterBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/router", Arc::new(RouterBlock::new()))
 }

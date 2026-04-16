@@ -1,4 +1,5 @@
 use std::sync::{Arc, RwLock};
+
 use wafer_block::*;
 
 /// Access control policy for the inspector.
@@ -32,6 +33,28 @@ impl InspectorBlock {
     }
 }
 
+/// Build a JSON OutputStream response (bytes already serialized).
+fn json_respond(json: Vec<u8>) -> OutputStream {
+    OutputStream::respond_with_meta(
+        json,
+        vec![MetaEntry {
+            key: META_RESP_CONTENT_TYPE.to_string(),
+            value: "application/json".to_string(),
+        }],
+    )
+}
+
+/// Build an HTML OutputStream response.
+fn html_respond(html: Vec<u8>) -> OutputStream {
+    OutputStream::respond_with_meta(
+        html,
+        vec![MetaEntry {
+            key: META_RESP_CONTENT_TYPE.to_string(),
+            value: "text/html; charset=utf-8".to_string(),
+        }],
+    )
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Block for InspectorBlock {
@@ -46,7 +69,7 @@ impl Block for InspectorBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Access control
         {
             let policy = self.policy.read().unwrap();
@@ -54,12 +77,20 @@ impl Block for InspectorBlock {
                 AccessPolicy::Anonymous => {}
                 AccessPolicy::Authenticated => {
                     if msg.get_meta("auth.user_id").is_empty() {
-                        return err_unauthorized(msg, "inspector requires authentication");
+                        return OutputStream::error(WaferError {
+                            code: ErrorCode::Unauthenticated,
+                            message: "inspector requires authentication".to_string(),
+                            meta: vec![],
+                        });
                     }
                 }
                 AccessPolicy::Roles(allowed) => {
                     if msg.get_meta("auth.user_id").is_empty() {
-                        return err_unauthorized(msg, "inspector requires authentication");
+                        return OutputStream::error(WaferError {
+                            code: ErrorCode::Unauthenticated,
+                            message: "inspector requires authentication".to_string(),
+                            meta: vec![],
+                        });
                     }
                     let user_roles: Vec<&str> = msg
                         .get_meta("auth.user_roles")
@@ -69,20 +100,26 @@ impl Block for InspectorBlock {
                         .collect();
                     if !allowed.iter().any(|a| user_roles.contains(&a.as_str())) {
                         let roles_list = allowed.join(", ");
-                        return error(
-                            msg,
-                            "forbidden",
-                            &format!("inspector requires one of these roles: [{}]", roles_list),
-                        );
+                        return OutputStream::error(WaferError {
+                            code: ErrorCode::PermissionDenied,
+                            message: format!(
+                                "inspector requires one of these roles: [{roles_list}]"
+                            ),
+                            meta: vec![],
+                        });
                     }
                 }
             }
         }
 
         // Only allow retrieve (GET)
-        let action = msg.action();
+        let action = msg.action().to_string();
         if !action.is_empty() && action != "retrieve" {
-            return error(msg, "unimplemented", "only retrieve action is allowed");
+            return OutputStream::error(WaferError {
+                code: ErrorCode::Unimplemented,
+                message: "only retrieve action is allowed".to_string(),
+                meta: vec![],
+            });
         }
 
         let path = msg.path().to_string();
@@ -93,35 +130,37 @@ impl Block for InspectorBlock {
             let configs = ctx.block_configs();
             let blocks = ctx.registered_blocks();
             let interfaces = ctx.interface_specs();
-            return json_respond(
-                msg,
-                &serde_json::json!({
-                    "flows": flows,
-                    "configs": configs,
-                    "blocks": blocks,
-                    "interfaces": interfaces,
-                }),
-            );
+            let json = serde_json::to_vec(&serde_json::json!({
+                "flows": flows,
+                "configs": configs,
+                "blocks": blocks,
+                "interfaces": interfaces,
+            }))
+            .unwrap_or_default();
+            return json_respond(json);
         }
 
         if path.ends_with("/blocks") {
             let blocks = ctx.registered_blocks();
-            return json_respond(msg, &blocks);
+            let json = serde_json::to_vec(&blocks).unwrap_or_default();
+            return json_respond(json);
         }
 
         if path.ends_with("/flows") {
             let flows = ctx.flow_infos();
-            return json_respond(msg, &flows);
+            let json = serde_json::to_vec(&flows).unwrap_or_default();
+            return json_respond(json);
         }
 
         if path.ends_with("/interfaces") {
             let interfaces = ctx.interface_specs();
-            return json_respond(msg, &interfaces);
+            let json = serde_json::to_vec(&interfaces).unwrap_or_default();
+            return json_respond(json);
         }
 
         if path.ends_with("/ui") {
             let html = include_str!("inspector.html");
-            return respond(msg, html.as_bytes().to_vec(), "text/html; charset=utf-8");
+            return html_respond(html.as_bytes().to_vec());
         }
 
         // /blocks/{name} — single block info
@@ -129,9 +168,14 @@ impl Block for InspectorBlock {
             let decoded = url_decode(&block_name);
             let blocks = ctx.registered_blocks();
             if let Some(info) = blocks.into_iter().find(|b| b.name == decoded) {
-                return json_respond(msg, &info);
+                let json = serde_json::to_vec(&info).unwrap_or_default();
+                return json_respond(json);
             }
-            return err_not_found(msg, &format!("block '{}' not found", decoded));
+            return OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("block '{decoded}' not found"),
+                meta: vec![],
+            });
         }
 
         // /flows/{id} — single flow def
@@ -139,9 +183,14 @@ impl Block for InspectorBlock {
             let decoded = url_decode(&flow_id);
             let defs = ctx.flow_defs();
             if let Some(def) = defs.into_iter().find(|c| c.id == decoded) {
-                return json_respond(msg, &def);
+                let json = serde_json::to_vec(&def).unwrap_or_default();
+                return json_respond(json);
             }
-            return err_not_found(msg, &format!("flow '{}' not found", decoded));
+            return OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: format!("flow '{decoded}' not found"),
+                meta: vec![],
+            });
         }
 
         // Fallback: summary
@@ -153,7 +202,7 @@ impl Block for InspectorBlock {
             "blocks": blocks.iter().map(|b| &b.name).collect::<Vec<_>>(),
             "flows": flows.iter().map(|c| &c.id).collect::<Vec<_>>(),
         });
-        json_respond(msg, &summary)
+        json_respond(serde_json::to_vec(&summary).unwrap_or_default())
     }
 
     async fn lifecycle(
@@ -236,6 +285,6 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()))
 }

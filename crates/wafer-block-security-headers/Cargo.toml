@@ -8,3 +8,6 @@ description = "WAFER block: adds standard security headers to HTTP responses"
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
+
+[lints]
+workspace = true

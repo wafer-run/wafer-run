@@ -9,3 +9,6 @@ description = "WAFER block: per-IP rate limiting"
 wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
+
+[lints]
+workspace = true

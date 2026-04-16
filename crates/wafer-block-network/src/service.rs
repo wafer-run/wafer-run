@@ -47,7 +47,7 @@ impl NetworkService for HttpNetworkService {
         let method = req
             .method
             .parse::<reqwest::Method>()
-            .map_err(|e| NetworkError::RequestError(format!("invalid method: {}", e)))?;
+            .map_err(|e| NetworkError::RequestError(format!("invalid method: {e}")))?;
 
         let client = self.client.get_or_init(|| {
             reqwest::Client::builder()
@@ -84,7 +84,7 @@ impl NetworkService for HttpNetworkService {
         let body = response
             .bytes()
             .await
-            .map_err(|e| NetworkError::RequestError(format!("reading body: {}", e)))?;
+            .map_err(|e| NetworkError::RequestError(format!("reading body: {e}")))?;
 
         Ok(Response {
             status_code,

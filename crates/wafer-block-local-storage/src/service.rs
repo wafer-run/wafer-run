@@ -1,7 +1,9 @@
-use chrono::Utc;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
+use chrono::Utc;
 use wafer_core::interfaces::storage::service::*;
 
 /// Local filesystem implementation of StorageService.
@@ -12,9 +14,8 @@ pub struct LocalStorageService {
 impl LocalStorageService {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(|e| {
-            StorageError::Internal(format!("create storage root {:?}: {}", root, e))
-        })?;
+        fs::create_dir_all(&root)
+            .map_err(|e| StorageError::Internal(format!("create storage root {root:?}: {e}")))?;
         Ok(Self { root })
     }
 
@@ -48,7 +49,7 @@ impl LocalStorageService {
         } else {
             Ok(path.to_path_buf())
         }
-        .map_err(|e| StorageError::Internal(format!("canonicalize {:?}: {}", path, e)))?;
+        .map_err(|e| StorageError::Internal(format!("canonicalize {path:?}: {e}")))?;
 
         if !canon_path.starts_with(&canon_root) {
             return Err(StorageError::Internal(
@@ -75,14 +76,12 @@ impl StorageService for LocalStorageService {
     ) -> Result<(), StorageError> {
         let path = self.object_path(folder, key);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                StorageError::Internal(format!("create dirs for {:?}: {}", path, e))
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
         }
         // Validate after parent dirs are created so canonicalize can resolve
         let path = self.validate_path(&path)?;
-        fs::write(&path, data)
-            .map_err(|e| StorageError::Internal(format!("write {:?}: {}", path, e)))
+        fs::write(&path, data).map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
@@ -93,7 +92,7 @@ impl StorageService for LocalStorageService {
         let path = self.validate_path(&path)?;
 
         let metadata = fs::metadata(&path)
-            .map_err(|e| StorageError::Internal(format!("metadata {:?}: {}", path, e)))?;
+            .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
 
         // Limit file reads to 100 MB to prevent OOM on huge files
         const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -106,8 +105,8 @@ impl StorageService for LocalStorageService {
             )));
         }
 
-        let data = fs::read(&path)
-            .map_err(|e| StorageError::Internal(format!("read {:?}: {}", path, e)))?;
+        let data =
+            fs::read(&path).map_err(|e| StorageError::Internal(format!("read {path:?}: {e}")))?;
 
         let last_modified = metadata
             .modified()
@@ -130,8 +129,7 @@ impl StorageService for LocalStorageService {
             return Err(StorageError::NotFound);
         }
         let path = self.validate_path(&path)?;
-        fs::remove_file(&path)
-            .map_err(|e| StorageError::Internal(format!("delete {:?}: {}", path, e)))
+        fs::remove_file(&path).map_err(|e| StorageError::Internal(format!("delete {path:?}: {e}")))
     }
 
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
@@ -169,7 +167,7 @@ impl StorageService for LocalStorageService {
         let path = self.folder_path(name);
         // Create the directory first so validate_path can canonicalize
         fs::create_dir_all(&path)
-            .map_err(|e| StorageError::Internal(format!("create folder {:?}: {}", path, e)))?;
+            .map_err(|e| StorageError::Internal(format!("create folder {path:?}: {e}")))?;
         self.validate_path(&path)?;
         Ok(())
     }
@@ -181,7 +179,7 @@ impl StorageService for LocalStorageService {
         }
         let path = self.validate_path(&path)?;
         fs::remove_dir_all(&path)
-            .map_err(|e| StorageError::Internal(format!("delete folder {:?}: {}", path, e)))
+            .map_err(|e| StorageError::Internal(format!("delete folder {path:?}: {e}")))
     }
 
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
@@ -190,10 +188,10 @@ impl StorageService for LocalStorageService {
             .map_err(|e| StorageError::Internal(format!("read dir {:?}: {}", self.root, e)))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
+            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {e}")))?;
             let metadata = entry
                 .metadata()
-                .map_err(|e| StorageError::Internal(format!("metadata: {}", e)))?;
+                .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
             if metadata.is_dir() {
                 let created_at = metadata
                     .created()
@@ -219,14 +217,14 @@ impl LocalStorageService {
         objects: &mut Vec<ObjectInfo>,
     ) -> Result<(), StorageError> {
         let entries = fs::read_dir(dir)
-            .map_err(|e| StorageError::Internal(format!("read dir {:?}: {}", dir, e)))?;
+            .map_err(|e| StorageError::Internal(format!("read dir {dir:?}: {e}")))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {}", e)))?;
+            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {e}")))?;
             let path = entry.path();
             let metadata = entry
                 .metadata()
-                .map_err(|e| StorageError::Internal(format!("metadata: {}", e)))?;
+                .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
 
             if metadata.is_dir() {
                 Self::list_recursive(base, &path, prefix, objects)?;

@@ -4,8 +4,7 @@
 //! between native and wasm32 targets. Using `web-time` for Instant (zero-cost
 //! on native, Performance.now() on wasm32) and conditional Send/Sync bounds.
 
-use std::future::Future;
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 /// Cross-platform Instant. On native, this is `std::time::Instant` (via web-time,
 /// which is a zero-cost wrapper). On wasm32 Component targets, a minimal stub

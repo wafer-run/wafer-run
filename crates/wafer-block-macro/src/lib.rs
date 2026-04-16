@@ -1,9 +1,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
-use syn::punctuated::Punctuated;
 use syn::{
-    parse_macro_input, Expr, ExprArray, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    punctuated::Punctuated,
+    Expr, ExprArray, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
 };
 
 // ---------------------------------------------------------------------------
@@ -106,7 +107,7 @@ impl Args {
 /// # Example
 ///
 /// ```rust,ignore
-/// use wafer_block::*;
+/// use wafer_sdk::*;
 ///
 /// struct MyBlock;
 ///
@@ -117,8 +118,8 @@ impl Args {
 ///     summary = "My block",
 /// )]
 /// impl MyBlock {
-///     fn handle(msg: Message) -> BlockResult {
-///         msg.cont()
+///     fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
+///         GuestResult::respond(vec![])
 ///     }
 /// }
 /// ```
@@ -173,7 +174,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         "singleton" => quote! { wafer_block::InstanceMode::Singleton },
         "per-flow" => quote! { wafer_block::InstanceMode::PerFlow },
         "per-execution" => quote! { wafer_block::InstanceMode::PerExecution },
-        other => panic!("#[wafer_block]: unknown instance_mode '{}'", other),
+        other => panic!("#[wafer_block]: unknown instance_mode '{other}'"),
     };
 
     let handle_sig = &handle_fn.sig;
@@ -233,10 +234,12 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             let msg_bytes = unsafe {
                 ::std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize)
             };
-            let msg: wafer_block::Message = serde_json::from_slice(msg_bytes)
-                .expect("failed to deserialize Message");
-            let result = <#struct_ty>::handle(msg);
-            let result_bytes = serde_json::to_vec(&result).expect("failed to serialize BlockResult");
+            // The host sends a 2-element JSON tuple: [Message, Vec<u8>]
+            let (msg, body): (wafer_block::Message, ::std::vec::Vec<u8>) =
+                serde_json::from_slice(msg_bytes)
+                    .expect("failed to deserialize (Message, body) tuple");
+            let result: wafer_sdk::core_abi::GuestResult = <#struct_ty>::handle(msg, body);
+            let result_bytes = serde_json::to_vec(&result).expect("failed to serialize GuestResult");
             let ptr = result_bytes.as_ptr() as u32;
             let len = result_bytes.len() as u32;
             ::std::mem::forget(result_bytes);

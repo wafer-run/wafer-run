@@ -5,17 +5,20 @@
 
 pub mod service;
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-
-use wafer_run::block::{Block, BlockCategory, BlockInfo};
-use wafer_run::context::Context;
-use wafer_run::manifest::{collections_to_tables, CollectionDef};
-use wafer_run::schema::Table;
-use wafer_run::types::*;
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use service::PostgresDatabaseService;
 use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_run::{
+    block::{Block, BlockCategory, BlockInfo},
+    context::Context,
+    manifest::{collections_to_tables, CollectionDef},
+    schema::Table,
+    types::*,
+};
 
 /// The PostgreSQL database block.
 ///
@@ -54,12 +57,19 @@ impl Block for PostgresDatabaseBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(
+        &self,
+        _ctx: &dyn Context,
+        msg: Message,
+        input: wafer_run::InputStream,
+    ) -> wafer_run::OutputStream {
         let service = self
             .service
             .get()
             .expect("wafer-run/postgres: not initialized — call lifecycle(Init) first");
-        wafer_core::interfaces::database::handler::handle_message(service.as_ref(), msg).await
+        let body = input.collect_to_bytes().await;
+        wafer_core::interfaces::database::handler::handle_message(service.as_ref(), &msg, &body)
+            .await
     }
 
     async fn lifecycle(
@@ -96,7 +106,7 @@ impl Block for PostgresDatabaseBlock {
 
             let svc = PostgresDatabaseService::connect(&url)
                 .await
-                .map_err(|e| WaferError::new("init", format!("wafer-run/postgres: {}", e)))?;
+                .map_err(|e| WaferError::new("init", format!("wafer-run/postgres: {e}")))?;
             tracing::info!("PostgreSQL database connected");
             self.service.set(Arc::new(svc)).ok();
         }
@@ -119,6 +129,6 @@ impl Block for PostgresDatabaseBlock {
 }
 
 /// Register the PostgreSQL database block with the given Wafer runtime.
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
     w.register_block("wafer-run/postgres", Arc::new(PostgresDatabaseBlock::new()))
 }

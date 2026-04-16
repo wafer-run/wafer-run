@@ -1,7 +1,6 @@
+use std::{collections::HashMap, sync::Arc, time::Instant};
+
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
 use wafer_run::*;
 
 /// MonitoringBlock tracks request metrics and provides a stats endpoint.
@@ -68,32 +67,35 @@ impl Block for MonitoringBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: &mut Message) -> Result_ {
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
 
         // Stats endpoint — only accessible from loopback addresses.
         // Use an auth middleware in front if broader access control is needed.
         if path == "/_stats" || path == "/_monitoring" {
-            let remote = msg.remote_addr();
+            let remote = msg.remote_addr().to_string();
             let is_local = remote.is_empty()
                 || remote == "127.0.0.1"
                 || remote == "::1"
                 || remote.starts_with("127.");
             if !is_local {
-                return err_forbidden(msg, "stats endpoint is restricted to localhost");
+                return OutputStream::error(WaferError {
+                    code: ErrorCode::PermissionDenied,
+                    message: "stats endpoint is restricted to localhost".to_string(),
+                    meta: vec![],
+                });
             }
             let stats = self.stats.lock();
             let uptime = self.start_time.elapsed().as_secs();
-            return json_respond(
-                msg,
-                &serde_json::json!({
-                    "uptime_seconds": uptime,
-                    "total_requests": stats.total_requests,
-                    "error_count": stats.error_count,
-                    "status_counts": stats.status_counts,
-                    "top_paths": stats.path_counts,
-                }),
-            );
+            let body = serde_json::to_vec(&serde_json::json!({
+                "uptime_seconds": uptime,
+                "total_requests": stats.total_requests,
+                "error_count": stats.error_count,
+                "status_counts": stats.status_counts,
+                "top_paths": stats.path_counts,
+            }))
+            .unwrap_or_default();
+            return OutputStream::respond(body);
         }
 
         // Track the request
@@ -106,7 +108,7 @@ impl Block for MonitoringBlock {
             }
         }
 
-        msg.cont_ref()
+        OutputStream::continue_with(msg)
     }
 
     async fn lifecycle(
@@ -118,6 +120,6 @@ impl Block for MonitoringBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/monitoring", Arc::new(MonitoringBlock::new()))
 }

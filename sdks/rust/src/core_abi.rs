@@ -4,13 +4,84 @@
 //! - Pack/unpack helpers for the `i64` `(ptr << 32 | len)` pointer convention.
 //! - The `__wafer_alloc` export so the host can allocate guest memory.
 //! - Safe wrappers around the host imports (`call_block`, `log`, `is_cancelled`).
+//! - [`GuestResult`] / [`GuestResponse`]: the JSON-serializable result type that
+//!   `__wafer_handle` returns to the host. The `#[wafer_block]` macro generates
+//!   the ABI glue; block authors use these types directly in their `handle` impl.
 //!
 //! The `extern "C"` FFI declarations and the `__wafer_alloc` export are only
 //! meaningful on `wasm32` targets. On all other targets the public wrappers
 //! compile to stub functions that panic, ensuring block code that calls them
 //! fails loudly rather than silently doing nothing.
 
-use wafer_block::{BlockResult, Message};
+use wafer_block::{Message, MetaEntry, WaferError};
+
+// ---------------------------------------------------------------------------
+// Guest result types — returned from __wafer_handle / __wafer_lifecycle
+// ---------------------------------------------------------------------------
+
+/// The result returned by a WASM block's `handle` function.
+///
+/// This is serialized as JSON and sent back to the host runtime. The host
+/// maps it to an `OutputStream` using the `LegacyResult` bridge layer.
+///
+/// Use [`GuestResult::respond`], [`GuestResult::error`], or
+/// [`GuestResult::drop_request`] to construct values.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuestResult {
+    pub action: String,
+    pub response: Option<GuestResponse>,
+    pub error: Option<WaferError>,
+    pub message: Option<Message>,
+}
+
+/// The response body returned by a successful WASM block invocation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuestResponse {
+    pub data: Vec<u8>,
+    pub meta: Vec<MetaEntry>,
+}
+
+impl GuestResult {
+    /// Respond with a body (and optional trailing meta).
+    pub fn respond(data: Vec<u8>) -> Self {
+        Self {
+            action: "Respond".to_string(),
+            response: Some(GuestResponse { data, meta: vec![] }),
+            error: None,
+            message: None,
+        }
+    }
+
+    /// Respond with body and meta entries.
+    pub fn respond_with_meta(data: Vec<u8>, meta: Vec<MetaEntry>) -> Self {
+        Self {
+            action: "Respond".to_string(),
+            response: Some(GuestResponse { data, meta }),
+            error: None,
+            message: None,
+        }
+    }
+
+    /// Return an error to the caller.
+    pub fn error(err: WaferError) -> Self {
+        Self {
+            action: "Error".to_string(),
+            response: None,
+            error: Some(err),
+            message: None,
+        }
+    }
+
+    /// Drop the request (no response, no error).
+    pub fn drop_request() -> Self {
+        Self {
+            action: "Drop".to_string(),
+            response: None,
+            error: None,
+            message: None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pack / unpack helpers (target-independent)
@@ -77,10 +148,13 @@ pub fn log(level: &str, msg: &str) {
     }
 }
 
-/// Call another block by name, passing a [`Message`] and returning the
-/// [`BlockResult`] produced by that block.
+/// Call another block by name, passing a [`Message`].
+///
+/// Returns the raw JSON response from the host as a `serde_json::Value`.
+/// The response object contains an `"action"` field and optional `"response"`,
+/// `"error"`, and `"message"` fields.
 #[cfg(target_arch = "wasm32")]
-pub fn call_block(name: &str, msg: &Message) -> BlockResult {
+pub fn call_block(name: &str, msg: &Message) -> serde_json::Value {
     let msg_bytes = serde_json::to_vec(msg).expect("failed to serialize message");
     unsafe {
         let packed = __wafer_host_call_block(
@@ -91,8 +165,8 @@ pub fn call_block(name: &str, msg: &Message) -> BlockResult {
         );
         let (ptr, len) = unpack_ptr_len(packed);
         let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
-        let result: BlockResult =
-            serde_json::from_slice(bytes).expect("failed to deserialize BlockResult");
+        let result: serde_json::Value =
+            serde_json::from_slice(bytes).expect("failed to deserialize call_block result");
         // Reclaim the allocation made by __wafer_alloc to avoid leaking guest memory.
         let _ = Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize);
         result
@@ -117,6 +191,6 @@ pub fn log(_level: &str, _msg: &str) {
 
 /// Stub: always panics. `call_block` is only available in WASM blocks.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn call_block(_name: &str, _msg: &Message) -> BlockResult {
+pub fn call_block(_name: &str, _msg: &Message) -> serde_json::Value {
     panic!("call_block is only available in WASM blocks")
 }
