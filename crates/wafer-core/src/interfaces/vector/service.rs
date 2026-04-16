@@ -76,6 +76,35 @@ pub enum VectorError {
     Internal(String),
 }
 
+pub type Result<T> = std::result::Result<T, VectorError>;
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
+    async fn create_index(&self, config: VectorIndexConfig) -> Result<()>;
+    async fn delete_index(&self, name: &str) -> Result<()>;
+    async fn upsert(&self, index: &str, entries: Vec<VectorEntry>) -> Result<()>;
+    async fn query(
+        &self,
+        index: &str,
+        vector: Vec<f32>,
+        top_k: usize,
+        filter: Option<MetadataFilter>,
+        mode: SearchMode,
+        keyword_query: Option<String>,
+    ) -> Result<Vec<VectorMatch>>;
+    async fn delete(&self, index: &str, ids: Vec<String>) -> Result<()>;
+    async fn count(&self, index: &str) -> Result<u64>;
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
+    fn model(&self) -> &str;
+    fn dimensions(&self) -> u32;
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
