@@ -33,7 +33,7 @@ tokio-util = { version = "0.7", default-features = false }
 tokio-stream = { version = "0.1", default-features = false }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 # Platform-aware spawn for OutputStream::from_producer.
 # Native: tokio/rt for tokio::spawn. WASM: wasm-bindgen-futures for spawn_local.

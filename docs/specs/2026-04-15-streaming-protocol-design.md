@@ -96,7 +96,7 @@ impl OutputStream {
     pub fn error(err: WaferError) -> Self;
 
     /// Drop helper: emits a single terminal Drop event.
-    pub fn drop() -> Self;
+    pub fn drop_request() -> Self;
 
     /// Continue helper: emits a single terminal Continue(msg) event.
     pub fn continue_with(msg: Message) -> Self;
@@ -158,8 +158,55 @@ pub struct BufferedResponse {
 1. Every `OutputStream` yields exactly one terminal event (`Complete` | `Error` | `Drop` | `Continue`) as its last event, after which the underlying channel closes.
 2. `Drop` and `Continue` are valid only as the first-and-only event; they cannot follow `Chunk` or `Meta`. This is enforced by a debug assertion in `OutputSink` and a runtime check in the HTTP adapter.
 3. `Error` may follow any number of `Chunk` / `Meta` events. Consumers decide whether prior chunks are usable.
-4. `Meta` events must precede their semantic effect — e.g., a `Content-Type: text/event-stream` declaration must be the first `Meta`, emitted before any `Chunk`, because the HTTP adapter commits to SSE framing on seeing it.
+4. `Meta` events should precede their semantic effect — e.g., a `Content-Type: text/event-stream` declaration should be emitted before any `Chunk`, because the HTTP adapter commits to SSE framing on seeing it. **Enforcement:** If the HTTP adapter sees a `Content-Type: text/event-stream` Meta after already receiving a `Chunk`, it logs a warning and continues in buffered mode — the late declaration is ignored. This is a runtime check, not a debug assertion, to prevent silent misbehavior in production.
 5. Blocks emit raw body bytes in `Chunk` events. Wire-format framing (SSE frames, HTTP chunked encoding, binary WebSocket frames) is the responsibility of the transport adapter, not the block. This keeps blocks transport-agnostic: the same streaming block serves SSE to browsers, chunked JSON to APIs, and binary frames to wasmi guests without change.
+
+### Ergonomic Helpers
+
+**`OutputStream::from_producer`** — platform-aware spawn with auto-complete:
+
+```rust
+// Works on native AND wasm32. Closure returns () — if no terminal
+// is sent on the sink, Complete { meta: vec![] } is auto-emitted on drop.
+OutputStream::from_producer(|sink, cancel| async move {
+    sink.send_meta(MetaEntry::content_type("text/event-stream")).await.ok();
+    let mut upstream = service.stream(cancel).await.unwrap();
+    while let Some(chunk) = upstream.next().await {
+        if sink.send_chunk(chunk).await.is_err() { return; }
+    }
+    // auto-complete on drop
+})
+```
+
+On native: wraps in `tokio::spawn`. On wasm32: wraps in `wasm_bindgen_futures::spawn_local`. The `spawn_producer` function in `wafer-block/src/spawn.rs` provides the platform abstraction.
+
+**`OutputStream::from_result`** — one-liner for buffered blocks:
+
+```rust
+OutputStream::from_result(self.process(&msg, &body).await)
+// Ok(bytes) -> respond(bytes), Err(e) -> error(e)
+```
+
+**`Context::call_block_buffered`** — shorthand for the 90% call pattern:
+
+```rust
+let response = ctx.call_block_buffered("wafer-run/database", msg, &body).await?;
+// Returns Result<BufferedResponse, WaferError>
+```
+
+Default method on `Context`; builds `InputStream` from `&[u8]`, calls `call_block`, drains via `collect_buffered`, and converts `TerminalNotResponse` to `WaferError`.
+
+**`OutputStream::body_stream_or_error`** — error-propagating body stream:
+
+```rust
+let chunks = prev_output.body_stream_or_error();
+// Stream<Item = Result<Vec<u8>, WaferError>>
+// Propagates Error terminals instead of swallowing them.
+```
+
+**`OutputSink` auto-complete on Drop:**
+
+When an `OutputSink` is dropped without having called any terminal method (`complete`, `error`, `drop_request`, `continue_with`), the `Drop` impl auto-emits `Complete { meta: vec![] }` via `try_send`. This makes `from_producer` ergonomic: the closure simply returns and the stream completes. If a terminal was explicitly sent, the auto-complete is suppressed via an internal `terminal_sent` flag.
 
 ## The Block Trait
 
@@ -283,6 +330,8 @@ Cancellation is **drop-triggered with an explicit token** for cooperative in-fli
 
 The `CancellationToken` is `tokio_util::sync::CancellationToken` (no custom type).
 
+**Input-side cancellation:** When a block returns an `OutputStream` before fully consuming its `InputStream`, the runtime fires the `InputStream`'s `CancellationToken`. This signals the upstream producer (e.g., the HTTP adapter streaming a request body) to stop sending. For large uploads, this means a block that rejects on the first chunk causes the upload to abort rather than buffering the full body. Transport adapters are responsible for wiring the `InputStream` cancel token to their upstream source (e.g., dropping the axum `Body`).
+
 ## Backpressure
 
 Pull-based throughout. `OutputStream` is a `Stream<Item = StreamEvent>`; consumers pull at their own pace. When a task-to-task decoupling exists (producer task feeding a consumer task via the sink), a bounded `tokio::sync::mpsc::channel(N)` sits between them. The producing task's `sink.send_chunk().await` awaits when full, which naturally slows the producer, which in turn slows whatever the producer is draining from upstream (e.g., stops polling an OpenAI SSE stream, which triggers TCP flow control, which slows the OpenAI server). End-to-end backpressure.
@@ -317,6 +366,7 @@ The adapter peeks at events until it either:
 2. Sees `Chunk` or `Complete` without a preceding SSE `Meta` declaration → buffered mode. Collects until terminal, emits one `Response` body.
 3. Sees `Drop` first → emits 204.
 4. Sees `Continue(msg)` first → looks up the target block from the message and re-dispatches.
+   Continue re-dispatch is limited to a maximum depth of **8**. If the depth is exceeded, the adapter emits a 508 (Loop Detected) response with a JSON error body. This prevents infinite forwarding loops between blocks.
 5. Sees `Error` at any point → emits appropriate error response (500 + JSON body for pre-headers, or SSE error frame for mid-stream in streaming mode).
 
 Client disconnect (axum's `Body` cancel) triggers `output.cancel_token().cancel()`, which the producing block sees via its token.
@@ -514,6 +564,7 @@ async fn pipeline_streams_end_to_end() {
 - **gRPC or network streaming between wafer-run nodes.** Not needed today; when/if adopted, it becomes a separate transport adapter; the protocol above is transport-agnostic enough that no core changes are required.
 - **WASI Preview 3 stream adoption.** Tracked for future migration; the current ABI is shaped to enable it when wasmi ships the runtime support.
 - **Bidirectional message streaming (client-streaming of typed messages, not byte streams).** The current design supports byte-streamed inputs, which covers file upload and similar use cases. Streaming typed messages into a block is not in demand; if needed later, `Message` itself could gain a tail stream of `Message`s, but that's a separate future evolution.
+- **Flow/pipeline streaming plumbing.** The declarative flow engine (`wafer-flow`) currently composes blocks via `call_block`. Flows inherit streaming support automatically through the updated `call_block` signature — each flow step's `OutputStream` can be piped to the next step's `InputStream` via `body_stream()` or consumed directly. No flow engine changes are needed for this spec. If flows later need streaming-aware routing logic (e.g., "route based on first chunk"), that's a separate evolution.
 
 ## Open Implementation Notes
 
