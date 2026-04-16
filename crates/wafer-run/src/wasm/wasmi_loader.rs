@@ -41,6 +41,27 @@ fn unpack_ptr_len(packed: i64) -> (u32, u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Guest meta sanitisation
+// ---------------------------------------------------------------------------
+
+/// Strip meta entries that a sandboxed WASM guest should not control.
+fn sanitize_guest_meta(meta: Vec<MetaEntry>) -> Vec<MetaEntry> {
+    meta.into_iter()
+        .filter(|e| {
+            let k = e.key.to_lowercase();
+            // Block cookies, redirects, and security headers from WASM guests.
+            !k.starts_with("resp.set_cookie")
+                && !k.starts_with("http.resp.set-cookie")
+                && !k.contains("location")
+                && !k.contains("access-control")
+                && !k.contains("strict-transport")
+                && !k.contains("x-frame-options")
+                && !k.contains("content-security-policy")
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Host state stored in the wasmi Store
 // ---------------------------------------------------------------------------
 
@@ -395,15 +416,19 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
 
     // random_get(buf_ptr, buf_len) -> errno
     // TinyGo WASM runtime imports this for crypto/rand and map seed initialisation.
-    // We fill the buffer with zeros — sufficient for initialisation, not for crypto use.
+    // We fill the buffer with real random bytes via getrandom.
     linker
         .func_wrap(
             "wasi_snapshot_preview1",
             "random_get",
             |mut caller: Caller<WasmiHostState>, buf_ptr: i32, buf_len: i32| -> i32 {
                 if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let zeros = vec![0u8; buf_len as usize];
-                    let _ = memory.write(&mut caller, buf_ptr as usize, &zeros);
+                    let mut buf = vec![0u8; buf_len as usize];
+                    if getrandom::getrandom(&mut buf).is_err() {
+                        // RNG failure should not happen; fall back to zeros.
+                        warn!("getrandom failed in WASI random_get, falling back to zeros");
+                    }
+                    let _ = memory.write(&mut caller, buf_ptr as usize, &buf);
                 }
                 0
             },
@@ -596,12 +621,12 @@ impl WasmiBlock {
                 .await;
             let buf = out.collect_buffered().await;
             // Serialize the outcome for the WASM guest.
-            // The guest expects a Result_-shaped JSON with action/response/error.
+            // The guest expects a guest ABI format JSON with action/response/error.
             // We map BufferedResponse → respond, Error → error terminal.
             use wafer_block::streams::output::TerminalNotResponse;
             let result_bytes = match buf {
                 Ok(response) => {
-                    // Build a legacy-compatible response JSON the WASM guest can decode
+                    // Build a guest ABI format response JSON the WASM guest can decode
                     let payload = serde_json::json!({
                         "action": "Respond",
                         "response": { "data": response.body, "meta": response.meta },
@@ -775,27 +800,27 @@ impl Block for WasmiBlock {
             }
         };
 
-        // The guest returns a Result_-shaped JSON. Map it back to OutputStream.
+        // The guest returns a guest ABI format JSON. Map it back to OutputStream.
         #[derive(serde::Deserialize)]
-        struct LegacyResult {
+        struct GuestAbiResult {
             action: String,
-            response: Option<LegacyResponse>,
+            response: Option<GuestAbiResponse>,
             error: Option<WaferError>,
             message: Option<Message>,
         }
         #[derive(serde::Deserialize)]
-        struct LegacyResponse {
+        struct GuestAbiResponse {
             data: Vec<u8>,
             #[serde(default)]
             meta: Vec<MetaEntry>,
         }
 
-        match serde_json::from_slice::<LegacyResult>(&result_bytes) {
+        match serde_json::from_slice::<GuestAbiResult>(&result_bytes) {
             Ok(result) => match result.action.as_str() {
                 "Respond" => {
                     let (data, meta) = result
                         .response
-                        .map(|r| (r.data, r.meta))
+                        .map(|r| (r.data, sanitize_guest_meta(r.meta)))
                         .unwrap_or_default();
                     if meta.is_empty() {
                         OutputStream::respond(data)

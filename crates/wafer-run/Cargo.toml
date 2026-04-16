@@ -8,7 +8,7 @@ repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
 default = ["wasm"]
-wasmi = ["dep:wasmi"]
+wasmi = ["dep:wasmi", "dep:getrandom"]
 wasm = ["wasmi", "dep:reqwest", "dep:tokio"]
 full = ["wasm", "dep:tracing-subscriber"]
 
@@ -34,6 +34,7 @@ url = "2"
 
 # WASM (wasmi interpreter engine)
 wasmi = { workspace = true, optional = true }
+getrandom = { version = "0.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 web-time = "1"
