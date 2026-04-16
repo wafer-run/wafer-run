@@ -3931,7 +3931,6 @@ dependencies = [
  "tracing",
  "wafer-block-macro",
  "wafer-flow",
- "wasm-bindgen-futures",
 ]
 
 [[package]]

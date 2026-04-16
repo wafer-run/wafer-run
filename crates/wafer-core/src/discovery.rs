@@ -243,7 +243,7 @@ pub fn generate_agent_card(
             }
         ],
         "capabilities": {
-            "streaming": false,
+            "streaming": true,
             "pushNotifications": false
         },
         "security_schemes": {
@@ -475,7 +475,7 @@ mod tests {
         let block = test_block();
         let card = generate_agent_card(&[block], "P", "", "https://x.com");
 
-        assert_eq!(card["capabilities"]["streaming"], false);
+        assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
     }
 }
