@@ -153,6 +153,10 @@ pub async fn execute(
         let start = Instant::now();
 
         // --- Execute block with panic recovery ---
+        // Save body before handing it to the block — middleware (Continue)
+        // blocks don't produce a response body, so we need to restore the
+        // original input for the next step.
+        let saved_body = current_body.clone();
         let step_input = InputStream::from_bytes(std::mem::take(&mut current_body));
         let out = crate::runtime::run_block_with_recovery(
             block.as_ref(),
@@ -200,9 +204,11 @@ pub async fn execute(
                 return OutputStream::drop_request();
             }
             Err(TerminalNotResponse::Continue(next_msg)) => {
-                // Block forwarded to another block - update current message
+                // Middleware block — update message but restore the original
+                // body so the next step receives it (the block didn't consume
+                // the input, but InputStream::from_bytes took ownership).
                 current_msg = next_msg;
-                current_body = Vec::new();
+                current_body = saved_body;
                 if is_pipeline {
                     acc.set(&step.id, serde_json::Value::Null);
                 }
@@ -265,6 +271,14 @@ pub async fn execute(
         }
     }
 
-    // Terminal result — respond with the last accumulated body
-    OutputStream::respond(current_body)
+    // Terminal result — respond with the last accumulated body.
+    // Extract response meta (resp.*) from the message so the HTTP listener
+    // can set content-type, status, headers, cookies, etc.
+    let resp_meta: Vec<MetaEntry> = current_msg
+        .meta
+        .iter()
+        .filter(|e| e.key.starts_with("resp."))
+        .cloned()
+        .collect();
+    OutputStream::respond_with_meta(current_body, resp_meta)
 }

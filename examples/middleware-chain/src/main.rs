@@ -182,8 +182,8 @@ async fn main() {
         "steps": [
             { "id": "security-headers", "block": "wafer-run/security-headers" },
             { "id": "cors", "block": "wafer-run/cors" },
-            { "id": "logger", "block": "request-logger" },
-            { "id": "auth", "block": "api-key-check" },
+            { "id": "logger", "block": "example/request-logger" },
+            { "id": "auth", "block": "example/api-key-check" },
             { "id": "router", "block": "wafer-run/router" }
         ],
         "config": { "on_error": "stop" },
@@ -217,9 +217,9 @@ async fn main() {
             "routes": [
                 { "path": "/_inspector/**", "block": "wafer-run/inspector" },
                 { "path": "/_inspector", "block": "wafer-run/inspector" },
-                { "path": "/api/**", "block": "echo-handler" },
-                { "path": "/stats", "block": "stats" },
-                { "path": "/**", "block": "fallback" }
+                { "path": "/api/**", "block": "example/echo-handler" },
+                { "path": "/stats", "block": "example/stats" },
+                { "path": "/**", "block": "example/fallback" }
             ]
         }),
     );
@@ -231,19 +231,19 @@ async fn main() {
 
     // Register custom blocks
     wafer
-        .register_block("request-logger", Arc::new(RequestLoggerBlock))
+        .register_block("example/request-logger", Arc::new(RequestLoggerBlock))
         .expect("register request-logger");
     wafer
-        .register_block("api-key-check", Arc::new(ApiKeyCheckBlock))
+        .register_block("example/api-key-check", Arc::new(ApiKeyCheckBlock))
         .expect("register api-key-check");
     wafer
-        .register_block("echo-handler", Arc::new(EchoHandlerBlock))
+        .register_block("example/echo-handler", Arc::new(EchoHandlerBlock))
         .expect("register echo-handler");
     wafer
-        .register_block("stats", Arc::new(StatsBlock))
+        .register_block("example/stats", Arc::new(StatsBlock))
         .expect("register stats");
     wafer
-        .register_block("fallback", Arc::new(FallbackBlock))
+        .register_block("example/fallback", Arc::new(FallbackBlock))
         .expect("register fallback");
 
     tracing::info!("middleware-chain example on http://localhost:8080");

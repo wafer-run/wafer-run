@@ -29,7 +29,7 @@ async fn main() {
             "routes": [
                 { "path": "/_inspector/**", "block": "wafer-run/inspector" },
                 { "path": "/_inspector", "block": "wafer-run/inspector" },
-                { "path": "/api/**", "block": "api-handler" }
+                { "path": "/api/**", "block": "example/api-handler" }
             ]
         }),
     )
@@ -59,7 +59,7 @@ async fn main() {
         }),
     );
     wafer
-        .register_block("api-handler", Arc::new(NotesHandler))
+        .register_block("example/api-handler", Arc::new(NotesHandler))
         .expect("register api-handler");
     wafer.add_block_config(
         "wafer-run/cors",

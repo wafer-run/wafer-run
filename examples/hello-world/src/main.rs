@@ -36,14 +36,14 @@ async fn main() {
         &mut wafer,
         serde_json::json!({
             "listen": "0.0.0.0:8080",
-            "routes": [{ "path": "/**", "block": "hello" }]
+            "routes": [{ "path": "/**", "block": "example/hello" }]
         }),
     )
     .expect("register http server");
 
     // Register a simple inline block that responds with JSON
     wafer
-        .register_block("hello", Arc::new(HelloBlock))
+        .register_block("example/hello", Arc::new(HelloBlock))
         .expect("register hello");
 
     tracing::info!("starting on http://localhost:8080");
