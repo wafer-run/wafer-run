@@ -16,6 +16,9 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 
+[lints]
+workspace = true
+
 [lib]
 name = "wafer_block_sqlite"
 path = "src/lib.rs"

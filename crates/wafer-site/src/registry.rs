@@ -147,7 +147,7 @@ impl RegistryBlock {
             }
             None => OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("Package '{}' not found", name),
+                message: format!("Package '{name}' not found"),
                 meta: vec![],
             }),
         }
@@ -198,8 +198,7 @@ impl RegistryBlock {
 
     async fn fetch_manifest(org: &str, block: &str) -> Option<RegistryManifest> {
         let url = format!(
-            "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
-            org, block
+            "https://raw.githubusercontent.com/wafer-run/registry/main/{org}/{block}/manifest.json"
         );
         let mut req = http_client().get(&url);
         if let Some(token) = github_token() {
@@ -268,7 +267,7 @@ impl RegistryBlock {
             .versions
             .iter()
             .map(|(ver, entry)| VersionInfo {
-                tag_name: format!("v{}", ver),
+                tag_name: format!("v{ver}"),
                 wasm_url: entry.wasm_url.clone(),
                 flow_url: entry.flow_url.clone(),
                 crate_name: entry.crate_name.clone(),
@@ -316,7 +315,7 @@ impl Block for RegistryBlock {
             }
             _ => OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("Registry endpoint not found: {}", path),
+                message: format!("Registry endpoint not found: {path}"),
                 meta: vec![],
             }),
         }
@@ -334,6 +333,6 @@ impl Block for RegistryBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-site/registry", Arc::new(RegistryBlock::new()))
 }

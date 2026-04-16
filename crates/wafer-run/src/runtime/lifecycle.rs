@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use crate::error::RuntimeError;
 use crate::types::*;
 
 use super::Wafer;
 
 impl Wafer {
     /// Initialize the runtime without calling `bind()` on blocks.
-    pub async fn start_without_bind(&mut self) -> Result<(), String> {
+    pub async fn start_without_bind(&mut self) -> Result<(), RuntimeError> {
         self.resolve().await?;
 
         // Rebuild the all_blocks map so contexts can see all resolved blocks
@@ -82,7 +83,7 @@ impl Wafer {
 
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn start(mut self) -> Result<Arc<Self>, String> {
+    pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
         self.start_without_bind().await?;
 
         for (name, block) in &self.blocks {

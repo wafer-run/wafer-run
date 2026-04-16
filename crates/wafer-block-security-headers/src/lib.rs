@@ -71,7 +71,7 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block(
         "wafer-run/security-headers",
         Arc::new(SecurityHeadersBlock::new()),

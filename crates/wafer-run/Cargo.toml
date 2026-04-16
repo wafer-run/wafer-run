@@ -42,6 +42,9 @@ web-time = "1"
 # Network (reqwest for WASM remote block downloads)
 reqwest = { workspace = true, optional = true }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }

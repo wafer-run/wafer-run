@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use crate::block::Block;
+use crate::error::RuntimeError;
 use crate::types::*;
 
 use super::Wafer;
@@ -122,7 +123,7 @@ impl Wafer {
     /// `lifecycle(Init)`. Blocks with configs (from `load_blocks_json` or
     /// `add_block_config`) are initialized first (infrastructure), then
     /// remaining blocks are initialized (features that may depend on infra).
-    pub async fn resolve(&mut self) -> Result<(), String> {
+    pub async fn resolve(&mut self) -> Result<(), RuntimeError> {
         // Resolve remote entries: download .flow.json / .wasm for deferred registrations
         #[cfg(feature = "wasm")]
         self.resolve_remote_entries().await?;
@@ -170,8 +171,9 @@ impl Wafer {
                     None,
                 );
 
-                let config_data = serde_json::to_vec(config)
-                    .map_err(|e| format!("serialize config for block {:?}: {}", name, e))?;
+                let config_data = serde_json::to_vec(config).map_err(|e| {
+                    RuntimeError::Config(format!("serialize config for block {name:?}: {e}"))
+                })?;
                 block
                     .lifecycle(
                         &ctx,
@@ -181,7 +183,10 @@ impl Wafer {
                         },
                     )
                     .await
-                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+                    .map_err(|e| RuntimeError::BlockInit {
+                        name: name.clone(),
+                        reason: e.to_string(),
+                    })?;
             } else {
                 tracing::warn!(block = %name, "block config present but no block registered — skipping");
             }
@@ -199,8 +204,9 @@ impl Wafer {
                     None,
                 );
 
-                let config_data = serde_json::to_vec(config)
-                    .map_err(|e| format!("serialize config for block {:?}: {}", name, e))?;
+                let config_data = serde_json::to_vec(config).map_err(|e| {
+                    RuntimeError::Config(format!("serialize config for block {name:?}: {e}"))
+                })?;
                 block
                     .lifecycle(
                         &ctx,
@@ -210,7 +216,10 @@ impl Wafer {
                         },
                     )
                     .await
-                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+                    .map_err(|e| RuntimeError::BlockInit {
+                        name: name.clone(),
+                        reason: e.to_string(),
+                    })?;
             } else {
                 tracing::warn!(block = %name, "block config present but no block registered — skipping");
             }
@@ -242,7 +251,10 @@ impl Wafer {
                         },
                     )
                     .await
-                    .map_err(|e| format!("init block {:?}: {}", name, e))?;
+                    .map_err(|e| RuntimeError::BlockInit {
+                        name: name.clone(),
+                        reason: e.to_string(),
+                    })?;
             }
         }
 
@@ -272,7 +284,9 @@ impl Wafer {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
-                    .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+                    .map_err(|e| {
+                        RuntimeError::Registry(format!("failed to create HTTP client: {e}"))
+                    })?;
                 match self.resolve_remote_block(&client, &block_name).await? {
                     Some(block) => {
                         tracing::info!(block = %block_name, "downloaded remote block");
@@ -292,16 +306,23 @@ impl Wafer {
                                 },
                             )
                             .await
-                            .map_err(|e| format!("init remote block {:?}: {}", block_name, e))?;
+                            .map_err(|e| RuntimeError::BlockInit {
+                                name: block_name.clone(),
+                                reason: e.to_string(),
+                            })?;
                         self.blocks.insert(block_name.clone(), block);
                     }
                     None => {
-                        return Err(format!("block type not found: {}", block_name));
+                        return Err(RuntimeError::BlockNotFound {
+                            name: block_name.clone(),
+                        });
                     }
                 }
             }
             #[cfg(not(feature = "wasm"))]
-            return Err(format!("block type not found: {}", block_name));
+            return Err(RuntimeError::BlockNotFound {
+                name: block_name.clone(),
+            });
         }
 
         // Rebuild snapshot so any Phase-3-resolved blocks are visible.
@@ -312,7 +333,7 @@ impl Wafer {
 
     /// Resolve remote blocks for deferred registrations via the registry.
     #[cfg(feature = "wasm")]
-    async fn resolve_remote_entries(&mut self) -> Result<(), String> {
+    async fn resolve_remote_entries(&mut self) -> Result<(), RuntimeError> {
         let candidates: Vec<String> = self
             .block_configs
             .keys()
@@ -332,7 +353,7 @@ impl Wafer {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| format!("failed to create HTTP client: {}", e))?;
+            .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))?;
 
         for name in candidates {
             let remote_ref =
@@ -352,25 +373,32 @@ impl Wafer {
                 .header("User-Agent", "wafer-run/0.1.0")
                 .send()
                 .await
-                .map_err(|e| format!("failed to fetch registry manifest for {}: {}", name, e))?;
+                .map_err(|e| {
+                    RuntimeError::Registry(format!(
+                        "failed to fetch registry manifest for {name}: {e}"
+                    ))
+                })?;
 
             if resp.status().as_u16() == 404 {
                 continue;
             }
             if resp.status().as_u16() != 200 {
-                return Err(format!(
+                return Err(RuntimeError::Registry(format!(
                     "failed to fetch registry manifest for {}: HTTP {}",
                     name,
                     resp.status().as_u16()
-                ));
+                )));
             }
 
-            let manifest_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
-            let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
-                .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
+            let manifest_bytes = resp.bytes().await.map_err(|e| {
+                RuntimeError::Registry(format!("failed to read manifest for {name}: {e}"))
+            })?;
+            let manifest: RegistryManifest =
+                serde_json::from_slice(&manifest_bytes).map_err(|e| {
+                    RuntimeError::Registry(format!(
+                        "failed to parse registry manifest for {name}: {e}"
+                    ))
+                })?;
 
             let version = if remote_ref.version == "latest" {
                 manifest.latest.clone()
@@ -378,16 +406,18 @@ impl Wafer {
                 remote_ref.version.clone()
             };
 
-            let entry = manifest
-                .versions
-                .get(&version)
-                .ok_or_else(|| format!("version {} not found in registry for {}", version, name))?;
+            let entry = manifest.versions.get(&version).ok_or_else(|| {
+                RuntimeError::Registry(format!(
+                    "version {version} not found in registry for {name}"
+                ))
+            })?;
 
             if entry.abi != ABI_VERSION {
-                return Err(format!(
-                    "block {} version {} requires ABI {} but runtime supports ABI {}",
-                    name, version, entry.abi, ABI_VERSION
-                ));
+                return Err(RuntimeError::AbiMismatch {
+                    name: name.clone(),
+                    required: entry.abi,
+                    supported: ABI_VERSION,
+                });
             }
 
             if let Some(flow_url) = &entry.flow_url {
@@ -425,10 +455,9 @@ impl Wafer {
                             );
                         }
                         Err(e) => {
-                            return Err(format!(
-                                "failed to download block dependency {:?} for flow {:?}: {}",
-                                block_name, name, e
-                            ));
+                            return Err(RuntimeError::Registry(format!(
+                                "failed to download block dependency {block_name:?} for flow {name:?}: {e}"
+                            )));
                         }
                     }
                 }
@@ -451,32 +480,35 @@ impl Wafer {
         client: &reqwest::Client,
         url: &str,
         name: &str,
-    ) -> Result<wafer_flow::WaferFlow, String> {
+    ) -> Result<wafer_flow::WaferFlow, RuntimeError> {
         let resp = client
             .get(url)
             .header("User-Agent", "wafer-run/0.1.0")
             .send()
             .await
-            .map_err(|e| format!("failed to download flow for {}: {}", name, e))?;
+            .map_err(|e| {
+                RuntimeError::Flow(format!("failed to download flow for {name}: {e}"))
+            })?;
 
         if resp.status().as_u16() != 200 {
-            return Err(format!(
+            return Err(RuntimeError::Flow(format!(
                 "failed to download flow for {}: HTTP {}",
                 name,
                 resp.status().as_u16()
-            ));
+            )));
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read flow body for {}: {}", name, e))?;
+        let body = resp.bytes().await.map_err(|e| {
+            RuntimeError::Flow(format!("failed to read flow body for {name}: {e}"))
+        })?;
 
-        let body_str = std::str::from_utf8(&body)
-            .map_err(|e| format!("failed to decode flow body for {}: {}", name, e))?;
+        let body_str = std::str::from_utf8(&body).map_err(|e| {
+            RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}"))
+        })?;
 
-        let flow = wafer_flow::parse(body_str)
-            .map_err(|e| format!("failed to parse flow JSON for {}: {}", name, e))?;
+        let flow = wafer_flow::parse(body_str).map_err(|e| {
+            RuntimeError::Flow(format!("failed to parse flow JSON for {name}: {e}"))
+        })?;
 
         tracing::info!(flow = %flow.id, url = %url, "downloaded remote flow definition");
         Ok(flow)
@@ -489,7 +521,7 @@ impl Wafer {
         client: &reqwest::Client,
         url: &str,
         name: &str,
-    ) -> Result<Arc<dyn Block>, String> {
+    ) -> Result<Arc<dyn Block>, RuntimeError> {
         use crate::wasm::capabilities::BlockCapabilities;
         use crate::wasm::WasmiBlock;
 
@@ -498,31 +530,32 @@ impl Wafer {
             .header("User-Agent", "wafer-run/0.1.0")
             .send()
             .await
-            .map_err(|e| format!("failed to download WASM for {}: {}", name, e))?;
+            .map_err(|e| {
+                RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}"))
+            })?;
 
         let status = resp.status().as_u16();
         if status != 200 {
-            return Err(format!(
-                "failed to download WASM for {}: HTTP {}",
-                name, status
-            ));
+            return Err(RuntimeError::Wasm(format!(
+                "failed to download WASM for {name}: HTTP {status}"
+            )));
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read WASM body for {}: {}", name, e))?;
+        let body = resp.bytes().await.map_err(|e| {
+            RuntimeError::Wasm(format!("failed to read WASM body for {name}: {e}"))
+        })?;
 
         if body.is_empty() {
-            return Err(format!(
-                "failed to download WASM for {}: empty response body",
-                name
-            ));
+            return Err(RuntimeError::Wasm(format!(
+                "failed to download WASM for {name}: empty response body"
+            )));
         }
 
         let engine = self.wasm_engine()?.clone();
         let block = WasmiBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
-            .map_err(|e| format!("failed to load remote block {}: {}", name, e))?;
+            .map_err(|e| {
+                RuntimeError::Wasm(format!("failed to load remote block {name}: {e}"))
+            })?;
 
         Ok(Arc::new(block))
     }
@@ -534,7 +567,7 @@ impl Wafer {
         &mut self,
         client: &reqwest::Client,
         name: &str,
-    ) -> Result<Option<Arc<dyn Block>>, String> {
+    ) -> Result<Option<Arc<dyn Block>>, RuntimeError> {
         let remote_ref = parse_versioned_block(name).or_else(|| parse_unversioned_block(name));
         let remote_ref = match remote_ref {
             Some(r) => r,
@@ -551,25 +584,31 @@ impl Wafer {
             .header("User-Agent", "wafer-run/0.1.0")
             .send()
             .await
-            .map_err(|e| format!("failed to fetch registry manifest for {}: {}", name, e))?;
+            .map_err(|e| {
+                RuntimeError::Registry(format!(
+                    "failed to fetch registry manifest for {name}: {e}"
+                ))
+            })?;
 
         if resp.status().as_u16() == 404 {
             return Ok(None);
         }
         if resp.status().as_u16() != 200 {
-            return Err(format!(
+            return Err(RuntimeError::Registry(format!(
                 "failed to fetch registry manifest for {}: HTTP {}",
                 name,
                 resp.status().as_u16()
-            ));
+            )));
         }
 
-        let manifest_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read manifest for {}: {}", name, e))?;
-        let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| format!("failed to parse registry manifest for {}: {}", name, e))?;
+        let manifest_bytes = resp.bytes().await.map_err(|e| {
+            RuntimeError::Registry(format!("failed to read manifest for {name}: {e}"))
+        })?;
+        let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
+            RuntimeError::Registry(format!(
+                "failed to parse registry manifest for {name}: {e}"
+            ))
+        })?;
 
         let version = if remote_ref.version == "latest" {
             manifest.latest.clone()
@@ -577,16 +616,18 @@ impl Wafer {
             remote_ref.version.clone()
         };
 
-        let entry = manifest
-            .versions
-            .get(&version)
-            .ok_or_else(|| format!("version {} not found in registry for {}", version, name))?;
+        let entry = manifest.versions.get(&version).ok_or_else(|| {
+            RuntimeError::Registry(format!(
+                "version {version} not found in registry for {name}"
+            ))
+        })?;
 
         if entry.abi != ABI_VERSION {
-            return Err(format!(
-                "block {} version {} requires ABI {} but runtime supports ABI {}",
-                name, version, entry.abi, ABI_VERSION
-            ));
+            return Err(RuntimeError::AbiMismatch {
+                name: name.to_string(),
+                required: entry.abi,
+                supported: ABI_VERSION,
+            });
         }
 
         if let Some(wasm_url) = &entry.wasm_url {
@@ -597,17 +638,16 @@ impl Wafer {
             Ok(None)
         } else {
             let crate_name = format!("wafer-block-{}", remote_ref.block);
-            Err(format!(
-                "Block \"{}\" is native-only and must be compiled in.\n\
-                 Add it with: cargo add {}",
-                name, crate_name
-            ))
+            Err(RuntimeError::Registry(format!(
+                "Block \"{name}\" is native-only and must be compiled in.\n\
+                 Add it with: cargo add {crate_name}"
+            )))
         }
     }
 
     /// Get or create the shared WASM engine.
     #[cfg(feature = "wasmi")]
-    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, String> {
+    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, RuntimeError> {
         if self.wasm_engine.is_none() {
             let mut config = wasmi::Config::default();
             config.consume_fuel(true);

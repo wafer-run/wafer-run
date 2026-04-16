@@ -158,6 +158,6 @@ impl Block for RouterBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/router", Arc::new(RouterBlock::new()))
 }

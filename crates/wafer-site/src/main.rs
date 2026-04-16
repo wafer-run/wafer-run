@@ -164,7 +164,7 @@ impl Block for ApiBlock {
             }
             _ => OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("API endpoint not found: {}", path),
+                message: format!("API endpoint not found: {path}"),
                 meta: vec![],
             }),
         }
@@ -179,6 +179,6 @@ impl Block for ApiBlock {
     }
 }
 
-fn register_api_block(w: &mut Wafer) -> Result<(), String> {
+fn register_api_block(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-site/api", Arc::new(ApiBlock))
 }

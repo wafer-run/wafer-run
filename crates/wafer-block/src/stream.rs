@@ -14,7 +14,10 @@ pub enum StreamEvent {
     Complete { meta: Vec<MetaEntry> },
 
     /// Terminal: stream failed.
-    Error(WaferError),
+    ///
+    /// Boxed to keep the enum size closer to the smaller non-terminal variants
+    /// (`Chunk` is 24 bytes; unboxed `WaferError` would be ~56 bytes).
+    Error(Box<WaferError>),
 
     /// Terminal: block chose to drop the request (HTTP 204-equivalent).
     /// Valid only with no preceding Chunk or Meta events.
@@ -51,11 +54,11 @@ mod tests {
             value: "text/event-stream".into(),
         });
         let _c = StreamEvent::Complete { meta: vec![] };
-        let _d = StreamEvent::Error(WaferError {
+        let _d = StreamEvent::Error(Box::new(WaferError {
             code: ErrorCode::Unknown,
             message: "test error".into(),
             meta: vec![],
-        });
+        }));
         let _e = StreamEvent::Drop;
         let _f = StreamEvent::Continue(Message {
             kind: "forward".into(),
@@ -80,11 +83,11 @@ mod tests {
         })
         .is_terminal());
         assert!(StreamEvent::Complete { meta: vec![] }.is_terminal());
-        assert!(StreamEvent::Error(WaferError {
+        assert!(StreamEvent::Error(Box::new(WaferError {
             code: ErrorCode::Unknown,
             message: "x".into(),
-            meta: vec![]
-        })
+            meta: vec![],
+        }))
         .is_terminal());
         assert!(StreamEvent::Drop.is_terminal());
     }

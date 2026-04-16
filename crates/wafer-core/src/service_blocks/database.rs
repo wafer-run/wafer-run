@@ -6,6 +6,7 @@ use wafer_block::streams::input::InputStream;
 use wafer_block::streams::output::OutputStream;
 use wafer_block::types::BlockInfo;
 use wafer_block::BlockRegistry;
+use wafer_block::RuntimeError;
 use wafer_block::*;
 use wafer_run::schema::Table;
 
@@ -62,7 +63,7 @@ impl Block for DatabaseBlock {
 pub fn register_with(
     w: &mut dyn BlockRegistry,
     service: Arc<dyn DatabaseService>,
-) -> Result<(), String> {
+) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/database", Arc::new(DatabaseBlock::new(service)))
 }
 
@@ -71,7 +72,7 @@ pub fn register_with_tables(
     w: &mut dyn BlockRegistry,
     service: Arc<dyn DatabaseService>,
     tables: Vec<Table>,
-) -> Result<(), String> {
+) -> Result<(), RuntimeError> {
     w.register_block(
         "wafer-run/database",
         Arc::new(DatabaseBlock::with_tables(service, tables)),

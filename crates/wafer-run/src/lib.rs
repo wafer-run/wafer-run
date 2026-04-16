@@ -9,7 +9,9 @@ pub mod common;
 pub mod compat;
 pub mod config;
 pub mod context;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;
+pub mod error;
 pub mod executor;
 pub mod helpers;
 pub mod manifest;
@@ -32,6 +34,7 @@ pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};
+pub use error::RuntimeError;
 pub use executor::{extract_path_vars, match_path, matches_pattern};
 #[cfg(not(target_arch = "wasm32"))]
 pub use helpers::expand_env_vars;

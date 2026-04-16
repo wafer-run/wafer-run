@@ -102,8 +102,7 @@ impl Block for InspectorBlock {
                         return OutputStream::error(WaferError {
                             code: ErrorCode::PermissionDenied,
                             message: format!(
-                                "inspector requires one of these roles: [{}]",
-                                roles_list
+                                "inspector requires one of these roles: [{roles_list}]"
                             ),
                             meta: vec![],
                         });
@@ -173,7 +172,7 @@ impl Block for InspectorBlock {
             }
             return OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("block '{}' not found", decoded),
+                message: format!("block '{decoded}' not found"),
                 meta: vec![],
             });
         }
@@ -188,7 +187,7 @@ impl Block for InspectorBlock {
             }
             return OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("flow '{}' not found", decoded),
+                message: format!("flow '{decoded}' not found"),
                 meta: vec![],
             });
         }
@@ -285,6 +284,6 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()))
 }

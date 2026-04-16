@@ -8,3 +8,6 @@ description = "WAFER block: blocks write operations in read-only mode"
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
+
+[lints]
+workspace = true

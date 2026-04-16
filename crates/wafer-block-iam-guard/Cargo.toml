@@ -12,6 +12,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 
+[lints]
+workspace = true
+
 [lib]
 name = "wafer_block_iam_guard"
 path = "src/lib.rs"

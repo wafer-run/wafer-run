@@ -40,7 +40,7 @@ impl WaferRuntime {
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {}", e)))?;
+            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {e}")))?;
         Ok(Self {
             inner: Wafer::new(),
             rt,
@@ -55,16 +55,16 @@ impl WaferRuntime {
     pub fn register(&mut self, name: String, path: String) -> Result<()> {
         if path.ends_with(".wasm") {
             let block = WasmiBlock::load(&path)
-                .map_err(|e| Error::from_reason(format!("failed to load WASM block: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("failed to load WASM block: {e}")))?;
             self.inner
                 .register_block(&name, Arc::new(block))
-                .map_err(Error::from_reason)?;
+                .map_err(|e| Error::from_reason(e.to_string()))?;
         } else {
             let json = std::fs::read_to_string(&path)
-                .map_err(|e| Error::from_reason(format!("failed to read file: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("failed to read file: {e}")))?;
             self.inner
                 .add_flow_json(&json)
-                .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {}", e)))?;
+                .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {e}")))?;
         }
         Ok(())
     }
@@ -74,7 +74,7 @@ impl WaferRuntime {
     pub fn resolve(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.resolve())
-            .map_err(Error::from_reason)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Start the runtime. Calls resolve() if not already resolved.
@@ -85,7 +85,7 @@ impl WaferRuntime {
     pub fn start(&mut self) -> Result<()> {
         self.rt
             .block_on(self.inner.start_without_bind())
-            .map_err(Error::from_reason)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Stop the runtime and shut down all block instances.
@@ -101,7 +101,7 @@ impl WaferRuntime {
     #[napi]
     pub fn run(&self, flow_id: String, message_json: String) -> Result<String> {
         let msg: Message = serde_json::from_str(&message_json)
-            .map_err(|e| Error::from_reason(format!("invalid Message JSON: {}", e)))?;
+            .map_err(|e| Error::from_reason(format!("invalid Message JSON: {e}")))?;
 
         let input = wafer_run::InputStream::empty();
         let output = self.rt.block_on(self.inner.run(&flow_id, msg, input));
@@ -162,7 +162,7 @@ impl WaferRuntime {
     pub fn flows_info(&self) -> Result<String> {
         let info = self.inner.flows_info();
         serde_json::to_string(&info)
-            .map_err(|e| Error::from_reason(format!("failed to serialize flows info: {}", e)))
+            .map_err(|e| Error::from_reason(format!("failed to serialize flows info: {e}")))
     }
 
     /// Check whether a block type is registered.

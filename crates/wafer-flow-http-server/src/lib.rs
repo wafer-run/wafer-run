@@ -52,7 +52,10 @@ const FLOW_JSON: &str = r#"{
 ///     "routes": [{ "path": "/**", "block": "hello" }]
 /// }));
 /// ```
-pub fn register(w: &mut wafer_run::Wafer, config: serde_json::Value) -> Result<(), String> {
+pub fn register(
+    w: &mut wafer_run::Wafer,
+    config: serde_json::Value,
+) -> Result<(), wafer_run::RuntimeError> {
     // Register native blocks (idempotent — skips if already registered)
     if !w.has_block("wafer-run/security-headers") {
         wafer_block_security_headers::register(w)?;

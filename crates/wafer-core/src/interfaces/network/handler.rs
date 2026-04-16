@@ -40,15 +40,7 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
     }
 }
 
-fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
-    match serde_json::to_vec(&val) {
-        Ok(bytes) => OutputStream::respond(bytes),
-        Err(e) => OutputStream::error(WaferError::new(
-            ErrorCode::INTERNAL,
-            format!("serialize response: {e}"),
-        )),
-    }
-}
+use crate::interfaces::handler_util::to_output;
 
 /// Handle a network message by delegating to the given service.
 ///

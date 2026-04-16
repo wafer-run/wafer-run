@@ -95,7 +95,7 @@ impl Block for IAMBlock {
         } else {
             OutputStream::error(WaferError {
                 code: ErrorCode::PermissionDenied,
-                message: format!("Requires '{}' role", required_role),
+                message: format!("Requires '{required_role}' role"),
                 meta: vec![],
             })
         }
@@ -110,6 +110,6 @@ impl Block for IAMBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/iam-guard", Arc::new(IAMBlock::new()))
 }

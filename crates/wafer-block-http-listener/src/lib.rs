@@ -33,7 +33,7 @@ pub fn http_to_message(
     headers: &HeaderMap,
     remote_addr: &str,
 ) -> Message {
-    let mut msg = Message::new(format!("{}:{}", method, uri_path));
+    let mut msg = Message::new(format!("{method}:{uri_path}"));
 
     // HTTP-specific meta
     msg.set_meta("http.method", method.to_string());
@@ -80,8 +80,8 @@ pub fn http_to_message(
             let mut parts = pair.splitn(2, '=');
             if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
                 let decoded_val = urlencoding_decode(val);
-                msg.set_meta(format!("http.query.{}", key), decoded_val.clone());
-                msg.set_meta(format!("{}{}", META_REQ_QUERY_PREFIX, key), decoded_val);
+                msg.set_meta(format!("http.query.{key}"), decoded_val.clone());
+                msg.set_meta(format!("{META_REQ_QUERY_PREFIX}{key}"), decoded_val);
             }
         }
     }
@@ -441,7 +441,7 @@ impl Block for HttpListenerBlock {
 // Registration
 // ---------------------------------------------------------------------------
 
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
     w.register_block(
         "wafer-run/http-listener",
         Arc::new(HttpListenerBlock::new()),

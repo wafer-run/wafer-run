@@ -121,6 +121,6 @@ impl Block for MonitoringBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/monitoring", Arc::new(MonitoringBlock::new()))
 }

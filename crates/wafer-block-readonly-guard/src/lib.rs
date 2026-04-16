@@ -64,7 +64,7 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block(
         "wafer-run/readonly-guard",
         Arc::new(ReadonlyGuardBlock::new()),

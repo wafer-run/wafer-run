@@ -103,7 +103,7 @@ impl Block for PostgresDatabaseBlock {
 
             let svc = PostgresDatabaseService::connect(&url)
                 .await
-                .map_err(|e| WaferError::new("init", format!("wafer-run/postgres: {}", e)))?;
+                .map_err(|e| WaferError::new("init", format!("wafer-run/postgres: {e}")))?;
             tracing::info!("PostgreSQL database connected");
             self.service.set(Arc::new(svc)).ok();
         }
@@ -126,6 +126,6 @@ impl Block for PostgresDatabaseBlock {
 }
 
 /// Register the PostgreSQL database block with the given Wafer runtime.
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), String> {
+pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
     w.register_block("wafer-run/postgres", Arc::new(PostgresDatabaseBlock::new()))
 }

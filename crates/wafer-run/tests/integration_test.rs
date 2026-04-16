@@ -13,7 +13,7 @@ use wafer_run::*;
 fn single_step_flow(id: &str, block: &str) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -64,7 +64,7 @@ fn step_with_config(id: &str, block: &str, config: serde_json::Value) -> wafer_f
 fn make_flow(id: &str, steps: Vec<wafer_flow::Step>) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -84,7 +84,7 @@ fn make_flow_with_on_error(
 ) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
-        name: format!("Test flow: {}", id),
+        name: format!("Test flow: {id}"),
         version: "0.0.1".to_string(),
         description: None,
         input: None,
@@ -133,14 +133,14 @@ impl TestResult {
     fn body(&self) -> &[u8] {
         match self {
             Self::Respond(body) => body,
-            _ => panic!("TestResult is not Respond, was: {:?}", self),
+            _ => panic!("TestResult is not Respond, was: {self:?}"),
         }
     }
 
     fn error(&self) -> &WaferError {
         match self {
             Self::Error(e) => e,
-            _ => panic!("TestResult is not Error, was: {:?}", self),
+            _ => panic!("TestResult is not Error, was: {self:?}"),
         }
     }
 }
@@ -223,7 +223,7 @@ async fn test_single_block_flow() {
         b"hello world".to_vec(),
     )
     .await;
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(String::from_utf8_lossy(result.body()), "HELLO WORLD");
 }
 
@@ -273,7 +273,7 @@ async fn test_sequential_flow() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "abc", Message::new("test"), b"start".to_vec()).await;
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(String::from_utf8_lossy(result.body()), "start-A-B-C");
 }
 
@@ -377,7 +377,7 @@ fn test_router_not_found() {
     });
     match result {
         Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::NotFound),
-        other => panic!("expected error, got {:?}", other),
+        other => panic!("expected error, got {other:?}"),
     }
 }
 
@@ -449,7 +449,7 @@ async fn test_error_helper() {
             assert_eq!(e.code, ErrorCode::InvalidArgument);
             assert_eq!(e.message, "missing field");
         }
-        other => panic!("expected error, got {:?}", other),
+        other => panic!("expected error, got {other:?}"),
     }
 }
 
@@ -471,7 +471,7 @@ async fn test_continue_helper() {
         Err(TerminalNotResponse::Continue(m)) => {
             assert_eq!(m.get_meta("key"), "value");
         }
-        other => panic!("expected continue, got {:?}", other),
+        other => panic!("expected continue, got {other:?}"),
     }
 }
 
@@ -651,7 +651,7 @@ async fn test_flow_reference() {
         b"data".to_vec(),
     )
     .await;
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(result.body(), b"stored");
 }
 
@@ -697,8 +697,7 @@ async fn test_drop_short_circuits_flow() {
     let result = run_flow(&w, "drop-short-circuit", Message::new("test"), vec![]).await;
     assert!(
         result.is_drop(),
-        "expected drop to short-circuit flow, got: {:?}",
-        result
+        "expected drop to short-circuit flow, got: {result:?}"
     );
 }
 
@@ -721,7 +720,7 @@ async fn test_flow_reference_not_found() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "bad-ref", Message::new("test"), vec![]).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(
         result.error().message.contains("does-not-exist"),
         "error: {:?}",
@@ -774,7 +773,7 @@ async fn test_on_error_stop() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "stop-flow", Message::new("test"), vec![]).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     // "test_error" is not a known ErrorCode variant, maps to Unknown
     assert_eq!(result.error().code, ErrorCode::Unknown);
 }
@@ -829,7 +828,7 @@ async fn test_on_error_continue() {
 
     // With on_error=continue, the flow proceeds past the error
     assert_eq!(fail_count.load(Ordering::SeqCst), 1);
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(result.body(), b"recovered");
 }
 
@@ -867,7 +866,7 @@ async fn test_on_error_continue_no_more_nodes() {
     let result = run_flow(&w, "cont-end", Message::new("test"), vec![]).await;
 
     // on_error=continue with no more steps means the flow continues with empty body
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
 }
 
 // ===========================================================================
@@ -906,7 +905,7 @@ async fn test_drop_action() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "drop-flow", Message::new("test"), b"data".to_vec()).await;
-    assert!(result.is_drop(), "expected drop, got: {:?}", result);
+    assert!(result.is_drop(), "expected drop, got: {result:?}");
 }
 
 // ===========================================================================
@@ -918,7 +917,7 @@ async fn test_execute_nonexistent_flow() {
     let w = Wafer::new();
 
     let result = run_flow(&w, "nonexistent", Message::new("test"), b"data".to_vec()).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     // "flow not found" maps to NotFound
     assert_eq!(result.error().code, ErrorCode::NotFound);
 }
@@ -966,7 +965,7 @@ async fn test_block_with_config() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "config-flow", Message::new("test"), b"world".to_vec()).await;
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(String::from_utf8_lossy(result.body()), "hello-world");
 }
 
@@ -1022,8 +1021,8 @@ async fn test_resolve_missing_block() {
 
     w.add_flow(single_step_flow("broken", "unregistered-block"));
 
-    let err = w.resolve().await.unwrap_err();
-    assert!(err.contains("unregistered-block"), "Error: {}", err);
+    let err = w.resolve().await.unwrap_err().to_string();
+    assert!(err.contains("unregistered-block"), "Error: {err}");
 }
 
 // ===========================================================================
@@ -1051,7 +1050,7 @@ async fn test_add_flow_json() {
 
     let result = run_flow(&w, "from-json", Message::new("test"), b"hello".to_vec()).await;
     // EchoBlock passes body through, so responds with "hello"
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     assert_eq!(result.body(), b"hello");
 }
 
@@ -1083,7 +1082,7 @@ async fn test_panic_recovery() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "panic-flow", Message::new("test"), vec![]).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     let err = result.error();
     // "panic" maps to Internal (block panicked)
     assert_eq!(err.code, ErrorCode::Internal);
@@ -1147,7 +1146,7 @@ async fn test_start_and_stop() {
     w.start_without_bind().await.expect("start failed");
 
     let result = run_flow(&w, "lifecycle-test", Message::new("test"), vec![]).await;
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
 
     // Stop calls lifecycle(Stop) on all resolved blocks
     w.stop().await;
@@ -1342,14 +1341,13 @@ async fn test_resolve_versioned_block_download_error() {
         "acme/nonexistent-block@v1.0.0",
     ));
 
-    let err = w.resolve().await.unwrap_err();
+    let err = w.resolve().await.unwrap_err().to_string();
     assert!(
-        err.contains("block type not found")
+        err.contains("not found")
             || err.contains("failed to download")
             || err.contains("failed to load remote block")
             || err.contains("failed to fetch registry"),
-        "Expected block-not-found or download error, got: {}",
-        err
+        "Expected block-not-found or download error, got: {err}"
     );
 }
 
@@ -1365,15 +1363,14 @@ async fn test_resolve_unversioned_block_download_error() {
         "acme/nonexistent-block",
     ));
 
-    let err = w.resolve().await.unwrap_err();
+    let err = w.resolve().await.unwrap_err().to_string();
     assert!(
-        err.contains("block type not found")
+        err.contains("not found")
             || err.contains("failed to fetch releases")
             || err.contains("failed to download")
             || err.contains("failed to fetch registry")
             || err.contains("HTTP"),
-        "Expected block-not-found or download error, got: {}",
-        err
+        "Expected block-not-found or download error, got: {err}"
     );
 }
 
@@ -1462,7 +1459,7 @@ async fn test_waferflow_simple_pipeline() {
     let input = serde_json::to_vec(&serde_json::json!({ "name": "world" })).unwrap();
     let result = run_flow(&w, "greet-flow", Message::new("pipeline"), input).await;
 
-    assert!(result.is_respond(), "expected respond, got: {:?}", result);
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
     let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "greeting": "Hello, WORLD!" }));
 }
@@ -1581,8 +1578,7 @@ async fn test_waferflow_conditional_routing() {
     let result = run_flow(&w, "sign-check", Message::new("pipeline"), input).await;
     assert!(
         result.is_respond(),
-        "expected respond (positive), got: {:?}",
-        result
+        "expected respond (positive), got: {result:?}"
     );
     let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "result": "positive" }));
@@ -1592,8 +1588,7 @@ async fn test_waferflow_conditional_routing() {
     let result = run_flow(&w, "sign-check", Message::new("pipeline"), input).await;
     assert!(
         result.is_respond(),
-        "expected respond (negative), got: {:?}",
-        result
+        "expected respond (negative), got: {result:?}"
     );
     let output: serde_json::Value = serde_json::from_slice(result.body()).unwrap();
     assert_eq!(output, serde_json::json!({ "result": "non-positive" }));
@@ -1616,7 +1611,7 @@ async fn test_waferflow_validation_errors() {
     }"#,
     );
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("duplicate"));
+    assert!(result.unwrap_err().to_string().contains("duplicate"));
 }
 
 #[tokio::test]
@@ -1663,7 +1658,7 @@ async fn test_waferflow_max_steps_limit() {
     w.resolve().await.expect("resolve failed");
 
     let result = run_flow(&w, "infinite", Message::new("test"), vec![]).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(
         result.error().message.contains("max steps"),
         "error: {:?}",
@@ -1675,7 +1670,7 @@ async fn test_waferflow_max_steps_limit() {
 async fn test_waferflow_not_found() {
     let w = Wafer::new();
     let result = run_flow(&w, "nonexistent", Message::new("test"), vec![]).await;
-    assert!(result.is_error(), "expected error, got: {:?}", result);
+    assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(
         result.error().message.contains("not found"),
         "error: {:?}",

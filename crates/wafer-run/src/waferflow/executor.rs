@@ -44,11 +44,13 @@ pub async fn execute(
     let has_pipeline_steps = flow.steps.iter().any(|s| s.input.is_some());
     let mut current_body: Vec<u8> = if has_pipeline_steps {
         let bytes = input.collect_to_bytes().await;
-        let input_val: serde_json::Value =
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        if let Err(e) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
-        }
+        let input_val = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
+                serde_json::Value::Null
+            }
+        };
         acc.set("input", input_val);
         bytes
     } else {
@@ -151,7 +153,7 @@ pub async fn execute(
         let start = Instant::now();
 
         // --- Execute block with panic recovery ---
-        let step_input = InputStream::from_bytes(current_body.clone());
+        let step_input = InputStream::from_bytes(std::mem::take(&mut current_body));
         let out = crate::runtime::run_block_with_recovery(
             block.as_ref(),
             &ctx,
@@ -235,7 +237,7 @@ pub async fn execute(
                             None => {
                                 return OutputStream::error(WaferError::new(
                                     ErrorCode::NOT_FOUND,
-                                    format!("next target step '{}' not found", target_step),
+                                    format!("next target step '{target_step}' not found"),
                                 ));
                             }
                         }

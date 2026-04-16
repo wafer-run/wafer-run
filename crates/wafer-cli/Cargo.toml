@@ -18,3 +18,6 @@ wasmi = { workspace = true }
 wafer-block = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
+
+[lints]
+workspace = true

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::block::Block;
+use crate::error::RuntimeError;
 
 use super::Wafer;
 
@@ -36,7 +37,7 @@ impl Wafer {
     /// `{org}/{block}` convention, the config is stored and the
     /// block or flow will be resolved during [`resolve()`](Self::resolve)
     /// (downloading `.flow.json` or `.wasm` via the registry).
-    pub fn register(&mut self, name: &str, config: serde_json::Value) -> Result<(), String> {
+    pub fn register(&mut self, name: &str, config: serde_json::Value) -> Result<(), RuntimeError> {
         if let Some(registrar) = self.registrars.remove(name) {
             registrar(self, config);
             self.registrars.insert(name.to_string(), registrar);
@@ -46,10 +47,9 @@ impl Wafer {
         // No registrar — store config for deferred resolution during resolve().
         // The name must look like a remote ref (org/block).
         if !name.contains('/') {
-            return Err(format!(
-                "no registrar found for {:?} and name is not a remote ref",
-                name
-            ));
+            return Err(RuntimeError::Config(format!(
+                "no registrar found for {name:?} and name is not a remote ref"
+            )));
         }
         tracing::debug!(name = %name, "no registrar found, deferring to resolve()");
         self.add_block_config(name, config);
@@ -63,21 +63,23 @@ impl Wafer {
     ///
     /// Native-only: requires filesystem access.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_blocks_json(&mut self, path: &str) -> Result<(), String> {
+    pub fn load_blocks_json(&mut self, path: &str) -> Result<(), RuntimeError> {
         let data = std::fs::read_to_string(path)
-            .map_err(|e| format!("read blocks.json {}: {}", path, e))?;
+            .map_err(|e| RuntimeError::Config(format!("read blocks.json {path}: {e}")))?;
 
         let expanded = crate::helpers::expand_env_vars(&data);
 
         let mut map: std::collections::HashMap<String, serde_json::Value> =
-            serde_json::from_str(&expanded).map_err(|e| format!("parse blocks.json: {}", e))?;
+            serde_json::from_str(&expanded)
+                .map_err(|e| RuntimeError::Config(format!("parse blocks.json: {e}")))?;
 
         // Extract alias definitions before processing block configs
         if let Some(aliases_val) = map.remove("aliases") {
             if let Some(aliases_obj) = aliases_val.as_object() {
                 for (alias, target) in aliases_obj {
                     if let Some(target_str) = target.as_str() {
-                        self.aliases.insert(alias.clone(), target_str.to_string());
+                        Arc::make_mut(&mut self.aliases)
+                            .insert(alias.clone(), target_str.to_string());
                     }
                 }
             }
@@ -133,11 +135,11 @@ impl Wafer {
         &mut self,
         type_name: impl Into<String>,
         block: Arc<dyn Block>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeError> {
         let name = type_name.into();
         super::validate_block_name(&name)?;
         if self.blocks.contains_key(&name) {
-            return Err(format!("block '{}' already registered", name));
+            return Err(RuntimeError::DuplicateBlock { name });
         }
         self.blocks.insert(name, block);
         Ok(())
@@ -149,14 +151,16 @@ impl Wafer {
     }
 
     /// Parse, validate, and register a WaferFlow from a JSON string.
-    pub fn add_flow_json(&mut self, json: &str) -> Result<(), String> {
-        let flow = wafer_flow::parse(json).map_err(|e| e.to_string())?;
+    pub fn add_flow_json(&mut self, json: &str) -> Result<(), RuntimeError> {
+        let flow = wafer_flow::parse(json).map_err(|e| RuntimeError::Flow(e.to_string()))?;
         wafer_flow::validate(&flow).map_err(|errors| {
-            errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
+            RuntimeError::Flow(
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
         })?;
         self.add_flow(flow);
         Ok(())
@@ -203,6 +207,6 @@ mod tests {
         let block = Arc::new(NoopBlock);
         assert!(wafer.register_block("my_org/block", block.clone()).is_err());
         assert!(wafer.register_block("noSlash", block.clone()).is_err());
-        assert!(wafer.register_block("my-org/block", block.clone()).is_ok());
+        assert!(wafer.register_block("my-org/block", block).is_ok());
     }
 }

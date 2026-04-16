@@ -33,9 +33,12 @@ impl BlockConfig {
     }
 
     pub fn env_or(&self, env_var: &str, key: &str) -> Option<String> {
-        if let Ok(val) = std::env::var(env_var) {
-            if !val.is_empty() {
-                return Some(val);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(val) = std::env::var(env_var) {
+                if !val.is_empty() {
+                    return Some(val);
+                }
             }
         }
         self.inner

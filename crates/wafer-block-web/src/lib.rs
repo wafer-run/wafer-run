@@ -69,7 +69,7 @@ impl WebBlock {
         let result = match store::get(ctx, &config.folder, key).await {
             Ok(r) => Ok(r),
             Err(_) if !key.is_empty() && Path::new(key).extension().is_none() => {
-                let html_key = format!("{}.html", key);
+                let html_key = format!("{key}.html");
                 match store::get(ctx, &config.folder, &html_key).await {
                     Ok(r) => Ok(r),
                     Err(_) => {
@@ -274,6 +274,6 @@ impl Block for WebBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/web", Arc::new(WebBlock::new()))
 }

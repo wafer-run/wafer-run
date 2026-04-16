@@ -92,29 +92,7 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     }
 }
 
-fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
-    match serde_json::to_vec(&val) {
-        Ok(bytes) => OutputStream::respond(bytes),
-        Err(e) => OutputStream::error(WaferError::new(
-            ErrorCode::INTERNAL,
-            format!("serialize response: {e}"),
-        )),
-    }
-}
-
-macro_rules! decode_or_err {
-    ($body:expr, $ty:ty, $op_name:expr) => {
-        match serde_json::from_slice::<$ty>($body) {
-            Ok(r) => r,
-            Err(e) => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
-                    format!("invalid {} request: {e}", $op_name),
-                ))
-            }
-        }
-    };
-}
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 /// Handle a crypto message by delegating to the given service.
 ///

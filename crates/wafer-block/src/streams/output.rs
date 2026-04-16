@@ -61,7 +61,7 @@ impl OutputSink {
     pub async fn error(mut self, err: WaferError) -> Result<(), SinkClosed> {
         self.terminal_sent = true;
         self.tx
-            .send(StreamEvent::Error(err))
+            .send(StreamEvent::Error(Box::new(err)))
             .await
             .map_err(|_| SinkClosed)
     }
@@ -165,7 +165,7 @@ impl OutputStream {
     pub fn error(err: WaferError) -> Self {
         let (tx, rx) = mpsc::channel::<StreamEvent>(1);
         let cancel = CancellationToken::new();
-        let _ = tx.try_send(StreamEvent::Error(err));
+        let _ = tx.try_send(StreamEvent::Error(Box::new(err)));
         Self {
             rx: ReceiverStream::new(rx),
             cancel,
@@ -258,6 +258,17 @@ pub enum TerminalNotResponse {
     Malformed,
 }
 
+impl std::fmt::Display for TerminalNotResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error(e) => write!(f, "block error: {e}"),
+            Self::Drop => write!(f, "block dropped the request"),
+            Self::Continue(msg) => write!(f, "unexpected Continue (kind: {})", msg.kind),
+            Self::Malformed => write!(f, "stream ended without terminal event"),
+        }
+    }
+}
+
 impl From<TerminalNotResponse> for WaferError {
     fn from(t: TerminalNotResponse) -> Self {
         match t {
@@ -297,7 +308,7 @@ impl OutputStream {
                     meta.extend(trailing);
                     return Ok(BufferedResponse { body, meta });
                 }
-                StreamEvent::Error(e) => return Err(TerminalNotResponse::Error(e)),
+                StreamEvent::Error(e) => return Err(TerminalNotResponse::Error(*e)),
                 StreamEvent::Drop => return Err(TerminalNotResponse::Drop),
                 StreamEvent::Continue(msg) => return Err(TerminalNotResponse::Continue(msg)),
             }
@@ -332,7 +343,7 @@ impl OutputStream {
         self.filter_map(|evt| async move {
             match evt {
                 StreamEvent::Chunk(bytes) => Some(Ok(bytes)),
-                StreamEvent::Error(e) => Some(Err(e)),
+                StreamEvent::Error(e) => Some(Err(*e)),
                 StreamEvent::Meta(_) => None,
                 StreamEvent::Complete { .. } | StreamEvent::Drop | StreamEvent::Continue(_) => None,
             }
@@ -357,7 +368,7 @@ impl OutputStream {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let (stream, sink, cancel) = Self::new_streaming();
-        let cancel_clone = cancel.clone();
+        let cancel_clone = cancel;
         crate::spawn::spawn_producer(async move {
             f(sink, cancel_clone).await;
         });
@@ -440,7 +451,7 @@ mod tests {
         };
         let (mut rx, sink, _cancel) = new_streaming_channel(16);
         sink.error(err.clone()).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), StreamEvent::Error(err));
+        assert_eq!(rx.recv().await.unwrap(), StreamEvent::Error(Box::new(err)));
     }
 
     #[tokio::test]
@@ -505,7 +516,7 @@ mod tests {
         let stream = OutputStream::error(err.clone());
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], StreamEvent::Error(err));
+        assert_eq!(events[0], StreamEvent::Error(Box::new(err)));
     }
 
     #[tokio::test]
@@ -546,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_stream_cancels_paired_token() {
         let (stream, _sink, cancel) = OutputStream::new_streaming();
-        let observer = cancel.clone();
+        let observer = cancel;
         assert!(!observer.is_cancelled());
         drop(stream);
         assert!(
@@ -789,7 +800,7 @@ mod tests {
         let stream = OutputStream::from_result(Err::<Vec<u8>, _>(err.clone()));
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], StreamEvent::Error(err));
+        assert_eq!(events[0], StreamEvent::Error(Box::new(err)));
     }
 
     #[tokio::test]
@@ -867,6 +878,6 @@ mod tests {
 
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], StreamEvent::Error(err));
+        assert_eq!(events[0], StreamEvent::Error(Box::new(err)));
     }
 }

@@ -9,6 +9,7 @@ use wafer_block::streams::output::OutputStream;
 
 use crate::block::{Block, BlockInfo};
 use crate::context::Context;
+use crate::error::RuntimeError;
 use crate::types::*;
 
 use super::capabilities::BlockCapabilities;
@@ -134,11 +135,11 @@ fn read_guest_bytes(
     memory: wasmi::Memory,
     offset: u32,
     len: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, RuntimeError> {
     let mut buf = vec![0u8; len as usize];
     memory
         .read(store, offset as usize, &mut buf)
-        .map_err(|e| format!("reading guest memory at {offset}+{len}: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("reading guest memory at {offset}+{len}: {e}")))?;
     Ok(buf)
 }
 
@@ -149,14 +150,14 @@ fn write_guest_bytes(
     alloc_fn: wasmi::TypedFunc<i32, i32>,
     memory: wasmi::Memory,
     data: &[u8],
-) -> Result<u32, String> {
+) -> Result<u32, RuntimeError> {
     let len = data.len() as i32;
     let ptr = alloc_fn
         .call(&mut *store, len)
-        .map_err(|e| format!("__wafer_alloc({len}): {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("__wafer_alloc({len}): {e}")))?;
     memory
         .write(&mut *store, ptr as usize, data)
-        .map_err(|e| format!("writing {len} bytes at guest ptr {ptr}: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("writing {len} bytes at guest ptr {ptr}: {e}")))?;
     Ok(ptr as u32)
 }
 
@@ -164,7 +165,7 @@ fn write_guest_bytes(
 // Linker setup
 // ---------------------------------------------------------------------------
 
-fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
+fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError> {
     let mut linker = Linker::<WasmiHostState>::new(engine);
 
     // ---- wafer module: host imports ----
@@ -187,7 +188,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 }
             },
         )
-        .map_err(|e| format!("linking __wafer_host_is_cancelled: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_is_cancelled: {e}")))?;
 
     // __wafer_host_log(level_ptr, level_len, msg_ptr, msg_len)
     linker
@@ -228,7 +229,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 }
             },
         )
-        .map_err(|e| format!("linking __wafer_host_log: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_log: {e}")))?;
 
     // __wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
     //
@@ -290,8 +291,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 // Capability check: deny if block is not allowed to call the target.
                 if !caller.data().capabilities.allows_call_block(&block_name) {
                     return Err(WasmiError::new(format!(
-                        "call_block to '{}' denied by block capabilities",
-                        block_name
+                        "call_block to '{block_name}' denied by block capabilities"
                     )));
                 }
 
@@ -308,7 +308,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 Err(WasmiError::host(CallBlockTrap))
             },
         )
-        .map_err(|e| format!("linking __wafer_host_call_block: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_call_block: {e}")))?;
 
     // ---- WASI stubs (wasi_snapshot_preview1) ----
 
@@ -330,7 +330,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 0 // __WASI_ERRNO_SUCCESS
             },
         )
-        .map_err(|e| format!("linking fd_write stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking fd_write stub: {e}")))?;
 
     // proc_exit(code)
     linker
@@ -341,7 +341,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 Err(WasmiError::new(format!("guest called proc_exit({code})")))
             },
         )
-        .map_err(|e| format!("linking proc_exit stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking proc_exit stub: {e}")))?;
 
     // environ_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
     linker
@@ -357,7 +357,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 0
             },
         )
-        .map_err(|e| format!("linking environ_sizes_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking environ_sizes_get stub: {e}")))?;
 
     // environ_get(argv_ptr, argv_buf_ptr) -> errno
     linker
@@ -366,7 +366,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
             "environ_get",
             |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
         )
-        .map_err(|e| format!("linking environ_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking environ_get stub: {e}")))?;
 
     // args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
     // TinyGo WASM runtime imports this to enumerate command-line arguments.
@@ -384,7 +384,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 0
             },
         )
-        .map_err(|e| format!("linking args_sizes_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking args_sizes_get stub: {e}")))?;
 
     // args_get(argv_ptr, argv_buf_ptr) -> errno
     // TinyGo WASM runtime imports this to read command-line arguments.
@@ -395,7 +395,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
             "args_get",
             |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
         )
-        .map_err(|e| format!("linking args_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking args_get stub: {e}")))?;
 
     // clock_time_get(id, precision, time_ptr) -> errno
     // TinyGo WASM runtime imports this for time.Now() etc.
@@ -412,7 +412,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 0
             },
         )
-        .map_err(|e| format!("linking clock_time_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking clock_time_get stub: {e}")))?;
 
     // random_get(buf_ptr, buf_len) -> errno
     // TinyGo WASM runtime imports this for crypto/rand and map seed initialisation.
@@ -433,7 +433,7 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, String> {
                 0
             },
         )
-        .map_err(|e| format!("linking random_get stub: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking random_get stub: {e}")))?;
 
     Ok(linker)
 }
@@ -457,7 +457,7 @@ fn instantiate(
     linker: &Linker<WasmiHostState>,
     module: &Module,
     caps: &BlockCapabilities,
-) -> Result<(Store<WasmiHostState>, wasmi::Instance), String> {
+) -> Result<(Store<WasmiHostState>, wasmi::Instance), RuntimeError> {
     let host_state = WasmiHostState {
         context: None,
         capabilities: caps.clone(),
@@ -470,14 +470,14 @@ fn instantiate(
     store.limiter(|state| state);
     store
         .set_fuel(DEFAULT_FUEL)
-        .map_err(|e| format!("setting fuel: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("setting fuel: {e}")))?;
 
     let pre = linker
         .instantiate(&mut store, module)
-        .map_err(|e| format!("instantiation: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("instantiation: {e}")))?;
     let instance = pre
         .start(&mut store)
-        .map_err(|e| format!("running start function: {e}"))?;
+        .map_err(|e| RuntimeError::Wasm(format!("running start function: {e}")))?;
 
     // Call `_start` if exported — required for TinyGo WASM modules.
     if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&store, "_start") {
@@ -486,7 +486,7 @@ fn instantiate(
             Err(e) => {
                 let msg = e.to_string();
                 if !msg.contains("proc_exit") {
-                    return Err(format!("WASM _start failed: {e}"));
+                    return Err(RuntimeError::Wasm(format!("WASM _start failed: {e}")));
                 }
                 // proc_exit(0) is the normal WASI shutdown path — expected.
             }
@@ -494,7 +494,7 @@ fn instantiate(
         // Re-fill fuel so the subsequent guest call has a full budget.
         store
             .set_fuel(DEFAULT_FUEL)
-            .map_err(|e| format!("refilling fuel after _start: {e}"))?;
+            .map_err(|e| RuntimeError::Wasm(format!("refilling fuel after _start: {e}")))?;
     }
 
     Ok((store, instance))
@@ -518,19 +518,21 @@ unsafe impl Send for WasmiBlock {}
 unsafe impl Sync for WasmiBlock {}
 
 impl WasmiBlock {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("reading WASM file: {e}"))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load(path: &str) -> Result<Self, RuntimeError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| RuntimeError::Wasm(format!("reading WASM file: {e}")))?;
         Self::load_from_bytes(&bytes)
     }
 
-    pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, String> {
+    pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
         Self::load_with_capabilities(wasm_bytes, BlockCapabilities::unrestricted())
     }
 
     pub fn load_with_capabilities(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RuntimeError> {
         let mut config = wasmi::Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);
@@ -541,9 +543,9 @@ impl WasmiBlock {
         engine: &Engine,
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
-    ) -> Result<Self, String> {
-        let module =
-            Module::new(engine, wasm_bytes).map_err(|e| format!("compiling WASM module: {e}"))?;
+    ) -> Result<Self, RuntimeError> {
+        let module = Module::new(engine, wasm_bytes)
+            .map_err(|e| RuntimeError::Wasm(format!("compiling WASM module: {e}")))?;
         let linker = build_linker(engine)?;
         Ok(Self {
             engine: engine.clone(),
@@ -569,8 +571,9 @@ impl WasmiBlock {
         setup: impl FnOnce(
             &mut Store<WasmiHostState>,
             wasmi::Instance,
-        ) -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), String>,
-    ) -> Result<Vec<u8>, String> {
+        )
+            -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
+    ) -> Result<Vec<u8>, RuntimeError> {
         let guard = ContextGuard::new(ctx);
         let (mut store, instance) =
             instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
@@ -580,12 +583,12 @@ impl WasmiBlock {
 
         let memory = instance
             .get_memory(&store, "memory")
-            .ok_or_else(|| "guest has no exported memory".to_string())?;
+            .ok_or_else(|| RuntimeError::Wasm("guest has no exported memory".to_string()))?;
 
         // Initial call (resumable).
         let mut resumable = match func
             .call_resumable(&mut store, (arg0, arg1))
-            .map_err(|e| format!("guest call failed: {e}"))?
+            .map_err(|e| RuntimeError::Wasm(format!("guest call failed: {e}")))?
         {
             TypedResumableCall::Finished(packed) => {
                 let (ptr, len) = unpack_ptr_len(packed);
@@ -600,10 +603,10 @@ impl WasmiBlock {
         // Resolve pending calls in a loop.
         loop {
             let pending = store.data_mut().pending_call.take().ok_or_else(|| {
-                format!(
+                RuntimeError::Wasm(format!(
                     "guest trapped but no pending_call (host error: {})",
                     resumable.host_error()
-                )
+                ))
             })?;
 
             debug!(
@@ -613,8 +616,9 @@ impl WasmiBlock {
             );
 
             // Deserialize the message, call the block, collect and serialize the result.
-            let msg: Message = serde_json::from_slice(&pending.msg_bytes)
-                .map_err(|e| format!("deserializing call_block message: {e}"))?;
+            let msg: Message = serde_json::from_slice(&pending.msg_bytes).map_err(|e| {
+                RuntimeError::Wasm(format!("deserializing call_block message: {e}"))
+            })?;
 
             let out = ctx
                 .call_block(&pending.block_name, msg, InputStream::empty())
@@ -633,8 +637,9 @@ impl WasmiBlock {
                         "error": null,
                         "message": null
                     });
-                    serde_json::to_vec(&payload)
-                        .map_err(|e| format!("serializing call_block result: {e}"))?
+                    serde_json::to_vec(&payload).map_err(|e| {
+                        RuntimeError::Wasm(format!("serializing call_block result: {e}"))
+                    })?
                 }
                 Err(TerminalNotResponse::Error(e)) => {
                     let payload = serde_json::json!({
@@ -643,8 +648,9 @@ impl WasmiBlock {
                         "error": { "code": format!("{:?}", e.code), "message": e.message, "meta": [] },
                         "message": null
                     });
-                    serde_json::to_vec(&payload)
-                        .map_err(|e| format!("serializing call_block error: {e}"))?
+                    serde_json::to_vec(&payload).map_err(|e| {
+                        RuntimeError::Wasm(format!("serializing call_block error: {e}"))
+                    })?
                 }
                 Err(TerminalNotResponse::Drop) => {
                     let payload = serde_json::json!({
@@ -653,8 +659,9 @@ impl WasmiBlock {
                         "error": null,
                         "message": null
                     });
-                    serde_json::to_vec(&payload)
-                        .map_err(|e| format!("serializing call_block drop: {e}"))?
+                    serde_json::to_vec(&payload).map_err(|e| {
+                        RuntimeError::Wasm(format!("serializing call_block drop: {e}"))
+                    })?
                 }
                 Err(TerminalNotResponse::Continue(next_msg)) => {
                     let payload = serde_json::json!({
@@ -663,8 +670,9 @@ impl WasmiBlock {
                         "error": null,
                         "message": next_msg
                     });
-                    serde_json::to_vec(&payload)
-                        .map_err(|e| format!("serializing call_block continue: {e}"))?
+                    serde_json::to_vec(&payload).map_err(|e| {
+                        RuntimeError::Wasm(format!("serializing call_block continue: {e}"))
+                    })?
                 }
                 Err(TerminalNotResponse::Malformed) => {
                     let payload = serde_json::json!({
@@ -673,8 +681,9 @@ impl WasmiBlock {
                         "error": { "code": "Internal", "message": "malformed output stream", "meta": [] },
                         "message": null
                     });
-                    serde_json::to_vec(&payload)
-                        .map_err(|e| format!("serializing malformed error: {e}"))?
+                    serde_json::to_vec(&payload).map_err(|e| {
+                        RuntimeError::Wasm(format!("serializing malformed error: {e}"))
+                    })?
                 }
             };
 
@@ -690,7 +699,7 @@ impl WasmiBlock {
             // function's return type.
             match resumable
                 .resume(&mut store, &[Val::I64(0)])
-                .map_err(|e| format!("resuming guest after call_block: {e}"))?
+                .map_err(|e| RuntimeError::Wasm(format!("resuming guest after call_block: {e}")))?
             {
                 TypedResumableCall::Finished(packed) => {
                     let (ptr, len) = unpack_ptr_len(packed);
@@ -719,26 +728,26 @@ impl Block for WasmiBlock {
         }
 
         // Sync instantiation: call __wafer_info.
-        let result = (|| -> Result<BlockInfo, String> {
+        let result = (|| -> Result<BlockInfo, RuntimeError> {
             let (mut store, instance) =
                 instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
 
             let info_fn = instance
                 .get_typed_func::<(), i64>(&store, "__wafer_info")
-                .map_err(|e| format!("getting __wafer_info: {e}"))?;
+                .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_info: {e}")))?;
 
             let memory = instance
                 .get_memory(&store, "memory")
-                .ok_or_else(|| "guest has no exported memory".to_string())?;
+                .ok_or_else(|| RuntimeError::Wasm("guest has no exported memory".to_string()))?;
 
             let packed = info_fn
                 .call(&mut store, ())
-                .map_err(|e| format!("calling __wafer_info: {e}"))?;
+                .map_err(|e| RuntimeError::Wasm(format!("calling __wafer_info: {e}")))?;
 
             let (ptr, len) = unpack_ptr_len(packed);
             let bytes = read_guest_bytes(&store, memory, ptr, len)?;
             let info: BlockInfo = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("deserializing BlockInfo: {e}"))?;
+                .map_err(|e| RuntimeError::Wasm(format!("deserializing BlockInfo: {e}")))?;
             Ok(info)
         })();
 
@@ -777,13 +786,13 @@ impl Block for WasmiBlock {
             .call_guest_resumable(ctx, |store, instance| {
                 let alloc_fn = instance
                     .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
-                    .map_err(|e| format!("getting __wafer_alloc: {e}"))?;
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
                 let handle_fn = instance
                     .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
-                    .map_err(|e| format!("getting __wafer_handle: {e}"))?;
-                let memory = instance
-                    .get_memory(&*store, "memory")
-                    .ok_or_else(|| "guest has no exported memory".to_string())?;
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+                let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
+                    RuntimeError::Wasm("guest has no exported memory".to_string())
+                })?;
 
                 let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
                 let len = msg_bytes.len() as i32;
@@ -870,13 +879,13 @@ impl Block for WasmiBlock {
             .call_guest_resumable(ctx, |store, instance| {
                 let alloc_fn = instance
                     .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
-                    .map_err(|e| format!("getting __wafer_alloc: {e}"))?;
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
                 let lifecycle_fn = instance
                     .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_lifecycle")
-                    .map_err(|e| format!("getting __wafer_lifecycle: {e}"))?;
-                let memory = instance
-                    .get_memory(&*store, "memory")
-                    .ok_or_else(|| "guest has no exported memory".to_string())?;
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_lifecycle: {e}")))?;
+                let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
+                    RuntimeError::Wasm("guest has no exported memory".to_string())
+                })?;
 
                 let ptr = write_guest_bytes(store, alloc_fn, memory, &event_bytes)?;
                 let len = event_bytes.len() as i32;

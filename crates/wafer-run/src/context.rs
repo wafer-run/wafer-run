@@ -22,7 +22,7 @@ pub use wafer_block::context::Context;
 pub struct RuntimeContext {
     pub flow_id: String,
     pub node_id: String,
-    pub config: HashMap<String, String>,
+    pub config: Arc<HashMap<String, String>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub deadline: Option<Instant>,
     /// All registered blocks.
@@ -110,8 +110,7 @@ impl Context for RuntimeContext {
                 return err_output(
                     ErrorCode::PERMISSION_DENIED,
                     format!(
-                        "block '{}' not in requires list — call_block denied",
-                        block_name
+                        "block '{block_name}' not in requires list — call_block denied"
                     ),
                 );
             }
@@ -152,7 +151,7 @@ impl Context for RuntimeContext {
                 if !caps.allows_call_block(block_name) {
                     return err_output(
                         ErrorCode::PERMISSION_DENIED,
-                        format!("block capability denies call to '{}'", block_name),
+                        format!("block capability denies call to '{block_name}'"),
                     );
                 }
 
@@ -178,8 +177,7 @@ impl Context for RuntimeContext {
                         return err_output(
                             ErrorCode::PERMISSION_DENIED,
                             format!(
-                                "block capability denies access to {} '{}'",
-                                wrap_rt_str, wrap_resource
+                                "block capability denies access to {wrap_rt_str} '{wrap_resource}'"
                             ),
                         );
                     }
@@ -202,7 +200,7 @@ impl Context for RuntimeContext {
             None => {
                 return err_output(
                     ErrorCode::NOT_FOUND,
-                    format!("block '{}' not found", block_name),
+                    format!("block '{block_name}' not found"),
                 );
             }
         };

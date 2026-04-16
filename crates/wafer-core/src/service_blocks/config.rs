@@ -6,6 +6,7 @@ use wafer_block::streams::input::InputStream;
 use wafer_block::streams::output::OutputStream;
 use wafer_block::types::BlockInfo;
 use wafer_block::BlockRegistry;
+use wafer_block::RuntimeError;
 use wafer_block::*;
 
 use crate::interfaces::config::{handler, service::ConfigService};
@@ -52,6 +53,6 @@ impl Block for ConfigBlock {
 pub fn register_with(
     w: &mut dyn BlockRegistry,
     service: Arc<dyn ConfigService>,
-) -> Result<(), String> {
+) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/config", Arc::new(ConfigBlock::new(service)))
 }

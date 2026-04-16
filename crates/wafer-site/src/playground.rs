@@ -81,7 +81,7 @@ impl Block for PlaygroundBlock {
                     Ok(bytes) => OutputStream::respond(bytes),
                     Err(e) => OutputStream::error(WaferError {
                         code: ErrorCode::Internal,
-                        message: format!("Rust Playground error: {}", e),
+                        message: format!("Rust Playground error: {e}"),
                         meta: vec![],
                     }),
                 }
@@ -124,7 +124,7 @@ impl Block for PlaygroundBlock {
                     Ok(bytes) => OutputStream::respond(bytes),
                     Err(e) => OutputStream::error(WaferError {
                         code: ErrorCode::Internal,
-                        message: format!("Go Playground error: {}", e),
+                        message: format!("Go Playground error: {e}"),
                         meta: vec![],
                     }),
                 }
@@ -160,7 +160,7 @@ impl Block for PlaygroundBlock {
 
             _ => OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
-                message: format!("Playground endpoint not found: {}", path),
+                message: format!("Playground endpoint not found: {path}"),
                 meta: vec![],
             }),
         }
@@ -266,6 +266,6 @@ async fn proxy_post_form(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, 
         .map_err(|e| e.to_string())
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-site/playground", Arc::new(PlaygroundBlock::new()))
 }

@@ -37,7 +37,7 @@ fn to_c_string(s: &str) -> *mut c_char {
 /// Build a JSON error string: `{"error":"<msg>"}`.
 fn error_json(msg: &str) -> *mut c_char {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let json = format!(r#"{{"error":"{}"}}"#, escaped);
+    let json = format!(r#"{{"error":"{escaped}"}}"#);
     to_c_string(&json)
 }
 
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
         };
         match rt.rt.block_on(rt.inner.resolve()) {
             Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e),
+            Err(e) => error_json(&e.to_string()),
         }
     }));
     result.unwrap_or_else(|_| error_json("panic in wafer_resolve"))
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
         };
         match rt.rt.block_on(rt.inner.start_without_bind()) {
             Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e),
+            Err(e) => error_json(&e.to_string()),
         }
     }));
     result.unwrap_or_else(|_| error_json("panic in wafer_start"))
@@ -219,18 +219,18 @@ pub unsafe extern "C" fn wafer_register(
                         .register_block(name_str, std::sync::Arc::new(block))
                     {
                         Ok(()) => std::ptr::null_mut(),
-                        Err(e) => error_json(&e),
+                        Err(e) => error_json(&e.to_string()),
                     }
                 }
-                Err(e) => error_json(&e),
+                Err(e) => error_json(&e.to_string()),
             }
         } else {
             match std::fs::read_to_string(path_str) {
                 Ok(json) => match rt.inner.add_flow_json(&json) {
                     Ok(()) => std::ptr::null_mut(),
-                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {}", e)),
+                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {e}")),
                 },
-                Err(e) => error_json(&format!("failed to read file: {}", e)),
+                Err(e) => error_json(&format!("failed to read file: {e}")),
             }
         }
     }));

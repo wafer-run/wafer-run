@@ -83,7 +83,7 @@ impl Block for S3StorageBlock {
             } else {
                 S3StorageService::with_endpoint(&bucket, &prefix, &endpoint, &region).await
             }
-            .map_err(|e| WaferError::new("init", format!("wafer-run/s3: {}", e)))?;
+            .map_err(|e| WaferError::new("init", format!("wafer-run/s3: {e}")))?;
 
             tracing::info!(bucket = %bucket, "S3 storage service initialized");
             self.service.set(Arc::new(svc)).ok();
@@ -93,6 +93,6 @@ impl Block for S3StorageBlock {
 }
 
 /// Register the S3 storage block with the given block registry.
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), String> {
+pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/s3", Arc::new(S3StorageBlock::new()))
 }

@@ -108,7 +108,7 @@ impl Block for RateLimitBlock {
                 .unwrap_or(Duration::ZERO);
             let retry_after = remaining.as_secs().to_string();
 
-            let mut err_msg = msg.clone();
+            let mut err_msg = msg;
             err_msg.set_meta("resp.header.Retry-After", retry_after);
             err_msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
             err_msg.set_meta("resp.header.X-RateLimit-Remaining", "0");
@@ -139,6 +139,6 @@ impl Block for RateLimitBlock {
     }
 }
 
-pub fn register(w: &mut Wafer) -> Result<(), String> {
+pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
 }
