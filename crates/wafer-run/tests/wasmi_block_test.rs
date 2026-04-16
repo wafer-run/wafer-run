@@ -108,8 +108,7 @@ mod tests {
         let result: std::result::Result<(), WaferError> = block.lifecycle(&ctx, event).await;
         assert!(
             result.is_ok(),
-            "lifecycle Init should return Ok(()), got: {:?}",
-            result
+            "lifecycle Init should return Ok(()), got: {result:?}"
         );
     }
 
@@ -135,7 +134,7 @@ mod tests {
     fn test_capabilities_returned() {
         // Load with a restricted capability set (no network, no storage).
         let caps = BlockCapabilities::none();
-        let block = WasmiBlock::load_with_capabilities(ECHO_WASM, caps.clone())
+        let block = WasmiBlock::load_with_capabilities(ECHO_WASM, caps)
             .expect("echo_block.wasm should load with restricted capabilities");
 
         let returned = block
@@ -180,13 +179,13 @@ mod tests {
 
         match result.collect_buffered().await {
             Err(TerminalNotResponse::Error(err)) => {
-                let err_msg = format!("{:?}", err);
+                let err_msg = format!("{err:?}");
                 assert!(
                     err_msg.contains("fuel"),
                     "error should mention fuel exhaustion, got: {err_msg}"
                 );
             }
-            other => panic!("infinite loop should produce an error, got: {:?}", other),
+            other => panic!("infinite loop should produce an error, got: {other:?}"),
         }
     }
 
@@ -229,16 +228,15 @@ mod tests {
 
         match result.collect_buffered().await {
             Err(TerminalNotResponse::Error(err)) => {
-                let err_msg = format!("{:?}", err);
+                let err_msg = format!("{err:?}");
                 assert!(
                     err_msg.contains("denied by block capabilities"),
                     "error should mention capability denial, got: {err_msg}"
                 );
             }
-            other => panic!(
-                "call_block with no capabilities should produce an error, got: {:?}",
-                other
-            ),
+            other => {
+                panic!("call_block with no capabilities should produce an error, got: {other:?}")
+            }
         }
     }
 
@@ -284,7 +282,7 @@ mod tests {
 
         match result.collect_buffered().await {
             Err(TerminalNotResponse::Error(err)) => {
-                let err_msg = format!("{:?}", err);
+                let err_msg = format!("{err:?}");
                 // The error should indicate an out-of-bounds memory access
                 assert!(
                     err_msg.contains("WASM handle error")
@@ -293,10 +291,7 @@ mod tests {
                     "error should indicate memory-related failure, got: {err_msg}"
                 );
             }
-            other => panic!(
-                "exceeding memory limit should produce an error, got: {:?}",
-                other
-            ),
+            other => panic!("exceeding memory limit should produce an error, got: {other:?}"),
         }
     }
 }

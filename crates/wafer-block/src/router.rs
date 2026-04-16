@@ -112,7 +112,7 @@ impl Router {
 
         OutputStream::error(WaferError {
             code: ErrorCode::NotFound,
-            message: format!("route not found: {} {}", action, path),
+            message: format!("route not found: {action} {path}"),
             meta: vec![],
         })
     }

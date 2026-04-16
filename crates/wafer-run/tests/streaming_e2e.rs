@@ -196,7 +196,7 @@ async fn error_returns_terminal() {
             assert_eq!(e.code, ErrorCode::Internal);
             assert_eq!(e.message, "deliberate");
         }
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 

@@ -71,8 +71,7 @@ pub fn check_access(
                 _ => Err(WaferError::new(
                     ErrorCode::PERMISSION_DENIED,
                     format!(
-                        "WRAP: raw SQL access denied (caller: {:?}, admin: {})",
-                        caller_id, admin_block
+                        "WRAP: raw SQL access denied (caller: {caller_id:?}, admin: {admin_block})"
                     ),
                 )),
             };
@@ -87,8 +86,7 @@ pub fn check_access(
                     _ => Err(WaferError::new(
                         ErrorCode::PERMISSION_DENIED,
                         format!(
-                            "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {:?})",
-                            caller_id
+                            "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {caller_id:?})"
                         ),
                     )),
                 };
@@ -135,20 +133,14 @@ pub fn check_access(
         if owner.is_none() {
             return Err(WaferError::new(
                 ErrorCode::PERMISSION_DENIED,
-                format!(
-                    "WRAP: unnamespaced resource '{}' denied (caller: {:?})",
-                    resource, caller_id
-                ),
+                format!("WRAP: unnamespaced resource '{resource}' denied (caller: {caller_id:?})"),
             ));
         }
 
         // Rule 7: no match → deny
         return Err(WaferError::new(
             ErrorCode::PERMISSION_DENIED,
-            format!(
-                "WRAP: access denied on '{}' (caller: {:?})",
-                resource, caller_id
-            ),
+            format!("WRAP: access denied on '{resource}' (caller: {caller_id:?})"),
         ));
     }
 
@@ -186,8 +178,7 @@ pub fn check_access(
     Err(WaferError::new(
         ErrorCode::PERMISSION_DENIED,
         format!(
-            "WRAP: access denied on '{}' (caller: {:?}, type: {:?})",
-            resource, caller_id, resource_type
+            "WRAP: access denied on '{resource}' (caller: {caller_id:?}, type: {resource_type:?})"
         ),
     ))
 }

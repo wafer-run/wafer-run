@@ -152,7 +152,7 @@ impl Block for FallbackBlock {
         let path = msg.path().to_string();
         OutputStream::error(WaferError {
             code: ErrorCode::NotFound,
-            message: format!("path '{}' not found", path),
+            message: format!("path '{path}' not found"),
             meta: vec![MetaEntry {
                 key: "resp.status".into(),
                 value: "404".into(),

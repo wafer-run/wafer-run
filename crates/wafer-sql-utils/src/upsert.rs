@@ -28,12 +28,7 @@ pub fn build_upsert(
     query.columns(cols);
     query.values_panic(vals);
 
-    let mut on_conflict = OnConflict::columns(
-        conflict_columns
-            .iter()
-            .map(|c| DynCol((*c).into()))
-            .collect::<Vec<_>>(),
-    );
+    let mut on_conflict = OnConflict::columns(conflict_columns.iter().map(|c| DynCol((*c).into())));
     for col in update_columns {
         on_conflict.update_column(DynCol((*col).into()));
     }

@@ -33,7 +33,7 @@ impl Block for GreeterBlock {
         let greeting = if name.is_empty() {
             "Hello, stranger! Try /greet?name=YourName".to_string()
         } else {
-            format!("Hello, {}! Welcome to WAFER.", name)
+            format!("Hello, {name}! Welcome to WAFER.")
         };
         let body =
             serde_json::to_vec(&serde_json::json!({ "greeting": greeting })).unwrap_or_default();

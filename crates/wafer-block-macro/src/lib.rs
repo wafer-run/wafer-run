@@ -173,7 +173,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         "singleton" => quote! { wafer_block::InstanceMode::Singleton },
         "per-flow" => quote! { wafer_block::InstanceMode::PerFlow },
         "per-execution" => quote! { wafer_block::InstanceMode::PerExecution },
-        other => panic!("#[wafer_block]: unknown instance_mode '{}'", other),
+        other => panic!("#[wafer_block]: unknown instance_mode '{other}'"),
     };
 
     let handle_sig = &handle_fn.sig;

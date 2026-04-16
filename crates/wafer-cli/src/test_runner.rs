@@ -445,7 +445,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     );
 
     if failed > 0 {
-        bail!("{} test(s) failed", failed);
+        bail!("{failed} test(s) failed");
     }
 
     Ok(())

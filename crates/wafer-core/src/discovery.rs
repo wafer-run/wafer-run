@@ -463,8 +463,7 @@ mod tests {
             let id = skill["id"].as_str().unwrap();
             assert!(
                 id.starts_with("test/block/"),
-                "skill id '{}' should start with block name 'test/block/'",
-                id
+                "skill id '{id}' should start with block name 'test/block/'"
             );
         }
     }

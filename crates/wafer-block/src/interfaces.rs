@@ -601,9 +601,9 @@ pub fn logger_v1() -> InterfaceSpec {
     let mut actions = HashMap::new();
     for level in &["debug", "info", "warn", "error"] {
         actions.insert(
-            format!("logger.{}", level),
+            format!("logger.{level}"),
             ActionSpec {
-                description: format!("Log a message at {} level.", level),
+                description: format!("Log a message at {level} level."),
                 message_schema: Some(log_msg_schema.clone()),
                 response_schema: None,
             },

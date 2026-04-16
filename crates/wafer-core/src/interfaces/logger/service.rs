@@ -28,12 +28,12 @@ pub enum FieldValue {
 impl fmt::Display for FieldValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::String(s) => write!(f, "{}", s),
-            Self::Int(i) => write!(f, "{}", i),
-            Self::Float(fl) => write!(f, "{}", fl),
-            Self::Bool(b) => write!(f, "{}", b),
-            Self::Error(e) => write!(f, "{}", e),
-            Self::Any(a) => write!(f, "{}", a),
+            Self::String(s) => write!(f, "{s}"),
+            Self::Int(i) => write!(f, "{i}"),
+            Self::Float(fl) => write!(f, "{fl}"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Error(e) => write!(f, "{e}"),
+            Self::Any(a) => write!(f, "{a}"),
         }
     }
 }

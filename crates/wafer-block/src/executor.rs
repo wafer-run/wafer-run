@@ -65,7 +65,7 @@ pub fn extract_path_vars(pattern: &str, path: &str, msg: &mut Message) {
         if pp.starts_with('{') && pp.ends_with('}') {
             let var_name = &pp[1..pp.len() - 1];
             msg.set_meta(
-                format!("{}{}", META_REQ_PARAM_PREFIX, var_name),
+                format!("{META_REQ_PARAM_PREFIX}{var_name}"),
                 path_parts[i].to_string(),
             );
         }

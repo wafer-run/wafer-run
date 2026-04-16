@@ -956,7 +956,7 @@ impl crate::Message {
 
     /// Get an HTTP header value (case-insensitive).
     pub fn header(&self, name: &str) -> &str {
-        let key = format!("http.header.{}", name);
+        let key = format!("http.header.{name}");
         let val = self.get_meta(&key);
         if !val.is_empty() {
             return val;

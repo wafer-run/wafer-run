@@ -11,17 +11,17 @@ pub trait MessageExt {
 
 impl MessageExt for Message {
     fn var(&self, name: &str) -> &str {
-        let key = format!("{}{}", META_REQ_PARAM_PREFIX, name);
+        let key = format!("{META_REQ_PARAM_PREFIX}{name}");
         self.get_meta(&key)
     }
 
     fn query(&self, name: &str) -> &str {
-        let key = format!("{}{}", META_REQ_QUERY_PREFIX, name);
+        let key = format!("{META_REQ_QUERY_PREFIX}{name}");
         self.get_meta(&key)
     }
 
     fn header(&self, name: &str) -> &str {
-        let key = format!("http.header.{}", name);
+        let key = format!("http.header.{name}");
         let val = self.get_meta(&key);
         if !val.is_empty() {
             return val;

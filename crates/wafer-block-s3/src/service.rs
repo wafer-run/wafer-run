@@ -54,7 +54,7 @@ impl S3StorageService {
     /// Build the full S3 key for an object: `{prefix}/{folder}/{key}`.
     fn s3_key(&self, folder: &str, key: &str) -> String {
         if self.prefix.is_empty() {
-            format!("{}/{}", folder, key)
+            format!("{folder}/{key}")
         } else {
             format!("{}/{}/{}", self.prefix, folder, key)
         }
@@ -63,7 +63,7 @@ impl S3StorageService {
     /// Build the S3 prefix for listing objects within a folder.
     fn folder_prefix(&self, folder: &str) -> String {
         if self.prefix.is_empty() {
-            format!("{}/", folder)
+            format!("{folder}/")
         } else {
             format!("{}/{}/", self.prefix, folder)
         }
@@ -105,7 +105,7 @@ impl StorageService for S3StorageService {
             .content_type(content_type)
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 PutObject {}: {}", s3_key, e)))?;
+            .map_err(|e| StorageError::Internal(format!("S3 PutObject {s3_key}: {e}")))?;
         Ok(())
     }
 
@@ -124,7 +124,7 @@ impl StorageService for S3StorageService {
                 if svc_err.is_no_such_key() {
                     StorageError::NotFound
                 } else {
-                    StorageError::Internal(format!("S3 GetObject {}: {}", s3_key, svc_err))
+                    StorageError::Internal(format!("S3 GetObject {s3_key}: {svc_err}"))
                 }
             })?;
 
@@ -144,7 +144,7 @@ impl StorageService for S3StorageService {
             .body
             .collect()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 read body {}: {}", s3_key, e)))?
+            .map_err(|e| StorageError::Internal(format!("S3 read body {s3_key}: {e}")))?
             .into_bytes()
             .to_vec();
 
@@ -167,7 +167,7 @@ impl StorageService for S3StorageService {
             .key(&s3_key)
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 DeleteObject {}: {}", s3_key, e)))?;
+            .map_err(|e| StorageError::Internal(format!("S3 DeleteObject {s3_key}: {e}")))?;
         Ok(())
     }
 
@@ -194,7 +194,7 @@ impl StorageService for S3StorageService {
             }
 
             let resp = req.send().await.map_err(|e| {
-                StorageError::Internal(format!("S3 ListObjectsV2 {}: {}", search_prefix, e))
+                StorageError::Internal(format!("S3 ListObjectsV2 {search_prefix}: {e}"))
             })?;
 
             for obj in resp.contents() {
@@ -261,7 +261,7 @@ impl StorageService for S3StorageService {
             .send()
             .await
             .map_err(|e| {
-                StorageError::Internal(format!("S3 create folder marker {}: {}", marker_key, e))
+                StorageError::Internal(format!("S3 create folder marker {marker_key}: {e}"))
             })?;
         Ok(())
     }
@@ -283,9 +283,10 @@ impl StorageService for S3StorageService {
                 req = req.continuation_token(token);
             }
 
-            let resp = req.send().await.map_err(|e| {
-                StorageError::Internal(format!("S3 list for delete {}: {}", prefix, e))
-            })?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StorageError::Internal(format!("S3 list for delete {prefix}: {e}")))?;
 
             let contents = resp.contents();
 
@@ -308,7 +309,7 @@ impl StorageService for S3StorageService {
                         .set_objects(Some(objects_to_delete))
                         .build()
                         .map_err(|e| {
-                            StorageError::Internal(format!("build Delete request: {}", e))
+                            StorageError::Internal(format!("build Delete request: {e}"))
                         })?;
 
                     self.client
@@ -318,7 +319,7 @@ impl StorageService for S3StorageService {
                         .send()
                         .await
                         .map_err(|e| {
-                            StorageError::Internal(format!("S3 DeleteObjects {}: {}", prefix, e))
+                            StorageError::Internal(format!("S3 DeleteObjects {prefix}: {e}"))
                         })?;
                 }
             }
@@ -344,7 +345,7 @@ impl StorageService for S3StorageService {
             .delimiter("/")
             .send()
             .await
-            .map_err(|e| StorageError::Internal(format!("S3 list folders: {}", e)))?;
+            .map_err(|e| StorageError::Internal(format!("S3 list folders: {e}")))?;
 
         let mut folders = Vec::new();
 

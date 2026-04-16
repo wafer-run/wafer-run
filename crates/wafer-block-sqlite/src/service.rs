@@ -29,13 +29,13 @@ impl SQLiteDatabaseService {
 
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
         let conn = Connection::open(path)
-            .map_err(|e| DatabaseError::Internal(format!("open database: {}", e)))?;
+            .map_err(|e| DatabaseError::Internal(format!("open database: {e}")))?;
         Ok(Self::new(conn))
     }
 
     pub fn open_in_memory() -> Result<Self, DatabaseError> {
         let conn = Connection::open_in_memory()
-            .map_err(|e| DatabaseError::Internal(format!("open in-memory database: {}", e)))?;
+            .map_err(|e| DatabaseError::Internal(format!("open in-memory database: {e}")))?;
         Ok(Self::new(conn))
     }
 
@@ -122,7 +122,7 @@ fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json:
         if key == "id" {
             col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
         } else {
-            col_defs.push(format!("{} TEXT", safe_key));
+            col_defs.push(format!("{safe_key} TEXT"));
         }
     }
     if !data.contains_key("id") {
@@ -140,7 +140,7 @@ fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json:
         for key in data.keys() {
             let safe_key = sanitize_ident(key);
             if !existing.contains(&safe_key.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_key);
+                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_key} TEXT");
                 db.execute_batch(&alter).ok();
             }
         }
@@ -151,7 +151,7 @@ fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json:
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
     let safe_table = sanitize_ident(table);
     let mut stmt = db
-        .prepare(&format!("PRAGMA table_info({})", safe_table))
+        .prepare(&format!("PRAGMA table_info({safe_table})"))
         .map_err(|_| ())?;
     let cols: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
@@ -165,7 +165,7 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
 /// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
 fn has_integer_pk(db: &Connection, table: &str) -> bool {
     let safe_table = sanitize_ident(table);
-    let mut stmt = match db.prepare(&format!("PRAGMA table_info(\"{}\")", safe_table)) {
+    let mut stmt = match db.prepare(&format!("PRAGMA table_info(\"{safe_table}\")")) {
         Ok(s) => s,
         Err(_) => return false,
     };
@@ -204,14 +204,14 @@ fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], so
         for f in filters {
             let safe_field = sanitize_ident(&f.field);
             if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_field);
+                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_field} TEXT");
                 db.execute_batch(&alter).ok();
             }
         }
         for s in sort {
             let safe_field = sanitize_ident(&s.field);
             if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {} ADD COLUMN {} TEXT", safe_table, safe_field);
+                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_field} TEXT");
                 db.execute_batch(&alter).ok();
             }
         }
@@ -227,7 +227,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        let sql = format!("SELECT * FROM {} WHERE id = ?1", table);
+        let sql = format!("SELECT * FROM {table} WHERE id = ?1");
         db.query_row(&sql, [id], Self::row_to_record)
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
@@ -351,7 +351,7 @@ impl DatabaseService for SQLiteDatabaseService {
         ensure_table(&db, &table, &data);
 
         let columns: Vec<&String> = data.keys().collect();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
+        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
         let values: Vec<SqlValue> = columns
             .iter()
             .map(|k| json_to_sql_value(&data[*k]))
@@ -451,7 +451,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        let sql = format!("DELETE FROM {} WHERE id = ?1", table);
+        let sql = format!("DELETE FROM {table} WHERE id = ?1");
         let rows = db
             .execute(&sql, [id])
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
@@ -652,7 +652,7 @@ impl DatabaseService for SQLiteDatabaseService {
         for idx in &table.indexes {
             let sql = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
             db.execute_batch(&sql)
-                .map_err(|e| DatabaseError::Internal(format!("create index: {}", e)))?;
+                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }
 
         // Create indexes for columns with foreign keys
@@ -660,10 +660,10 @@ impl DatabaseService for SQLiteDatabaseService {
             if col.references.is_some() {
                 let tbl = sanitize_ident(&table.name);
                 let c = sanitize_ident(&col.name);
-                let idx_name = format!("idx_{}_{}", tbl, c);
-                let sql = format!("CREATE INDEX IF NOT EXISTS {} ON {}({})", idx_name, tbl, c);
+                let idx_name = format!("idx_{tbl}_{c}");
+                let sql = format!("CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({c})");
                 db.execute_batch(&sql)
-                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {}", e)))?;
+                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
             }
         }
 
@@ -757,7 +757,7 @@ mod tests {
         let v = serde_json::json!([1, 2, 3]);
         match json_to_sql_value(&v) {
             SqlValue::Text(s) => assert_eq!(s, "[1,2,3]"),
-            other => panic!("expected Text, got {:?}", other),
+            other => panic!("expected Text, got {other:?}"),
         }
     }
 
@@ -769,7 +769,7 @@ mod tests {
                 let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
                 assert_eq!(parsed, serde_json::json!({"key": "val"}));
             }
-            other => panic!("expected Text, got {:?}", other),
+            other => panic!("expected Text, got {other:?}"),
         }
     }
 

@@ -21,7 +21,7 @@ impl Wafer {
             None => {
                 return OutputStream::error(WaferError::new(
                     ErrorCode::NOT_FOUND,
-                    format!("flow not found: {}", flow_id),
+                    format!("flow not found: {flow_id}"),
                 ));
             }
         };
@@ -93,7 +93,7 @@ impl Wafer {
             None => {
                 return OutputStream::error(WaferError::new(
                     ErrorCode::NOT_FOUND,
-                    format!("block not found: {}", block_name),
+                    format!("block not found: {block_name}"),
                 ));
             }
         };
@@ -173,7 +173,7 @@ pub async fn run_block_with_recovery(
                 };
                 OutputStream::error(WaferError::new(
                     ErrorCode::INTERNAL,
-                    format!("block panicked: {}", panic_msg),
+                    format!("block panicked: {panic_msg}"),
                 ))
             }
         }

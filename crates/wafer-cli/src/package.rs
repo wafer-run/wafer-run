@@ -84,7 +84,7 @@ pub fn package(dir: &Path) -> anyhow::Result<()> {
         version: manifest.version.clone(),
         interface: manifest.interface.clone(),
         summary: manifest.summary.clone(),
-        requires: manifest.requires.clone(),
+        requires: manifest.requires,
         capabilities: Some(capabilities),
         wasm_size: Some(wasm_size),
         sha256: Some(sha256.clone()),
