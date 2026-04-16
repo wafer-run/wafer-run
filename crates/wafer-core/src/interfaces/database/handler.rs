@@ -305,10 +305,7 @@ pub async fn handle_lifecycle(
             tracing::debug!("no schema tables configured — skipping migration");
         } else {
             service.ensure_schema_tables(tables).await.map_err(|e| {
-                WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("schema migration failed: {e}"),
-                )
+                WaferError::new(ErrorCode::INTERNAL, format!("schema migration failed: {e}"))
             })?;
             tracing::info!(tables = tables.len(), "database schema migrations applied");
         }

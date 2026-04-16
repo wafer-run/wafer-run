@@ -109,9 +109,7 @@ impl Context for RuntimeContext {
             {
                 return err_output(
                     ErrorCode::PERMISSION_DENIED,
-                    format!(
-                        "block '{block_name}' not in requires list — call_block denied"
-                    ),
+                    format!("block '{block_name}' not in requires list — call_block denied"),
                 );
             }
         }

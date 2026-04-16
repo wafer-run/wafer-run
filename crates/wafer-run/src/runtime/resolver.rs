@@ -486,9 +486,7 @@ impl Wafer {
             .header("User-Agent", "wafer-run/0.1.0")
             .send()
             .await
-            .map_err(|e| {
-                RuntimeError::Flow(format!("failed to download flow for {name}: {e}"))
-            })?;
+            .map_err(|e| RuntimeError::Flow(format!("failed to download flow for {name}: {e}")))?;
 
         if resp.status().as_u16() != 200 {
             return Err(RuntimeError::Flow(format!(
@@ -498,9 +496,10 @@ impl Wafer {
             )));
         }
 
-        let body = resp.bytes().await.map_err(|e| {
-            RuntimeError::Flow(format!("failed to read flow body for {name}: {e}"))
-        })?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| RuntimeError::Flow(format!("failed to read flow body for {name}: {e}")))?;
 
         let body_str = std::str::from_utf8(&body).map_err(|e| {
             RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}"))
@@ -530,9 +529,7 @@ impl Wafer {
             .header("User-Agent", "wafer-run/0.1.0")
             .send()
             .await
-            .map_err(|e| {
-                RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}"))
-            })?;
+            .map_err(|e| RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}")))?;
 
         let status = resp.status().as_u16();
         if status != 200 {
@@ -541,9 +538,10 @@ impl Wafer {
             )));
         }
 
-        let body = resp.bytes().await.map_err(|e| {
-            RuntimeError::Wasm(format!("failed to read WASM body for {name}: {e}"))
-        })?;
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("failed to read WASM body for {name}: {e}")))?;
 
         if body.is_empty() {
             return Err(RuntimeError::Wasm(format!(
@@ -553,9 +551,7 @@ impl Wafer {
 
         let engine = self.wasm_engine()?.clone();
         let block = WasmiBlock::load_with_engine(&engine, &body, BlockCapabilities::none())
-            .map_err(|e| {
-                RuntimeError::Wasm(format!("failed to load remote block {name}: {e}"))
-            })?;
+            .map_err(|e| RuntimeError::Wasm(format!("failed to load remote block {name}: {e}")))?;
 
         Ok(Arc::new(block))
     }
@@ -585,9 +581,7 @@ impl Wafer {
             .send()
             .await
             .map_err(|e| {
-                RuntimeError::Registry(format!(
-                    "failed to fetch registry manifest for {name}: {e}"
-                ))
+                RuntimeError::Registry(format!("failed to fetch registry manifest for {name}: {e}"))
             })?;
 
         if resp.status().as_u16() == 404 {
@@ -605,9 +599,7 @@ impl Wafer {
             RuntimeError::Registry(format!("failed to read manifest for {name}: {e}"))
         })?;
         let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
-            RuntimeError::Registry(format!(
-                "failed to parse registry manifest for {name}: {e}"
-            ))
+            RuntimeError::Registry(format!("failed to parse registry manifest for {name}: {e}"))
         })?;
 
         let version = if remote_ref.version == "latest" {
