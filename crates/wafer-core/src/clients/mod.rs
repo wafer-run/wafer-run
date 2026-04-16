@@ -4,6 +4,7 @@ pub mod database;
 pub mod logger;
 pub mod network;
 pub mod storage;
+pub mod vector;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
