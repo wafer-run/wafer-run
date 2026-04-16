@@ -9,6 +9,8 @@ impl ServiceName {
     pub const LOGGER: &str = "logger";
     pub const CONFIG: &str = "config";
     pub const RUNTIME: &str = "runtime";
+    pub const VECTOR: &str = "vector";
+    pub const EMBEDDING: &str = "embedding";
 }
 
 /// Service operation constants for WAFER.
@@ -45,4 +47,11 @@ impl ServiceOp {
     pub const LOGGER_ERROR: &str = "logger.error";
     pub const CONFIG_GET: &str = "config.get";
     pub const CONFIG_SET: &str = "config.set";
+    pub const VECTOR_CREATE_INDEX: &str = "vector.create_index";
+    pub const VECTOR_DELETE_INDEX: &str = "vector.delete_index";
+    pub const VECTOR_UPSERT: &str = "vector.upsert";
+    pub const VECTOR_QUERY: &str = "vector.query";
+    pub const VECTOR_DELETE: &str = "vector.delete";
+    pub const VECTOR_COUNT: &str = "vector.count";
+    pub const EMBEDDING_EMBED: &str = "embedding.embed";
 }

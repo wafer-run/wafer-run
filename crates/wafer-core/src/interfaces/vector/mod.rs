@@ -1,6 +1,7 @@
 //! Vector search and embedding interfaces.
 
 pub mod catalog;
+pub mod handler;
 pub mod rrf;
 pub mod service;
 
