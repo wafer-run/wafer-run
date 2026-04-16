@@ -3,6 +3,11 @@
 //! Vector ops are routed to the `wafer-run/vector` block. Embedding calls
 //! accept a caller-provided block name so app blocks can dispatch by model
 //! (e.g. `suppers-ai/fastembed`, `suppers-ai/openai-embed`).
+//!
+//! WRAP access control is not applied at this layer. Callers (app blocks
+//! such as `suppers-ai/vector`) enforce authentication and authorization
+//! at the HTTP boundary. If per-index WRAP typing is needed later, add
+//! `Vector` and `Embedding` variants to `ResourceType` in `wafer-block`.
 
 use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "wasm-component"))]
@@ -92,9 +97,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_CREATE_INDEX,
             &CreateIndexReq { config: &config },
-            Some(config.name.as_str()),
-            true,
-            Some("vector")
+            None::<&str>,
+            false,
+            None::<&str>
         )?;
         Ok(())
     }
@@ -104,9 +109,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE_INDEX,
             &DeleteIndexReq { name },
-            Some(name),
-            true,
-            Some("vector")
+            None::<&str>,
+            false,
+            None::<&str>
         )?;
         Ok(())
     }
@@ -116,9 +121,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_UPSERT,
             &UpsertReq { index, entries: &entries },
-            Some(index),
-            true,
-            Some("vector")
+            None::<&str>,
+            false,
+            None::<&str>
         )?;
         Ok(())
     }
@@ -143,9 +148,9 @@ dual_api! {
                 mode,
                 keyword_query: keyword_query.as_deref(),
             },
-            Some(index),
+            None::<&str>,
             false,
-            Some("vector")
+            None::<&str>
         )?;
         let resp: QueryResp = decode(&data)?;
         Ok(resp.matches)
@@ -156,9 +161,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE,
             &DeleteReq { index, ids: &ids },
-            Some(index),
-            true,
-            Some("vector")
+            None::<&str>,
+            false,
+            None::<&str>
         )?;
         Ok(())
     }
@@ -168,9 +173,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_COUNT,
             &CountReq { index },
-            Some(index),
+            None::<&str>,
             false,
-            Some("vector")
+            None::<&str>
         )?;
         let resp: CountResp = decode(&data)?;
         Ok(resp.count)
@@ -191,7 +196,7 @@ dual_api! {
             &EmbedReq { texts: &texts },
             None::<&str>,
             false,
-            Some("embedding")
+            None::<&str>
         )?;
         let resp: EmbedResp = decode(&data)?;
         Ok((resp.model, resp.dimensions, resp.vectors))
