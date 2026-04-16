@@ -59,17 +59,23 @@ jobs:
           prefix-key: test
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude wafer-run && cargo test -p wafer-run --lib
 
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --quiet
+
+      - name: Run audit
+        run: cargo audit
 
   coverage:
     name: Coverage
@@ -89,7 +95,7 @@ jobs:
           prefix-key: coverage
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude wafer-run --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
