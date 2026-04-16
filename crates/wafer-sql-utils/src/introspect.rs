@@ -1,5 +1,4 @@
-use crate::ident::sanitize_ident;
-use crate::Backend;
+use crate::{ident::sanitize_ident, Backend};
 
 /// Build query to list all user tables (excludes system tables).
 ///

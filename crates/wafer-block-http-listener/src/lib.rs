@@ -1,15 +1,18 @@
 use std::sync::{Arc, OnceLock};
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{HeaderMap, Method, StatusCode},
+};
 use parking_lot::Mutex;
-
-use wafer_run::block::{Block, BlockCategory, BlockInfo};
-use wafer_run::common::ErrorCode;
-use wafer_run::meta::*;
-use wafer_run::types::*;
-use wafer_run::{InputStream, OutputStream};
+use wafer_run::{
+    block::{Block, BlockCategory, BlockInfo},
+    common::ErrorCode,
+    meta::*,
+    types::*,
+    InputStream, OutputStream,
+};
 
 // ---------------------------------------------------------------------------
 // HTTP <-> Message conversion
@@ -346,13 +349,12 @@ impl Block for HttpListenerBlock {
     }
 
     fn bind(&self, handle: Box<dyn std::any::Any + Send + Sync>) {
-        let handle = match handle.downcast::<wafer_run::runtime::RuntimeHandle>() {
-            Ok(h) => *h,
-            Err(_) => return,
+        let Ok(handle) = handle.downcast::<wafer_run::runtime::RuntimeHandle>() else {
+            return;
         };
-        let target = match self.target.get().cloned() {
-            Some(t) => t,
-            None => return,
+        let handle = *handle;
+        let Some(target) = self.target.get().cloned() else {
+            return;
         };
         let listen = self.listen.get().cloned().unwrap_or_default();
         if listen.is_empty() {

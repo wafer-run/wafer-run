@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context};
 use wasmi::{Caller, Engine, Linker, Module, Store};

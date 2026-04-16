@@ -1,8 +1,8 @@
 //! BlockRegistry trait — abstracts block registration away from the concrete Wafer runtime.
 
-use crate::block::Block;
-use crate::error::RuntimeError;
 use std::sync::Arc;
+
+use crate::{block::Block, error::RuntimeError};
 
 /// Trait for registering blocks without depending on the concrete `Wafer` runtime.
 ///

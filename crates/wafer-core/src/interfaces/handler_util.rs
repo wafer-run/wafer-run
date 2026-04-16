@@ -3,9 +3,7 @@
 //! Provides `to_output` for serializing response payloads and `decode_or_err!`
 //! for deserializing request bodies with uniform error handling.
 
-use wafer_block::common::ErrorCode;
-use wafer_block::streams::output::OutputStream;
-use wafer_block::WaferError;
+use wafer_block::{common::ErrorCode, streams::output::OutputStream, WaferError};
 
 /// Serialize a value to JSON bytes and return as an `OutputStream::respond`,
 /// or return an error stream if serialization fails.

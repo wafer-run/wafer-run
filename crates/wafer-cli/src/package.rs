@@ -3,8 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
 
-use crate::manifest::Manifest;
-use crate::validate::validate_wasm;
+use crate::{manifest::Manifest, validate::validate_wasm};
 
 /// Package the built WAFER block in `dir`.
 ///

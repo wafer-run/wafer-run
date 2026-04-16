@@ -1,7 +1,6 @@
+use std::{collections::HashMap, sync::Arc, time::Instant};
+
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
 use wafer_run::*;
 
 /// MonitoringBlock tracks request metrics and provides a stats endpoint.

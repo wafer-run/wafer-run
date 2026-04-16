@@ -1,9 +1,13 @@
 //! The Context trait — runtime capabilities provided to blocks.
 
-use crate::core_types::{Message, WaferError};
-use crate::streams::input::InputStream;
-use crate::streams::output::{BufferedResponse, OutputStream};
-use crate::types::BlockInfo;
+use crate::{
+    core_types::{Message, WaferError},
+    streams::{
+        input::InputStream,
+        output::{BufferedResponse, OutputStream},
+    },
+    types::BlockInfo,
+};
 
 /// Context provides runtime capabilities to blocks.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

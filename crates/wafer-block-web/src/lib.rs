@@ -1,7 +1,10 @@
 mod mime;
 
-use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+};
+
 use wafer_block::*;
 use wafer_core::clients::storage as store;
 

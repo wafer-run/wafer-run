@@ -1,7 +1,8 @@
 //! Block configuration — common config accessor for blocks.
 
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::LifecycleEvent;
 

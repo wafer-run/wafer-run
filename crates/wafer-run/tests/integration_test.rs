@@ -1,11 +1,13 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use wafer_block::streams::output::TerminalNotResponse;
-use wafer_block::types::MetaAccess;
-use wafer_run::types::ErrorCode;
-use wafer_run::*;
+use wafer_block::{streams::output::TerminalNotResponse, types::MetaAccess};
+use wafer_run::{types::ErrorCode, *};
 
 // ---------------------------------------------------------------------------
 // Helper: build a single-step WaferFlow

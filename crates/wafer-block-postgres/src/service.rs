@@ -1,13 +1,10 @@
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
+use sqlx::{postgres::PgRow, PgPool, Row};
 use wafer_core::interfaces::database::service::*;
-use wafer_sql_utils::base64::base64_encode;
-use wafer_sql_utils::ddl;
-use wafer_sql_utils::ident::sanitize_ident;
-use wafer_sql_utils::value::sea_values_to_json;
-use wafer_sql_utils::Backend;
+use wafer_sql_utils::{
+    base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
+};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -687,8 +684,7 @@ fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
 
 /// Convert a PgRow to a Record, mapping column types to serde_json::Value.
 fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
-    use sqlx::Column as SqlxColumn;
-    use sqlx::TypeInfo;
+    use sqlx::{Column as SqlxColumn, TypeInfo};
 
     let columns = row.columns();
     let mut data = HashMap::new();

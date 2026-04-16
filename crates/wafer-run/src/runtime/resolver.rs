@@ -1,15 +1,14 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
-#[cfg(feature = "wasm")]
-use crate::block::Block;
-use crate::error::RuntimeError;
-use crate::types::*;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use super::Wafer;
 #[cfg(feature = "wasm")]
 use super::{parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION};
+#[cfg(feature = "wasm")]
+use crate::block::Block;
+use crate::{error::RuntimeError, types::*};
 
 impl Wafer {
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -59,9 +58,8 @@ impl Wafer {
             .collect();
 
         for (flow_id, config_map, config_defaults) in eligible {
-            let flow_config = match self.block_configs.remove(&flow_id) {
-                Some(c) => c,
-                None => continue,
+            let Some(flow_config) = self.block_configs.remove(&flow_id) else {
+                continue;
             };
 
             // 1. Apply config_defaults to target blocks
@@ -356,11 +354,10 @@ impl Wafer {
             .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))?;
 
         for name in candidates {
-            let remote_ref =
-                parse_versioned_block(&name).or_else(|| parse_unversioned_block(&name));
-            let remote_ref = match remote_ref {
-                Some(r) => r,
-                None => continue,
+            let Some(remote_ref) =
+                parse_versioned_block(&name).or_else(|| parse_unversioned_block(&name))
+            else {
+                continue;
             };
 
             let manifest_url = format!(
@@ -521,8 +518,7 @@ impl Wafer {
         url: &str,
         name: &str,
     ) -> Result<Arc<dyn Block>, RuntimeError> {
-        use crate::wasm::capabilities::BlockCapabilities;
-        use crate::wasm::WasmiBlock;
+        use crate::wasm::{capabilities::BlockCapabilities, WasmiBlock};
 
         let resp = client
             .get(url)
@@ -564,10 +560,10 @@ impl Wafer {
         client: &reqwest::Client,
         name: &str,
     ) -> Result<Option<Arc<dyn Block>>, RuntimeError> {
-        let remote_ref = parse_versioned_block(name).or_else(|| parse_unversioned_block(name));
-        let remote_ref = match remote_ref {
-            Some(r) => r,
-            None => return Ok(None),
+        let Some(remote_ref) =
+            parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
+        else {
+            return Ok(None);
         };
 
         let manifest_url = format!(

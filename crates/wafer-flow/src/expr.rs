@@ -1,5 +1,6 @@
-use crate::error::ExprError;
 use serde_json::Value;
+
+use crate::error::ExprError;
 
 /// A parsed expression token.
 #[derive(Debug, Clone, PartialEq)]
@@ -437,8 +438,9 @@ fn as_f64(v: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn dummy_resolve(segments: &[String]) -> Result<Value, ExprError> {
         match segments.first().map(String::as_str) {

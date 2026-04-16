@@ -1,15 +1,15 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::{OutputStream, TerminalNotResponse};
+use wafer_block::streams::{
+    input::InputStream,
+    output::{OutputStream, TerminalNotResponse},
+};
 use wafer_flow::{Accumulator, WaferFlow};
 
-use crate::config::parse_config_map;
-use crate::observability::ObservabilityContext;
-use crate::platform::Instant;
-use crate::runtime::Wafer;
-use crate::types::*;
+use crate::{
+    config::parse_config_map, observability::ObservabilityContext, platform::Instant,
+    runtime::Wafer, types::*,
+};
 
 /// Execute a WaferFlow definition.
 ///

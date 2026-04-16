@@ -1,13 +1,14 @@
 //! Message-based router for blocks.
 
-use crate::common::ErrorCode;
-use crate::context::Context;
-use crate::core_types::{Message, WaferError};
-use crate::executor::{extract_path_vars, match_path};
-use crate::meta::*;
-use crate::streams::input::InputStream;
-use crate::streams::output::OutputStream;
-use crate::types::RequestAction;
+use crate::{
+    common::ErrorCode,
+    context::Context,
+    core_types::{Message, WaferError},
+    executor::{extract_path_vars, match_path},
+    meta::*,
+    streams::{input::InputStream, output::OutputStream},
+    types::RequestAction,
+};
 
 /// Handler function type for routes.
 #[cfg(not(target_arch = "wasm32"))]

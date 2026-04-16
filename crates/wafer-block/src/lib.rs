@@ -11,19 +11,18 @@ pub mod meta;
 pub mod types;
 
 // Re-export the proc macro.
-pub use wafer_block_macro::wafer_block;
-
 // Re-export core types at crate root.
-pub use core_types::ErrorCode;
-pub use core_types::{InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError};
+pub use core_types::{
+    ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
+};
 pub use meta::*;
-
 // Re-export runtime-specific types (needed by block authors for BlockInfo etc.)
 pub use types::{
     ActionSpec, AuthLevel, BlockCategory, BlockConfigKey, BlockEndpoint, BlockInfo, BlockRuntime,
     CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
     MetaAccess, RequestAction, ResourceGrant, ResourceType, UiRoute,
 };
+pub use wafer_block_macro::wafer_block;
 
 // All modules below are now wasm32-compatible: streams use
 // `spawn_producer` (tokio::spawn on native, spawn_local on wasm32), and other
@@ -62,7 +61,7 @@ pub use registry::BlockRegistry;
 pub use router::Router;
 pub use spawn::spawn_producer;
 pub use stream::StreamEvent;
-pub use streams::input::InputStream;
-pub use streams::output::{
-    BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse,
+pub use streams::{
+    input::InputStream,
+    output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };

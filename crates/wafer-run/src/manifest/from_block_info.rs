@@ -4,9 +4,11 @@
 //!
 //! This bridges the block-declared schema → database table creation pipeline.
 
-use super::types::{CollectionDef, FieldDef, IndexDef};
 use std::collections::HashMap;
+
 use wafer_block::{CollectionSchema, FieldSchema};
+
+use super::types::{CollectionDef, FieldDef, IndexDef};
 
 /// Convert a block's `CollectionSchema` declarations into manifest `CollectionDef`
 /// types keyed by collection name.

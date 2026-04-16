@@ -1,6 +1,5 @@
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
-
 use wafer_core::interfaces::storage::service::*;
 
 /// S3 implementation of StorageService.

@@ -4,12 +4,11 @@
 #[cfg(feature = "wasm")]
 mod tests {
     use wafer_block::streams::output::TerminalNotResponse;
-    use wafer_run::types::{
-        ErrorCode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
+    use wafer_run::{
+        types::{ErrorCode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError},
+        wasm::{capabilities::BlockCapabilities, WasmiBlock},
+        Block, InputStream, OutputStream,
     };
-    use wafer_run::wasm::capabilities::BlockCapabilities;
-    use wafer_run::wasm::WasmiBlock;
-    use wafer_run::{Block, InputStream, OutputStream};
 
     const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");
 

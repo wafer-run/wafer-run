@@ -1,6 +1,9 @@
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use futures::stream::{self, BoxStream, Stream, StreamExt};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio_util::sync::CancellationToken;
 
 /// A byte-chunk stream with a paired cancellation token.
@@ -81,8 +84,9 @@ impl Stream for InputStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::stream::{self, StreamExt};
+
+    use super::*;
 
     #[tokio::test]
     async fn empty_stream_yields_no_bytes() {

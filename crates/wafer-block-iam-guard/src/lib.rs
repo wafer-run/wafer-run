@@ -1,7 +1,10 @@
 use std::sync::Arc;
+
 use wafer_block::*;
-use wafer_core::clients::database as db;
-use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
+use wafer_core::clients::{
+    database as db,
+    database::{Filter, FilterOp, ListOptions},
+};
 
 /// IAMBlock checks if the authenticated user has a required role.
 /// Configure the required role via node config: {"role": "admin"}.

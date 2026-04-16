@@ -1,7 +1,6 @@
 //! Route matching and path variable extraction.
 
-use crate::meta::META_REQ_PARAM_PREFIX;
-use crate::Message;
+use crate::{meta::META_REQ_PARAM_PREFIX, Message};
 
 /// Match a message kind pattern against a message kind.
 pub fn matches_pattern(pattern: &str, message_kind: &str) -> bool {
@@ -13,9 +12,8 @@ pub fn matches_pattern(pattern: &str, message_kind: &str) -> bool {
         let pattern_method = &pattern[..idx];
         let pattern_path = &pattern[idx + 1..];
 
-        let msg_idx = match message_kind.find(":/") {
-            Some(i) => i,
-            None => return false,
+        let Some(msg_idx) = message_kind.find(":/") else {
+            return false;
         };
         let msg_method = &message_kind[..msg_idx];
         let msg_path = &message_kind[msg_idx + 1..];

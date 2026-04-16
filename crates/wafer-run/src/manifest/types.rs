@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 /// CollectionDef defines a database collection (table).
 #[derive(Debug, Clone, Serialize, Deserialize)]

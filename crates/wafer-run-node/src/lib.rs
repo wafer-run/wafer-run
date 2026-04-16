@@ -3,10 +3,10 @@
 //! This calls wafer-run directly (no C FFI hop) for maximum efficiency.
 //! All complex data crosses the boundary as JSON strings.
 
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
 use std::sync::Arc;
 
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
 use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.

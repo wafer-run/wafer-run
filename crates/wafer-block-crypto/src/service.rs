@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 // Re-export the trait and error from wafer-core.
 pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};

@@ -1,4 +1,5 @@
 use std::sync::{Arc, RwLock};
+
 use wafer_block::*;
 
 /// Access control policy for the inspector.

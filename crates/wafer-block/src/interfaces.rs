@@ -5,9 +5,11 @@
 //! response shapes. Block authors implementing an existing interface can
 //! consult these specs to know exactly what to support.
 
-use crate::types::{ActionSpec, InterfaceSpec};
-use serde_json::json;
 use std::collections::HashMap;
+
+use serde_json::json;
+
+use crate::types::{ActionSpec, InterfaceSpec};
 
 /// Return all well-known interface specs.
 pub fn all() -> Vec<InterfaceSpec> {

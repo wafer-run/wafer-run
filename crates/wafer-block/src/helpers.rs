@@ -1,5 +1,4 @@
-use crate::meta::*;
-use crate::Message;
+use crate::{meta::*, Message};
 
 /// Extension trait for the `Message` type.
 /// Provides ergonomic read-only accessors for request metadata.

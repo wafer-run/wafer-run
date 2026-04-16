@@ -7,8 +7,11 @@
 //! GET  /registry/search?q=term&type=block|flow — search packages
 //! GET  /registry/packages/{org}/{block}        — package details + versions
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+
 use wafer_run::*;
 
 fn github_token() -> Option<String> {
@@ -119,8 +122,10 @@ impl RegistryBlock {
                     return false;
                 }
                 if !type_filter.is_empty() {
-                    let types: Vec<&str> = pkg.package_type.split(',').collect();
-                    return types.contains(&type_filter.as_str());
+                    return pkg
+                        .package_type
+                        .split(',')
+                        .any(|t| t == type_filter.as_str());
                 }
                 true
             })
@@ -158,9 +163,8 @@ impl RegistryBlock {
     // -----------------------------------------------------------------------
 
     async fn load_registry(&self) {
-        let tree = match Self::fetch_registry_tree().await {
-            Some(t) => t,
-            None => return,
+        let Some(tree) = Self::fetch_registry_tree().await else {
+            return;
         };
 
         let mut entries = Vec::new();

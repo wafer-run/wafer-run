@@ -1,5 +1,4 @@
-use crate::error::ParseError;
-use crate::types::WaferFlow;
+use crate::{error::ParseError, types::WaferFlow};
 
 /// Parse a JSON string into a WaferFlow definition.
 pub fn parse(json: &str) -> Result<WaferFlow, ParseError> {

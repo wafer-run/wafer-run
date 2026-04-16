@@ -27,8 +27,6 @@ pub mod waferflow;
 pub mod wasm;
 
 // Re-export the WRAP access control module from wafer-block
-pub use wafer_block::wrap;
-
 // Re-exports for convenience
 pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};
 pub use compat::{MaybeSend, MaybeSync};
@@ -51,10 +49,14 @@ pub use types::{
     AuthLevel, ErrorCode, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType, Message,
     MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
 };
-pub use wafer_block::streams;
-pub use wafer_block::streams::input::InputStream;
-pub use wafer_block::streams::output::{OutputSink, OutputStream, TerminalNotResponse};
-
+pub use wafer_block::{
+    streams,
+    streams::{
+        input::InputStream,
+        output::{OutputSink, OutputStream, TerminalNotResponse},
+    },
+    wrap,
+};
 pub use wasm::capabilities::BlockCapabilities;
 #[cfg(feature = "wasmi")]
 pub use wasm::WasmiBlock;

@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-
-use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::streams::output::OutputStream;
-use wafer_block::*;
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    streams::output::OutputStream,
+    *,
+};
 
 use super::service::{NetworkError, NetworkService, Request};
 

@@ -1,29 +1,23 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::OutputStream;
-
-use crate::block::Block;
-use crate::config::*;
-use crate::observability::ObservabilityContext;
-use crate::platform::Instant;
-use crate::types::*;
+use wafer_block::streams::{input::InputStream, output::OutputStream};
 
 use super::Wafer;
+use crate::{
+    block::Block, config::*, observability::ObservabilityContext, platform::Instant, types::*,
+};
 
 impl Wafer {
     /// Run a flow by ID with the given message.
     pub async fn run(&self, flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
-        let flow = match self.flows.get(flow_id) {
-            Some(f) => f,
-            None => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::NOT_FOUND,
-                    format!("flow not found: {flow_id}"),
-                ));
-            }
+        let Some(flow) = self.flows.get(flow_id) else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::NOT_FOUND,
+                format!("flow not found: {flow_id}"),
+            ));
         };
 
         // Observability: flow start

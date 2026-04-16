@@ -1,7 +1,8 @@
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")
@@ -143,9 +144,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     if !src.exists() {
         return;
     }
-    let entries = match fs::read_dir(src) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(src) else {
+        return;
     };
     for entry in entries.flatten() {
         let src_path = entry.path();

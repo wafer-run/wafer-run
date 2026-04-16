@@ -4,6 +4,7 @@
 //! Test with: curl http://localhost:8080
 
 use std::sync::Arc;
+
 use wafer_run::*;
 
 struct HelloBlock;

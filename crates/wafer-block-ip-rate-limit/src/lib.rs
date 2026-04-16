@@ -1,7 +1,10 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use wafer_run::*;
 
 /// RateLimitBlock provides per-IP rate limiting.

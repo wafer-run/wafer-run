@@ -1,13 +1,18 @@
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use futures::stream::Stream;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::core_types::{Message, MetaEntry, WaferError};
-use crate::stream::StreamEvent;
+use crate::{
+    core_types::{Message, MetaEntry, WaferError},
+    stream::StreamEvent,
+};
 
 /// Signals that the consumer dropped the stream.
 #[derive(Debug, thiserror::Error)]
@@ -393,10 +398,13 @@ impl OutputStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::core_types::{Message, MetaEntry};
-    use crate::stream::StreamEvent;
     use futures::StreamExt;
+
+    use super::*;
+    use crate::{
+        core_types::{Message, MetaEntry},
+        stream::StreamEvent,
+    };
 
     #[tokio::test]
     async fn sink_send_chunk_then_complete() {
@@ -756,8 +764,10 @@ mod tests {
 
     #[tokio::test]
     async fn from_producer_stops_on_consumer_drop() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
 
         let finished = Arc::new(AtomicBool::new(false));
         let finished_clone = finished.clone();

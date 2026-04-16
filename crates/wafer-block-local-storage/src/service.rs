@@ -1,7 +1,9 @@
-use chrono::Utc;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
+use chrono::Utc;
 use wafer_core::interfaces::storage::service::*;
 
 /// Local filesystem implementation of StorageService.

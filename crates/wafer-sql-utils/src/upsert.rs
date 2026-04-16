@@ -1,8 +1,6 @@
 use sea_query::{OnConflict, Query, SimpleExpr};
 
-use crate::ident::DynCol;
-use crate::value::json_to_sea_value;
-use crate::Backend;
+use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
 /// Build INSERT ... ON CONFLICT (conflict_cols) DO UPDATE SET {update_columns} = excluded.{col}.
 ///

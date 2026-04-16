@@ -265,8 +265,9 @@ pub fn generate_agent_card(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn test_block() -> BlockInfo {
         BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "A test block")

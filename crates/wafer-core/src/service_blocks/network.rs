@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use wafer_block::block::Block;
-use wafer_block::context::Context;
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::OutputStream;
-use wafer_block::types::BlockInfo;
-use wafer_block::BlockRegistry;
-use wafer_block::RuntimeError;
-use wafer_block::*;
+use wafer_block::{
+    block::Block,
+    context::Context,
+    streams::{input::InputStream, output::OutputStream},
+    types::BlockInfo,
+    BlockRegistry, RuntimeError, *,
+};
 
 use crate::interfaces::network::{handler, service::NetworkService};
 

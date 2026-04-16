@@ -1,11 +1,12 @@
 //! The Block trait — core interface every WAFER block must implement.
 
-use crate::capabilities::BlockCapabilities;
-use crate::context::Context;
-use crate::core_types::{LifecycleEvent, Message, WaferError};
-use crate::streams::input::InputStream;
-use crate::streams::output::OutputStream;
-use crate::types::{BlockInfo, UiRoute};
+use crate::{
+    capabilities::BlockCapabilities,
+    context::Context,
+    core_types::{LifecycleEvent, Message, WaferError},
+    streams::{input::InputStream, output::OutputStream},
+    types::{BlockInfo, UiRoute},
+};
 
 /// Block is the core interface every WAFER block must implement.
 ///

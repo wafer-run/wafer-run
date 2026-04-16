@@ -22,9 +22,8 @@ pub fn discover_wasm_blocks(blocks_dir: &Path) -> Vec<PathBuf> {
 
 /// Recursively walk `dir`, collecting any `target/block.wasm` found under it.
 fn scan_for_wasm_blocks(dir: &Path, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
 
     for entry in entries.flatten() {
@@ -60,9 +59,8 @@ pub fn discover_flows(flows_dir: &Path) -> Vec<PathBuf> {
 
 /// Recursively walk `dir`, collecting all `.json` files.
 fn scan_for_flows(dir: &Path, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
 
     for entry in entries.flatten() {

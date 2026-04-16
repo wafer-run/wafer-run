@@ -1,19 +1,15 @@
 //! Context trait re-exported from wafer-block. RuntimeContext stays here.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use wafer_block::types::ResourceGrant;
-
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::OutputStream;
-
-use crate::block::Block;
-use crate::platform::Instant;
-use crate::types::*;
+use std::{collections::HashMap, sync::Arc};
 
 // Re-export the trait from wafer-block.
 pub use wafer_block::context::Context;
+use wafer_block::{
+    streams::{input::InputStream, output::OutputStream},
+    types::ResourceGrant,
+};
+
+use crate::{block::Block, platform::Instant, types::*};
 
 /// RuntimeContext implements Context for blocks.
 ///

@@ -1,7 +1,10 @@
 use std::sync::Arc;
+
 use wafer_block::*;
-use wafer_core::clients::database::{Filter, FilterOp, ListOptions};
-use wafer_core::clients::{crypto, database as db};
+use wafer_core::clients::{
+    crypto, database as db,
+    database::{Filter, FilterOp, ListOptions},
+};
 
 /// AuthBlock validates authentication from HTTP request metadata.
 /// Supports JWT Bearer tokens, API keys (sb_ prefix), and httpOnly cookies.
@@ -189,15 +192,12 @@ impl AuthBlock {
         token: &str,
     ) -> std::result::Result<(String, String, Vec<String>), WaferError> {
         // Verify JWT signature and extract claims
-        let claims_map = match crypto::verify(ctx, token).await {
-            Ok(data) => data,
-            Err(_) => {
-                return Err(WaferError {
-                    code: ErrorCode::Unauthenticated,
-                    message: "Invalid or expired token".to_string(),
-                    meta: vec![],
-                })
-            }
+        let Ok(claims_map) = crypto::verify(ctx, token).await else {
+            return Err(WaferError {
+                code: ErrorCode::Unauthenticated,
+                message: "Invalid or expired token".to_string(),
+                meta: vec![],
+            });
         };
 
         // Convert claims HashMap to serde_json::Value for uniform access
@@ -263,15 +263,12 @@ impl Block for AuthBlock {
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Extract token
-        let token = match Self::extract_token(&msg) {
-            Some(t) => t,
-            None => {
-                return OutputStream::error(WaferError {
-                    code: ErrorCode::Unauthenticated,
-                    message: "No authentication token provided".to_string(),
-                    meta: vec![],
-                })
-            }
+        let Some(token) = Self::extract_token(&msg) else {
+            return OutputStream::error(WaferError {
+                code: ErrorCode::Unauthenticated,
+                message: "No authentication token provided".to_string(),
+                meta: vec![],
+            });
         };
 
         // Validate based on token type

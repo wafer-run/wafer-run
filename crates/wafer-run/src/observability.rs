@@ -1,9 +1,11 @@
-use parking_lot::RwLock;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use crate::compat::{MaybeSend, MaybeSync};
-use crate::types::*;
+use parking_lot::RwLock;
+
+use crate::{
+    compat::{MaybeSend, MaybeSync},
+    types::*,
+};
 
 /// ObservabilityContext provides metadata for observability hooks.
 #[derive(Clone)]

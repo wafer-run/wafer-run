@@ -1,4 +1,5 @@
 use std::sync::{Arc, OnceLock};
+
 use wafer_block::*;
 
 /// Normalize a value to a standard action. Accepts both action names

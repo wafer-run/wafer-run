@@ -1,13 +1,13 @@
 //! Shared message handler logic for the crypto block.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
-
-use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::streams::output::OutputStream;
-use wafer_block::*;
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    streams::output::OutputStream,
+    *,
+};
 
 use super::service::{CryptoError, CryptoService};
 

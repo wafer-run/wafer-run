@@ -4,8 +4,7 @@
 //! Client wrappers set `wrap.resource` meta on the message; the runtime reads it
 //! and calls `check_access()` before dispatching to the handler.
 
-use crate::types::ResourceGrant;
-use crate::{ErrorCode, WaferError};
+use crate::{types::ResourceGrant, ErrorCode, WaferError};
 
 /// Extract the owning block ID from a namespaced resource name.
 ///

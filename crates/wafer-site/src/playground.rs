@@ -5,6 +5,7 @@
 //! GET  /playground/templates/{lang} - get template code per language
 
 use std::sync::Arc;
+
 use wafer_run::*;
 
 pub struct PlaygroundBlock;

@@ -22,7 +22,6 @@ pub mod core_abi;
 pub mod pure;
 
 // Re-export everything from wafer-block (types, traits, helpers, macros).
-pub use wafer_block::*;
-
 // Re-export runtime functions and guest result types for block authors.
 pub use core_abi::{call_block, is_cancelled, log, GuestResponse, GuestResult};
+pub use wafer_block::*;

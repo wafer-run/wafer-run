@@ -1,6 +1,7 @@
 //! Tests for wafer_run::discovery — WASM block and flow file auto-discovery.
 
 use std::fs;
+
 use tempfile::TempDir;
 use wafer_run::discovery::{discover_flows, discover_wasm_blocks};
 

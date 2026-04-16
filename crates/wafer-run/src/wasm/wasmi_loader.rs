@@ -2,18 +2,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
+use wafer_block::streams::{input::InputStream, output::OutputStream};
 use wasmi::{Caller, Engine, Error as WasmiError, Linker, Module, Store, TypedResumableCall, Val};
 
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::OutputStream;
-
-use crate::block::{Block, BlockInfo};
-use crate::context::Context;
-use crate::error::RuntimeError;
-use crate::types::*;
-
-use super::capabilities::BlockCapabilities;
-use super::host::ContextGuard;
+use super::{capabilities::BlockCapabilities, host::ContextGuard};
+use crate::{
+    block::{Block, BlockInfo},
+    context::Context,
+    error::RuntimeError,
+    types::*,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -200,9 +198,8 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
              level_len: i32,
              msg_ptr: i32,
              msg_len: i32| {
-                let memory = match caller.get_export("memory") {
-                    Some(wasmi::Extern::Memory(m)) => m,
-                    _ => return,
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return;
                 };
                 let level_bytes = {
                     let mut buf = vec![0u8; level_len as usize];
@@ -265,9 +262,8 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
                         .map_err(|e| {
                             WasmiError::new(format!("__wafer_alloc in call_block phase 2: {e}"))
                         })?;
-                    let ptr = match alloc_result[0] {
-                        Val::I32(v) => v,
-                        _ => return Err(WasmiError::new("__wafer_alloc returned non-i32")),
+                    let Val::I32(ptr) = alloc_result[0] else {
+                        return Err(WasmiError::new("__wafer_alloc returned non-i32"));
                     };
                     memory
                         .write(&mut caller, ptr as usize, &result_bytes)

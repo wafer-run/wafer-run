@@ -4,13 +4,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use wafer_block::stream::StreamEvent;
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::{OutputStream, TerminalNotResponse};
-use wafer_run::block::{Block, BlockInfo};
-use wafer_run::context::Context;
-use wafer_run::types::*;
-use wafer_run::Wafer;
+use wafer_block::{
+    stream::StreamEvent,
+    streams::{
+        input::InputStream,
+        output::{OutputStream, TerminalNotResponse},
+    },
+};
+use wafer_run::{
+    block::{Block, BlockInfo},
+    context::Context,
+    types::*,
+    Wafer,
+};
 
 // ---------------------------------------------------------------------------
 // Test blocks

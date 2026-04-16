@@ -4,10 +4,11 @@
 //! functions to avoid duplicating the message protocol handling.
 
 use serde::{Deserialize, Serialize};
-
-use wafer_block::common::{ErrorCode, ServiceOp};
-use wafer_block::streams::output::OutputStream;
-use wafer_block::*;
+use wafer_block::{
+    common::{ErrorCode, ServiceOp},
+    streams::output::OutputStream,
+    *,
+};
 
 use super::service::{StorageError, StorageService};
 

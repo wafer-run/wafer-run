@@ -1,6 +1,6 @@
-use parking_lot::RwLock;
 use std::collections::HashMap;
 
+use parking_lot::RwLock;
 // Re-export the trait from wafer-core so consumers can use it.
 pub use wafer_core::interfaces::config::service::ConfigService;
 

@@ -7,9 +7,8 @@ pub mod service;
 
 use std::sync::{Arc, OnceLock};
 
-use wafer_block::*;
-
 use service::S3StorageService;
+use wafer_block::*;
 use wafer_core::interfaces::storage::service::StorageService;
 
 /// The S3-compatible storage block.

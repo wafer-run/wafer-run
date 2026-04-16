@@ -12,8 +12,11 @@
 //!   curl http://localhost:8080/stats     # also blocked
 //!   curl http://localhost:8080/_inspector/ui
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
 use wafer_run::*;
 
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);

@@ -2,8 +2,7 @@ use wafer_core::interfaces::database::service::{
     Column, DataType, DefaultVal, DefaultValue, Index, Table,
 };
 
-use crate::ident::sanitize_ident;
-use crate::Backend;
+use crate::{ident::sanitize_ident, Backend};
 
 /// Quote an identifier for use in DDL (double-quote escaping).
 fn quote_ident(name: &str) -> String {
@@ -196,8 +195,9 @@ pub fn build_drop_table(table_name: &str, _backend: Backend) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_core::interfaces::database::service::{col_string, pk, timestamps};
+
+    use super::*;
 
     fn test_table() -> Table {
         Table {

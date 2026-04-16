@@ -5,13 +5,15 @@ pub mod logger;
 pub mod network;
 pub mod storage;
 
-use wafer_block::common::ErrorCode;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE};
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::input::InputStream;
-use wafer_block::{Message, WaferError};
+use wafer_block::{
+    common::ErrorCode,
+    meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
+    Message, WaferError,
+};
 
 // ---------------------------------------------------------------------------
 // Macros for generating cfg-gated native-async / wasm-sync function pairs.
@@ -72,7 +74,9 @@ macro_rules! svc_fn {
     }};
 }
 
-pub(crate) use {dual_api, svc, svc_fn};
+pub(crate) use dual_api;
+pub(crate) use svc;
+pub(crate) use svc_fn;
 
 /// Call a block and return the raw response bytes (native async variant).
 /// Returns `Err(WaferError)` if the block returns an error.

@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
-use crate::error::RuntimeError;
-use crate::types::*;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use super::Wafer;
+use crate::{error::RuntimeError, types::*};
 
 impl Wafer {
     /// Initialize the runtime without calling `bind()` on blocks.

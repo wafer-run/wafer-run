@@ -1,13 +1,10 @@
-use rusqlite::{types::Value as SqlValue, Connection, Row};
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
+use rusqlite::{types::Value as SqlValue, Connection, Row};
 use wafer_core::interfaces::database::service::*;
-use wafer_sql_utils::base64::base64_encode;
-use wafer_sql_utils::ddl;
-use wafer_sql_utils::ident::sanitize_ident;
-use wafer_sql_utils::value::sea_values_to_json;
-use wafer_sql_utils::Backend;
+use wafer_sql_utils::{
+    base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
+};
 
 /// SQLite implementation of the DatabaseService.
 pub struct SQLiteDatabaseService {
@@ -165,9 +162,8 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
 /// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
 fn has_integer_pk(db: &Connection, table: &str) -> bool {
     let safe_table = sanitize_ident(table);
-    let mut stmt = match db.prepare(&format!("PRAGMA table_info(\"{safe_table}\")")) {
-        Ok(s) => s,
-        Err(_) => return false,
+    let Ok(mut stmt) = db.prepare(&format!("PRAGMA table_info(\"{safe_table}\")")) else {
+        return false;
     };
     let result = stmt.query_map([], |row| {
         let name: String = row.get(1)?;
@@ -700,8 +696,9 @@ impl DatabaseService for SQLiteDatabaseService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+
+    use super::*;
 
     // -----------------------------------------------------------------------
     // json_to_sql_value type conversion tests

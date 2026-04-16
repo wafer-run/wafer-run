@@ -5,17 +5,20 @@
 
 pub mod service;
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-
-use wafer_run::block::{Block, BlockCategory, BlockInfo};
-use wafer_run::context::Context;
-use wafer_run::manifest::{collections_to_tables, CollectionDef};
-use wafer_run::schema::Table;
-use wafer_run::types::*;
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use service::PostgresDatabaseService;
 use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_run::{
+    block::{Block, BlockCategory, BlockInfo},
+    context::Context,
+    manifest::{collections_to_tables, CollectionDef},
+    schema::Table,
+    types::*,
+};
 
 /// The PostgreSQL database block.
 ///

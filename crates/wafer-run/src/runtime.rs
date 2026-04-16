@@ -1,13 +1,16 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 
-use crate::block::Block;
-use crate::context::RuntimeContext;
-use crate::error::RuntimeError;
-use crate::observability::ObservabilityBus;
-use crate::platform::{ConfigExpanderFn, Instant, RegistrarFn};
-use crate::types::*;
+use crate::{
+    block::Block,
+    context::RuntimeContext,
+    error::RuntimeError,
+    observability::ObservabilityBus,
+    platform::{ConfigExpanderFn, Instant, RegistrarFn},
+    types::*,
+};
 
 pub mod lifecycle;
 pub mod registry;

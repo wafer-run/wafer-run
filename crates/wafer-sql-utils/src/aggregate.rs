@@ -1,9 +1,11 @@
 use sea_query::{Alias, Asterisk, Expr, Func, Query};
 use wafer_core::interfaces::database::service::{Filter, SortField};
 
-use crate::ident::DynCol;
-use crate::query::{apply_order, build_condition};
-use crate::Backend;
+use crate::{
+    ident::DynCol,
+    query::{apply_order, build_condition},
+    Backend,
+};
 
 /// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
 pub fn build_count(
@@ -175,9 +177,10 @@ pub fn build_grouped_query(
 
 #[cfg(test)]
 mod tests {
+    use wafer_core::interfaces::database::service::FilterOp;
+
     use super::*;
     use crate::Backend;
-    use wafer_core::interfaces::database::service::FilterOp;
 
     #[test]
     fn test_build_count_sqlite() {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use wafer_block::*;
 
 /// SecurityHeadersBlock adds standard security headers to responses.

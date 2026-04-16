@@ -1,9 +1,11 @@
-use wafer_block::streams::input::InputStream;
-use wafer_block::streams::output::OutputStream;
-use wafer_block::Message;
+use std::sync::Arc;
+
+use wafer_block::{
+    streams::{input::InputStream, output::OutputStream},
+    Message,
+};
 
 use crate::context::Context;
-use std::sync::Arc;
 
 /// ContextGuard — scoped wrapper for passing a borrowed Context into wasmi.
 pub(crate) struct ContextGuard {

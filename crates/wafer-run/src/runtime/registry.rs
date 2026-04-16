@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use crate::block::Block;
-use crate::error::RuntimeError;
-
 use super::Wafer;
+use crate::{block::Block, error::RuntimeError};
 
 impl Wafer {
     /// Add a named registrar function. Registrars are called by
@@ -169,12 +167,15 @@ impl Wafer {
 
 #[cfg(test)]
 mod tests {
-    use crate::Wafer;
     use std::sync::Arc;
-    use wafer_block::streams::input::InputStream;
-    use wafer_block::streams::output::OutputStream;
-    use wafer_block::types::BlockInfo;
-    use wafer_block::{Message, WaferError};
+
+    use wafer_block::{
+        streams::{input::InputStream, output::OutputStream},
+        types::BlockInfo,
+        Message, WaferError,
+    };
+
+    use crate::Wafer;
 
     struct NoopBlock;
 

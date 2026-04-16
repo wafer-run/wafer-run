@@ -1,7 +1,8 @@
-use crate::detect::Lang;
-use crate::manifest::Manifest;
-use anyhow::{bail, Context};
 use std::path::Path;
+
+use anyhow::{bail, Context};
+
+use crate::{detect::Lang, manifest::Manifest};
 
 /// Create a new block project directory for the given `name` and `lang`.
 ///
