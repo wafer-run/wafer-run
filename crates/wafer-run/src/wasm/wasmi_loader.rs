@@ -781,17 +781,27 @@ impl Block for WasmiBlock {
             action: String,
             response: Option<LegacyResponse>,
             error: Option<WaferError>,
+            message: Option<Message>,
         }
         #[derive(serde::Deserialize)]
         struct LegacyResponse {
             data: Vec<u8>,
+            #[serde(default)]
+            meta: Vec<MetaEntry>,
         }
 
         match serde_json::from_slice::<LegacyResult>(&result_bytes) {
             Ok(result) => match result.action.as_str() {
                 "Respond" => {
-                    let data = result.response.map(|r| r.data).unwrap_or_default();
-                    OutputStream::respond(data)
+                    let (data, meta) = result
+                        .response
+                        .map(|r| (r.data, r.meta))
+                        .unwrap_or_default();
+                    if meta.is_empty() {
+                        OutputStream::respond(data)
+                    } else {
+                        OutputStream::respond_with_meta(data, meta)
+                    }
                 }
                 "Error" => {
                     let e = result.error.unwrap_or_else(|| {
@@ -803,7 +813,10 @@ impl Block for WasmiBlock {
                     OutputStream::error(e)
                 }
                 "Drop" => OutputStream::drop_request(),
-                "Continue" => OutputStream::respond(vec![]), // best-effort: treat as empty respond
+                "Continue" => {
+                    let msg = result.message.unwrap_or_else(|| Message::new("continue"));
+                    OutputStream::continue_with(msg)
+                }
                 _ => OutputStream::error(WaferError::new(
                     ErrorCode::Internal,
                     format!("unknown action from WASM guest: {}", result.action),

@@ -104,8 +104,8 @@ struct {struct_name};
     summary = "A WAFER block"
 )]
 impl {struct_name} {{
-    fn handle(msg: Message) -> BlockResult {{
-        msg.cont()
+    fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {{
+        GuestResult::respond(vec![])
     }}
 }}
 "#,

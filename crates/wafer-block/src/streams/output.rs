@@ -471,6 +471,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn respond_with_meta_includes_trailing_meta() {
+        let meta = vec![MetaEntry {
+            key: "Content-Type".into(),
+            value: "text/html".into(),
+        }];
+        let stream = OutputStream::respond_with_meta(b"<h1>hi</h1>".to_vec(), meta.clone());
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], StreamEvent::Chunk(b"<h1>hi</h1>".to_vec()));
+        assert_eq!(events[1], StreamEvent::Complete { meta });
+    }
+
+    #[tokio::test]
+    async fn respond_with_meta_empty_body_skips_chunk() {
+        let meta = vec![MetaEntry {
+            key: "resp.status".into(),
+            value: "204".into(),
+        }];
+        let stream = OutputStream::respond_with_meta(vec![], meta.clone());
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 1, "empty body should skip Chunk");
+        assert_eq!(events[0], StreamEvent::Complete { meta });
+    }
+
+    #[tokio::test]
     async fn error_is_single_terminal() {
         let err = crate::core_types::WaferError {
             code: crate::core_types::ErrorCode::Unknown,
