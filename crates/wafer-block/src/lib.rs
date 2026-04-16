@@ -40,6 +40,7 @@ pub mod helpers;
 pub mod interfaces;
 pub mod registry;
 pub mod router;
+pub mod spawn;
 pub mod stream;
 pub mod streams;
 pub mod wrap;
@@ -57,6 +58,7 @@ pub use hash::{hex_encode, sha256, sha256_hex};
 pub use helpers::*;
 pub use registry::BlockRegistry;
 pub use router::Router;
+pub use spawn::spawn_producer;
 pub use stream::StreamEvent;
 pub use streams::input::InputStream;
 pub use streams::output::{
