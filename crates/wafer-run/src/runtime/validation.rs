@@ -29,11 +29,11 @@ pub fn collect_missing_config<'a>(
             if !cv.default.is_empty() || cv.auto_generate {
                 continue;
             }
-            let provided = cfg
-                .get(&cv.key)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
+            let provided = cfg.get(&cv.key).is_some_and(|v| match v {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(s) => !s.is_empty(),
+                _ => true,
+            });
             if !provided {
                 out.push(MissingConfig {
                     block_name: info.name.clone(),
@@ -286,5 +286,31 @@ mod tests {
                 Err(format!("expected 1 warning line, got {n}"))
             }
         });
+    }
+
+    #[test]
+    fn config_non_string_value_counts_as_present() {
+        let info = mk_block(
+            "org/a",
+            vec![
+                ConfigVar::new("ORG__A__PORT", "port", ""),
+                ConfigVar::new("ORG__A__DEBUG", "debug", ""),
+                ConfigVar::new("ORG__A__NESTED", "nested", ""),
+            ],
+        );
+        let cfg = serde_json::json!({
+            "ORG__A__PORT": 8080,
+            "ORG__A__DEBUG": true,
+            "ORG__A__NESTED": { "key": "v" },
+        });
+        assert!(collect_missing_config(&[(info, &cfg)]).is_empty());
+    }
+
+    #[test]
+    fn config_null_value_counts_as_missing() {
+        let info = mk_block("org/a", vec![ConfigVar::new("ORG__A__KEY", "k", "")]);
+        let cfg = serde_json::json!({ "ORG__A__KEY": null });
+        let missing = collect_missing_config(&[(info, &cfg)]);
+        assert_eq!(missing.len(), 1);
     }
 }
