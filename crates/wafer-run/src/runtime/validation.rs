@@ -3,8 +3,8 @@
 //! Pure functions — no mutation of runtime state. Called from `Wafer::resolve()`
 //! (config presence) and `RuntimeContext::call_block()` (interface action).
 
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::{collections::HashSet, sync::Mutex};
+
 use wafer_block::types::{BlockInfo, InterfaceSpec};
 
 /// A single `(block, key)` pair whose required config value was not provided.
@@ -132,9 +132,11 @@ pub fn warn_once_unknown_interface(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
     use wafer_block::types::{ActionSpec, BlockInfo, ConfigVar, InterfaceSpec};
+
+    use super::*;
 
     fn mk_block(name: &str, cfg_vars: Vec<ConfigVar>) -> BlockInfo {
         let mut info = BlockInfo::new(name, "0.1.0", "test@v1", "test");
