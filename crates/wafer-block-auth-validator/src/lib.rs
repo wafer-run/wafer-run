@@ -321,3 +321,204 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block("wafer-run/auth-validator", Arc::new(AuthBlock::new()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    use wafer_block::{
+        sha256_hex,
+        streams::{input::InputStream, output::TerminalNotResponse},
+        Message,
+    };
+    use wafer_test_support::{
+        builder::WaferBuilder,
+        fake_crypto::FakeCrypto,
+        fake_db::{FailureMode, FakeDb},
+    };
+
+    async fn build_wafer(db: Arc<FakeDb>, crypto: Arc<FakeCrypto>) -> Arc<wafer_run::Wafer> {
+        WaferBuilder::new()
+            .with_fake_db(db)
+            .with_fake_crypto(crypto)
+            .with_block("wafer-run/auth-validator", Arc::new(AuthBlock::new()))
+            // Grant top-level WRAP admin access (node_id "root") so auth-validator's
+            // DB calls pass the WRAP check. The api_keys / auth_users / iam_user_roles
+            // tables use plain unnamespaced names that predate WAFER's {org}__{block}__
+            // naming convention; in a future refactor they should be namespaced and
+            // auth-validator should declare proper grants in BlockInfo.
+            .with_admin_block("root")
+            .build()
+            .await
+            .expect("build")
+    }
+
+    /// Sign a JWT via the crypto block and return the token string.
+    async fn sign_jwt(wafer: &Arc<wafer_run::Wafer>, claims: serde_json::Value) -> String {
+        let out = wafer
+            .run_block(
+                "wafer-run/crypto",
+                Message::new("crypto.jwt_sign"),
+                InputStream::from_bytes(serde_json::to_vec(&json!({"claims": claims})).unwrap()),
+            )
+            .await;
+        let buf = out.collect_buffered().await.expect("sign ok");
+        let resp: serde_json::Value = serde_json::from_slice(&buf.body).unwrap();
+        resp["token"].as_str().unwrap().to_string()
+    }
+
+    // The real meta key for Authorization header: `msg.header("Authorization")`
+    // resolves via `format!("http.header.{}", name.to_lowercase())` → "http.header.authorization".
+    // For X-API-Key: "http.header.x-api-key".
+
+    #[tokio::test]
+    async fn missing_token_returns_unauthenticated() {
+        let db = Arc::new(FakeDb::new());
+        let crypto = Arc::new(FakeCrypto::new());
+        let wafer = build_wafer(db, crypto).await;
+
+        let msg = Message::new("http.request");
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::UNAUTHENTICATED);
+            }
+            other => panic!("expected Unauthenticated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_jwt_sets_auth_meta_and_continues() {
+        let db = Arc::new(FakeDb::new());
+        let crypto = Arc::new(FakeCrypto::new());
+        let wafer = build_wafer(db, crypto).await;
+
+        let token = sign_jwt(
+            &wafer,
+            json!({"sub": "u1", "email": "a@b.c", "roles": ["admin"]}),
+        )
+        .await;
+
+        let mut msg = Message::new("http.request");
+        // msg.header("Authorization") reads from "http.header.authorization"
+        msg.set_meta("http.header.authorization", format!("Bearer {token}"));
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Continue(continued)) => {
+                assert_eq!(continued.get_meta("auth.user_id"), "u1");
+                assert_eq!(continued.get_meta("auth.user_email"), "a@b.c");
+                assert!(continued.get_meta("auth.user_roles").contains("admin"));
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_jwt_signature_returns_unauthenticated() {
+        let db = Arc::new(FakeDb::new());
+        let signing = Arc::new(FakeCrypto::with_secret(b"secret-a".to_vec()));
+        let validating = Arc::new(FakeCrypto::with_secret(b"secret-b".to_vec()));
+
+        // Produce token using signing crypto in an isolated Wafer.
+        let mut wsign = wafer_run::Wafer::new();
+        wsign
+            .register_block("test/fake-crypto", signing.clone())
+            .unwrap();
+        wsign.add_alias("wafer-run/crypto", "test/fake-crypto");
+        let ws = wsign.start().await.unwrap();
+        let token = sign_jwt(&ws, json!({"sub": "u1"})).await;
+
+        // Wire auth-validator with the different (validating) crypto — signature won't match.
+        let wafer = build_wafer(db, validating).await;
+        let mut msg = Message::new("http.request");
+        msg.set_meta("http.header.authorization", format!("Bearer {token}"));
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::UNAUTHENTICATED);
+            }
+            other => panic!("expected Unauthenticated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_api_key_sets_auth_meta() {
+        let db = Arc::new(FakeDb::new());
+        let raw_key = "sb_testkey_abc123";
+        db.seed(
+            "api_keys",
+            vec![json!({
+                "id": "k1",
+                "key_hash": sha256_hex(raw_key.as_bytes()),
+                "user_id": "u1",
+                "user_email": "a@b.c",
+                "revoked_at": null,
+            })],
+        );
+        // Seed the user so validate_api_key can look up email.
+        db.seed("auth_users", vec![json!({"id": "u1", "email": "a@b.c"})]);
+        let crypto = Arc::new(FakeCrypto::new());
+        let wafer = build_wafer(db, crypto).await;
+
+        let mut msg = Message::new("http.request");
+        // API keys are sent via Authorization: Bearer sb_xxx (no X-API-Key header).
+        // extract_token() reads Authorization and falls back to the auth_token cookie.
+        msg.set_meta("http.header.authorization", format!("Bearer {raw_key}"));
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Continue(continued)) => {
+                assert_eq!(continued.get_meta("auth.user_id"), "u1");
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_api_key_returns_unauthenticated() {
+        let db = Arc::new(FakeDb::new());
+        let crypto = Arc::new(FakeCrypto::new());
+        let wafer = build_wafer(db, crypto).await;
+
+        let mut msg = Message::new("http.request");
+        msg.set_meta("http.header.authorization", "Bearer sb_not_in_db");
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::UNAUTHENTICATED);
+            }
+            other => panic!("expected Unauthenticated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn db_unavailable_on_api_key_returns_internal_not_bypass() {
+        let db = Arc::new(FakeDb::new());
+        db.set_failure(FailureMode::Unavailable);
+        let crypto = Arc::new(FakeCrypto::new());
+        let wafer = build_wafer(db, crypto).await;
+
+        let mut msg = Message::new("http.request");
+        msg.set_meta("http.header.authorization", "Bearer sb_any");
+        let out = wafer
+            .run_block("wafer-run/auth-validator", msg, InputStream::empty())
+            .await;
+        // Security invariant: DB failure must never bypass auth (return INTERNAL, not Unauthenticated).
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::INTERNAL);
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+}

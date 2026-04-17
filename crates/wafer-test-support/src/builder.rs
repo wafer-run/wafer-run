@@ -58,6 +58,14 @@ impl WaferBuilder {
         self
     }
 
+    /// Set the WRAP admin block — this block bypasses resource access checks.
+    /// Use in tests where the block under test needs unrestricted DB/crypto access
+    /// (e.g., infrastructure blocks that were written before WRAP naming conventions).
+    pub fn with_admin_block(mut self, block_id: &str) -> Self {
+        self.wafer.set_admin_block(block_id);
+        self
+    }
+
     /// Start the runtime. Returns `Arc<Wafer>`.
     pub async fn build(self) -> Result<Arc<Wafer>, RuntimeError> {
         self.wafer.start().await

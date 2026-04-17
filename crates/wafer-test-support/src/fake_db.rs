@@ -144,6 +144,28 @@ impl Block for FakeDb {
     }
 }
 
+/// Convert a flat seeded row `{id, field1, field2, ...}` to the wire format
+/// `{id: String, data: {field1, field2, ...}}` expected by `Record`.
+///
+/// The `id` field is extracted to the top level; all other fields go into `data`.
+fn to_record(row: &serde_json::Value) -> serde_json::Value {
+    let id = row
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let data: serde_json::Map<String, serde_json::Value> = row
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| k.as_str() != "id")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({ "id": id, "data": data })
+}
+
 impl FakeDb {
     fn handle_list(&self, req: &serde_json::Value) -> OutputStream {
         let collection = req["collection"].as_str().unwrap_or("");
@@ -152,15 +174,22 @@ impl FakeDb {
         let state = self.state.lock();
         let empty = Vec::new();
         let rows = state.collections.get(collection).unwrap_or(&empty);
+        // Filter and convert to `{id, data}` wire format expected by `RecordList`.
         let matching: Vec<serde_json::Value> = rows
             .iter()
             .filter(|r| row_matches_filters(r, &filters))
             .take(limit)
-            .cloned()
+            .map(to_record)
             .collect();
+        let total_count = rows
+            .iter()
+            .filter(|r| row_matches_filters(r, &filters))
+            .count() as i64;
         let body = serde_json::to_vec(&serde_json::json!({
             "records": matching,
-            "total": rows.iter().filter(|r| row_matches_filters(r, &filters)).count(),
+            "total_count": total_count,
+            "page": 0_i64,
+            "page_size": limit as i64,
         }))
         .unwrap();
         OutputStream::respond(body)
@@ -175,7 +204,8 @@ impl FakeDb {
         let found = rows.iter().find(|r| r["id"].as_str() == Some(id)).cloned();
         match found {
             Some(row) => {
-                let body = serde_json::to_vec(&row).unwrap();
+                // Convert to `{id, data}` wire format expected by `Record`.
+                let body = serde_json::to_vec(&to_record(&row)).unwrap();
                 OutputStream::respond(body)
             }
             None => OutputStream::error(WaferError::new(

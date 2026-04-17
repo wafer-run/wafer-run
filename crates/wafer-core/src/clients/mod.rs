@@ -12,7 +12,7 @@ use wafer_block::context::Context;
 use wafer_block::streams::input::InputStream;
 use wafer_block::{
     common::ErrorCode,
-    meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
+    meta::{META_REQ_ACTION, META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
     Message, WaferError,
 };
 
@@ -97,6 +97,9 @@ pub(crate) async fn call_service(
     let payload = serde_json::to_vec(data)
         .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e.to_string()))?;
     let mut msg = Message::new(kind);
+    // Set META_REQ_ACTION so call_block's interface-action validator can check
+    // the action against the target block's declared interface spec.
+    msg.set_meta(META_REQ_ACTION, kind);
     if let Some(res) = resource {
         msg.set_meta(META_WRAP_RESOURCE, res);
         msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });

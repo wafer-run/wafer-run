@@ -5273,9 +5273,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-core",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5655,6 +5658,21 @@ dependencies = [
  "sea-query",
  "serde_json",
  "wafer-core",
+]
+
+[[package]]
+name = "wafer-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64ct",
+ "hmac",
+ "parking_lot",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]

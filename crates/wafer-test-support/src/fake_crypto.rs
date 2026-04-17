@@ -107,8 +107,9 @@ impl Block for FakeCrypto {
             msg.kind.clone()
         };
         match action.as_str() {
-            "crypto.jwt_sign" => self.handle_jwt_sign(&req),
-            "crypto.jwt_verify" => self.handle_jwt_verify(&req),
+            // Direct test helpers use the jwt_* prefix.
+            "crypto.jwt_sign" | "crypto.sign" => self.handle_jwt_sign(&req),
+            "crypto.jwt_verify" | "crypto.verify" => self.handle_jwt_verify(&req),
             "crypto.hash" => self.handle_hash(&req),
             other => OutputStream::error(WaferError::new(
                 ErrorCode::INVALID_ARGUMENT,
