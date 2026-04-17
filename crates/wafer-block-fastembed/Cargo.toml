@@ -1,0 +1,21 @@
+[package]
+name = "wafer-block-fastembed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ONNX-based EmbeddingService via fastembed-rs"
+
+[dependencies]
+wafer-core = { path = "../wafer-core", default-features = false }
+fastembed = "5"
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
+
+[lib]
+name = "wafer_block_fastembed"
+path = "src/lib.rs"

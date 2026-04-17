@@ -6,3 +6,4 @@ pub mod database;
 pub mod logger;
 pub mod network;
 pub mod storage;
+pub mod vector;
