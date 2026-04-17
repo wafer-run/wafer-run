@@ -362,12 +362,78 @@ impl VectorService for SqliteVecService {
         Ok(out)
     }
 
-    async fn delete(&self, _index: &str, _ids: Vec<String>) -> Result<(), VectorError> {
-        Err(VectorError::Internal("not implemented yet".into()))
+    async fn delete(&self, index: &str, ids: Vec<String>) -> Result<(), VectorError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.db.lock().unwrap();
+        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(&conn, index)? {
+            return Err(VectorError::IndexNotFound(index.to_string()));
+        }
+        let has_kw = Self::has_keyword_search(&conn, index)?;
+        let vec_tbl = Self::table_name(index, "vec");
+        let meta_tbl = Self::table_name(index, "meta");
+        let fts_tbl = Self::table_name(index, "fts");
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let placeholders: Vec<&str> = (0..ids.len()).map(|_| "?").collect();
+        let in_clause = placeholders.join(",");
+
+        // Gather rowids first so we can delete from _vec by rowid.
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT rowid FROM {meta_tbl} WHERE id IN ({in_clause})"
+            ))
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let rowids: Vec<i64> = stmt
+            .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+                r.get::<_, i64>(0)
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        for rid in rowids {
+            tx.execute(
+                &format!("DELETE FROM {vec_tbl} WHERE rowid = ?1"),
+                params![rid],
+            )
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        }
+        tx.execute(
+            &format!("DELETE FROM {meta_tbl} WHERE id IN ({in_clause})"),
+            rusqlite::params_from_iter(ids.iter()),
+        )
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+        if has_kw {
+            tx.execute(
+                &format!("DELETE FROM {fts_tbl} WHERE id IN ({in_clause})"),
+                rusqlite::params_from_iter(ids.iter()),
+            )
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        Ok(())
     }
 
-    async fn count(&self, _index: &str) -> Result<u64, VectorError> {
-        Err(VectorError::Internal("not implemented yet".into()))
+    async fn count(&self, index: &str) -> Result<u64, VectorError> {
+        let conn = self.db.lock().unwrap();
+        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(&conn, index)? {
+            return Err(VectorError::IndexNotFound(index.to_string()));
+        }
+        let meta_tbl = Self::table_name(index, "meta");
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {meta_tbl}"), [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        Ok(n as u64)
     }
 }
 
@@ -705,5 +771,45 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "b");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_from_all_tables() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: true,
+        })
+        .await
+        .unwrap();
+        svc.upsert(
+            "docs",
+            vec![
+                entry("a", vec![1.0, 0.0, 0.0], Some("one")),
+                entry("b", vec![0.0, 1.0, 0.0], Some("two")),
+            ],
+        )
+        .await
+        .unwrap();
+        svc.delete("docs", vec!["a".into()]).await.unwrap();
+        assert_eq!(svc.count("docs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_empty_index_is_zero() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+        assert_eq!(svc.count("docs").await.unwrap(), 0);
     }
 }
