@@ -289,8 +289,9 @@ fn uuid_like() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn seed_and_retrieve_rows() {

@@ -74,14 +74,16 @@ pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_bloc
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::sync::Arc;
+
+    use serde_json::json;
     use wafer_block::{
         streams::{input::InputStream, output::TerminalNotResponse},
         Message,
     };
     use wafer_test_support::builder::WaferBuilder;
+
+    use super::*;
 
     async fn build_wafer(config: Option<serde_json::Value>) -> Arc<wafer_run::Wafer> {
         let mut b = WaferBuilder::new().with_block(

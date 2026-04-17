@@ -324,9 +324,9 @@ pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_bloc
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::sync::Arc;
+
+    use serde_json::json;
     use wafer_block::{
         sha256_hex,
         streams::{input::InputStream, output::TerminalNotResponse},
@@ -337,6 +337,8 @@ mod tests {
         fake_crypto::FakeCrypto,
         fake_db::{FailureMode, FakeDb},
     };
+
+    use super::*;
 
     async fn build_wafer(db: Arc<FakeDb>, crypto: Arc<FakeCrypto>) -> Arc<wafer_run::Wafer> {
         WaferBuilder::new()

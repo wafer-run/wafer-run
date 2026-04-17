@@ -221,10 +221,11 @@ impl FakeCrypto {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use wafer_block::streams::output::TerminalNotResponse;
     use wafer_run::Wafer;
+
+    use super::*;
 
     #[tokio::test]
     async fn sign_and_verify_roundtrip() {

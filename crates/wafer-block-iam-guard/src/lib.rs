@@ -119,9 +119,9 @@ pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_bloc
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::sync::Arc;
+
+    use serde_json::json;
     use wafer_block::{
         streams::{input::InputStream, output::TerminalNotResponse},
         Message,
@@ -130,6 +130,8 @@ mod tests {
         builder::WaferBuilder,
         fake_db::{FailureMode, FakeDb},
     };
+
+    use super::*;
 
     async fn build_wafer(
         db: Arc<FakeDb>,

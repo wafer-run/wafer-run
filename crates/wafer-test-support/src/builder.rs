@@ -74,9 +74,10 @@ impl WaferBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use wafer_block::{streams::input::InputStream, Message};
+
+    use super::*;
 
     #[tokio::test]
     async fn builder_routes_database_alias_to_fake() {

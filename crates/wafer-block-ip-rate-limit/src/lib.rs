@@ -168,12 +168,15 @@ pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
 
 #[cfg(test)]
 mod clock_seam_tests {
-    use super::*;
-    use std::sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
+    use std::{
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
     };
-    use std::time::{Duration, Instant};
+
+    use super::*;
 
     struct FixedClock {
         base: Instant,
@@ -204,10 +207,12 @@ mod clock_seam_tests {
 
 #[cfg(test)]
 mod rate_limit_tests {
-    use super::*;
-    use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use serde_json::json;
     use wafer_test_support::builder::WaferBuilder;
+
+    use super::*;
 
     /// Serializes all env-var-sensitive tests to prevent RATE_LIMIT_IP leaking
     /// between tests running concurrently in the same process.
