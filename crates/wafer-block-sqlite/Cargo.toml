@@ -9,12 +9,17 @@ description = "SQLite database block for WAFER"
 wafer-core = { path = "../wafer-core", default-features = false }
 wafer-sql-utils = { path = "../wafer-sql-utils" }
 rusqlite = { workspace = true }
+sqlite-vec = { version = "0.1", optional = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+
+[features]
+default = []
+vectors = ["dep:sqlite-vec"]
 
 [lints]
 workspace = true
