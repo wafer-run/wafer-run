@@ -211,7 +211,11 @@ mod rate_limit_tests {
 
     /// Serializes all env-var-sensitive tests to prevent RATE_LIMIT_IP leaking
     /// between tests running concurrently in the same process.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Uses tokio::sync::Mutex so the lock can be held across `.await` points.
+    fn env_mutex() -> &'static tokio::sync::Mutex<()> {
+        static MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
 
     struct ControllableClock {
         base: Instant,
@@ -261,7 +265,7 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn under_limit_continues_with_remaining_meta() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = env_mutex().lock().await;
         std::env::remove_var("RATE_LIMIT_IP");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
@@ -290,7 +294,7 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn over_limit_denies_with_retry_after() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = env_mutex().lock().await;
         std::env::remove_var("RATE_LIMIT_IP");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
@@ -340,7 +344,7 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn window_reset_restores_budget() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = env_mutex().lock().await;
         std::env::remove_var("RATE_LIMIT_IP");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
@@ -393,7 +397,7 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn disable_via_env_skips_entirely() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = env_mutex().lock().await;
         std::env::set_var("RATE_LIMIT_IP", "0");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
@@ -425,7 +429,7 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn distinct_ips_have_separate_buckets() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = env_mutex().lock().await;
         std::env::remove_var("RATE_LIMIT_IP");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
