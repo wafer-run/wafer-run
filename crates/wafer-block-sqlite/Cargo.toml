@@ -23,6 +23,7 @@ vectors = ["dep:sqlite-vec"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+wafer-block-fastembed = { path = "../wafer-block-fastembed" }
 
 [lints]
 workspace = true
