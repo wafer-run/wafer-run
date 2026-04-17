@@ -3,6 +3,8 @@
 //! Pure functions — no mutation of runtime state. Called from `Wafer::resolve()`
 //! (config presence) and `RuntimeContext::call_block()` (interface action).
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use wafer_block::types::{BlockInfo, InterfaceSpec};
 
 /// A single `(block, key)` pair whose required config value was not provided.
@@ -102,6 +104,29 @@ pub fn check_action_interface(
         message: format!(
             "block '{block_name}' with interface '{interface_name}' does not expose action '{action}'"
         ),
+    }
+}
+
+/// Emit a `WARN`-level log line exactly once per `(block_name)` for the
+/// lifetime of the `warned` set.
+///
+/// Called from `RuntimeContext::call_block()` when a target block declares
+/// an interface name that isn't in the runtime's registered `InterfaceSpec`
+/// set. Preserves backward compatibility for custom interfaces while
+/// signalling to the block author that action validation isn't catching
+/// mistakes for them.
+pub fn warn_once_unknown_interface(
+    warned: &Mutex<HashSet<String>>,
+    block_name: &str,
+    interface_name: &str,
+) {
+    let mut guard = warned.lock().expect("warn-once mutex poisoned");
+    if guard.insert(block_name.to_string()) {
+        tracing::warn!(
+            block = %block_name,
+            interface = %interface_name,
+            "block declares unknown interface; skipping action validation"
+        );
     }
 }
 
@@ -239,5 +264,27 @@ mod tests {
         let rendered = format_missing_config(&missing);
         assert!(rendered.contains("org/a: ORG__A__K1, ORG__A__K2"));
         assert!(rendered.contains("org/b: ORG__B__K1"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn warn_once_unknown_interface_emits_exactly_one_line() {
+        let warned: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+        warn_once_unknown_interface(&warned, "org/weird", "my-org/custom@v1");
+        warn_once_unknown_interface(&warned, "org/weird", "my-org/custom@v1");
+        warn_once_unknown_interface(&warned, "org/weird", "my-org/custom@v1");
+
+        // Expect presence.
+        assert!(logs_contain("org/weird"));
+
+        // Expect exactly one matching log line.
+        logs_assert(|lines: &[&str]| {
+            let n = lines.iter().filter(|l| l.contains("org/weird")).count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("expected 1 warning line, got {n}"))
+            }
+        });
     }
 }
