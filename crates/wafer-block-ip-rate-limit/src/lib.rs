@@ -7,11 +7,26 @@ use std::{
 use parking_lot::Mutex;
 use wafer_run::*;
 
+/// Source of monotonic time for rate-limit windowing. Injected for tests.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Default production clock backed by `std::time::Instant::now()`.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// RateLimitBlock provides per-IP rate limiting.
 pub struct RateLimitBlock {
     max_requests: u32,
     window: Duration,
     buckets: Mutex<HashMap<String, RateBucket>>,
+    clock: Arc<dyn Clock>,
 }
 
 struct RateBucket {
@@ -27,10 +42,15 @@ impl Default for RateLimitBlock {
 
 impl RateLimitBlock {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             max_requests: 1000,
             window: Duration::from_secs(60),
             buckets: Mutex::new(HashMap::new()),
+            clock,
         }
     }
 }
@@ -80,7 +100,7 @@ impl Block for RateLimitBlock {
         }
 
         let mut buckets = self.buckets.lock();
-        let now = Instant::now();
+        let now = self.clock.now();
 
         // Evict expired entries proactively to prevent unbounded memory growth.
         if buckets.len() > 1_000 {
@@ -144,4 +164,40 @@ impl Block for RateLimitBlock {
 
 pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
+}
+
+#[cfg(test)]
+mod clock_seam_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, Instant};
+
+    struct FixedClock {
+        base: Instant,
+        advance_ms: Arc<AtomicU64>,
+    }
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.advance_ms.load(Ordering::Relaxed))
+        }
+    }
+
+    #[test]
+    fn injected_clock_is_used() {
+        let advance = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(FixedClock {
+            base: Instant::now(),
+            advance_ms: advance.clone(),
+        });
+        let block = RateLimitBlock::with_clock(clock.clone());
+        let t0 = clock.now();
+        advance.store(1000, Ordering::Relaxed);
+        let t1 = clock.now();
+        assert!(t1 - t0 >= Duration::from_millis(1000));
+        let _ = block.info();
+    }
 }
