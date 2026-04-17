@@ -48,8 +48,6 @@ impl SqliteVecService {
         Ok(exists)
     }
 
-    // consumed in Task 10 upsert
-    #[allow(dead_code)]
     fn has_keyword_search(conn: &Connection, index: &str) -> Result<bool, VectorError> {
         let fts_tbl = Self::table_name(index, "fts");
         let exists: bool = conn
@@ -113,8 +111,103 @@ impl VectorService for SqliteVecService {
         Ok(())
     }
 
-    async fn upsert(&self, _index: &str, _entries: Vec<VectorEntry>) -> Result<(), VectorError> {
-        Err(VectorError::Internal("not implemented yet".into()))
+    async fn upsert(&self, index: &str, entries: Vec<VectorEntry>) -> Result<(), VectorError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.db.lock().unwrap();
+        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(&conn, index)? {
+            return Err(VectorError::IndexNotFound(index.to_string()));
+        }
+        let has_kw = Self::has_keyword_search(&conn, index)?;
+        for e in &entries {
+            if has_kw && e.text.is_none() {
+                return Err(VectorError::TextRequired);
+            }
+        }
+        let vec_tbl = Self::table_name(index, "vec");
+        let meta_tbl = Self::table_name(index, "meta");
+        let fts_tbl = Self::table_name(index, "fts");
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        for e in entries {
+            let meta_json = e
+                .metadata
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".into());
+
+            // Find existing rowid (re-upsert path) or create a new one.
+            let rowid: Option<i64> = tx
+                .query_row(
+                    &format!("SELECT rowid FROM {meta_tbl} WHERE id = ?1"),
+                    params![&e.id],
+                    |r| r.get(0),
+                )
+                .ok();
+            let rowid = match rowid {
+                Some(rid) => {
+                    tx.execute(
+                        &format!("DELETE FROM {vec_tbl} WHERE rowid = ?1"),
+                        params![rid],
+                    )
+                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    rid
+                }
+                None => {
+                    tx.execute(
+                        &format!(
+                            "INSERT INTO {meta_tbl}(id, rowid, metadata, text) \
+                             VALUES (?1, (SELECT COALESCE(MAX(rowid), 0) + 1 FROM {meta_tbl}), ?2, ?3)"
+                        ),
+                        params![&e.id, meta_json, e.text.clone().unwrap_or_default()],
+                    )
+                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    tx.query_row(
+                        &format!("SELECT rowid FROM {meta_tbl} WHERE id = ?1"),
+                        params![&e.id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map_err(|err| VectorError::Internal(err.to_string()))?
+                }
+            };
+
+            let vec_bytes: Vec<u8> = e.vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+            tx.execute(
+                &format!("INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?1, ?2)"),
+                params![rowid, vec_bytes],
+            )
+            .map_err(|err| VectorError::Internal(err.to_string()))?;
+
+            // Update meta (metadata + text may have changed on re-upsert)
+            tx.execute(
+                &format!("UPDATE {meta_tbl} SET metadata = ?1, text = ?2 WHERE id = ?3"),
+                params![meta_json, e.text.clone().unwrap_or_default(), &e.id],
+            )
+            .map_err(|err| VectorError::Internal(err.to_string()))?;
+
+            if has_kw {
+                let text = e.text.unwrap_or_default();
+                tx.execute(
+                    &format!("DELETE FROM {fts_tbl} WHERE id = ?1"),
+                    params![&e.id],
+                )
+                .map_err(|err| VectorError::Internal(err.to_string()))?;
+                tx.execute(
+                    &format!("INSERT INTO {fts_tbl}(id, text) VALUES (?1, ?2)"),
+                    params![&e.id, text],
+                )
+                .map_err(|err| VectorError::Internal(err.to_string()))?;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        Ok(())
     }
 
     async fn query(
@@ -222,5 +315,93 @@ mod tests {
         let svc = SqliteVecService::open_in_memory().unwrap();
         let err = svc.delete_index("nope").await.unwrap_err();
         assert!(matches!(err, VectorError::IndexNotFound(_)));
+    }
+
+    fn entry(id: &str, v: Vec<f32>, text: Option<&str>) -> VectorEntry {
+        VectorEntry {
+            id: id.into(),
+            vector: v,
+            metadata: Some(serde_json::json!({ "source": "test" })),
+            text: text.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_vector_only() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+
+        svc.upsert(
+            "docs",
+            vec![
+                entry("a", vec![1.0, 0.0, 0.0], None),
+                entry("b", vec![0.0, 1.0, 0.0], None),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let conn = svc.db.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn upsert_requires_text_when_keyword_search() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: true,
+        })
+        .await
+        .unwrap();
+
+        let err = svc
+            .upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VectorError::TextRequired));
+    }
+
+    #[tokio::test]
+    async fn upsert_replaces_existing_id() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+        svc.upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
+            .await
+            .unwrap();
+        svc.upsert("docs", vec![entry("a", vec![0.0, 1.0, 0.0], None)])
+            .await
+            .unwrap();
+        let conn = svc.db.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        let n_vec: i64 = conn
+            .query_row("SELECT COUNT(*) FROM docs_vec", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_vec, 1);
     }
 }
