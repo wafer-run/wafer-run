@@ -201,14 +201,38 @@ impl Context for RuntimeContext {
             }
         };
 
-        // Derive the called block's requires for its own sub-context
-        let called_requires = {
-            let info = block.info();
-            if info.requires.is_empty() {
-                None // unrestricted
-            } else {
-                Some(info.requires)
+        // Interface action validation: verify the message action is part of the
+        // target block's declared interface. Skipped for action-agnostic
+        // interfaces (empty action map) and for interfaces the runtime does
+        // not recognize (warn-once, then proceed).
+        let info = block.info();
+        {
+            let action = msg.action();
+            match crate::runtime::validation::check_action_interface(
+                &info.name,
+                &info.interface,
+                action,
+                &self.interface_specs_snapshot,
+            ) {
+                crate::runtime::validation::ActionCheck::Valid => {}
+                crate::runtime::validation::ActionCheck::Invalid { message } => {
+                    return err_output(ErrorCode::INVALID_ARGUMENT, message);
+                }
+                crate::runtime::validation::ActionCheck::UnknownInterface => {
+                    crate::runtime::validation::warn_once_unknown_interface(
+                        &self.warned_unknown_interfaces,
+                        &info.name,
+                        &info.interface,
+                    );
+                }
             }
+        }
+
+        // Derive the called block's requires for its own sub-context
+        let called_requires = if info.requires.is_empty() {
+            None // unrestricted
+        } else {
+            Some(info.requires)
         };
 
         // Build a sub-context for the called block
