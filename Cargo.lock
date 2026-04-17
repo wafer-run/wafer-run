@@ -5353,9 +5353,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-core",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5453,7 +5456,11 @@ name = "wafer-block-readonly-guard"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
+ "tokio",
  "wafer-block",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
