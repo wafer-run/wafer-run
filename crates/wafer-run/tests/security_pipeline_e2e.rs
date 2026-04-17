@@ -16,7 +16,7 @@ use wafer_block::{
 };
 use wafer_block_auth_validator::AuthBlock;
 use wafer_block_iam_guard::IAMBlock;
-use wafer_block_ip_rate_limit::{Clock, RateLimitBlock};
+use wafer_block_ip_rate_limit::{RateLimitBlock, SystemClock};
 use wafer_block_readonly_guard::ReadonlyGuardBlock;
 use wafer_run::Wafer;
 use wafer_test_support::{builder::WaferBuilder, fake_crypto::FakeCrypto, fake_db::FakeDb};
@@ -50,13 +50,6 @@ impl Block for OkHandler {
     }
 }
 
-struct ZeroClock;
-impl Clock for ZeroClock {
-    fn now(&self) -> std::time::Instant {
-        std::time::Instant::now()
-    }
-}
-
 fn seed_iam_role(db: &Arc<FakeDb>, user_id: &str, role: &str) {
     db.seed(
         "iam_user_roles",
@@ -79,7 +72,7 @@ async fn build_pipeline(
         .with_block("wafer-run/iam-guard", Arc::new(IAMBlock::new()))
         .with_block(
             "wafer-run/ip-rate-limit",
-            Arc::new(RateLimitBlock::with_clock(Arc::new(ZeroClock))),
+            Arc::new(RateLimitBlock::with_clock(Arc::new(SystemClock))),
         )
         .with_block(
             "wafer-run/readonly-guard",

@@ -51,6 +51,12 @@ impl FakeDb {
     }
 
     /// Insert rows into a collection. Does not touch failure mode.
+    ///
+    /// Rows are stored as-is and converted to the production wire format
+    /// (`Record { id, data }` and `RecordList`) at dispatch time. So a seed
+    /// like `json!({"id": "u1", "name": "Alice"})` will be returned by
+    /// `database.list` as `{"records": [{"id": "u1", "data": {"name": "Alice"}}], ...}`.
+    /// See `to_record` for the exact mapping.
     pub fn seed(&self, collection: &str, rows: Vec<serde_json::Value>) {
         self.state
             .lock()

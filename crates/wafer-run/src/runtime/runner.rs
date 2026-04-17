@@ -107,10 +107,14 @@ impl Wafer {
             }
         };
 
-        // Look up block config and flatten to HashMap<String, String>
+        // Look up block config and flatten to HashMap<String, String>.
+        // Mirrors the block-lookup logic above: try the alias-resolved name
+        // first, then fall back to the original. `add_block_config` is keyed
+        // by registration name (which may be either the alias or the target).
         let block_config = self
             .block_configs_snapshot
-            .get(block_name)
+            .get(resolved)
+            .or_else(|| self.block_configs_snapshot.get(block_name))
             .map(crate::config::parse_config_map)
             .unwrap_or_default();
 

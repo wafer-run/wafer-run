@@ -98,16 +98,20 @@ impl Block for FakeCrypto {
             }
         };
 
-        // `msg.kind` carries the action when dispatched directly via `run_block`.
-        // `msg.action()` reads `META_REQ_ACTION` meta, which is only set on the
-        // HTTP pipeline path. Fall back to `msg.action()` if kind is empty.
+        // Two dispatch paths reach this fake:
+        //   1. Direct `wafer.run_block("wafer-run/crypto", Message::new("crypto.jwt_sign"), ...)`
+        //      from a test — sets `msg.kind` directly.
+        //   2. Production code via `wafer_core::clients::crypto::*` → `call_service` —
+        //      sets `META_REQ_ACTION` meta, readable via `msg.action()`. Production
+        //      uses ServiceOp names without the `jwt_` prefix (`crypto.sign`, `crypto.verify`).
+        // We accept both kind/action sources and both naming conventions so the
+        // same fake serves both call paths.
         let action = if msg.kind.is_empty() {
             msg.action().to_string()
         } else {
             msg.kind.clone()
         };
         match action.as_str() {
-            // Direct test helpers use the jwt_* prefix.
             "crypto.jwt_sign" | "crypto.sign" => self.handle_jwt_sign(&req),
             "crypto.jwt_verify" | "crypto.verify" => self.handle_jwt_verify(&req),
             "crypto.hash" => self.handle_hash(&req),
