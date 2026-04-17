@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use wafer_block::streams::{input::InputStream, output::OutputStream};
 
@@ -109,7 +106,15 @@ impl Wafer {
                 Some(info.requires)
             }
         };
-        let mut ctx = self.make_context(block_name, "root", HashMap::new(), cancelled, None);
+
+        // Look up block config and flatten to HashMap<String, String>
+        let block_config = self
+            .block_configs_snapshot
+            .get(block_name)
+            .map(crate::config::parse_config_map)
+            .unwrap_or_default();
+
+        let mut ctx = self.make_context(block_name, "root", block_config, cancelled, None);
         ctx.caller_requires = caller_requires;
 
         // Observability

@@ -9,5 +9,11 @@ description = "WAFER block: blocks write operations in read-only mode"
 wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 
+[dev-dependencies]
+wafer-test-support = { path = "../wafer-test-support" }
+wafer-run = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true
+
 [lints]
 workspace = true
