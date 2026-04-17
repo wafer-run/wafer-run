@@ -65,6 +65,14 @@ impl Wafer {
     /// WASM blocks or untrusted code. Native blocks receive it via `bind()`
     /// during lifecycle, which is acceptable because native blocks are trusted
     /// (they run in the same process).
+    ///
+    /// # Validation
+    ///
+    /// Top-level dispatch does **not** run the interface-action validator.
+    /// That validator only runs on `RuntimeContext::call_block`, which is
+    /// the path used when one block calls another. Callers invoking
+    /// `run_block` are trusted (e.g., HTTP listeners) and are responsible
+    /// for supplying actions the target block can handle.
     pub async fn run_block(
         &self,
         block_name: &str,
