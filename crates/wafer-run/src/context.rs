@@ -37,6 +37,8 @@ pub struct RuntimeContext {
     pub block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
     /// Snapshot of interface specifications.
     pub interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
+    /// Warn-once tracking for unknown interfaces. Shared Arc with the Wafer.
+    pub warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
@@ -224,6 +226,7 @@ impl Context for RuntimeContext {
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             block_configs_snapshot: self.block_configs_snapshot.clone(),
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
+            warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
             caller_id: Some(self.node_id.clone()),

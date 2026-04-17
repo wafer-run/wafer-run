@@ -165,6 +165,10 @@ pub struct Wafer {
     pub(crate) interface_specs: HashMap<String, wafer_block::InterfaceSpec>,
     /// Snapshot of interface specs (populated at start time).
     pub(crate) interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
+    /// Block names that have already produced an "unknown interface" warning.
+    /// Process-local; used by the call_block interface-action validator to
+    /// emit the warning at most once per block.
+    pub(crate) warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// WRAP: all validated resource grants collected from blocks at startup.
     pub(crate) wrap_grants: Arc<Vec<wafer_block::types::ResourceGrant>>,
     /// WRAP: the block ID that has admin privileges (exact match).
@@ -195,6 +199,7 @@ impl Wafer {
                 .map(|s| (s.name.clone(), s))
                 .collect(),
             interface_specs_snapshot: Arc::new(Vec::new()),
+            warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
             wrap_grants: Arc::new(Vec::new()),
             wrap_admin_block: Arc::new(String::new()),
             #[cfg(feature = "wasmi")]
@@ -259,6 +264,7 @@ impl Wafer {
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             block_configs_snapshot: self.block_configs_snapshot.clone(),
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
+            warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.aliases.clone(),
             caller_requires: None, // unrestricted by default
             caller_id: None,       // top-level call, no caller
