@@ -20,7 +20,6 @@ pub mod service;
 /// This mirrors the usage pattern shown in the `sqlite-vec` crate's
 /// own tests (see `sqlite-vec-0.1.9/src/lib.rs`).
 #[cfg(feature = "vectors")]
-#[allow(dead_code)] // consumed by `vector::SqliteVecService` in Task 9
 pub(crate) fn ensure_vec_loaded(_conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     use std::sync::OnceLock;
     static LOADED: OnceLock<()> = OnceLock::new();

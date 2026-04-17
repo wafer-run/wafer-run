@@ -21,6 +21,9 @@ chrono = { workspace = true }
 default = []
 vectors = ["dep:sqlite-vec"]
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true
 
