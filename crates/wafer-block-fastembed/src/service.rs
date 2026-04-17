@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use wafer_core::interfaces::vector::{
@@ -78,8 +77,9 @@ impl EmbeddingService for FastembedService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_core::interfaces::vector::service::EmbeddingService;
+
+    use super::*;
 
     /// Gated smoke test — first run downloads ~120 MB. Enable with
     /// `SOLOBASE_RUN_FASTEMBED_TESTS=1 cargo test -- --ignored`.

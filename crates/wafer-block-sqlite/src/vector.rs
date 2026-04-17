@@ -4,10 +4,12 @@
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
-use wafer_core::interfaces::vector::rrf;
-use wafer_core::interfaces::vector::service::{
-    DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorError, VectorIndexConfig,
-    VectorMatch, VectorService,
+use wafer_core::interfaces::vector::{
+    rrf,
+    service::{
+        DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorError, VectorIndexConfig,
+        VectorMatch, VectorService,
+    },
 };
 use wafer_sql_utils::ident::sanitize_ident;
 
