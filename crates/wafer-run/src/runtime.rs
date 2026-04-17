@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod registry;
 pub mod resolver;
 pub mod runner;
+pub mod validation;
 
 // Re-export the standalone function so external callers see it at the old path.
 pub use runner::run_block_with_recovery;
