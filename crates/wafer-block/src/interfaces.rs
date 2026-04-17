@@ -203,6 +203,16 @@ pub fn database_v1() -> InterfaceSpec {
     );
 
     actions.insert(
+        "database.update_where".into(),
+        ActionSpec {
+            description:
+                "Update fields on all records in a collection that match a set of filters.".into(),
+            message_schema: None,
+            response_schema: None,
+        },
+    );
+
+    actions.insert(
         "database.delete".into(),
         ActionSpec {
             description: "Delete a record by ID.".into(),
@@ -214,6 +224,15 @@ pub fn database_v1() -> InterfaceSpec {
                 },
                 "required": ["collection", "id"]
             })),
+            response_schema: None,
+        },
+    );
+
+    actions.insert(
+        "database.delete_where".into(),
+        ActionSpec {
+            description: "Delete all records in a collection that match a set of filters.".into(),
+            message_schema: None,
             response_schema: None,
         },
     );
