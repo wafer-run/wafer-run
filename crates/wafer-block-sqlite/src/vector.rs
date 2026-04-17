@@ -4,6 +4,7 @@
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
+use wafer_core::interfaces::vector::rrf;
 use wafer_core::interfaces::vector::service::{
     DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorError, VectorIndexConfig,
     VectorMatch, VectorService,
@@ -212,14 +213,153 @@ impl VectorService for SqliteVecService {
 
     async fn query(
         &self,
-        _index: &str,
-        _vector: Vec<f32>,
-        _top_k: usize,
-        _filter: Option<MetadataFilter>,
-        _mode: SearchMode,
-        _keyword_query: Option<String>,
+        index: &str,
+        vector: Vec<f32>,
+        top_k: usize,
+        filter: Option<MetadataFilter>,
+        mode: SearchMode,
+        keyword_query: Option<String>,
     ) -> Result<Vec<VectorMatch>, VectorError> {
-        Err(VectorError::Internal("not implemented yet".into()))
+        let conn = self.db.lock().unwrap();
+        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(&conn, index)? {
+            return Err(VectorError::IndexNotFound(index.to_string()));
+        }
+        let has_kw = Self::has_keyword_search(&conn, index)?;
+        match mode {
+            SearchMode::Keyword | SearchMode::Hybrid if !has_kw => {
+                return Err(VectorError::KeywordSearchNotEnabled);
+            }
+            SearchMode::Keyword | SearchMode::Hybrid if keyword_query.is_none() => {
+                return Err(VectorError::KeywordQueryRequired(mode));
+            }
+            _ => {}
+        }
+        let vec_tbl = Self::table_name(index, "vec");
+        let meta_tbl = Self::table_name(index, "meta");
+        let fts_tbl = Self::table_name(index, "fts");
+
+        let candidate_limit = match mode {
+            SearchMode::Vector => top_k,
+            _ => top_k.max(50),
+        };
+
+        // --- Vector rankings ---
+        let vec_ranking: Vec<(String, f32)> =
+            if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
+                let vec_bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+                // vec0 knn requires LIMIT (or `k = ?`) in the same SELECT that has the MATCH
+                // clause, so run the knn as a subquery and join against meta outside.
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT m.id, v.distance FROM (\
+                             SELECT rowid, distance FROM {vec_tbl} \
+                             WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2\
+                         ) v JOIN {meta_tbl} m ON m.rowid = v.rowid \
+                         ORDER BY v.distance"
+                    ))
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![vec_bytes, candidate_limit as i64], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+                    })
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| VectorError::Internal(e.to_string()))?
+            } else {
+                Vec::new()
+            };
+
+        // --- Keyword rankings ---
+        let kw_ranking: Vec<(String, f32)> =
+            if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
+                let q = keyword_query.as_deref().unwrap();
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT id, bm25({fts_tbl}) AS score \
+                         FROM {fts_tbl} WHERE {fts_tbl} MATCH ?1 \
+                         ORDER BY score LIMIT ?2"
+                    ))
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![q, candidate_limit as i64], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
+                    })
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| VectorError::Internal(e.to_string()))?
+            } else {
+                Vec::new()
+            };
+
+        // rrf::fuse already truncates to top_k, so no extra slicing needed
+        let ids_top: Vec<String> = match mode {
+            SearchMode::Vector => vec_ranking.iter().map(|(id, _)| id.clone()).collect(),
+            SearchMode::Keyword => kw_ranking.iter().map(|(id, _)| id.clone()).collect(),
+            SearchMode::Hybrid => {
+                let vec_ids: Vec<String> = vec_ranking.iter().map(|(id, _)| id.clone()).collect();
+                let kw_ids: Vec<String> = kw_ranking.iter().map(|(id, _)| id.clone()).collect();
+                rrf::fuse(&[vec_ids, kw_ids], top_k, rrf::DEFAULT_RRF_K)
+            }
+        };
+
+        if ids_top.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Metadata lookup
+        let placeholders: Vec<&str> = (0..ids_top.len()).map(|_| "?").collect();
+        let in_clause = placeholders.join(",");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id, metadata FROM {meta_tbl} WHERE id IN ({in_clause})"
+            ))
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(ids_top.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        let meta_map: std::collections::HashMap<String, serde_json::Value> = rows
+            .filter_map(|r| r.ok())
+            .map(|(id, meta)| {
+                let v = meta
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                (id, v)
+            })
+            .collect();
+
+        let scores: std::collections::HashMap<String, f32> = match mode {
+            SearchMode::Vector => vec_ranking.into_iter().collect(),
+            SearchMode::Keyword => kw_ranking.into_iter().collect(),
+            SearchMode::Hybrid => ids_top
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (id.clone(), 1.0 / (i as f32 + 1.0)))
+                .collect(),
+        };
+
+        let out: Vec<VectorMatch> = ids_top
+            .into_iter()
+            .filter_map(|id| {
+                let metadata = meta_map.get(&id).cloned();
+                if let Some(flt) = filter.as_ref() {
+                    if !apply_filter(&metadata, flt) {
+                        return None;
+                    }
+                }
+                Some(VectorMatch {
+                    id: id.clone(),
+                    score: scores.get(&id).copied().unwrap_or(0.0),
+                    metadata,
+                })
+            })
+            .take(top_k)
+            .collect();
+
+        Ok(out)
     }
 
     async fn delete(&self, _index: &str, _ids: Vec<String>) -> Result<(), VectorError> {
@@ -229,6 +369,25 @@ impl VectorService for SqliteVecService {
     async fn count(&self, _index: &str) -> Result<u64, VectorError> {
         Err(VectorError::Internal("not implemented yet".into()))
     }
+}
+
+fn apply_filter(metadata: &Option<serde_json::Value>, filter: &MetadataFilter) -> bool {
+    let Some(meta) = metadata else {
+        return filter.equals.is_empty();
+    };
+    for (path, want) in &filter.equals {
+        let mut cursor = meta;
+        for segment in path.split('.') {
+            match cursor.get(segment) {
+                Some(v) => cursor = v,
+                None => return false,
+            }
+        }
+        if cursor != want {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -403,5 +562,148 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM docs_vec", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n_vec, 1);
+    }
+
+    #[tokio::test]
+    async fn query_vector_mode() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+        svc.upsert(
+            "docs",
+            vec![
+                entry("a", vec![1.0, 0.0, 0.0], None),
+                entry("b", vec![0.0, 1.0, 0.0], None),
+                entry("c", vec![0.0, 0.0, 1.0], None),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let hits = svc
+            .query(
+                "docs",
+                vec![1.0, 0.0, 0.0],
+                2,
+                None,
+                SearchMode::Vector,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn query_keyword_mode_requires_keyword_search() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+        let err = svc
+            .query(
+                "docs",
+                vec![0.0; 3],
+                5,
+                None,
+                SearchMode::Keyword,
+                Some("cat".into()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VectorError::KeywordSearchNotEnabled));
+    }
+
+    #[tokio::test]
+    async fn query_hybrid_mode() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: true,
+        })
+        .await
+        .unwrap();
+        svc.upsert(
+            "docs",
+            vec![
+                entry("a", vec![1.0, 0.0, 0.0], Some("cats are soft")),
+                entry("b", vec![0.0, 1.0, 0.0], Some("dogs bark loud")),
+                entry("c", vec![0.0, 0.0, 1.0], Some("cats can climb")),
+            ],
+        )
+        .await
+        .unwrap();
+        let hits = svc
+            .query(
+                "docs",
+                vec![0.9, 0.1, 0.1],
+                3,
+                None,
+                SearchMode::Hybrid,
+                Some("cats".into()),
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn query_filter_excludes_non_matching() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(VectorIndexConfig {
+            name: "docs".into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search: false,
+        })
+        .await
+        .unwrap();
+        let e1 = VectorEntry {
+            id: "a".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: Some(serde_json::json!({"tag": "x"})),
+            text: None,
+        };
+        let e2 = VectorEntry {
+            id: "b".into(),
+            vector: vec![0.9, 0.1, 0.0],
+            metadata: Some(serde_json::json!({"tag": "y"})),
+            text: None,
+        };
+        svc.upsert("docs", vec![e1, e2]).await.unwrap();
+        let mut filter = MetadataFilter::default();
+        filter.equals.insert("tag".into(), serde_json::json!("y"));
+        let hits = svc
+            .query(
+                "docs",
+                vec![1.0, 0.0, 0.0],
+                5,
+                Some(filter),
+                SearchMode::Vector,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "b");
     }
 }
