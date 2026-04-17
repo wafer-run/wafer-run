@@ -71,3 +71,89 @@ pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_bloc
         Arc::new(ReadonlyGuardBlock::new()),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use wafer_block::{
+        streams::{input::InputStream, output::TerminalNotResponse},
+        Message,
+    };
+    use wafer_test_support::builder::WaferBuilder;
+
+    use super::*;
+
+    async fn build_wafer(config: Option<serde_json::Value>) -> Arc<wafer_run::Wafer> {
+        let mut b = WaferBuilder::new().with_block(
+            "wafer-run/readonly-guard",
+            Arc::new(ReadonlyGuardBlock::new()),
+        );
+        if let Some(cfg) = config {
+            b = b.with_config("wafer-run/readonly-guard", cfg);
+        }
+        b.build().await.expect("build")
+    }
+
+    async fn expect_allowed(wafer: &Arc<wafer_run::Wafer>, action: &str) {
+        let mut msg = Message::new(action);
+        // Populate META_REQ_ACTION so the action validator picks up the action.
+        msg.set_meta("req.action", action);
+        match wafer
+            .run_block("wafer-run/readonly-guard", msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Ok(_) => {} // Respond terminals are allowed (rare for middleware)
+            Err(TerminalNotResponse::Continue(_)) => {} // Expected for middleware
+            other => panic!("expected allow for action '{action}', got {other:?}"),
+        }
+    }
+
+    async fn expect_denied(wafer: &Arc<wafer_run::Wafer>, action: &str) {
+        let mut msg = Message::new(action);
+        msg.set_meta("req.action", action);
+        match wafer
+            .run_block("wafer-run/readonly-guard", msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::PERMISSION_DENIED);
+            }
+            other => panic!("expected PermissionDenied for action '{action}', got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_off_write_actions_allowed() {
+        let wafer = build_wafer(Some(json!({"readonly": "false"}))).await;
+        expect_allowed(&wafer, "create").await;
+        expect_allowed(&wafer, "update").await;
+        expect_allowed(&wafer, "delete").await;
+    }
+
+    #[tokio::test]
+    async fn readonly_on_write_actions_all_deny() {
+        let wafer = build_wafer(Some(json!({"readonly": "true"}))).await;
+        expect_denied(&wafer, "create").await;
+        expect_denied(&wafer, "update").await;
+        expect_denied(&wafer, "delete").await;
+    }
+
+    #[tokio::test]
+    async fn readonly_on_read_actions_allowed() {
+        let wafer = build_wafer(Some(json!({"readonly": "true"}))).await;
+        expect_allowed(&wafer, "retrieve").await;
+        expect_allowed(&wafer, "list").await;
+    }
+
+    #[tokio::test]
+    async fn readonly_default_off_allows_writes() {
+        let wafer = build_wafer(None).await;
+        expect_allowed(&wafer, "create").await;
+    }
+}

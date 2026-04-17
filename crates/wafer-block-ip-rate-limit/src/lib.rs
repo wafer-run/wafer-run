@@ -7,11 +7,26 @@ use std::{
 use parking_lot::Mutex;
 use wafer_run::*;
 
+/// Source of monotonic time for rate-limit windowing. Injected for tests.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Default production clock backed by `std::time::Instant::now()`.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// RateLimitBlock provides per-IP rate limiting.
 pub struct RateLimitBlock {
     max_requests: u32,
     window: Duration,
     buckets: Mutex<HashMap<String, RateBucket>>,
+    clock: Arc<dyn Clock>,
 }
 
 struct RateBucket {
@@ -27,10 +42,15 @@ impl Default for RateLimitBlock {
 
 impl RateLimitBlock {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             max_requests: 1000,
             window: Duration::from_secs(60),
             buckets: Mutex::new(HashMap::new()),
+            clock,
         }
     }
 }
@@ -80,7 +100,7 @@ impl Block for RateLimitBlock {
         }
 
         let mut buckets = self.buckets.lock();
-        let now = Instant::now();
+        let now = self.clock.now();
 
         // Evict expired entries proactively to prevent unbounded memory growth.
         if buckets.len() > 1_000 {
@@ -144,4 +164,299 @@ impl Block for RateLimitBlock {
 
 pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
+}
+
+#[cfg(test)]
+mod clock_seam_tests {
+    use std::{
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+
+    struct FixedClock {
+        base: Instant,
+        advance_ms: Arc<AtomicU64>,
+    }
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.advance_ms.load(Ordering::Relaxed))
+        }
+    }
+
+    #[test]
+    fn injected_clock_is_used() {
+        let advance = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(FixedClock {
+            base: Instant::now(),
+            advance_ms: advance.clone(),
+        });
+        let block = RateLimitBlock::with_clock(clock.clone());
+        let t0 = clock.now();
+        advance.store(1000, Ordering::Relaxed);
+        let t1 = clock.now();
+        assert!(t1 - t0 >= Duration::from_millis(1000));
+        let _ = block.info();
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use serde_json::json;
+    use wafer_test_support::builder::WaferBuilder;
+
+    use super::*;
+
+    /// Serializes all env-var-sensitive tests to prevent RATE_LIMIT_IP leaking
+    /// between tests running concurrently in the same process.
+    /// Uses tokio::sync::Mutex so the lock can be held across `.await` points.
+    fn env_mutex() -> &'static tokio::sync::Mutex<()> {
+        static MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    struct ControllableClock {
+        base: Instant,
+        offset_ms: AtomicU64,
+    }
+
+    impl ControllableClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                base: Instant::now(),
+                offset_ms: AtomicU64::new(0),
+            })
+        }
+        fn advance(&self, ms: u64) {
+            self.offset_ms.fetch_add(ms, Ordering::Relaxed);
+        }
+    }
+
+    impl Clock for ControllableClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.offset_ms.load(Ordering::Relaxed))
+        }
+    }
+
+    async fn build_wafer_with_clock(
+        clock: Arc<dyn Clock>,
+        config: serde_json::Value,
+    ) -> Arc<wafer_run::Wafer> {
+        WaferBuilder::new()
+            .with_block(
+                "wafer-run/ip-rate-limit",
+                Arc::new(RateLimitBlock::with_clock(clock)),
+            )
+            .with_config("wafer-run/ip-rate-limit", config)
+            .build()
+            .await
+            .expect("build")
+    }
+
+    /// Build a request message with the given client IP.
+    /// `remote_addr()` reads from meta key `"req.client.ip"` (META_REQ_CLIENT_IP).
+    fn request_from(ip: &str) -> Message {
+        let mut msg = Message::new("http.request");
+        msg.set_meta("req.client.ip", ip);
+        msg
+    }
+
+    #[tokio::test]
+    async fn under_limit_continues_with_remaining_meta() {
+        let _guard = env_mutex().lock().await;
+        std::env::remove_var("RATE_LIMIT_IP");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "10", "window_seconds": "60"}),
+        )
+        .await;
+        match wafer
+            .run_block(
+                "wafer-run/ip-rate-limit",
+                request_from("1.1.1.1"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Continue(continued)) => {
+                // Block writes "resp.header.X-RateLimit-Remaining" on the continued message.
+                let remaining = continued.get_meta("resp.header.X-RateLimit-Remaining");
+                assert!(!remaining.is_empty(), "X-RateLimit-Remaining meta missing");
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn over_limit_denies_with_retry_after() {
+        let _guard = env_mutex().lock().await;
+        std::env::remove_var("RATE_LIMIT_IP");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "2", "window_seconds": "60"}),
+        )
+        .await;
+
+        // Two allowed requests.
+        for _ in 0..2 {
+            let _ = wafer
+                .run_block(
+                    "wafer-run/ip-rate-limit",
+                    request_from("2.2.2.2"),
+                    InputStream::empty(),
+                )
+                .await
+                .collect_buffered()
+                .await;
+        }
+
+        // Third request over the limit.
+        match wafer
+            .run_block(
+                "wafer-run/ip-rate-limit",
+                request_from("2.2.2.2"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(e)) => {
+                // Block writes "resp.header.Retry-After" into err.meta.
+                let has_retry = e.meta.iter().any(|m| {
+                    m.key.eq_ignore_ascii_case("resp.header.retry-after")
+                        || m.key.eq_ignore_ascii_case("retry-after")
+                });
+                assert!(
+                    has_retry,
+                    "Retry-After meta missing from rate-limit error: {e:?}"
+                );
+            }
+            other => panic!("expected rate-limit error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn window_reset_restores_budget() {
+        let _guard = env_mutex().lock().await;
+        std::env::remove_var("RATE_LIMIT_IP");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "1", "window_seconds": "1"}),
+        )
+        .await;
+
+        // First request OK.
+        let _ = wafer
+            .run_block(
+                "wafer-run/ip-rate-limit",
+                request_from("3.3.3.3"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await;
+
+        // Second request blocked.
+        let blocked = wafer
+            .run_block(
+                "wafer-run/ip-rate-limit",
+                request_from("3.3.3.3"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await;
+        assert!(matches!(blocked, Err(TerminalNotResponse::Error(_))));
+
+        // Advance clock past the window (1 second = 1000 ms, advance 1500 ms).
+        clock.advance(1_500);
+
+        // Third request OK again after window reset.
+        match wafer
+            .run_block(
+                "wafer-run/ip-rate-limit",
+                request_from("3.3.3.3"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Continue(_)) => {}
+            other => panic!("expected Continue after window reset, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disable_via_env_skips_entirely() {
+        let _guard = env_mutex().lock().await;
+        std::env::set_var("RATE_LIMIT_IP", "0");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "1", "window_seconds": "60"}),
+        )
+        .await;
+
+        for _ in 0..3 {
+            match wafer
+                .run_block(
+                    "wafer-run/ip-rate-limit",
+                    request_from("4.4.4.4"),
+                    InputStream::empty(),
+                )
+                .await
+                .collect_buffered()
+                .await
+            {
+                Err(TerminalNotResponse::Continue(_)) => {}
+                other => {
+                    std::env::remove_var("RATE_LIMIT_IP");
+                    panic!("expected Continue (env disabled), got {other:?}");
+                }
+            }
+        }
+        std::env::remove_var("RATE_LIMIT_IP");
+    }
+
+    #[tokio::test]
+    async fn distinct_ips_have_separate_buckets() {
+        let _guard = env_mutex().lock().await;
+        std::env::remove_var("RATE_LIMIT_IP");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "1", "window_seconds": "60"}),
+        )
+        .await;
+
+        for ip in ["5.5.5.5", "6.6.6.6"] {
+            match wafer
+                .run_block(
+                    "wafer-run/ip-rate-limit",
+                    request_from(ip),
+                    InputStream::empty(),
+                )
+                .await
+                .collect_buffered()
+                .await
+            {
+                Err(TerminalNotResponse::Continue(_)) => {}
+                other => panic!("expected Continue for {ip}, got {other:?}"),
+            }
+        }
+    }
 }

@@ -5273,9 +5273,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-core",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5350,9 +5353,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-core",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5371,7 +5377,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "parking_lot",
+ "serde_json",
+ "tokio",
  "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5450,7 +5459,11 @@ name = "wafer-block-readonly-guard"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
+ "tokio",
  "wafer-block",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -5596,7 +5609,12 @@ dependencies = [
  "tracing-test",
  "url",
  "wafer-block",
+ "wafer-block-auth-validator",
+ "wafer-block-iam-guard",
+ "wafer-block-ip-rate-limit",
+ "wafer-block-readonly-guard",
  "wafer-flow",
+ "wafer-test-support",
  "wasmi",
  "wat",
  "web-time",
@@ -5655,6 +5673,21 @@ dependencies = [
  "sea-query",
  "serde_json",
  "wafer-core",
+]
+
+[[package]]
+name = "wafer-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64ct",
+ "hmac",
+ "parking_lot",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]

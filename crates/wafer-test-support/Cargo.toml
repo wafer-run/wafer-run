@@ -1,0 +1,18 @@
+[package]
+name = "wafer-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wafer-block.workspace = true
+wafer-run.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+base64ct.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

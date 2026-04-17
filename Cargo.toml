@@ -23,6 +23,7 @@ members = [
     "crates/wafer-block-security-headers",
     "crates/wafer-block-sqlite",
     "crates/wafer-sql-utils",
+    "crates/wafer-test-support",
     "crates/wafer-block-web",
     "crates/wafer-flow-http-server",
     "crates/wafer-flow",

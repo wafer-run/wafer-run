@@ -12,6 +12,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 
+[dev-dependencies]
+wafer-test-support = { path = "../wafer-test-support" }
+wafer-run = { path = "../wafer-run" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true
+
 [lints]
 workspace = true
 
