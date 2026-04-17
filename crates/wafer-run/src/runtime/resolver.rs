@@ -133,6 +133,34 @@ impl Wafer {
         // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
 
+        // Validate required config presence across all registered blocks.
+        // Runs after composite/uses expansion so all configs are final.
+        {
+            let empty_cfg = serde_json::Value::Object(Default::default());
+            let owned: Vec<(wafer_block::types::BlockInfo, serde_json::Value)> = self
+                .blocks
+                .iter()
+                .map(|(name, block)| {
+                    let cfg = self
+                        .block_configs
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| empty_cfg.clone());
+                    (block.info(), cfg)
+                })
+                .collect();
+            let borrowed: Vec<(wafer_block::types::BlockInfo, &serde_json::Value)> = owned
+                .iter()
+                .map(|(info, cfg)| (info.clone(), cfg))
+                .collect();
+            let missing = super::validation::collect_missing_config(&borrowed);
+            if !missing.is_empty() {
+                return Err(RuntimeError::Config(
+                    super::validation::format_missing_config(&missing),
+                ));
+            }
+        }
+
         // Snapshot expanded configs for inspector before draining
         self.block_configs_snapshot = Arc::new(self.block_configs.clone());
 
