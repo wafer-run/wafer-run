@@ -3,7 +3,7 @@
 //! Pure functions — no mutation of runtime state. Called from `Wafer::resolve()`
 //! (config presence) and `RuntimeContext::call_block()` (interface action).
 
-use wafer_block::types::BlockInfo;
+use wafer_block::types::{BlockInfo, InterfaceSpec};
 
 /// A single `(block, key)` pair whose required config value was not provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,15 +59,131 @@ pub fn format_missing_config(missing: &[MissingConfig]) -> String {
     format!("missing required config: [{}]", parts.join("; "))
 }
 
+/// Result of checking whether an action is valid for a block's declared interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionCheck {
+    /// Action is valid for the block's interface.
+    Valid,
+    /// The action is not listed in the interface's action map.
+    ///
+    /// Message is pre-formatted for use in a `WaferError::invalid_argument`.
+    Invalid { message: String },
+    /// The block's interface string does not match any registered `InterfaceSpec`.
+    ///
+    /// Caller should warn-once and then treat the call as valid (backward compat
+    /// for custom interfaces).
+    UnknownInterface,
+}
+
+/// Check whether `action` is part of the action map for the block's declared interface.
+///
+/// Rules:
+/// - If the interface has an **empty** action map, it is action-agnostic
+///   (e.g., `middleware@v1`): any action is valid.
+/// - If the interface has a non-empty action map, `action` must be a key in it.
+/// - If the interface name matches no registered `InterfaceSpec`, return
+///   `UnknownInterface` so the caller can warn-once and proceed.
+pub fn check_action_interface(
+    block_name: &str,
+    interface_name: &str,
+    action: &str,
+    specs: &[InterfaceSpec],
+) -> ActionCheck {
+    let Some(spec) = specs.iter().find(|s| s.name == interface_name) else {
+        return ActionCheck::UnknownInterface;
+    };
+    if spec.actions.is_empty() {
+        return ActionCheck::Valid;
+    }
+    if spec.actions.contains_key(action) {
+        return ActionCheck::Valid;
+    }
+    ActionCheck::Invalid {
+        message: format!(
+            "block '{block_name}' with interface '{interface_name}' does not expose action '{action}'"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wafer_block::types::{BlockInfo, ConfigVar};
+    use std::collections::HashMap;
+    use wafer_block::types::{ActionSpec, BlockInfo, ConfigVar, InterfaceSpec};
 
     fn mk_block(name: &str, cfg_vars: Vec<ConfigVar>) -> BlockInfo {
         let mut info = BlockInfo::new(name, "0.1.0", "test@v1", "test");
         info.config_keys = cfg_vars;
         info
+    }
+
+    fn db_interface() -> InterfaceSpec {
+        let mut actions = HashMap::new();
+        actions.insert(
+            "retrieve".into(),
+            ActionSpec {
+                description: "".into(),
+                message_schema: None,
+                response_schema: None,
+            },
+        );
+        actions.insert(
+            "list".into(),
+            ActionSpec {
+                description: "".into(),
+                message_schema: None,
+                response_schema: None,
+            },
+        );
+        InterfaceSpec {
+            name: "database@v1".into(),
+            description: "".into(),
+            actions,
+        }
+    }
+
+    #[test]
+    fn interface_valid_action() {
+        let specs = vec![db_interface()];
+        let result = check_action_interface("org/sqlite", "database@v1", "retrieve", &specs);
+        assert!(matches!(result, ActionCheck::Valid));
+    }
+
+    #[test]
+    fn interface_unknown_action_rejected() {
+        let specs = vec![db_interface()];
+        let result = check_action_interface("org/sqlite", "database@v1", "publish", &specs);
+        match result {
+            ActionCheck::Invalid { message } => {
+                assert!(message.contains("org/sqlite"));
+                assert!(message.contains("database@v1"));
+                assert!(message.contains("publish"));
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interface_action_agnostic_interface_passes_any() {
+        let mw = InterfaceSpec {
+            name: "middleware@v1".into(),
+            description: "".into(),
+            actions: HashMap::new(),
+        };
+        let specs = vec![mw];
+        assert_eq!(
+            check_action_interface("org/cors", "middleware@v1", "anything", &specs),
+            ActionCheck::Valid
+        );
+    }
+
+    #[test]
+    fn interface_unknown_interface_returns_unknown() {
+        let specs = vec![db_interface()];
+        assert_eq!(
+            check_action_interface("org/x", "my-org/custom@v1", "retrieve", &specs),
+            ActionCheck::UnknownInterface
+        );
     }
 
     #[test]
