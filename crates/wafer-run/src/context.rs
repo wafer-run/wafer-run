@@ -37,6 +37,8 @@ pub struct RuntimeContext {
     pub block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
     /// Snapshot of interface specifications.
     pub interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
+    /// Warn-once tracking for unknown interfaces. Shared Arc with the Wafer.
+    pub warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
@@ -69,6 +71,22 @@ impl Drop for CallDepthGuard {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
+    /// Dispatch a message to another registered block.
+    ///
+    /// # Checks
+    ///
+    /// Runs in order, returning an error event on failure:
+    /// 1. Call-depth limit (default 16).
+    /// 2. Cancellation / deadline.
+    /// 3. Caller `requires` allowlist.
+    /// 4. WRAP resource access (`META_WRAP_RESOURCE`).
+    /// 5. Caller capability check (WASM capability model).
+    /// 6. **Interface action**: `msg.action()` must be in the target block's
+    ///    declared interface action map, unless the interface is
+    ///    action-agnostic (empty map) or unknown to the runtime. Unknown
+    ///    interfaces produce a one-time `WARN` log per block.
+    ///
+    /// See `crates/wafer-run/src/runtime/validation.rs`.
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
         // Recursion depth check — the RAII guard ensures the counter is
         // decremented even if the block panics.
@@ -199,14 +217,38 @@ impl Context for RuntimeContext {
             }
         };
 
-        // Derive the called block's requires for its own sub-context
-        let called_requires = {
-            let info = block.info();
-            if info.requires.is_empty() {
-                None // unrestricted
-            } else {
-                Some(info.requires)
+        // Interface action validation: verify the message action is part of the
+        // target block's declared interface. Skipped for action-agnostic
+        // interfaces (empty action map) and for interfaces the runtime does
+        // not recognize (warn-once, then proceed).
+        let info = block.info();
+        {
+            let action = msg.action();
+            match crate::runtime::validation::check_action_interface(
+                &info.name,
+                &info.interface,
+                action,
+                &self.interface_specs_snapshot,
+            ) {
+                crate::runtime::validation::ActionCheck::Valid => {}
+                crate::runtime::validation::ActionCheck::Invalid { message } => {
+                    return err_output(ErrorCode::INVALID_ARGUMENT, message);
+                }
+                crate::runtime::validation::ActionCheck::UnknownInterface => {
+                    crate::runtime::validation::warn_once_unknown_interface(
+                        &self.warned_unknown_interfaces,
+                        &info.name,
+                        &info.interface,
+                    );
+                }
             }
+        }
+
+        // Derive the called block's requires for its own sub-context
+        let called_requires = if info.requires.is_empty() {
+            None // unrestricted
+        } else {
+            Some(info.requires)
         };
 
         // Build a sub-context for the called block
@@ -224,6 +266,7 @@ impl Context for RuntimeContext {
             flow_defs_snapshot: self.flow_defs_snapshot.clone(),
             block_configs_snapshot: self.block_configs_snapshot.clone(),
             interface_specs_snapshot: self.interface_specs_snapshot.clone(),
+            warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
             caller_id: Some(self.node_id.clone()),
