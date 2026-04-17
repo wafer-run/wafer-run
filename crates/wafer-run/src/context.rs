@@ -71,6 +71,22 @@ impl Drop for CallDepthGuard {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Context for RuntimeContext {
+    /// Dispatch a message to another registered block.
+    ///
+    /// # Checks
+    ///
+    /// Runs in order, returning an error event on failure:
+    /// 1. Call-depth limit (default 16).
+    /// 2. Cancellation / deadline.
+    /// 3. Caller `requires` allowlist.
+    /// 4. WRAP resource access (`META_WRAP_RESOURCE`).
+    /// 5. Caller capability check (WASM capability model).
+    /// 6. **Interface action**: `msg.action()` must be in the target block's
+    ///    declared interface action map, unless the interface is
+    ///    action-agnostic (empty map) or unknown to the runtime. Unknown
+    ///    interfaces produce a one-time `WARN` log per block.
+    ///
+    /// See `crates/wafer-run/src/runtime/validation.rs`.
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
         // Recursion depth check — the RAII guard ensures the counter is
         // decremented even if the block panics.

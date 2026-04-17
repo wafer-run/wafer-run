@@ -81,6 +81,17 @@ impl Wafer {
     }
 
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
+    ///
+    /// # Validation
+    ///
+    /// Before any block lifecycle event is dispatched, runs:
+    /// - **Config presence**: every registered block's declared `config_keys`
+    ///   that have no default and no `auto_generate` must be provided, or
+    ///   `start()` returns `RuntimeError::Config` with all missing
+    ///   `(block, key)` pairs aggregated into a single message. Lifecycle
+    ///   events are not dispatched on failure.
+    ///
+    /// See `crates/wafer-run/src/runtime/validation.rs`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
         self.start_without_bind().await?;
