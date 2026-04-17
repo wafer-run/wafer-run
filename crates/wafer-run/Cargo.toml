@@ -46,7 +46,14 @@ reqwest = { workspace = true, optional = true }
 workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 tempfile = { workspace = true }
 tracing-test = "0.2"
 wat = "1"
+wafer-test-support = { path = "../wafer-test-support" }
+wafer-block-auth-validator = { path = "../wafer-block-auth-validator" }
+wafer-block-iam-guard = { path = "../wafer-block-iam-guard" }
+wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
+wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
