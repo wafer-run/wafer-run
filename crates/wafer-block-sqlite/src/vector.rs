@@ -47,6 +47,20 @@ impl SqliteVecService {
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(exists)
     }
+
+    // consumed in Task 10 upsert
+    #[allow(dead_code)]
+    fn has_keyword_search(conn: &Connection, index: &str) -> Result<bool, VectorError> {
+        let fts_tbl = Self::table_name(index, "fts");
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                params![fts_tbl],
+                |row| row.get(0),
+            )
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        Ok(exists)
+    }
 }
 
 #[async_trait::async_trait]
