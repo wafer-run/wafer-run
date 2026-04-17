@@ -10,5 +10,10 @@ wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
 
+[dev-dependencies]
+wafer-test-support = { path = "../wafer-test-support" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true
+
 [lints]
 workspace = true
