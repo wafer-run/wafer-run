@@ -43,6 +43,35 @@ fn unpack_ptr_len(packed: i64) -> (u32, u32) {
 // Guest meta sanitisation
 // ---------------------------------------------------------------------------
 
+/// Default set of HTTP header names that are considered security-sensitive.
+/// WASM blocks cannot read or write these unless they declare them in their
+/// `HeaderPolicy.readable` / `HeaderPolicy.writable` (and are granted the
+/// cap after config intersection).
+pub(crate) fn default_sensitive_headers() -> &'static [&'static str] {
+    &[
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "location",
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-allow-methods",
+        "access-control-allow-headers",
+        "access-control-expose-headers",
+        "access-control-max-age",
+        "strict-transport-security",
+        "x-frame-options",
+        "content-security-policy",
+        "content-security-policy-report-only",
+    ]
+}
+
+fn is_sensitive_header(name: &str, policy_masked: &[String]) -> bool {
+    let n = name.to_lowercase();
+    default_sensitive_headers().contains(&n.as_str())
+        || policy_masked.iter().any(|m| m.eq_ignore_ascii_case(&n))
+}
+
 /// Extract the canonical (lowercase) HTTP header name from a wafer meta key,
 /// or `None` if the key is not a header.
 ///
@@ -64,19 +93,66 @@ pub(crate) fn header_name_from_meta_key(key: &str) -> Option<String> {
     None
 }
 
-/// Strip meta entries that a sandboxed WASM guest should not control.
-fn sanitize_guest_meta(meta: Vec<MetaEntry>) -> Vec<MetaEntry> {
+/// Strip outbound meta entries whose header name is in the default sensitive
+/// set plus `HeaderPolicy.masked`, unless explicitly in `HeaderPolicy.writable`.
+/// Non-header meta entries pass through.
+///
+/// Stripped header names (deduped, lowercased) are appended to `stripped_names`.
+pub(crate) fn sanitize_outbound_meta(
+    meta: Vec<MetaEntry>,
+    caps: &BlockCapabilities,
+    stripped_names: &mut Vec<String>,
+) -> Vec<MetaEntry> {
     meta.into_iter()
         .filter(|e| {
-            let k = e.key.to_lowercase();
-            // Block cookies, redirects, and security headers from WASM guests.
-            !k.starts_with("resp.set_cookie")
-                && !k.starts_with("http.resp.set-cookie")
-                && !k.contains("location")
-                && !k.contains("access-control")
-                && !k.contains("strict-transport")
-                && !k.contains("x-frame-options")
-                && !k.contains("content-security-policy")
+            let Some(name) = header_name_from_meta_key(&e.key) else {
+                return true;
+            };
+            if !is_sensitive_header(&name, &caps.headers.masked) {
+                return true;
+            }
+            let allowed = caps
+                .headers
+                .writable
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(&name));
+            if !allowed {
+                if !stripped_names.iter().any(|n| n == &name) {
+                    stripped_names.push(name);
+                }
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// Symmetric inbound sanitizer. Uses `HeaderPolicy.readable` as the allowlist.
+pub(crate) fn sanitize_inbound_meta(
+    meta: Vec<MetaEntry>,
+    caps: &BlockCapabilities,
+    stripped_names: &mut Vec<String>,
+) -> Vec<MetaEntry> {
+    meta.into_iter()
+        .filter(|e| {
+            let Some(name) = header_name_from_meta_key(&e.key) else {
+                return true;
+            };
+            if !is_sensitive_header(&name, &caps.headers.masked) {
+                return true;
+            }
+            let allowed = caps
+                .headers
+                .readable
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&name));
+            if !allowed {
+                if !stripped_names.iter().any(|n| n == &name) {
+                    stripped_names.push(name);
+                }
+                return false;
+            }
+            true
         })
         .collect()
 }
@@ -130,6 +206,127 @@ mod header_name_tests {
         assert_eq!(header_name_from_meta_key("auth.user_id"), None);
         assert_eq!(header_name_from_meta_key("trace_id"), None);
         assert_eq!(header_name_from_meta_key(""), None);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+    use wafer_block::capabilities::{BlockCapabilities, HeaderPolicy};
+
+    fn meta(key: &str, value: &str) -> MetaEntry {
+        MetaEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn outbound_strips_default_sensitive_when_empty_policy() {
+        let caps = BlockCapabilities::default();
+        let input = vec![
+            meta("resp.header.content-type", "text/plain"),
+            meta("resp.header.set-cookie", "s=1"),
+            meta("resp.set_cookie", "legacy"),
+            meta("resp.header.x-frame-options", "DENY"),
+            meta("resp.header.x-safe", "ok"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"resp.header.content-type"));
+        assert!(keys.contains(&"resp.header.x-safe"));
+        assert!(!keys
+            .iter()
+            .any(|k| k.contains("set-cookie") || k.contains("set_cookie")));
+        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
+        assert!(stripped.contains(&"set-cookie".to_string()));
+    }
+
+    #[test]
+    fn outbound_writable_allows_named_header() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                writable: vec!["set-cookie".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = vec![
+            meta("resp.header.set-cookie", "s=1"),
+            meta("resp.set_cookie", "legacy"),
+            meta("resp.header.x-frame-options", "DENY"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"resp.header.set-cookie"));
+        assert!(keys.contains(&"resp.set_cookie"));
+        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
+    }
+
+    #[test]
+    fn inbound_strips_default_sensitive_when_empty_policy() {
+        let caps = BlockCapabilities::default();
+        let input = vec![
+            meta("req.header.accept", "text/plain"),
+            meta("req.header.authorization", "Bearer abc"),
+            meta("req.header.cookie", "a=1"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"req.header.accept"));
+        assert!(!keys.iter().any(|k| k.contains("authorization")));
+        assert!(!keys.iter().any(|k| k.contains("cookie")));
+    }
+
+    #[test]
+    fn inbound_readable_allows_named_header() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["authorization".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = vec![
+            meta("req.header.authorization", "Bearer abc"),
+            meta("req.header.cookie", "a=1"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"req.header.authorization"));
+        assert!(!keys.iter().any(|k| k.contains("cookie")));
+    }
+
+    #[test]
+    fn masked_extends_default_sensitive_both_directions() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                masked: vec!["x-internal".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inbound = vec![meta("req.header.x-internal", "secret")];
+        let outbound = vec![meta("resp.header.x-internal", "secret")];
+        let mut s1 = Vec::new();
+        let mut s2 = Vec::new();
+        assert!(sanitize_inbound_meta(inbound, &caps, &mut s1).is_empty());
+        assert!(sanitize_outbound_meta(outbound, &caps, &mut s2).is_empty());
+    }
+
+    #[test]
+    fn non_header_keys_pass_through() {
+        let caps = BlockCapabilities::default();
+        let input = vec![meta("auth.user_id", "u1"), meta("trace_id", "abc")];
+        let mut s = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut s);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"auth.user_id"));
+        assert!(keys.contains(&"trace_id"));
     }
 }
 
@@ -579,6 +776,10 @@ pub struct WasmiBlock {
     linker: Linker<WasmiHostState>,
     info_cache: Mutex<Option<BlockInfo>>,
     capabilities: BlockCapabilities,
+    /// Warn-once flag for outbound stripped headers.
+    warned_outbound: std::sync::atomic::AtomicBool,
+    /// Warn-once flag for inbound stripped headers.
+    warned_inbound: std::sync::atomic::AtomicBool,
 }
 
 // Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44.
@@ -622,6 +823,8 @@ impl WasmiBlock {
             linker,
             info_cache: Mutex::new(None),
             capabilities: caps,
+            warned_outbound: std::sync::atomic::AtomicBool::new(false),
+            warned_inbound: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -783,6 +986,32 @@ impl WasmiBlock {
             }
         }
     }
+
+    fn warn_once_stripped_outbound(&self, names: &[String]) {
+        use std::sync::atomic::Ordering;
+        if self.warned_outbound.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            block = %self.info().name,
+            direction = "outbound",
+            stripped = ?names,
+            "headers outside writable allowlist — stripped"
+        );
+    }
+
+    fn warn_once_stripped_inbound(&self, names: &[String]) {
+        use std::sync::atomic::Ordering;
+        if self.warned_inbound.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            block = %self.info().name,
+            direction = "inbound",
+            stripped = ?names,
+            "headers outside readable allowlist — stripped"
+        );
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -841,6 +1070,21 @@ impl Block for WasmiBlock {
         // We collect the input stream and embed it into a wrapper so the guest
         // can decode both the message and the body.
         let body = input.collect_to_bytes().await;
+
+        // Sanitize inbound message meta before passing to WASM guest.
+        let msg = {
+            let mut stripped_in: Vec<String> = Vec::new();
+            let sanitized_meta =
+                sanitize_inbound_meta(msg.meta, &self.capabilities, &mut stripped_in);
+            if !stripped_in.is_empty() {
+                self.warn_once_stripped_inbound(&stripped_in);
+            }
+            Message {
+                meta: sanitized_meta,
+                ..msg
+            }
+        };
+
         let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
             Ok(b) => b,
             Err(e) => {
@@ -898,7 +1142,15 @@ impl Block for WasmiBlock {
                 "Respond" => {
                     let (data, meta) = result
                         .response
-                        .map(|r| (r.data, sanitize_guest_meta(r.meta)))
+                        .map(|r| {
+                            let mut stripped: Vec<String> = Vec::new();
+                            let sanitized =
+                                sanitize_outbound_meta(r.meta, &self.capabilities, &mut stripped);
+                            if !stripped.is_empty() {
+                                self.warn_once_stripped_outbound(&stripped);
+                            }
+                            (r.data, sanitized)
+                        })
                         .unwrap_or_default();
                     if meta.is_empty() {
                         OutputStream::respond(data)
