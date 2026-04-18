@@ -56,17 +56,37 @@ impl fmt::Display for AssetLoadError {
 /// Host-side callback invoked from inside `__wafer_host_load_asset`.
 /// Implementations are expected to memoise — the first call performs the
 /// work, subsequent calls for the same id return `Ready` without re-fetching.
-#[async_trait::async_trait]
-pub trait LoadAssetCallback: Send + Sync {
+///
+/// On native targets the future is `Send` (matches the rest of the runtime).
+/// On wasm32 the future is `!Send` so impls can use single-threaded
+/// browser primitives like `JsFuture` (the SW host in solobase-web does
+/// this).
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait LoadAssetCallback: MaybeSendSync {
     async fn load(&self, asset_id: &str) -> AssetLoadStatus;
 }
+
+/// Send + Sync on native, no bound on wasm32. Mirrors the conditional bound
+/// applied to `Block` so the trait object stored in `Wafer::asset_loader`
+/// keeps `Arc<dyn LoadAssetCallback>` thread-safe on native while letting
+/// wasm32 callbacks hold `!Send` JS handles.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync + ?Sized> MaybeSendSync for T {}
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSendSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSendSync for T {}
 
 /// Default loader for hosts that haven't wired one up. Always returns
 /// `Failed(UnknownLoader)` so wasm callers see a clear error rather than
 /// hanging.
 pub struct NoopAssetLoader;
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl LoadAssetCallback for NoopAssetLoader {
     async fn load(&self, asset_id: &str) -> AssetLoadStatus {
         AssetLoadStatus::Failed(AssetLoadError::UnknownLoader(format!(
