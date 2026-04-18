@@ -4,6 +4,7 @@
 //! Each block receives a message, processes it, and returns a result
 //! that determines the next step in the flow.
 
+pub mod asset_loader;
 pub mod block;
 pub mod common;
 pub mod compat;
@@ -28,6 +29,7 @@ pub mod wasm;
 
 // Re-export the WRAP access control module from wafer-block
 // Re-exports for convenience
+pub use asset_loader::{AssetLoadError, AssetLoadStatus, LoadAssetCallback, NoopAssetLoader};
 pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
