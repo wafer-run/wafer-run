@@ -146,34 +146,37 @@ impl Wafer {
                     .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
 
                 // Strip + parse the `capabilities` subkey from block config.
-                let config_caps = if let Some(cfg) = self.block_configs.get_mut(name) {
+                let config_overrides = if let Some(cfg) = self.block_configs.get_mut(name) {
                     if let Some(obj) = cfg.as_object_mut() {
                         if let Some(raw) = obj.remove("capabilities") {
-                            match serde_json::from_value::<wafer_block::BlockCapabilities>(raw) {
-                                Ok(c) => c,
+                            match serde_json::from_value::<
+                                wafer_block::capabilities::ConfigCapabilityOverrides,
+                            >(raw)
+                            {
+                                Ok(o) => o,
                                 Err(e) => {
                                     tracing::warn!(
                                         block = %name,
                                         error = %e,
                                         "failed to parse `capabilities` subkey — ignoring"
                                     );
-                                    wafer_block::BlockCapabilities::unrestricted()
+                                    wafer_block::capabilities::ConfigCapabilityOverrides::default()
                                 }
                             }
                         } else {
-                            wafer_block::BlockCapabilities::unrestricted()
+                            wafer_block::capabilities::ConfigCapabilityOverrides::default()
                         }
                     } else {
-                        wafer_block::BlockCapabilities::unrestricted()
+                        wafer_block::capabilities::ConfigCapabilityOverrides::default()
                     }
                 } else {
-                    wafer_block::BlockCapabilities::unrestricted()
+                    wafer_block::capabilities::ConfigCapabilityOverrides::default()
                 };
 
-                let effective = declared.intersect(&config_caps);
+                let effective = declared.apply_config_overrides(&config_overrides);
 
                 // Warn on widening attempts (fields where config > declared).
-                log_widening_attempts(name, &config_caps, &effective);
+                log_widening_attempts(name, &config_overrides, &effective);
 
                 // Propagate effective caps into the block for runtime enforcement.
                 // Native blocks ignore this call (default no-op); WASM blocks update
@@ -732,84 +735,94 @@ impl Wafer {
 
 fn log_widening_attempts(
     name: &str,
-    config: &wafer_block::BlockCapabilities,
+    overrides: &wafer_block::capabilities::ConfigCapabilityOverrides,
     effective: &wafer_block::BlockCapabilities,
 ) {
-    // Booleans: if config asked for `true` but effective is `false`, declared denied.
-    for (label, c, e) in [
-        ("raw_sql", config.raw_sql, effective.raw_sql),
-        ("crypto", config.crypto, effective.crypto),
-        ("network", config.network, effective.network),
-        ("config", config.config, effective.config),
+    // Booleans: if config explicitly set `true` but effective is `false`, declared denied.
+    for (label, over, eff) in [
+        ("raw_sql", overrides.raw_sql, effective.raw_sql),
+        ("crypto", overrides.crypto, effective.crypto),
+        ("network", overrides.network, effective.network),
+        ("config", overrides.config, effective.config),
     ] {
-        if c && !e {
-            tracing::warn!(
-                block = %name,
-                field = %label,
-                "config widened capability beyond declared — narrower declaration wins"
-            );
-        }
-    }
-
-    // HashSet allowlists: items in config that did NOT survive intersection.
-    let hash_fields: &[(
-        &str,
-        &std::collections::HashSet<String>,
-        &std::collections::HashSet<String>,
-    )] = &[
-        ("collections", &config.collections, &effective.collections),
-        (
-            "storage_folders",
-            &config.storage_folders,
-            &effective.storage_folders,
-        ),
-        ("config_keys", &config.config_keys, &effective.config_keys),
-        (
-            "callable_blocks",
-            &config.callable_blocks,
-            &effective.callable_blocks,
-        ),
-    ];
-    for (label, c_set, e_set) in hash_fields {
-        for item in c_set.iter() {
-            if !e_set.contains(item) {
+        if let Some(true) = over {
+            if !eff {
                 tracing::warn!(
                     block = %name,
                     field = %label,
-                    item = %item,
                     "config widened capability beyond declared — narrower declaration wins"
                 );
             }
         }
     }
 
+    // HashSet allowlists: items in the override that did NOT survive intersection.
+    let hash_fields = [
+        (
+            "collections",
+            overrides.collections.as_ref(),
+            &effective.collections,
+        ),
+        (
+            "storage_folders",
+            overrides.storage_folders.as_ref(),
+            &effective.storage_folders,
+        ),
+        (
+            "config_keys",
+            overrides.config_keys.as_ref(),
+            &effective.config_keys,
+        ),
+        (
+            "callable_blocks",
+            overrides.callable_blocks.as_ref(),
+            &effective.callable_blocks,
+        ),
+    ];
+    for (label, over_opt, eff_set) in hash_fields {
+        if let Some(over_set) = over_opt {
+            for item in over_set.iter() {
+                if !eff_set.contains(item) {
+                    tracing::warn!(
+                        block = %name,
+                        field = %label,
+                        item = %item,
+                        "config widened capability beyond declared — narrower declaration wins"
+                    );
+                }
+            }
+        }
+    }
+
     // Vec allowlists: same shape.
-    let vec_fields: &[(&str, &Vec<String>, &Vec<String>)] = &[
+    let vec_fields = [
         (
             "network_allow",
-            &config.network_allow,
+            overrides.network_allow.as_ref(),
             &effective.network_allow,
         ),
         (
             "headers.readable",
-            &config.headers.readable,
+            overrides.headers.as_ref().and_then(|h| h.readable.as_ref()),
             &effective.headers.readable,
         ),
         (
             "headers.writable",
-            &config.headers.writable,
+            overrides.headers.as_ref().and_then(|h| h.writable.as_ref()),
             &effective.headers.writable,
         ),
     ];
-    for (label, c_vec, e_vec) in vec_fields {
-        for item in c_vec.iter() {
-            if !e_vec.iter().any(|x| x == item) {
-                tracing::warn!(
-                    block = %name,
-                    field = %label,
-                    item = %item,
-                    "config widened capability beyond declared — narrower declaration wins"
-                );
+    for (label, over_opt, eff_vec) in vec_fields {
+        if let Some(over_vec) = over_opt {
+            for item in over_vec.iter() {
+                if !eff_vec.iter().any(|x| x == item) {
+                    tracing::warn!(
+                        block = %name,
+                        field = %label,
+                        item = %item,
+                        "config widened capability beyond declared — narrower declaration wins"
+                    );
+                }
             }
         }
     }

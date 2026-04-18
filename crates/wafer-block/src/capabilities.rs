@@ -190,6 +190,126 @@ impl BlockCapabilities {
             },
         }
     }
+
+    /// Apply sparse config overrides onto this (declared) capability set.
+    ///
+    /// Fields the operator did not mention (`None` in the overrides) are
+    /// preserved as declared. Fields the operator did mention are combined
+    /// with declared using the intersection rules:
+    ///
+    /// - Booleans: logical AND (operator can only disable, not enable).
+    /// - HashSet allowlists: set intersection (with `"*"` wildcard).
+    /// - Vec allowlists: set intersection.
+    /// - HeaderPolicy `readable`/`writable`: intersection.
+    /// - HeaderPolicy `masked`: UNION (operator can add masking).
+    pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
+        let headers = match &o.headers {
+            Some(h) => HeaderPolicy {
+                readable: match &h.readable {
+                    Some(r) => intersect_vec(&self.headers.readable, r),
+                    None => self.headers.readable.clone(),
+                },
+                writable: match &h.writable {
+                    Some(w) => intersect_vec(&self.headers.writable, w),
+                    None => self.headers.writable.clone(),
+                },
+                masked: match &h.masked {
+                    Some(m) => union_vec(&self.headers.masked, m),
+                    None => self.headers.masked.clone(),
+                },
+            },
+            None => self.headers.clone(),
+        };
+
+        Self {
+            collections: match &o.collections {
+                Some(c) => intersect_wildcard_set(&self.collections, c),
+                None => self.collections.clone(),
+            },
+            raw_sql: match o.raw_sql {
+                Some(r) => self.raw_sql && r,
+                None => self.raw_sql,
+            },
+            storage_folders: match &o.storage_folders {
+                Some(s) => intersect_wildcard_set(&self.storage_folders, s),
+                None => self.storage_folders.clone(),
+            },
+            crypto: match o.crypto {
+                Some(c) => self.crypto && c,
+                None => self.crypto,
+            },
+            network: match o.network {
+                Some(n) => self.network && n,
+                None => self.network,
+            },
+            network_allow: match &o.network_allow {
+                Some(n) => intersect_vec(&self.network_allow, n),
+                None => self.network_allow.clone(),
+            },
+            config: match o.config {
+                Some(c) => self.config && c,
+                None => self.config,
+            },
+            config_keys: match &o.config_keys {
+                Some(c) => intersect_wildcard_set(&self.config_keys, c),
+                None => self.config_keys.clone(),
+            },
+            callable_blocks: match &o.callable_blocks {
+                Some(c) => intersect_wildcard_set(&self.callable_blocks, c),
+                None => self.callable_blocks.clone(),
+            },
+            headers,
+        }
+    }
+}
+
+/// Sparse capability overrides parsed from a block's config `capabilities`
+/// subkey. `None` fields mean "keep whatever the block declared" — only
+/// fields that are explicitly `Some` participate in narrowing.
+///
+/// This is the wire shape for operators. For example:
+///
+/// ```json
+/// { "capabilities": { "network": false, "collections": ["users"] } }
+/// ```
+///
+/// deserializes into `ConfigCapabilityOverrides { network: Some(false),
+/// collections: Some({"users"}), ..everything else None }`. Fields the
+/// operator didn't mention stay at the block's declared value after
+/// `apply_config_overrides`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigCapabilityOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collections: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_sql: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_folders: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crypto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_allow: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_keys: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callable_blocks: Option<HashSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HeaderPolicyOverrides>,
+}
+
+/// Sparse header-policy overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HeaderPolicyOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readable: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writable: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masked: Option<Vec<String>>,
 }
 
 fn intersect_wildcard_set(a: &HashSet<String>, b: &HashSet<String>) -> HashSet<String> {
@@ -367,5 +487,126 @@ mod tests {
         let mut got = r.headers.masked;
         got.sort();
         assert_eq!(got, vec!["x-a".to_string(), "x-b".to_string()]);
+    }
+
+    #[test]
+    fn apply_overrides_empty_keeps_declared() {
+        let declared = BlockCapabilities {
+            crypto: true,
+            network: true,
+            collections: ["users"].iter().map(|s| s.to_string()).collect(),
+            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let overrides = ConfigCapabilityOverrides::default();
+        let eff = declared.apply_config_overrides(&overrides);
+
+        // All declared fields preserved — nothing silently wiped.
+        assert!(eff.crypto);
+        assert!(eff.network);
+        assert!(eff.collections.contains("users"));
+        assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+    }
+
+    #[test]
+    fn apply_overrides_partial_preserves_untouched_fields() {
+        let declared = BlockCapabilities {
+            crypto: true,
+            network: true,
+            network_allow: vec!["https://a.com/".into(), "https://b.com/".into()],
+            collections: ["users", "sessions"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        // Operator narrows ONLY network_allow.
+        let overrides = ConfigCapabilityOverrides {
+            network_allow: Some(vec!["https://a.com/".into()]),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&overrides);
+
+        // Explicit narrowing applied.
+        assert_eq!(eff.network_allow, vec!["https://a.com/".to_string()]);
+        // Everything else preserved.
+        assert!(eff.crypto);
+        assert!(eff.network);
+        assert!(eff.collections.contains("users"));
+        assert!(eff.collections.contains("sessions"));
+        assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+    }
+
+    #[test]
+    fn apply_overrides_bool_narrowing() {
+        let declared = BlockCapabilities {
+            crypto: true,
+            network: true,
+            ..Default::default()
+        };
+        let overrides = ConfigCapabilityOverrides {
+            network: Some(false),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&overrides);
+        assert!(eff.crypto, "crypto untouched");
+        assert!(!eff.network, "network narrowed to false");
+    }
+
+    #[test]
+    fn apply_overrides_bool_cannot_widen() {
+        let declared = BlockCapabilities {
+            network: false,
+            ..Default::default()
+        };
+        let overrides = ConfigCapabilityOverrides {
+            network: Some(true),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&overrides);
+        // Declared denied; config attempts to widen; declared wins.
+        assert!(!eff.network);
+    }
+
+    #[test]
+    fn apply_overrides_header_policy_partial() {
+        let declared = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["authorization".into(), "cookie".into()],
+                writable: vec!["set-cookie".into()],
+                masked: vec![],
+            },
+            ..Default::default()
+        };
+        let overrides = ConfigCapabilityOverrides {
+            headers: Some(HeaderPolicyOverrides {
+                // Only narrow readable; writable untouched.
+                readable: Some(vec!["authorization".into()]),
+                writable: None,
+                masked: None,
+            }),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&overrides);
+        assert_eq!(eff.headers.readable, vec!["authorization".to_string()]);
+        // Untouched writable preserved.
+        assert_eq!(eff.headers.writable, vec!["set-cookie".to_string()]);
+    }
+
+    #[test]
+    fn apply_overrides_partial_json_roundtrip() {
+        // Verify the JSON wire format: absent fields → None → preserved.
+        let declared = BlockCapabilities {
+            crypto: true,
+            collections: ["users"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let json = serde_json::json!({ "network_allow": ["https://a.com/"] });
+        let overrides: ConfigCapabilityOverrides = serde_json::from_value(json).unwrap();
+        let eff = declared.apply_config_overrides(&overrides);
+        assert!(eff.crypto);
+        assert!(eff.collections.contains("users"));
+        assert_eq!(eff.network_allow, Vec::<String>::new()); // declared was empty; override narrowed to empty
     }
 }
