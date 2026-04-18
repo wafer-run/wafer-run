@@ -43,6 +43,27 @@ fn unpack_ptr_len(packed: i64) -> (u32, u32) {
 // Guest meta sanitisation
 // ---------------------------------------------------------------------------
 
+/// Extract the canonical (lowercase) HTTP header name from a wafer meta key,
+/// or `None` if the key is not a header.
+///
+/// Matches three forms:
+/// - `req.header.{name}` — inbound request header
+/// - `resp.header.{name}` — outbound response header
+/// - `resp.set_cookie` / `resp.set_cookie.*` — legacy cookie keys, mapped to `set-cookie`
+pub(crate) fn header_name_from_meta_key(key: &str) -> Option<String> {
+    let lower = key.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("req.header.") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = lower.strip_prefix("resp.header.") {
+        return Some(rest.to_string());
+    }
+    if lower == "resp.set_cookie" || lower.starts_with("resp.set_cookie.") {
+        return Some("set-cookie".to_string());
+    }
+    None
+}
+
 /// Strip meta entries that a sandboxed WASM guest should not control.
 fn sanitize_guest_meta(meta: Vec<MetaEntry>) -> Vec<MetaEntry> {
     meta.into_iter()
@@ -58,6 +79,58 @@ fn sanitize_guest_meta(meta: Vec<MetaEntry>) -> Vec<MetaEntry> {
                 && !k.contains("content-security-policy")
         })
         .collect()
+}
+
+#[cfg(test)]
+mod header_name_tests {
+    use super::header_name_from_meta_key;
+
+    #[test]
+    fn req_header_prefix() {
+        assert_eq!(
+            header_name_from_meta_key("req.header.authorization"),
+            Some("authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn req_header_uppercase_lowercased() {
+        assert_eq!(
+            header_name_from_meta_key("req.header.Authorization"),
+            Some("authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn resp_header_prefix() {
+        assert_eq!(
+            header_name_from_meta_key("resp.header.x-custom"),
+            Some("x-custom".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_resp_set_cookie_bare() {
+        assert_eq!(
+            header_name_from_meta_key("resp.set_cookie"),
+            Some("set-cookie".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_resp_set_cookie_nested() {
+        assert_eq!(
+            header_name_from_meta_key("resp.set_cookie.session"),
+            Some("set-cookie".to_string())
+        );
+    }
+
+    #[test]
+    fn internal_meta_key_is_none() {
+        assert_eq!(header_name_from_meta_key("auth.user_id"), None);
+        assert_eq!(header_name_from_meta_key("trace_id"), None);
+        assert_eq!(header_name_from_meta_key(""), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
