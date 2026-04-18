@@ -230,6 +230,20 @@ pub struct BlockInfo {
     /// Empty if the block has no admin UI.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub admin_url: String,
+
+    /// Capability declaration.
+    ///
+    /// For WASM blocks: carried in the JSON returned by `__wafer_info` and
+    /// intersected with operator config at load time. Enforced at dispatch.
+    ///
+    /// For native blocks: documentation and inspector metadata only. Not
+    /// enforced by the runtime. Native blocks continue to operate under
+    /// the existing trust model.
+    ///
+    /// `None` means the block did not declare — the runtime applies the
+    /// existing default for that block's runtime type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::BlockCapabilities>,
 }
 
 impl Default for BlockInfo {
@@ -264,6 +278,7 @@ impl BlockInfo {
             description: String::new(),
             endpoints: Vec::new(),
             admin_url: String::new(),
+            capabilities: None,
         }
     }
 
@@ -324,6 +339,14 @@ impl BlockInfo {
 
     pub fn admin_url(mut self, url: impl Into<String>) -> Self {
         self.admin_url = url.into();
+        self
+    }
+
+    /// Set the block's declared capabilities. For WASM blocks, these are
+    /// enforced after intersection with operator config. For native blocks,
+    /// they are documentation only.
+    pub fn capabilities(mut self, caps: crate::BlockCapabilities) -> Self {
+        self.capabilities = Some(caps);
         self
     }
 }
@@ -1081,6 +1104,50 @@ impl crate::InstanceMode {
             "per-execution" => Self::PerExecution,
             _ => Self::PerNode,
         }
+    }
+}
+
+#[cfg(test)]
+mod block_info_tests {
+    use super::*;
+
+    #[test]
+    fn block_info_capabilities_default_none() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary");
+        assert!(info.capabilities.is_none());
+    }
+
+    #[test]
+    fn block_info_capabilities_builder_sets_some() {
+        let mut caps = crate::BlockCapabilities::default();
+        caps.crypto = true;
+        let info =
+            BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").capabilities(caps);
+        assert!(info.capabilities.is_some());
+        assert!(info.capabilities.as_ref().unwrap().crypto);
+    }
+
+    #[test]
+    fn block_info_capabilities_roundtrip_json() {
+        let mut caps = crate::BlockCapabilities::default();
+        caps.crypto = true;
+        caps.headers.writable = vec!["set-cookie".into()];
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").capabilities(caps);
+        let j = serde_json::to_string(&info).unwrap();
+        let back: BlockInfo = serde_json::from_str(&j).unwrap();
+        let caps_back = back.capabilities.expect("caps present");
+        assert!(caps_back.crypto);
+        assert_eq!(caps_back.headers.writable, vec!["set-cookie".to_string()]);
+    }
+
+    #[test]
+    fn block_info_without_capabilities_serializes_without_key() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary");
+        let j = serde_json::to_string(&info).unwrap();
+        assert!(
+            !j.contains("\"capabilities\""),
+            "json should omit the field when None: {j}"
+        );
     }
 }
 
