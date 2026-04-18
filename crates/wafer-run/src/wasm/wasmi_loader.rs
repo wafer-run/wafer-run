@@ -338,8 +338,7 @@ struct WasmiHostState {
     /// Context reference — set before each guest call via ContextGuard.
     context: Option<Arc<dyn Context>>,
     /// Capabilities (resource limits) for this block.
-    /// Stored for future use by host function enforcement.
-    #[allow(dead_code)]
+    /// Used by host function enforcement (e.g. `allows_call_block`).
     capabilities: BlockCapabilities,
     /// Set by __wafer_host_call_block to request an async call.
     pending_call: Option<PendingCall>,
