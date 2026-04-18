@@ -133,6 +133,53 @@ impl Wafer {
         // Gather uses contributions before initializing blocks
         self.gather_uses_configs();
 
+        // Compute effective capabilities per block: declared ∩ config ∩ host.
+        // Also strip the reserved `capabilities` subkey from the block config
+        // so it doesn't leak into `ctx.config_get(...)`.
+        {
+            let mut eff: std::collections::HashMap<String, wafer_block::BlockCapabilities> =
+                std::collections::HashMap::new();
+            for (name, block) in &self.blocks {
+                let declared = block
+                    .info()
+                    .capabilities
+                    .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
+
+                // Strip + parse the `capabilities` subkey from block config.
+                let config_caps = if let Some(cfg) = self.block_configs.get_mut(name) {
+                    if let Some(obj) = cfg.as_object_mut() {
+                        if let Some(raw) = obj.remove("capabilities") {
+                            match serde_json::from_value::<wafer_block::BlockCapabilities>(raw) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        block = %name,
+                                        error = %e,
+                                        "failed to parse `capabilities` subkey — ignoring"
+                                    );
+                                    wafer_block::BlockCapabilities::unrestricted()
+                                }
+                            }
+                        } else {
+                            wafer_block::BlockCapabilities::unrestricted()
+                        }
+                    } else {
+                        wafer_block::BlockCapabilities::unrestricted()
+                    }
+                } else {
+                    wafer_block::BlockCapabilities::unrestricted()
+                };
+
+                let effective = declared.intersect(&config_caps);
+
+                // Warn on widening attempts (fields where config > declared).
+                log_widening_attempts(name, &config_caps, &effective);
+
+                eff.insert(name.clone(), effective);
+            }
+            self.effective_capabilities = std::sync::Arc::new(eff);
+        }
+
         // Validate required config presence across all registered blocks.
         // Runs after composite/uses expansion so all configs are final.
         {
@@ -674,5 +721,90 @@ impl Wafer {
             .wasm_engine
             .as_ref()
             .expect("wasm_engine initialized above"))
+    }
+}
+
+fn log_widening_attempts(
+    name: &str,
+    config: &wafer_block::BlockCapabilities,
+    effective: &wafer_block::BlockCapabilities,
+) {
+    // Booleans: if config asked for `true` but effective is `false`, declared denied.
+    for (label, c, e) in [
+        ("raw_sql", config.raw_sql, effective.raw_sql),
+        ("crypto", config.crypto, effective.crypto),
+        ("network", config.network, effective.network),
+        ("config", config.config, effective.config),
+    ] {
+        if c && !e {
+            tracing::warn!(
+                block = %name,
+                field = %label,
+                "config widened capability beyond declared — narrower declaration wins"
+            );
+        }
+    }
+
+    // HashSet allowlists: items in config that did NOT survive intersection.
+    let hash_fields: &[(
+        &str,
+        &std::collections::HashSet<String>,
+        &std::collections::HashSet<String>,
+    )] = &[
+        ("collections", &config.collections, &effective.collections),
+        (
+            "storage_folders",
+            &config.storage_folders,
+            &effective.storage_folders,
+        ),
+        ("config_keys", &config.config_keys, &effective.config_keys),
+        (
+            "callable_blocks",
+            &config.callable_blocks,
+            &effective.callable_blocks,
+        ),
+    ];
+    for (label, c_set, e_set) in hash_fields {
+        for item in c_set.iter() {
+            if !e_set.contains(item) {
+                tracing::warn!(
+                    block = %name,
+                    field = %label,
+                    item = %item,
+                    "config widened capability beyond declared — narrower declaration wins"
+                );
+            }
+        }
+    }
+
+    // Vec allowlists: same shape.
+    let vec_fields: &[(&str, &Vec<String>, &Vec<String>)] = &[
+        (
+            "network_allow",
+            &config.network_allow,
+            &effective.network_allow,
+        ),
+        (
+            "headers.readable",
+            &config.headers.readable,
+            &effective.headers.readable,
+        ),
+        (
+            "headers.writable",
+            &config.headers.writable,
+            &effective.headers.writable,
+        ),
+    ];
+    for (label, c_vec, e_vec) in vec_fields {
+        for item in c_vec.iter() {
+            if !e_vec.iter().any(|x| x == item) {
+                tracing::warn!(
+                    block = %name,
+                    field = %label,
+                    item = %item,
+                    "config widened capability beyond declared — narrower declaration wins"
+                );
+            }
+        }
     }
 }
