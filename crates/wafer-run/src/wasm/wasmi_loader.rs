@@ -43,21 +43,292 @@ fn unpack_ptr_len(packed: i64) -> (u32, u32) {
 // Guest meta sanitisation
 // ---------------------------------------------------------------------------
 
-/// Strip meta entries that a sandboxed WASM guest should not control.
-fn sanitize_guest_meta(meta: Vec<MetaEntry>) -> Vec<MetaEntry> {
+/// Default set of HTTP header names that are considered security-sensitive.
+/// WASM blocks cannot read or write these unless they declare them in their
+/// `HeaderPolicy.readable` / `HeaderPolicy.writable` (and are granted the
+/// cap after config intersection).
+pub(crate) fn default_sensitive_headers() -> &'static [&'static str] {
+    &[
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "location",
+        "access-control-allow-origin",
+        "access-control-allow-credentials",
+        "access-control-allow-methods",
+        "access-control-allow-headers",
+        "access-control-expose-headers",
+        "access-control-max-age",
+        "strict-transport-security",
+        "x-frame-options",
+        "content-security-policy",
+        "content-security-policy-report-only",
+    ]
+}
+
+fn is_sensitive_header(name: &str, policy_masked: &[String]) -> bool {
+    let n = name.to_lowercase();
+    default_sensitive_headers().contains(&n.as_str())
+        || policy_masked.iter().any(|m| m.eq_ignore_ascii_case(&n))
+}
+
+/// Extract the canonical (lowercase) HTTP header name from a wafer meta key,
+/// or `None` if the key is not a header.
+///
+/// Matches three forms:
+/// - `req.header.{name}` — inbound request header
+/// - `resp.header.{name}` — outbound response header
+/// - `resp.set_cookie` / `resp.set_cookie.*` — legacy cookie keys, mapped to `set-cookie`
+pub(crate) fn header_name_from_meta_key(key: &str) -> Option<String> {
+    let lower = key.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("req.header.") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = lower.strip_prefix("resp.header.") {
+        return Some(rest.to_string());
+    }
+    if lower == "resp.set_cookie" || lower.starts_with("resp.set_cookie.") {
+        return Some("set-cookie".to_string());
+    }
+    None
+}
+
+/// Strip outbound meta entries whose header name is in the default sensitive
+/// set plus `HeaderPolicy.masked`, unless explicitly in `HeaderPolicy.writable`.
+/// Non-header meta entries pass through.
+///
+/// Stripped header names (deduped, lowercased) are appended to `stripped_names`.
+pub(crate) fn sanitize_outbound_meta(
+    meta: Vec<MetaEntry>,
+    caps: &BlockCapabilities,
+    stripped_names: &mut Vec<String>,
+) -> Vec<MetaEntry> {
     meta.into_iter()
         .filter(|e| {
-            let k = e.key.to_lowercase();
-            // Block cookies, redirects, and security headers from WASM guests.
-            !k.starts_with("resp.set_cookie")
-                && !k.starts_with("http.resp.set-cookie")
-                && !k.contains("location")
-                && !k.contains("access-control")
-                && !k.contains("strict-transport")
-                && !k.contains("x-frame-options")
-                && !k.contains("content-security-policy")
+            let Some(name) = header_name_from_meta_key(&e.key) else {
+                return true;
+            };
+            if !is_sensitive_header(&name, &caps.headers.masked) {
+                return true;
+            }
+            let allowed = caps
+                .headers
+                .writable
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(&name));
+            if !allowed {
+                if !stripped_names.iter().any(|n| n == &name) {
+                    stripped_names.push(name);
+                }
+                return false;
+            }
+            true
         })
         .collect()
+}
+
+/// Symmetric inbound sanitizer. Uses `HeaderPolicy.readable` as the allowlist.
+pub(crate) fn sanitize_inbound_meta(
+    meta: Vec<MetaEntry>,
+    caps: &BlockCapabilities,
+    stripped_names: &mut Vec<String>,
+) -> Vec<MetaEntry> {
+    meta.into_iter()
+        .filter(|e| {
+            let Some(name) = header_name_from_meta_key(&e.key) else {
+                return true;
+            };
+            if !is_sensitive_header(&name, &caps.headers.masked) {
+                return true;
+            }
+            let allowed = caps
+                .headers
+                .readable
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&name));
+            if !allowed {
+                if !stripped_names.iter().any(|n| n == &name) {
+                    stripped_names.push(name);
+                }
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod header_name_tests {
+    use super::header_name_from_meta_key;
+
+    #[test]
+    fn req_header_prefix() {
+        assert_eq!(
+            header_name_from_meta_key("req.header.authorization"),
+            Some("authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn req_header_uppercase_lowercased() {
+        assert_eq!(
+            header_name_from_meta_key("req.header.Authorization"),
+            Some("authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn resp_header_prefix() {
+        assert_eq!(
+            header_name_from_meta_key("resp.header.x-custom"),
+            Some("x-custom".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_resp_set_cookie_bare() {
+        assert_eq!(
+            header_name_from_meta_key("resp.set_cookie"),
+            Some("set-cookie".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_resp_set_cookie_nested() {
+        assert_eq!(
+            header_name_from_meta_key("resp.set_cookie.session"),
+            Some("set-cookie".to_string())
+        );
+    }
+
+    #[test]
+    fn internal_meta_key_is_none() {
+        assert_eq!(header_name_from_meta_key("auth.user_id"), None);
+        assert_eq!(header_name_from_meta_key("trace_id"), None);
+        assert_eq!(header_name_from_meta_key(""), None);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use wafer_block::capabilities::{BlockCapabilities, HeaderPolicy};
+
+    use super::*;
+
+    fn meta(key: &str, value: &str) -> MetaEntry {
+        MetaEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn outbound_strips_default_sensitive_when_empty_policy() {
+        let caps = BlockCapabilities::default();
+        let input = vec![
+            meta("resp.header.content-type", "text/plain"),
+            meta("resp.header.set-cookie", "s=1"),
+            meta("resp.set_cookie", "legacy"),
+            meta("resp.header.x-frame-options", "DENY"),
+            meta("resp.header.x-safe", "ok"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"resp.header.content-type"));
+        assert!(keys.contains(&"resp.header.x-safe"));
+        assert!(!keys
+            .iter()
+            .any(|k| k.contains("set-cookie") || k.contains("set_cookie")));
+        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
+        assert!(stripped.contains(&"set-cookie".to_string()));
+    }
+
+    #[test]
+    fn outbound_writable_allows_named_header() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                writable: vec!["set-cookie".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = vec![
+            meta("resp.header.set-cookie", "s=1"),
+            meta("resp.set_cookie", "legacy"),
+            meta("resp.header.x-frame-options", "DENY"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"resp.header.set-cookie"));
+        assert!(keys.contains(&"resp.set_cookie"));
+        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
+    }
+
+    #[test]
+    fn inbound_strips_default_sensitive_when_empty_policy() {
+        let caps = BlockCapabilities::default();
+        let input = vec![
+            meta("req.header.accept", "text/plain"),
+            meta("req.header.authorization", "Bearer abc"),
+            meta("req.header.cookie", "a=1"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"req.header.accept"));
+        assert!(!keys.iter().any(|k| k.contains("authorization")));
+        assert!(!keys.iter().any(|k| k.contains("cookie")));
+    }
+
+    #[test]
+    fn inbound_readable_allows_named_header() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["authorization".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = vec![
+            meta("req.header.authorization", "Bearer abc"),
+            meta("req.header.cookie", "a=1"),
+        ];
+        let mut stripped = Vec::new();
+        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"req.header.authorization"));
+        assert!(!keys.iter().any(|k| k.contains("cookie")));
+    }
+
+    #[test]
+    fn masked_extends_default_sensitive_both_directions() {
+        let caps = BlockCapabilities {
+            headers: HeaderPolicy {
+                masked: vec!["x-internal".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inbound = vec![meta("req.header.x-internal", "secret")];
+        let outbound = vec![meta("resp.header.x-internal", "secret")];
+        let mut s1 = Vec::new();
+        let mut s2 = Vec::new();
+        assert!(sanitize_inbound_meta(inbound, &caps, &mut s1).is_empty());
+        assert!(sanitize_outbound_meta(outbound, &caps, &mut s2).is_empty());
+    }
+
+    #[test]
+    fn non_header_keys_pass_through() {
+        let caps = BlockCapabilities::default();
+        let input = vec![meta("auth.user_id", "u1"), meta("trace_id", "abc")];
+        let mut s = Vec::new();
+        let out = sanitize_outbound_meta(input, &caps, &mut s);
+        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"auth.user_id"));
+        assert!(keys.contains(&"trace_id"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,8 +339,7 @@ struct WasmiHostState {
     /// Context reference — set before each guest call via ContextGuard.
     context: Option<Arc<dyn Context>>,
     /// Capabilities (resource limits) for this block.
-    /// Stored for future use by host function enforcement.
-    #[allow(dead_code)]
+    /// Used by host function enforcement (e.g. `allows_call_block`).
     capabilities: BlockCapabilities,
     /// Set by __wafer_host_call_block to request an async call.
     pending_call: Option<PendingCall>,
@@ -505,7 +775,15 @@ pub struct WasmiBlock {
     module: Module,
     linker: Linker<WasmiHostState>,
     info_cache: Mutex<Option<BlockInfo>>,
-    capabilities: BlockCapabilities,
+    /// Interior-mutable capabilities field so the runtime can propagate the
+    /// effective set (`declared ∩ config`) after `resolve()` without reloading
+    /// the WASM module.  Reads are lock-free on uncontended RwLock; the write
+    /// path is exercised at most once per block lifetime (startup).
+    capabilities: parking_lot::RwLock<BlockCapabilities>,
+    /// Warn-once flag for outbound stripped headers.
+    warned_outbound: std::sync::atomic::AtomicBool,
+    /// Warn-once flag for inbound stripped headers.
+    warned_inbound: std::sync::atomic::AtomicBool,
 }
 
 // Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44.
@@ -548,7 +826,9 @@ impl WasmiBlock {
             module,
             linker,
             info_cache: Mutex::new(None),
-            capabilities: caps,
+            capabilities: parking_lot::RwLock::new(caps),
+            warned_outbound: std::sync::atomic::AtomicBool::new(false),
+            warned_inbound: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -571,8 +851,9 @@ impl WasmiBlock {
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
         let guard = ContextGuard::new(ctx);
+        let caps_snapshot = self.capabilities.read().clone();
         let (mut store, instance) =
-            instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
+            instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
         store.data_mut().context = Some(guard.as_arc());
 
         let (func, arg0, arg1) = setup(&mut store, instance)?;
@@ -710,6 +991,32 @@ impl WasmiBlock {
             }
         }
     }
+
+    fn warn_once_stripped_outbound(&self, names: &[String]) {
+        use std::sync::atomic::Ordering;
+        if self.warned_outbound.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            block = %self.info().name,
+            direction = "outbound",
+            stripped = ?names,
+            "headers outside writable allowlist — stripped"
+        );
+    }
+
+    fn warn_once_stripped_inbound(&self, names: &[String]) {
+        use std::sync::atomic::Ordering;
+        if self.warned_inbound.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            block = %self.info().name,
+            direction = "inbound",
+            stripped = ?names,
+            "headers outside readable allowlist — stripped"
+        );
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -725,8 +1032,9 @@ impl Block for WasmiBlock {
 
         // Sync instantiation: call __wafer_info.
         let result = (|| -> Result<BlockInfo, RuntimeError> {
+            let caps_snapshot = self.capabilities.read().clone();
             let (mut store, instance) =
-                instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
+                instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
 
             let info_fn = instance
                 .get_typed_func::<(), i64>(&store, "__wafer_info")
@@ -768,6 +1076,22 @@ impl Block for WasmiBlock {
         // We collect the input stream and embed it into a wrapper so the guest
         // can decode both the message and the body.
         let body = input.collect_to_bytes().await;
+
+        // Sanitize inbound message meta before passing to WASM guest.
+        let msg = {
+            let mut stripped_in: Vec<String> = Vec::new();
+            let caps_guard = self.capabilities.read();
+            let sanitized_meta = sanitize_inbound_meta(msg.meta, &caps_guard, &mut stripped_in);
+            drop(caps_guard);
+            if !stripped_in.is_empty() {
+                self.warn_once_stripped_inbound(&stripped_in);
+            }
+            Message {
+                meta: sanitized_meta,
+                ..msg
+            }
+        };
+
         let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
             Ok(b) => b,
             Err(e) => {
@@ -825,7 +1149,17 @@ impl Block for WasmiBlock {
                 "Respond" => {
                     let (data, meta) = result
                         .response
-                        .map(|r| (r.data, sanitize_guest_meta(r.meta)))
+                        .map(|r| {
+                            let mut stripped: Vec<String> = Vec::new();
+                            let caps_guard = self.capabilities.read();
+                            let sanitized =
+                                sanitize_outbound_meta(r.meta, &caps_guard, &mut stripped);
+                            drop(caps_guard);
+                            if !stripped.is_empty() {
+                                self.warn_once_stripped_outbound(&stripped);
+                            }
+                            (r.data, sanitized)
+                        })
                         .unwrap_or_default();
                     if meta.is_empty() {
                         OutputStream::respond(data)
@@ -903,7 +1237,78 @@ impl Block for WasmiBlock {
         result
     }
 
-    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
-        Some(&self.capabilities)
+    fn block_capabilities(&self) -> Option<BlockCapabilities> {
+        Some(self.capabilities.read().clone())
+    }
+
+    fn runtime_capabilities_mut(&self, new: BlockCapabilities) {
+        *self.capabilities.write() = new;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for interior-mutable capabilities update
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod capabilities_update_tests {
+    use wafer_block::capabilities::BlockCapabilities;
+
+    use super::*;
+
+    /// Verify that `runtime_capabilities_mut` (via the Block trait) atomically
+    /// replaces the internal capabilities and that subsequent calls to
+    /// `block_capabilities()` reflect the new set.
+    ///
+    /// Loading a real WASM module is required to construct a WasmiBlock.
+    /// We use the minimal WAT fixture from the fuel-exhaustion test — it has all
+    /// required exports and exercises no guest logic.
+    #[test]
+    fn runtime_capabilities_mut_replaces_caps() {
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT should parse");
+
+        // Load with unrestricted capabilities.
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm_bytes, BlockCapabilities::unrestricted())
+                .expect("minimal WAT module should load");
+
+        // Confirm initial state: unrestricted → network = true.
+        let before = block
+            .block_capabilities()
+            .expect("WasmiBlock must return Some(caps)");
+        assert!(before.network, "initial caps should have network=true");
+
+        // Apply a narrower capability set via the Block trait method.
+        let narrowed = BlockCapabilities::none();
+        use crate::block::Block;
+        block.runtime_capabilities_mut(narrowed);
+
+        // Confirm the update is visible.
+        let after = block
+            .block_capabilities()
+            .expect("WasmiBlock must return Some(caps) after update");
+        assert!(
+            !after.network,
+            "after runtime_capabilities_mut, network should be false"
+        );
+        assert!(
+            !after.crypto,
+            "after runtime_capabilities_mut, crypto should be false"
+        );
+        assert!(
+            !after.raw_sql,
+            "after runtime_capabilities_mut, raw_sql should be false"
+        );
     }
 }

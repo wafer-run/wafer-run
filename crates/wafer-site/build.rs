@@ -268,6 +268,7 @@ fn assemble_doc_page(
         "built-in-blocks",
         "services",
         "http-bridge",
+        "block-capabilities",
         "api-runtime",
         "api-services",
         "api-sdk",

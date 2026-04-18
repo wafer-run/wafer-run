@@ -181,6 +181,11 @@ pub struct Wafer {
     pub(crate) wrap_grants: Arc<Vec<wafer_block::types::ResourceGrant>>,
     /// WRAP: the block ID that has admin privileges (exact match).
     pub(crate) wrap_admin_block: Arc<String>,
+    /// Effective capabilities per block after declared ∩ config ∩ host
+    /// intersection. Computed at `resolve()` time. WASM blocks enforce
+    /// against this; native blocks store for inspector visibility only.
+    pub(crate) effective_capabilities:
+        Arc<std::collections::HashMap<String, wafer_block::BlockCapabilities>>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasmi")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
@@ -210,6 +215,7 @@ impl Wafer {
             warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
             wrap_grants: Arc::new(Vec::new()),
             wrap_admin_block: Arc::new(String::new()),
+            effective_capabilities: Arc::new(std::collections::HashMap::new()),
             #[cfg(feature = "wasmi")]
             wasm_engine: None,
         }
@@ -241,6 +247,16 @@ impl Wafer {
     /// Get the admin block ID (read-only).
     pub fn wrap_admin_block(&self) -> &Arc<String> {
         &self.wrap_admin_block
+    }
+
+    /// Look up the effective (declared ∩ config ∩ host) capabilities for a
+    /// registered block. Returns `None` if the block did not declare and no
+    /// config/host caps were provided.
+    pub fn effective_capabilities(
+        &self,
+        block_name: &str,
+    ) -> Option<&wafer_block::BlockCapabilities> {
+        self.effective_capabilities.get(block_name)
     }
 
     /// Register an interface specification. Overwrites any existing spec

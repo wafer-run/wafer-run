@@ -40,9 +40,22 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     fn bind(&self, _handle: Box<dyn std::any::Any + Send + Sync>) {}
 
     /// Return the capability restrictions for this block, if any.
-    /// None means unrestricted (native blocks). WASM blocks return Some(&caps).
-    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
+    /// `None` means unrestricted (native blocks). WASM blocks return `Some(caps)`.
+    ///
+    /// Returns an owned clone so interior-mutable implementations can read their
+    /// current caps without exposing a lifetime-bound guard to callers.
+    fn block_capabilities(&self) -> Option<BlockCapabilities> {
         None
+    }
+
+    /// Update the block's runtime-enforcement capabilities atomically.
+    ///
+    /// Called by the runtime after `resolve()` computes effective caps
+    /// (`declared ∩ config`). Native blocks ignore this call (default no-op);
+    /// WASM blocks override to update their interior-mutable caps field so
+    /// every subsequent host-import check uses the effective set.
+    fn runtime_capabilities_mut(&self, _new: BlockCapabilities) {
+        // Default: no-op. Native blocks are trusted and do not enforce caps.
     }
 
     /// Declare UI routes this block serves (SSR pages).

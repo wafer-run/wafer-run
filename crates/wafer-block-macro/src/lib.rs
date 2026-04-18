@@ -27,19 +27,153 @@ impl Parse for KeyValue {
     }
 }
 
-struct Args {
+// ---------------------------------------------------------------------------
+// capabilities(...) parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CapabilitiesArgs {
+    crypto: bool,
+    network: bool,
+    raw_sql: bool,
+    config: bool,
+    collections: Vec<String>,
+    storage_folders: Vec<String>,
+    network_allow: Vec<String>,
+    config_keys: Vec<String>,
+    callable_blocks: Vec<String>,
+    headers_readable: Vec<String>,
+    headers_writable: Vec<String>,
+    headers_masked: Vec<String>,
+}
+
+fn parse_capabilities(meta: &syn::MetaList) -> CapabilitiesArgs {
+    let mut out = CapabilitiesArgs::default();
+    let nested: Punctuated<syn::Meta, Token![,]> = meta
+        .parse_args_with(Punctuated::parse_terminated)
+        .expect("#[wafer_block]: failed to parse capabilities(...)");
+    for item in nested {
+        match item {
+            syn::Meta::Path(p) => {
+                let ident = p
+                    .get_ident()
+                    .expect("expected identifier in capabilities(...)")
+                    .to_string();
+                match ident.as_str() {
+                    "crypto" => out.crypto = true,
+                    "network" => out.network = true,
+                    "raw_sql" => out.raw_sql = true,
+                    "config" => out.config = true,
+                    other => panic!("#[wafer_block]: unknown bool capability '{other}'"),
+                }
+            }
+            syn::Meta::NameValue(nv) => {
+                let ident = nv
+                    .path
+                    .get_ident()
+                    .expect("expected identifier in capabilities(...)")
+                    .to_string();
+                let list = parse_string_list(&nv.value);
+                match ident.as_str() {
+                    "collections" => out.collections = list,
+                    "storage_folders" => out.storage_folders = list,
+                    "network_allow" => out.network_allow = list,
+                    "config_keys" => out.config_keys = list,
+                    "callable_blocks" => out.callable_blocks = list,
+                    other => panic!("#[wafer_block]: unknown list capability '{other}'"),
+                }
+            }
+            syn::Meta::List(inner) if inner.path.is_ident("headers") => {
+                parse_headers_nested(&inner, &mut out);
+            }
+            other => {
+                use quote::ToTokens;
+                panic!(
+                    "#[wafer_block]: unexpected token in capabilities(...): {}",
+                    other.to_token_stream()
+                );
+            }
+        }
+    }
+    out
+}
+
+fn parse_headers_nested(inner: &syn::MetaList, out: &mut CapabilitiesArgs) {
+    let nested: Punctuated<syn::Meta, Token![,]> = inner
+        .parse_args_with(Punctuated::parse_terminated)
+        .expect("#[wafer_block]: failed to parse headers(...)");
+    for item in nested {
+        if let syn::Meta::NameValue(nv) = item {
+            let ident = nv
+                .path
+                .get_ident()
+                .expect("expected ident in headers(...)")
+                .to_string();
+            let list = parse_string_list(&nv.value);
+            match ident.as_str() {
+                "readable" => out.headers_readable = list,
+                "writable" => out.headers_writable = list,
+                "masked" => out.headers_masked = list,
+                other => panic!("#[wafer_block]: unknown headers field '{other}'"),
+            }
+        } else {
+            panic!("#[wafer_block]: headers(...) only supports name = [...] pairs");
+        }
+    }
+}
+
+fn parse_string_list(expr: &syn::Expr) -> Vec<String> {
+    if let syn::Expr::Array(arr) = expr {
+        arr.elems
+            .iter()
+            .map(|e| match e {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) => s.value(),
+                other => {
+                    use quote::ToTokens;
+                    panic!(
+                        "#[wafer_block]: expected string literal, got: {}",
+                        other.to_token_stream()
+                    );
+                }
+            })
+            .collect()
+    } else {
+        use quote::ToTokens;
+        panic!(
+            "#[wafer_block]: expected array expression `[...]`, got: {}",
+            expr.to_token_stream()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level attribute token handling — two-pass approach
+// ---------------------------------------------------------------------------
+//
+// The existing Args parser handles `key = value` pairs using a custom Parse
+// impl. `capabilities(...)` is a MetaList and cannot be expressed as a
+// `KeyValue`. We therefore parse the attribute token stream using `syn::Meta`
+// items first, then split them into flat key=value pairs (for the existing
+// Args helpers) and capabilities groups.
+
+/// Flat key=value attribute arg. Repurposed from `Args` but now drives both
+/// passes without owning the whole argument list.
+struct FlatArgs {
     pairs: Punctuated<KeyValue, Token![,]>,
 }
 
-impl Parse for Args {
+impl Parse for FlatArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(Args {
+        Ok(FlatArgs {
             pairs: Punctuated::parse_terminated(input)?,
         })
     }
 }
 
-impl Args {
+impl FlatArgs {
     fn get_str(&self, key: &str) -> Option<String> {
         self.pairs.iter().find(|kv| kv.key == key).and_then(|kv| {
             if let Expr::Lit(ExprLit {
@@ -80,6 +214,79 @@ impl Args {
     }
 }
 
+/// Parsed attribute: flat key=value pairs plus an optional capabilities group.
+struct ParsedAttr {
+    flat: FlatArgs,
+    capabilities: Option<CapabilitiesArgs>,
+}
+
+/// Parse the full attribute token stream by splitting on `capabilities(...)`.
+///
+/// Strategy: scan the token stream for `capabilities`, peel it off into a
+/// `syn::MetaList`, forward everything else to `FlatArgs`.
+fn parse_attr(attr: TokenStream) -> ParsedAttr {
+    // We perform a two-step parse:
+    //   1. Convert to a proc_macro2 TokenStream and scan Meta items.
+    //   2. Re-collect the non-capabilities items for flat parsing.
+
+    use proc_macro2::TokenStream as Ts2;
+    use quote::ToTokens;
+
+    let ts2: Ts2 = attr.into();
+    let metas: Punctuated<syn::Meta, Token![,]> = syn::parse2::<MetaList>(ts2)
+        .map(|m| m.0)
+        .unwrap_or_default();
+
+    let mut caps: Option<CapabilitiesArgs> = None;
+    let mut flat_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for meta in &metas {
+        match meta {
+            syn::Meta::List(ml) if ml.path.is_ident("capabilities") => {
+                caps = Some(parse_capabilities(ml));
+            }
+            other => {
+                flat_tokens.push(other.to_token_stream());
+            }
+        }
+    }
+
+    // Reassemble flat tokens into a comma-separated TokenStream for FlatArgs.
+    let flat_ts: Ts2 = if flat_tokens.is_empty() {
+        Ts2::new()
+    } else {
+        let joined = flat_tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if i + 1 < flat_tokens.len() {
+                    quote! { #t , }
+                } else {
+                    quote! { #t }
+                }
+            })
+            .collect::<Ts2>();
+        joined
+    };
+
+    let flat: FlatArgs = syn::parse2(flat_ts)
+        .unwrap_or_else(|e| panic!("#[wafer_block]: failed to parse flat attributes: {e}"));
+
+    ParsedAttr {
+        flat,
+        capabilities: caps,
+    }
+}
+
+/// Helper wrapper so we can use syn::parse2 with a Punctuated return.
+struct MetaList(Punctuated<syn::Meta, Token![,]>);
+
+impl Parse for MetaList {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(MetaList(Punctuated::parse_terminated(input)?))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // #[wafer_block] proc macro
 // ---------------------------------------------------------------------------
@@ -103,6 +310,21 @@ impl Args {
 /// # Optional attributes
 /// - `instance_mode` — `"per-node"` (default), `"singleton"`, `"per-flow"`, `"per-execution"`
 /// - `requires` — list of block names this block may call (e.g. `["wafer-run/database"]`)
+/// - `capabilities(...)` — declare block capabilities (see below)
+///
+/// # Capabilities
+///
+/// The `capabilities(...)` group controls what services the WASM block may
+/// access. Omitting it leaves `BlockInfo::capabilities` as `None` (runtime
+/// applies its default). Providing an empty group sets an explicit
+/// zero-capabilities declaration.
+///
+/// Boolean flags: `crypto`, `network`, `raw_sql`, `config`
+///
+/// List fields: `collections = [...]`, `storage_folders = [...]`,
+/// `network_allow = [...]`, `config_keys = [...]`, `callable_blocks = [...]`
+///
+/// Header policy: `headers(readable = [...], writable = [...], masked = [...])`
 ///
 /// # Example
 ///
@@ -116,6 +338,12 @@ impl Args {
 ///     version = "0.1.0",
 ///     interface = "http-handler@v1",
 ///     summary = "My block",
+///     capabilities(
+///         crypto,
+///         network,
+///         collections = ["users"],
+///         headers(readable = ["authorization"]),
+///     ),
 /// )]
 /// impl MyBlock {
 ///     fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
@@ -125,7 +353,10 @@ impl Args {
 /// ```
 #[proc_macro_attribute]
 pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as Args);
+    let parsed = parse_attr(attr);
+    let args = &parsed.flat;
+    let capabilities_args = parsed.capabilities;
+
     let input = parse_macro_input!(item as ItemImpl);
 
     // Required attributes
@@ -208,6 +439,58 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Build the capabilities expression for `__wafer_info`.
+    let capabilities_expr = if let Some(c) = &capabilities_args {
+        let crypto = c.crypto;
+        let network = c.network;
+        let raw_sql = c.raw_sql;
+        let config_cap = c.config;
+        let collections = &c.collections;
+        let storage_folders = &c.storage_folders;
+        let network_allow = &c.network_allow;
+        let config_keys = &c.config_keys;
+        let callable_blocks = &c.callable_blocks;
+        let readable = &c.headers_readable;
+        let writable = &c.headers_writable;
+        let masked = &c.headers_masked;
+        quote! {
+            Some(wafer_block::BlockCapabilities {
+                crypto: #crypto,
+                network: #network,
+                raw_sql: #raw_sql,
+                config: #config_cap,
+                collections: {
+                    let mut s = ::std::collections::HashSet::new();
+                    #(s.insert(#collections.to_string());)*
+                    s
+                },
+                storage_folders: {
+                    let mut s = ::std::collections::HashSet::new();
+                    #(s.insert(#storage_folders.to_string());)*
+                    s
+                },
+                config_keys: {
+                    let mut s = ::std::collections::HashSet::new();
+                    #(s.insert(#config_keys.to_string());)*
+                    s
+                },
+                callable_blocks: {
+                    let mut s = ::std::collections::HashSet::new();
+                    #(s.insert(#callable_blocks.to_string());)*
+                    s
+                },
+                network_allow: vec![#(#network_allow.to_string()),*],
+                headers: wafer_block::capabilities::HeaderPolicy {
+                    readable: vec![#(#readable.to_string()),*],
+                    writable: vec![#(#writable.to_string()),*],
+                    masked: vec![#(#masked.to_string()),*],
+                },
+            })
+        }
+    } else {
+        quote! { None::<wafer_block::BlockCapabilities> }
+    };
+
     let expanded = quote! {
         #other_impl
 
@@ -216,12 +499,24 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             #handle_sig #handle_block
 
             #lifecycle_impl
+
+            /// Returns the block's metadata. Generated by `#[wafer_block]`.
+            /// Used in tests and by the native runtime adapter.
+            pub fn block_info() -> wafer_block::BlockInfo {
+                let mut info = wafer_block::BlockInfo::new(#name, #version, #interface, #summary)
+                    .instance_mode(#instance_mode_tokens);
+                let caps: Option<wafer_block::BlockCapabilities> = #capabilities_expr;
+                if let Some(c) = caps {
+                    info = info.capabilities(c);
+                }
+                info
+            }
         }
 
+        #[cfg(not(test))]
         #[no_mangle]
         pub extern "C" fn __wafer_info() -> i64 {
-            let info = wafer_block::BlockInfo::new(#name, #version, #interface, #summary)
-                .instance_mode(#instance_mode_tokens);
+            let info = <#struct_ty>::block_info();
             let bytes = serde_json::to_vec(&info).expect("failed to serialize BlockInfo");
             let ptr = bytes.as_ptr() as u32;
             let len = bytes.len() as u32;
@@ -229,6 +524,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
+        #[cfg(not(test))]
         #[no_mangle]
         pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
             let msg_bytes = unsafe {
@@ -246,6 +542,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
+        #[cfg(not(test))]
         #[no_mangle]
         pub extern "C" fn __wafer_lifecycle(evt_ptr: i32, evt_len: i32) -> i64 {
             let evt_bytes = unsafe {
