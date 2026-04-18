@@ -775,7 +775,11 @@ pub struct WasmiBlock {
     module: Module,
     linker: Linker<WasmiHostState>,
     info_cache: Mutex<Option<BlockInfo>>,
-    capabilities: BlockCapabilities,
+    /// Interior-mutable capabilities field so the runtime can propagate the
+    /// effective set (`declared ∩ config`) after `resolve()` without reloading
+    /// the WASM module.  Reads are lock-free on uncontended RwLock; the write
+    /// path is exercised at most once per block lifetime (startup).
+    capabilities: parking_lot::RwLock<BlockCapabilities>,
     /// Warn-once flag for outbound stripped headers.
     warned_outbound: std::sync::atomic::AtomicBool,
     /// Warn-once flag for inbound stripped headers.
@@ -822,7 +826,7 @@ impl WasmiBlock {
             module,
             linker,
             info_cache: Mutex::new(None),
-            capabilities: caps,
+            capabilities: parking_lot::RwLock::new(caps),
             warned_outbound: std::sync::atomic::AtomicBool::new(false),
             warned_inbound: std::sync::atomic::AtomicBool::new(false),
         })
@@ -847,8 +851,9 @@ impl WasmiBlock {
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
         let guard = ContextGuard::new(ctx);
+        let caps_snapshot = self.capabilities.read().clone();
         let (mut store, instance) =
-            instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
+            instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
         store.data_mut().context = Some(guard.as_arc());
 
         let (func, arg0, arg1) = setup(&mut store, instance)?;
@@ -1027,8 +1032,9 @@ impl Block for WasmiBlock {
 
         // Sync instantiation: call __wafer_info.
         let result = (|| -> Result<BlockInfo, RuntimeError> {
+            let caps_snapshot = self.capabilities.read().clone();
             let (mut store, instance) =
-                instantiate(&self.engine, &self.linker, &self.module, &self.capabilities)?;
+                instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
 
             let info_fn = instance
                 .get_typed_func::<(), i64>(&store, "__wafer_info")
@@ -1074,8 +1080,9 @@ impl Block for WasmiBlock {
         // Sanitize inbound message meta before passing to WASM guest.
         let msg = {
             let mut stripped_in: Vec<String> = Vec::new();
-            let sanitized_meta =
-                sanitize_inbound_meta(msg.meta, &self.capabilities, &mut stripped_in);
+            let caps_guard = self.capabilities.read();
+            let sanitized_meta = sanitize_inbound_meta(msg.meta, &caps_guard, &mut stripped_in);
+            drop(caps_guard);
             if !stripped_in.is_empty() {
                 self.warn_once_stripped_inbound(&stripped_in);
             }
@@ -1144,8 +1151,10 @@ impl Block for WasmiBlock {
                         .response
                         .map(|r| {
                             let mut stripped: Vec<String> = Vec::new();
+                            let caps_guard = self.capabilities.read();
                             let sanitized =
-                                sanitize_outbound_meta(r.meta, &self.capabilities, &mut stripped);
+                                sanitize_outbound_meta(r.meta, &caps_guard, &mut stripped);
+                            drop(caps_guard);
                             if !stripped.is_empty() {
                                 self.warn_once_stripped_outbound(&stripped);
                             }
@@ -1228,7 +1237,77 @@ impl Block for WasmiBlock {
         result
     }
 
-    fn block_capabilities(&self) -> Option<&BlockCapabilities> {
-        Some(&self.capabilities)
+    fn block_capabilities(&self) -> Option<BlockCapabilities> {
+        Some(self.capabilities.read().clone())
+    }
+
+    fn runtime_capabilities_mut(&self, new: BlockCapabilities) {
+        *self.capabilities.write() = new;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for interior-mutable capabilities update
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod capabilities_update_tests {
+    use super::*;
+    use wafer_block::capabilities::BlockCapabilities;
+
+    /// Verify that `runtime_capabilities_mut` (via the Block trait) atomically
+    /// replaces the internal capabilities and that subsequent calls to
+    /// `block_capabilities()` reflect the new set.
+    ///
+    /// Loading a real WASM module is required to construct a WasmiBlock.
+    /// We use the minimal WAT fixture from the fuel-exhaustion test — it has all
+    /// required exports and exercises no guest logic.
+    #[test]
+    fn runtime_capabilities_mut_replaces_caps() {
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT should parse");
+
+        // Load with unrestricted capabilities.
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm_bytes, BlockCapabilities::unrestricted())
+                .expect("minimal WAT module should load");
+
+        // Confirm initial state: unrestricted → network = true.
+        let before = block
+            .block_capabilities()
+            .expect("WasmiBlock must return Some(caps)");
+        assert!(before.network, "initial caps should have network=true");
+
+        // Apply a narrower capability set via the Block trait method.
+        let narrowed = BlockCapabilities::none();
+        use crate::block::Block;
+        block.runtime_capabilities_mut(narrowed);
+
+        // Confirm the update is visible.
+        let after = block
+            .block_capabilities()
+            .expect("WasmiBlock must return Some(caps) after update");
+        assert!(
+            !after.network,
+            "after runtime_capabilities_mut, network should be false"
+        );
+        assert!(
+            !after.crypto,
+            "after runtime_capabilities_mut, crypto should be false"
+        );
+        assert!(
+            !after.raw_sql,
+            "after runtime_capabilities_mut, raw_sql should be false"
+        );
     }
 }

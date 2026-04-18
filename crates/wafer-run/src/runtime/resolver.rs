@@ -175,6 +175,12 @@ impl Wafer {
                 // Warn on widening attempts (fields where config > declared).
                 log_widening_attempts(name, &config_caps, &effective);
 
+                // Propagate effective caps into the block for runtime enforcement.
+                // Native blocks ignore this call (default no-op); WASM blocks update
+                // their interior-mutable capabilities field so that every subsequent
+                // host-import check and sanitizer uses the narrowed effective set.
+                block.runtime_capabilities_mut(effective.clone());
+
                 eff.insert(name.clone(), effective);
             }
             self.effective_capabilities = std::sync::Arc::new(eff);
