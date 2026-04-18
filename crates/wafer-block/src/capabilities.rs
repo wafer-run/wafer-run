@@ -152,6 +152,66 @@ impl BlockCapabilities {
     pub fn allows_call_block(&self, target: &str) -> bool {
         self.callable_blocks.contains("*") || self.callable_blocks.contains(target)
     }
+
+    /// Intersect two capability sets.
+    ///
+    /// Rules:
+    /// - Booleans: logical AND (both must allow).
+    /// - HashSet allowlists (collections, storage_folders, config_keys, callable_blocks):
+    ///   set intersection. Wildcard sentinel `"*"` on one side yields the other side.
+    /// - Vec allowlist (network_allow): set intersection, preserves self's order.
+    /// - HeaderPolicy readable / writable: intersection.
+    /// - HeaderPolicy masked: UNION (denylists strengthen).
+    pub fn intersect(&self, other: &Self) -> Self {
+        Self {
+            collections: intersect_wildcard_set(&self.collections, &other.collections),
+            raw_sql: self.raw_sql && other.raw_sql,
+            storage_folders: intersect_wildcard_set(&self.storage_folders, &other.storage_folders),
+            crypto: self.crypto && other.crypto,
+            network: self.network && other.network,
+            network_allow: intersect_vec(&self.network_allow, &other.network_allow),
+            config: self.config && other.config,
+            config_keys: intersect_wildcard_set(&self.config_keys, &other.config_keys),
+            callable_blocks: intersect_wildcard_set(&self.callable_blocks, &other.callable_blocks),
+            headers: HeaderPolicy {
+                readable: intersect_vec(&self.headers.readable, &other.headers.readable),
+                writable: intersect_vec(&self.headers.writable, &other.headers.writable),
+                masked: union_vec(&self.headers.masked, &other.headers.masked),
+            },
+        }
+    }
+}
+
+fn intersect_wildcard_set(a: &HashSet<String>, b: &HashSet<String>) -> HashSet<String> {
+    let a_any = a.contains("*");
+    let b_any = b.contains("*");
+    match (a_any, b_any) {
+        (true, true) => {
+            let mut r = HashSet::new();
+            r.insert("*".to_string());
+            r
+        }
+        (true, false) => b.clone(),
+        (false, true) => a.clone(),
+        (false, false) => a.intersection(b).cloned().collect(),
+    }
+}
+
+fn intersect_vec(a: &[String], b: &[String]) -> Vec<String> {
+    a.iter()
+        .filter(|x| b.iter().any(|y| y == *x))
+        .cloned()
+        .collect()
+}
+
+fn union_vec(a: &[String], b: &[String]) -> Vec<String> {
+    let mut r: Vec<String> = a.to_vec();
+    for v in b {
+        if !r.iter().any(|x| x == v) {
+            r.push(v.clone());
+        }
+    }
+    r
 }
 
 #[cfg(test)]
@@ -186,5 +246,116 @@ mod tests {
         assert_eq!(back.readable, p.readable);
         assert_eq!(back.writable, p.writable);
         assert_eq!(back.masked, p.masked);
+    }
+
+    use std::collections::HashSet;
+
+    fn caps_with_collections(items: &[&str]) -> BlockCapabilities {
+        let mut c = BlockCapabilities::default();
+        c.collections = items.iter().map(|s| s.to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn intersect_booleans_and() {
+        let a = BlockCapabilities {
+            crypto: true,
+            network: true,
+            raw_sql: false,
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            crypto: true,
+            network: false,
+            raw_sql: true,
+            ..Default::default()
+        };
+        let r = a.intersect(&b);
+        assert!(r.crypto);
+        assert!(!r.network);
+        assert!(!r.raw_sql);
+    }
+
+    #[test]
+    fn intersect_collections_set_intersection() {
+        let a = caps_with_collections(&["a", "b", "c"]);
+        let b = caps_with_collections(&["b", "c", "d"]);
+        let r = a.intersect(&b);
+        let expected: HashSet<String> = ["b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(r.collections, expected);
+    }
+
+    #[test]
+    fn intersect_wildcard_sentinel_left_yields_right() {
+        let a = caps_with_collections(&["*"]);
+        let b = caps_with_collections(&["users"]);
+        let r = a.intersect(&b);
+        let expected: HashSet<String> = ["users"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(r.collections, expected);
+    }
+
+    #[test]
+    fn intersect_wildcard_sentinel_both_yields_wildcard() {
+        let a = caps_with_collections(&["*"]);
+        let b = caps_with_collections(&["*"]);
+        let r = a.intersect(&b);
+        let expected: HashSet<String> = ["*"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(r.collections, expected);
+    }
+
+    #[test]
+    fn intersect_network_allow_vec_intersection() {
+        let a = BlockCapabilities {
+            network_allow: vec!["https://a.com/".into(), "https://b.com/".into()],
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            network_allow: vec!["https://b.com/".into(), "https://c.com/".into()],
+            ..Default::default()
+        };
+        let r = a.intersect(&b);
+        assert_eq!(r.network_allow, vec!["https://b.com/".to_string()]);
+    }
+
+    #[test]
+    fn intersect_header_policy_readable_intersects() {
+        let a = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["authorization".into(), "cookie".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["cookie".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let r = a.intersect(&b);
+        assert_eq!(r.headers.readable, vec!["cookie".to_string()]);
+    }
+
+    #[test]
+    fn intersect_header_policy_masked_unions() {
+        let a = BlockCapabilities {
+            headers: HeaderPolicy {
+                masked: vec!["x-a".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            headers: HeaderPolicy {
+                masked: vec!["x-b".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let r = a.intersect(&b);
+        let mut got = r.headers.masked;
+        got.sort();
+        assert_eq!(got, vec!["x-a".to_string(), "x-b".to_string()]);
     }
 }
