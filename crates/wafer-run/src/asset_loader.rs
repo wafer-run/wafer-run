@@ -60,25 +60,13 @@ impl fmt::Display for AssetLoadError {
 /// On native targets the future is `Send` (matches the rest of the runtime).
 /// On wasm32 the future is `!Send` so impls can use single-threaded
 /// browser primitives like `JsFuture` (the SW host in solobase-web does
-/// this).
+/// this). The supertrait bound uses `wafer_block::compat::{MaybeSend,
+/// MaybeSync}`, matching the pattern already applied to `Block`.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait LoadAssetCallback: MaybeSendSync {
+pub trait LoadAssetCallback: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn load(&self, asset_id: &str) -> AssetLoadStatus;
 }
-
-/// Send + Sync on native, no bound on wasm32. Mirrors the conditional bound
-/// applied to `Block` so the trait object stored in `Wafer::asset_loader`
-/// keeps `Arc<dyn LoadAssetCallback>` thread-safe on native while letting
-/// wasm32 callbacks hold `!Send` JS handles.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSendSync: Send + Sync {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + Sync + ?Sized> MaybeSendSync for T {}
-#[cfg(target_arch = "wasm32")]
-pub trait MaybeSendSync {}
-#[cfg(target_arch = "wasm32")]
-impl<T: ?Sized> MaybeSendSync for T {}
 
 /// Default loader for hosts that haven't wired one up. Always returns
 /// `Failed(UnknownLoader)` so wasm callers see a clear error rather than
