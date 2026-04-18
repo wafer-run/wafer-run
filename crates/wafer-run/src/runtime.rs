@@ -276,6 +276,14 @@ impl Wafer {
         }
     }
 
+    /// Return a snapshot of `BlockInfo` for every currently-registered block.
+    /// Used by hosts that need to look up manifest metadata by block or asset
+    /// id (e.g. the SW-side asset loader in solobase-web). The returned list
+    /// is a snapshot — later registrations are not reflected.
+    pub fn registered_block_infos(&self) -> Vec<crate::block::BlockInfo> {
+        self.blocks.values().map(|b| b.info()).collect()
+    }
+
     /// Return the currently registered asset loader. Defaults to
     /// `NoopAssetLoader` if `set_asset_loader` was never called.
     ///
