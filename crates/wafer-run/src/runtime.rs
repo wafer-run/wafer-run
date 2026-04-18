@@ -265,8 +265,12 @@ impl Wafer {
 
     /// Return the currently registered asset loader. Defaults to
     /// `NoopAssetLoader` if `set_asset_loader` was never called.
-    pub fn asset_loader(&self) -> Arc<dyn crate::asset_loader::LoadAssetCallback> {
-        self.asset_loader.clone()
+    ///
+    /// Returns a borrow to match the `wrap_grants()` / `wrap_admin_block()`
+    /// pattern — callers who need ownership can `.clone()` themselves. This
+    /// keeps the wasmi host-import hot path refcount-free.
+    pub fn asset_loader(&self) -> &Arc<dyn crate::asset_loader::LoadAssetCallback> {
+        &self.asset_loader
     }
 
     /// Look up the effective (declared ∩ config ∩ host) capabilities for a
