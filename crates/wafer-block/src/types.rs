@@ -244,6 +244,20 @@ pub struct BlockInfo {
     /// existing default for that block's runtime type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<crate::BlockCapabilities>,
+
+    // -- Skill / agent metadata --
+    /// Whether this block acts as an agent-callable tool.
+    /// `None` means the block is not exposed as a skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<SkillRole>,
+
+    /// OpenAI-compatible tool descriptor for this block when `role == Some(Skill)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<SkillTool>,
+
+    /// Heavy external WASM/JS assets the host must load lazily before this block runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_assets: Vec<ExternalAsset>,
 }
 
 impl Default for BlockInfo {
@@ -279,6 +293,9 @@ impl BlockInfo {
             endpoints: Vec::new(),
             admin_url: String::new(),
             capabilities: None,
+            role: None,
+            tool: None,
+            external_assets: Vec::new(),
         }
     }
 
@@ -347,6 +364,21 @@ impl BlockInfo {
     /// they are documentation only.
     pub fn capabilities(mut self, caps: crate::BlockCapabilities) -> Self {
         self.capabilities = Some(caps);
+        self
+    }
+
+    pub fn role(mut self, role: SkillRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    pub fn tool(mut self, tool: SkillTool) -> Self {
+        self.tool = Some(tool);
+        self
+    }
+
+    pub fn external_assets(mut self, assets: Vec<ExternalAsset>) -> Self {
+        self.external_assets = assets;
         self
     }
 }
@@ -1078,6 +1110,44 @@ pub fn meta_to_hashmap(meta: &[crate::MetaEntry]) -> HashMap<String, String> {
     meta.iter()
         .map(|e| (e.key.clone(), e.value.clone()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Skill metadata (consumed by gizza-ai/agent and any future agent block)
+// ---------------------------------------------------------------------------
+
+/// Marker for blocks that should be enumerated as tools by an agent block.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillRole {
+    /// Block is callable as a tool by an agent block.
+    Skill,
+}
+
+/// JSON-Schema-shaped tool descriptor for OpenAI-compatible function calling.
+/// Mirrors the shape consumed by WebLLM and remote LLM providers.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SkillTool {
+    pub description: String,
+    /// Free-form JSON Schema describing the tool's input arguments.
+    pub parameters: serde_json::Value,
+}
+
+/// Declarative pointer to a heavy external WASM/JS asset that the host
+/// loads lazily on first use (e.g. ffmpeg-core.wasm from a CDN).
+///
+/// `loader` is a controlled vocabulary on the host side. Known values:
+/// - `"ffmpeg.wasm"` — initialised via `@ffmpeg/ffmpeg`'s `createFFmpeg`.
+///
+/// New loader values require a host update; new assets that target an
+/// existing loader do not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExternalAsset {
+    pub id: String,
+    pub loader: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
 }
 
 // ---------------------------------------------------------------------------
