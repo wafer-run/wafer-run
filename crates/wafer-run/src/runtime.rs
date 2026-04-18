@@ -259,8 +259,21 @@ impl Wafer {
     /// Register a host-side loader for external assets. Called during startup
     /// by hosts that need lazy asset loading. Replaces any previously
     /// registered loader.
+    ///
+    /// Propagates the new loader to all already-registered WASM blocks so that
+    /// `set_asset_loader` and `register_block` can be called in any order.
     pub fn set_asset_loader(&mut self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
-        self.asset_loader = loader;
+        self.asset_loader = loader.clone();
+        // Forward to all WasmiBlock instances currently registered.
+        #[cfg(feature = "wasmi")]
+        for block in self.blocks.values() {
+            if let Some(wasmi_block) = block
+                .as_any()
+                .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
+            {
+                wasmi_block.set_asset_loader(loader.clone());
+            }
+        }
     }
 
     /// Return the currently registered asset loader. Defaults to
@@ -477,6 +490,17 @@ impl Wafer {
                     });
                 }
             }
+        }
+
+        // Propagate the current asset loader to the block before inserting.
+        // Only WasmiBlock instances override `as_any()`, so native blocks are
+        // skipped without any unsafe code.
+        #[cfg(feature = "wasmi")]
+        if let Some(wasmi_block) = block
+            .as_any()
+            .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
+        {
+            wasmi_block.set_asset_loader(self.asset_loader.clone());
         }
 
         self.blocks.insert(name.to_string(), block);

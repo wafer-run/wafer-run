@@ -902,6 +902,14 @@ impl WasmiBlock {
         *self.asset_loader.write() = loader;
     }
 
+    /// Return the currently active asset loader. Used by tests to verify that
+    /// propagation from `Wafer::set_asset_loader` / `Wafer::register_block`
+    /// has taken effect.
+    #[cfg(test)]
+    pub fn asset_loader_for_test(&self) -> Arc<dyn crate::asset_loader::LoadAssetCallback> {
+        self.asset_loader.read().clone()
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -1342,6 +1350,13 @@ impl Block for WasmiBlock {
 
     fn runtime_capabilities_mut(&self, new: BlockCapabilities) {
         *self.capabilities.write() = new;
+    }
+
+    /// Expose `self` as `&dyn Any` so the runtime can downcast `Arc<dyn Block>`
+    /// to `Arc<WasmiBlock>` and forward the host-side asset loader without
+    /// importing `wafer-run` types into `wafer-block`.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 

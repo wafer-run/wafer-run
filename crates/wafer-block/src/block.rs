@@ -63,4 +63,16 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     fn ui_routes(&self) -> Vec<UiRoute> {
         Vec::new()
     }
+
+    /// Return `self` as `&dyn std::any::Any` for runtime downcasting.
+    ///
+    /// The default implementation returns `None`. WASM blocks override to
+    /// return `Some(self)` so the runtime can downcast `Arc<dyn Block>` to
+    /// `Arc<WasmiBlock>` and forward the asset loader without requiring a
+    /// separate trait method that imports `wafer-run` types.
+    ///
+    /// Non-WASM blocks do not need to override this.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
