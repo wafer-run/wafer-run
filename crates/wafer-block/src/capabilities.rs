@@ -1,3 +1,13 @@
+//! Block capability declarations and enforcement policy.
+//!
+//! See the wafer-site page "Block capabilities" for the high-level
+//! model. TL;DR:
+//!
+//! - Blocks declare required capabilities in `BlockInfo::capabilities`.
+//! - Operators narrow via a `capabilities` subkey in block config.
+//! - The runtime intersects declared ∩ config and enforces on WASM blocks.
+//! - Native blocks' declarations are documentation-only.
+
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};

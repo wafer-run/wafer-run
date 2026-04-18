@@ -1,0 +1,129 @@
+<!--
+TITLE: Block Capabilities — wafer.run docs
+ACTIVE: block-capabilities
+-->
+
+<h2>Block Capabilities</h2>
+<p>
+    Blocks declare what platform services they need; operators narrow those
+    declarations via config; the runtime enforces the intersection — but
+    only on WASM blocks.
+</p>
+
+<h3>Declaring Capabilities</h3>
+<p>
+    A block declares what it needs using the <code>#[wafer_block(capabilities(...))]</code>
+    attribute:
+</p>
+<pre><code>#[wafer_block(
+    name = "suppers-ai/auth",
+    version = "0.1.0",
+    interface = "middleware@v1",
+    summary = "Authentication middleware",
+    capabilities(
+        crypto,
+        config,
+        collections = ["users", "sessions", "api_keys"],
+        config_keys = ["SUPPERS_AI__AUTH__JWT_SECRET"],
+        callable_blocks = ["wafer-run/crypto", "wafer-run/database"],
+        headers(
+            readable = ["authorization", "cookie"],
+            writable = ["set-cookie"],
+        ),
+    )
+)]</code></pre>
+<p>
+    Bare identifiers (e.g., <code>crypto</code>, <code>config</code>) set the
+    corresponding boolean to <code>true</code>. Array-valued fields accept string
+    literals. Nested <code>headers(...)</code> maps to <code>HeaderPolicy</code>.
+    Any field you omit defaults to empty or <code>false</code>.
+</p>
+
+<h3>Native vs WASM — Enforcement Asymmetry</h3>
+<p>
+    <strong>WASM blocks: declarations are enforced at dispatch.</strong>
+    Attempts to access collections, network URLs, or headers outside the declared
+    set fail loudly. This is the primary trust boundary — WASM is untrusted code.
+</p>
+<p>
+    <strong>Native Rust blocks: declarations are documentation only.</strong>
+    Native blocks run in-process with full trust; adding <code>capabilities(...)</code>
+    to a native <code>#[wafer_block]</code> records the intent (and surfaces it in
+    the inspector), but the runtime does not enforce the restrictions. The
+    declaration's value is audit trails and inspector UIs, not sandboxing.
+</p>
+<p>
+    This asymmetry is intentional. WASM is the untrusted boundary; native is the
+    trusted runtime. Applying enforcement to native blocks would add runtime cost
+    to the trust-by-default path.
+</p>
+
+<h3>Operator Narrowing via Config</h3>
+<p>
+    Operators narrow a block's declared capabilities via a reserved
+    <code>capabilities</code> subkey in block config. The runtime intersects
+    declared caps with config caps — narrowing only. Config cannot grant more
+    than the block declared.
+</p>
+<pre><code>{
+  "SUPPERS_AI__AUTH__JWT_SECRET": "...",
+  "capabilities": {
+    "network": false,
+    "collections": ["users"],
+    "headers": {
+      "writable": []
+    }
+  }
+}</code></pre>
+<p>
+    If config asks for more than the block declared (e.g., <code>network: true</code>
+    when the block declared <code>network: false</code>), the narrower declaration
+    wins and a warning surfaces:
+</p>
+<pre><code>WARN block=suppers-ai/auth field=network: config widened capability beyond declared — narrower declaration wins</code></pre>
+<p>
+    The reserved <code>capabilities</code> key is stripped from the block's runtime
+    config — your block code will not see it via <code>ctx.config_get("capabilities")</code>.
+</p>
+
+<h3>Header Policy</h3>
+<p>
+    Headers are handled separately via <code>HeaderPolicy</code>:
+</p>
+<ul>
+    <li>
+        <strong><code>readable</code></strong> — sensitive inbound headers the block may read.
+        Default-denied set (Authorization, Cookie, Set-Cookie, Location, CORS headers,
+        HSTS, X-Frame-Options, CSP) is masked unless explicitly allowed.
+    </li>
+    <li>
+        <strong><code>writable</code></strong> — sensitive outbound headers the block may write.
+        Same default-deny set; allowlist-override per header.
+    </li>
+    <li>
+        <strong><code>masked</code></strong> — additional headers to mask. Applies to both
+        directions. Operator extension for app-specific sensitive headers (e.g.,
+        <code>x-internal-token</code>).
+    </li>
+</ul>
+<p>
+    Intersection rules: allowlists intersect (narrower wins), masked unions (stricter wins).
+</p>
+
+<h3>Inspecting Effective Capabilities</h3>
+<p>
+    The existing <code>/blocks</code> inspector endpoint exposes each registered
+    block's <code>BlockInfo</code>. The <code>capabilities</code> field shows what
+    the block declared. For audit and narrowing-diagnosis, the runtime also exposes
+    <code>Wafer::effective_capabilities(block_name)</code> — the post-intersection
+    caps that are actually enforced on WASM blocks.
+</p>
+
+<h3>Follow-up: Solobase-Specific Guidance</h3>
+<p>
+    The solobase repository (separate codebase) maintains its own parallel documentation
+    page describing how each solobase block (<code>suppers-ai/auth</code>,
+    <code>suppers-ai/iam-guard</code>, etc.) declares and narrows capabilities. That page
+    is authored in the solobase repo, not here. When Spec 2B adoption rolls out to
+    solobase blocks, the solobase docs get the parallel update.
+</p>
