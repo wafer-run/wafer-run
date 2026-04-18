@@ -1121,8 +1121,7 @@ mod block_info_tests {
     fn block_info_capabilities_builder_sets_some() {
         let mut caps = crate::BlockCapabilities::default();
         caps.crypto = true;
-        let info =
-            BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").capabilities(caps);
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").capabilities(caps);
         assert!(info.capabilities.is_some());
         assert!(info.capabilities.as_ref().unwrap().crypto);
     }

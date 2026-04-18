@@ -211,8 +211,9 @@ mod header_name_tests {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::*;
     use wafer_block::capabilities::{BlockCapabilities, HeaderPolicy};
+
+    use super::*;
 
     fn meta(key: &str, value: &str) -> MetaEntry {
         MetaEntry {
@@ -1251,8 +1252,9 @@ impl Block for WasmiBlock {
 
 #[cfg(test)]
 mod capabilities_update_tests {
-    use super::*;
     use wafer_block::capabilities::BlockCapabilities;
+
+    use super::*;
 
     /// Verify that `runtime_capabilities_mut` (via the Block trait) atomically
     /// replaces the internal capabilities and that subsequent calls to
