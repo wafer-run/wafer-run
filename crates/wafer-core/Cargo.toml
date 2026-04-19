@@ -21,6 +21,11 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "std"
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true, default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
