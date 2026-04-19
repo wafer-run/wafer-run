@@ -365,7 +365,8 @@ impl OutputStream {
     ///
     /// For explicit error handling, call `sink.error(e).await` before returning.
     ///
-    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32.
+    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser.
+    /// Not available on wasm32-wasip1 (WASI) — use `GuestResult::respond` directly.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_producer<F, Fut>(f: F) -> Self
     where
@@ -380,8 +381,8 @@ impl OutputStream {
         stream
     }
 
-    /// Creates a streaming `OutputStream` driven by a producer closure (wasm32 variant).
-    #[cfg(target_arch = "wasm32")]
+    /// Creates a streaming `OutputStream` driven by a producer closure (wasm32 browser variant).
+    #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
     pub fn from_producer<F, Fut>(f: F) -> Self
     where
         F: FnOnce(OutputSink, CancellationToken) -> Fut + 'static,
@@ -393,6 +394,17 @@ impl OutputStream {
             f(sink, cancel_clone).await;
         });
         stream
+    }
+
+    /// WASI blocks (wasm32-wasip1) are synchronous — `from_producer` is not available.
+    /// Use `GuestResult::respond(bytes)` to return a response directly.
+    #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+    pub fn from_producer<F, Fut>(_f: F) -> Self
+    where
+        F: FnOnce(OutputSink, CancellationToken) -> Fut + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        panic!("OutputStream::from_producer is not supported on wasm32-wasip1 (WASI)");
     }
 }
 

@@ -186,6 +186,12 @@ pub struct Wafer {
     /// against this; native blocks store for inspector visibility only.
     pub(crate) effective_capabilities:
         Arc<std::collections::HashMap<String, wafer_block::BlockCapabilities>>,
+    /// Host-injected async loader for external wasm/js assets referenced by
+    /// `BlockInfo::external_assets`. Defaults to `NoopAssetLoader`. Hosts
+    /// that need lazy asset loading (e.g. solobase-web fetching
+    /// ffmpeg-core.wasm from jsdelivr) call `set_asset_loader` during
+    /// startup.
+    pub(crate) asset_loader: Arc<dyn crate::asset_loader::LoadAssetCallback>,
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasmi")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
@@ -216,6 +222,7 @@ impl Wafer {
             wrap_grants: Arc::new(Vec::new()),
             wrap_admin_block: Arc::new(String::new()),
             effective_capabilities: Arc::new(std::collections::HashMap::new()),
+            asset_loader: Arc::new(crate::asset_loader::NoopAssetLoader),
             #[cfg(feature = "wasmi")]
             wasm_engine: None,
         }
@@ -247,6 +254,44 @@ impl Wafer {
     /// Get the admin block ID (read-only).
     pub fn wrap_admin_block(&self) -> &Arc<String> {
         &self.wrap_admin_block
+    }
+
+    /// Register a host-side loader for external assets. Called during startup
+    /// by hosts that need lazy asset loading. Replaces any previously
+    /// registered loader.
+    ///
+    /// Propagates the new loader to all already-registered WASM blocks so that
+    /// `set_asset_loader` and `register_block` can be called in any order.
+    pub fn set_asset_loader(&mut self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
+        self.asset_loader = loader.clone();
+        // Forward to all WasmiBlock instances currently registered.
+        #[cfg(feature = "wasmi")]
+        for block in self.blocks.values() {
+            if let Some(wasmi_block) = block
+                .as_any()
+                .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
+            {
+                wasmi_block.set_asset_loader(loader.clone());
+            }
+        }
+    }
+
+    /// Return a snapshot of `BlockInfo` for every currently-registered block.
+    /// Used by hosts that need to look up manifest metadata by block or asset
+    /// id (e.g. the SW-side asset loader in solobase-web). The returned list
+    /// is a snapshot — later registrations are not reflected.
+    pub fn registered_block_infos(&self) -> Vec<crate::block::BlockInfo> {
+        self.blocks.values().map(|b| b.info()).collect()
+    }
+
+    /// Return the currently registered asset loader. Defaults to
+    /// `NoopAssetLoader` if `set_asset_loader` was never called.
+    ///
+    /// Returns a borrow to match the `wrap_grants()` / `wrap_admin_block()`
+    /// pattern — callers who need ownership can `.clone()` themselves. This
+    /// keeps the wasmi host-import hot path refcount-free.
+    pub fn asset_loader(&self) -> &Arc<dyn crate::asset_loader::LoadAssetCallback> {
+        &self.asset_loader
     }
 
     /// Look up the effective (declared ∩ config ∩ host) capabilities for a
@@ -453,6 +498,17 @@ impl Wafer {
                     });
                 }
             }
+        }
+
+        // Propagate the current asset loader to the block before inserting.
+        // Only WasmiBlock instances override `as_any()`, so native blocks are
+        // skipped without any unsafe code.
+        #[cfg(feature = "wasmi")]
+        if let Some(wasmi_block) = block
+            .as_any()
+            .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
+        {
+            wasmi_block.set_asset_loader(self.asset_loader.clone());
         }
 
         self.blocks.insert(name.to_string(), block);

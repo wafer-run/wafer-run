@@ -129,6 +129,11 @@ impl Wafer {
     ///
     /// The block's `lifecycle(Init)` will be called during `start()` with
     /// config data from `add_block_config()` (if any) or empty data.
+    ///
+    /// If a host-side asset loader has been registered via
+    /// [`set_asset_loader`](super::Wafer::set_asset_loader), it is
+    /// propagated to WASM blocks at registration time so that
+    /// `set_asset_loader` and `register_block` can be called in any order.
     pub fn register_block(
         &mut self,
         type_name: impl Into<String>,
@@ -139,6 +144,18 @@ impl Wafer {
         if self.blocks.contains_key(&name) {
             return Err(RuntimeError::DuplicateBlock { name });
         }
+
+        // Propagate the current asset loader to the block before inserting.
+        // Only WasmiBlock instances override `as_any()`, so native blocks are
+        // skipped without any unsafe code.
+        #[cfg(feature = "wasmi")]
+        if let Some(wasmi_block) = block
+            .as_any()
+            .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
+        {
+            wasmi_block.set_asset_loader(self.asset_loader.clone());
+        }
+
         self.blocks.insert(name, block);
         Ok(())
     }

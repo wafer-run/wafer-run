@@ -1,7 +1,22 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context};
+use serde::Deserialize;
 use wasmi::{Caller, Engine, Linker, Module, Store};
+
+/// A test fixture file. The `kind` and `meta` fields match `wafer_block::Message`.
+/// The optional `data` field carries the body bytes to pass as the second argument
+/// to the block's `handle(msg, body)` — matching the `(Message, Vec<u8>)` ABI that
+/// `__wafer_handle` expects.
+#[derive(Debug, Deserialize)]
+struct TestFixture {
+    kind: String,
+    #[serde(default)]
+    meta: Vec<wafer_block::MetaEntry>,
+    /// Body bytes passed to `handle(_msg, body)`. Absent = empty body.
+    #[serde(default)]
+    data: Vec<u8>,
+}
 
 /// State held in the wasmi store during test execution.
 struct TestState {
@@ -461,17 +476,26 @@ fn run_single_test(
     instance: &wasmi::Instance,
 ) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
-    // a. Read and parse the test fixture as a Message
+    // a. Read and parse the test fixture.
+    //
+    // The fixture JSON may include an optional `data` field (Vec<u8>) that
+    // carries body bytes for the block's second `handle` argument.
     // -----------------------------------------------------------------------
     let fixture_bytes = std::fs::read(test_path)
         .with_context(|| format!("Failed to read test file: {}", test_path.display()))?;
 
-    let _message: wafer_block::Message = serde_json::from_slice(&fixture_bytes)
-        .with_context(|| format!("Test file {test_name} is not a valid Message JSON"))?;
+    let fixture: TestFixture = serde_json::from_slice(&fixture_bytes)
+        .with_context(|| format!("Test file {test_name} is not a valid fixture JSON"))?;
 
-    // Re-serialize to ensure canonical form
-    let msg_bytes = serde_json::to_vec(&_message)
-        .with_context(|| format!("Failed to serialize message for {test_name}"))?;
+    let message = wafer_block::Message {
+        kind: fixture.kind,
+        meta: fixture.meta,
+    };
+    let body: Vec<u8> = fixture.data;
+
+    // Encode as the `(Message, Vec<u8>)` tuple that `__wafer_handle` expects.
+    let msg_bytes = serde_json::to_vec(&(&message, &body))
+        .with_context(|| format!("Failed to serialize (message, body) tuple for {test_name}"))?;
 
     // -----------------------------------------------------------------------
     // b. Allocate guest memory and write the message

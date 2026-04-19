@@ -40,7 +40,9 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt"] }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm-bindgen-futures is only needed for the browser (wasm32-unknown-unknown).
+# wasm32-wasip1 (WASI) blocks are synchronous and must not pull in wbindgen.
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
 wasm-bindgen-futures = "0.4"
 
 [lints]

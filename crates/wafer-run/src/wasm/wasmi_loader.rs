@@ -346,6 +346,12 @@ struct WasmiHostState {
     /// Set by the host after resolving a pending_call; the guest reads this
     /// on the resumed/replayed invocation.
     pending_result: Option<Vec<u8>>,
+    /// Set by __wafer_host_load_asset to request an async asset load.
+    /// The resume loop consumes this, drives the LoadAssetCallback, and
+    /// resumes the guest with the resolved i32 status code as the return
+    /// value (wasmi's `resumable.resume(..)` value IS the return value of
+    /// the trapped host function — no phase-2 re-entry like call_block).
+    pending_load_asset: Option<String>,
 }
 
 struct PendingCall {
@@ -392,6 +398,20 @@ impl std::fmt::Display for CallBlockTrap {
 }
 
 impl wasmi::core::HostError for CallBlockTrap {}
+
+/// Marker error returned by `__wafer_host_load_asset` to suspend execution.
+/// Mirrors `CallBlockTrap` — the resume loop catches it and drives the
+/// registered `LoadAssetCallback` before resuming the guest.
+#[derive(Debug)]
+struct LoadAssetTrap;
+
+impl std::fmt::Display for LoadAssetTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "load_asset trap (expected — will be resumed)")
+    }
+}
+
+impl wasmi::core::HostError for LoadAssetTrap {}
 
 // ---------------------------------------------------------------------------
 // Guest memory helpers
@@ -576,6 +596,43 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_call_block: {e}")))?;
 
+    // __wafer_host_load_asset(id_ptr, id_len) -> i32
+    //
+    // Reads the asset id from guest memory, stashes it in pending_load_asset,
+    // and traps. The resume loop in `call_guest_resumable` drives the
+    // registered `LoadAssetCallback` and resumes the guest with the resolved
+    // i32 status code as the return value. (Unlike `__wafer_host_call_block`,
+    // this host function has no phase-2 re-entry — the resume value IS the
+    // return value in wasmi's resumable-call API.)
+    //
+    // Status codes:
+    //   0 = Ready, 1 = Pending, 2 = Failed
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_load_asset",
+            |mut caller: Caller<WasmiHostState>,
+             id_ptr: i32,
+             id_len: i32|
+             -> Result<i32, WasmiError> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
+
+                let mut id_buf = vec![0u8; id_len as usize];
+                memory
+                    .read(&caller, id_ptr as usize, &mut id_buf)
+                    .map_err(|e| WasmiError::new(format!("reading asset id: {e}")))?;
+                let asset_id = String::from_utf8(id_buf)
+                    .map_err(|e| WasmiError::new(format!("asset id not UTF-8: {e}")))?;
+
+                caller.data_mut().pending_load_asset = Some(asset_id);
+                Err(WasmiError::host(LoadAssetTrap))
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_load_asset: {e}")))?;
+
     // ---- WASI stubs (wasi_snapshot_preview1) ----
 
     // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
@@ -729,6 +786,7 @@ fn instantiate(
         capabilities: caps.clone(),
         pending_call: None,
         pending_result: None,
+        pending_load_asset: None,
     };
     let mut store = Store::new(engine, host_state);
 
@@ -784,6 +842,10 @@ pub struct WasmiBlock {
     warned_outbound: std::sync::atomic::AtomicBool,
     /// Warn-once flag for inbound stripped headers.
     warned_inbound: std::sync::atomic::AtomicBool,
+    /// Host-side asset loader for external WASM/JS assets referenced by the
+    /// block's `external_assets` manifest field. Defaults to `NoopAssetLoader`.
+    /// Hosts inject a real loader via `set_asset_loader`.
+    asset_loader: parking_lot::RwLock<Arc<dyn crate::asset_loader::LoadAssetCallback>>,
 }
 
 // Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44.
@@ -829,7 +891,23 @@ impl WasmiBlock {
             capabilities: parking_lot::RwLock::new(caps),
             warned_outbound: std::sync::atomic::AtomicBool::new(false),
             warned_inbound: std::sync::atomic::AtomicBool::new(false),
+            asset_loader: parking_lot::RwLock::new(Arc::new(crate::asset_loader::NoopAssetLoader)),
         })
+    }
+
+    /// Replace the asset loader used by `__wafer_host_load_asset`. Called by
+    /// hosts (e.g. solobase-web) during startup to inject a real loader that
+    /// fetches CDN assets, verifies sha256, and returns readiness.
+    pub fn set_asset_loader(&self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
+        *self.asset_loader.write() = loader;
+    }
+
+    /// Return the currently active asset loader. Used by tests to verify that
+    /// propagation from `Wafer::set_asset_loader` / `Wafer::register_block`
+    /// has taken effect.
+    #[cfg(test)]
+    pub fn asset_loader_for_test(&self) -> Arc<dyn crate::asset_loader::LoadAssetCallback> {
+        self.asset_loader.read().clone()
     }
 
     // -----------------------------------------------------------------------
@@ -879,115 +957,144 @@ impl WasmiBlock {
 
         // Resolve pending calls in a loop.
         loop {
-            let pending = store.data_mut().pending_call.take().ok_or_else(|| {
-                RuntimeError::Wasm(format!(
-                    "guest trapped but no pending_call (host error: {})",
+            // Dispatch based on which pending field is set by the host import.
+            if let Some(pending) = store.data_mut().pending_call.take() {
+                debug!(
+                    block = pending.block_name,
+                    msg_len = pending.msg_bytes.len(),
+                    "resolving call_block from WASM guest"
+                );
+
+                // Deserialize the message, call the block, collect and serialize the result.
+                let msg: Message = serde_json::from_slice(&pending.msg_bytes).map_err(|e| {
+                    RuntimeError::Wasm(format!("deserializing call_block message: {e}"))
+                })?;
+
+                let out = ctx
+                    .call_block(&pending.block_name, msg, InputStream::empty())
+                    .await;
+                let buf = out.collect_buffered().await;
+                // Serialize the outcome for the WASM guest.
+                // The guest expects a guest ABI format JSON with action/response/error.
+                // We map BufferedResponse → respond, Error → error terminal.
+                use wafer_block::streams::output::TerminalNotResponse;
+                let result_bytes = match buf {
+                    Ok(response) => {
+                        // Build a guest ABI format response JSON the WASM guest can decode
+                        let payload = serde_json::json!({
+                            "action": "Respond",
+                            "response": { "data": response.body, "meta": response.meta },
+                            "error": null,
+                            "message": null
+                        });
+                        serde_json::to_vec(&payload).map_err(|e| {
+                            RuntimeError::Wasm(format!("serializing call_block result: {e}"))
+                        })?
+                    }
+                    Err(TerminalNotResponse::Error(e)) => {
+                        let payload = serde_json::json!({
+                            "action": "Error",
+                            "response": null,
+                            "error": { "code": format!("{:?}", e.code), "message": e.message, "meta": [] },
+                            "message": null
+                        });
+                        serde_json::to_vec(&payload).map_err(|e| {
+                            RuntimeError::Wasm(format!("serializing call_block error: {e}"))
+                        })?
+                    }
+                    Err(TerminalNotResponse::Drop) => {
+                        let payload = serde_json::json!({
+                            "action": "Drop",
+                            "response": null,
+                            "error": null,
+                            "message": null
+                        });
+                        serde_json::to_vec(&payload).map_err(|e| {
+                            RuntimeError::Wasm(format!("serializing call_block drop: {e}"))
+                        })?
+                    }
+                    Err(TerminalNotResponse::Continue(next_msg)) => {
+                        let payload = serde_json::json!({
+                            "action": "Continue",
+                            "response": null,
+                            "error": null,
+                            "message": next_msg
+                        });
+                        serde_json::to_vec(&payload).map_err(|e| {
+                            RuntimeError::Wasm(format!("serializing call_block continue: {e}"))
+                        })?
+                    }
+                    Err(TerminalNotResponse::Malformed) => {
+                        let payload = serde_json::json!({
+                            "action": "Error",
+                            "response": null,
+                            "error": { "code": "Internal", "message": "malformed output stream", "meta": [] },
+                            "message": null
+                        });
+                        serde_json::to_vec(&payload).map_err(|e| {
+                            RuntimeError::Wasm(format!("serializing malformed error: {e}"))
+                        })?
+                    }
+                };
+
+                // Provide the result for phase 2.
+                store.data_mut().pending_result = Some(result_bytes);
+
+                // Resume. The host func (__wafer_host_call_block) returns i64,
+                // so we must provide a single i64 Val. However, the resumption
+                // re-enters the host function which checks pending_result, so
+                // the value we pass here is not directly used — the host func
+                // will overwrite it. We pass 0 as a placeholder; wasmi requires
+                // the correct number/type of resume inputs matching the host
+                // function's return type.
+                match resumable.resume(&mut store, &[Val::I64(0)]).map_err(|e| {
+                    RuntimeError::Wasm(format!("resuming guest after call_block: {e}"))
+                })? {
+                    TypedResumableCall::Finished(packed) => {
+                        let (ptr, len) = unpack_ptr_len(packed);
+                        let result = read_guest_bytes(&store, memory, ptr, len)?;
+                        store.data_mut().context = None;
+                        return Ok(result);
+                    }
+                    TypedResumableCall::Resumable(next) => {
+                        resumable = next;
+                        // Continue the loop: another call_block from the same invocation.
+                    }
+                }
+            } else if let Some(asset_id) = store.data_mut().pending_load_asset.take() {
+                debug!(asset = asset_id, "resolving load_asset from WASM guest");
+
+                let loader = self.asset_loader.read().clone();
+                let status = loader.load(&asset_id).await;
+                let code: i32 = match status {
+                    crate::asset_loader::AssetLoadStatus::Ready => 0,
+                    crate::asset_loader::AssetLoadStatus::Pending => 1,
+                    crate::asset_loader::AssetLoadStatus::Failed(_) => 2,
+                };
+
+                // Resume with the status code as the return value of the
+                // trapped host function. wasmi's resumable.resume value IS
+                // the return value — no re-entry into the host fn.
+                match resumable
+                    .resume(&mut store, &[Val::I32(code)])
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!("resuming guest after load_asset: {e}"))
+                    })? {
+                    TypedResumableCall::Finished(packed) => {
+                        let (ptr, len) = unpack_ptr_len(packed);
+                        let result = read_guest_bytes(&store, memory, ptr, len)?;
+                        store.data_mut().context = None;
+                        return Ok(result);
+                    }
+                    TypedResumableCall::Resumable(next) => {
+                        resumable = next;
+                    }
+                }
+            } else {
+                return Err(RuntimeError::Wasm(format!(
+                    "guest trapped but no pending host call (host error: {})",
                     resumable.host_error()
-                ))
-            })?;
-
-            debug!(
-                block = pending.block_name,
-                msg_len = pending.msg_bytes.len(),
-                "resolving call_block from WASM guest"
-            );
-
-            // Deserialize the message, call the block, collect and serialize the result.
-            let msg: Message = serde_json::from_slice(&pending.msg_bytes).map_err(|e| {
-                RuntimeError::Wasm(format!("deserializing call_block message: {e}"))
-            })?;
-
-            let out = ctx
-                .call_block(&pending.block_name, msg, InputStream::empty())
-                .await;
-            let buf = out.collect_buffered().await;
-            // Serialize the outcome for the WASM guest.
-            // The guest expects a guest ABI format JSON with action/response/error.
-            // We map BufferedResponse → respond, Error → error terminal.
-            use wafer_block::streams::output::TerminalNotResponse;
-            let result_bytes = match buf {
-                Ok(response) => {
-                    // Build a guest ABI format response JSON the WASM guest can decode
-                    let payload = serde_json::json!({
-                        "action": "Respond",
-                        "response": { "data": response.body, "meta": response.meta },
-                        "error": null,
-                        "message": null
-                    });
-                    serde_json::to_vec(&payload).map_err(|e| {
-                        RuntimeError::Wasm(format!("serializing call_block result: {e}"))
-                    })?
-                }
-                Err(TerminalNotResponse::Error(e)) => {
-                    let payload = serde_json::json!({
-                        "action": "Error",
-                        "response": null,
-                        "error": { "code": format!("{:?}", e.code), "message": e.message, "meta": [] },
-                        "message": null
-                    });
-                    serde_json::to_vec(&payload).map_err(|e| {
-                        RuntimeError::Wasm(format!("serializing call_block error: {e}"))
-                    })?
-                }
-                Err(TerminalNotResponse::Drop) => {
-                    let payload = serde_json::json!({
-                        "action": "Drop",
-                        "response": null,
-                        "error": null,
-                        "message": null
-                    });
-                    serde_json::to_vec(&payload).map_err(|e| {
-                        RuntimeError::Wasm(format!("serializing call_block drop: {e}"))
-                    })?
-                }
-                Err(TerminalNotResponse::Continue(next_msg)) => {
-                    let payload = serde_json::json!({
-                        "action": "Continue",
-                        "response": null,
-                        "error": null,
-                        "message": next_msg
-                    });
-                    serde_json::to_vec(&payload).map_err(|e| {
-                        RuntimeError::Wasm(format!("serializing call_block continue: {e}"))
-                    })?
-                }
-                Err(TerminalNotResponse::Malformed) => {
-                    let payload = serde_json::json!({
-                        "action": "Error",
-                        "response": null,
-                        "error": { "code": "Internal", "message": "malformed output stream", "meta": [] },
-                        "message": null
-                    });
-                    serde_json::to_vec(&payload).map_err(|e| {
-                        RuntimeError::Wasm(format!("serializing malformed error: {e}"))
-                    })?
-                }
-            };
-
-            // Provide the result for phase 2.
-            store.data_mut().pending_result = Some(result_bytes);
-
-            // Resume. The host func (__wafer_host_call_block) returns i64,
-            // so we must provide a single i64 Val. However, the resumption
-            // re-enters the host function which checks pending_result, so
-            // the value we pass here is not directly used — the host func
-            // will overwrite it. We pass 0 as a placeholder; wasmi requires
-            // the correct number/type of resume inputs matching the host
-            // function's return type.
-            match resumable
-                .resume(&mut store, &[Val::I64(0)])
-                .map_err(|e| RuntimeError::Wasm(format!("resuming guest after call_block: {e}")))?
-            {
-                TypedResumableCall::Finished(packed) => {
-                    let (ptr, len) = unpack_ptr_len(packed);
-                    let result = read_guest_bytes(&store, memory, ptr, len)?;
-                    store.data_mut().context = None;
-                    return Ok(result);
-                }
-                TypedResumableCall::Resumable(next) => {
-                    resumable = next;
-                    // Continue the loop: another call_block from the same invocation.
-                }
+                )));
             }
         }
     }
@@ -1243,6 +1350,13 @@ impl Block for WasmiBlock {
 
     fn runtime_capabilities_mut(&self, new: BlockCapabilities) {
         *self.capabilities.write() = new;
+    }
+
+    /// Expose `self` as `&dyn Any` so the runtime can downcast `Arc<dyn Block>`
+    /// to `Arc<WasmiBlock>` and forward the host-side asset loader without
+    /// importing `wafer-run` types into `wafer-block`.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
