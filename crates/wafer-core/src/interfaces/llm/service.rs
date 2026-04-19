@@ -104,6 +104,61 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+impl ChatRequest {
+    /// Minimal constructor. Leaves `params`, `tools`, and `extra` defaulted;
+    /// callers set them via field access.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model: impl Into<String>,
+        messages: Vec<ChatMessage>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model: model.into(),
+            messages,
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+        }
+    }
+}
+
+impl ChatMessage {
+    /// Text-only user message.
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::User, text)
+    }
+
+    /// Text-only system message.
+    pub fn system(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::System, text)
+    }
+
+    /// Text-only assistant message.
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::Assistant, text)
+    }
+
+    /// Tool-result message.
+    pub fn tool(tool_call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: ChatContent::Text(text.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    fn text(role: ChatRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: ChatContent::Text(text.into()),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
 // ---------- Response side ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -153,6 +208,27 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     pub cached_tokens: Option<u32>,
     pub reasoning_tokens: Option<u32>,
+}
+
+impl ChatChunk {
+    /// A non-terminal text delta.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::Text(s.into()),
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A terminal chunk with the given finish reason and optional usage. The
+    /// delta is `Empty` — a meta-only terminal frame.
+    pub fn finish(reason: FinishReason, usage: Option<TokenUsage>) -> Self {
+        Self {
+            delta: ChunkDelta::Empty,
+            finish_reason: Some(reason),
+            usage,
+        }
+    }
 }
 
 // ---------- Model management ----------
@@ -207,6 +283,50 @@ pub struct LoadProgress {
     pub stage: String,
     pub bytes_downloaded: Option<u64>,
     pub bytes_total: Option<u64>,
+}
+
+impl ModelInfo {
+    /// Minimal constructor. Capabilities default to all-false / unlimited.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model_id: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model_id: model_id.into(),
+            display_name: display_name.into(),
+            capabilities: ModelCapabilities::default(),
+        }
+    }
+
+    pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
+impl ModelStatus {
+    pub fn ready() -> Self {
+        Self {
+            state: ModelState::Ready,
+            progress: None,
+        }
+    }
+
+    pub fn loading(progress: f32) -> Self {
+        Self {
+            state: ModelState::Loading,
+            progress: Some(progress),
+        }
+    }
+
+    pub fn unloaded() -> Self {
+        Self {
+            state: ModelState::Unloaded,
+            progress: None,
+        }
+    }
 }
 
 // ---------- Error ----------

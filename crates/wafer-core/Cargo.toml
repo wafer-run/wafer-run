@@ -25,7 +25,8 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+async-stream = "0.3"
 
 [lints]
 workspace = true
