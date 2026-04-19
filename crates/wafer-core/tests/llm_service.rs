@@ -82,9 +82,7 @@ impl LlmService for ScriptedLlm {
                 yield Err(LlmError::Cancelled);
             })
         } else {
-            Box::pin(futures::stream::iter(
-                chunks.into_iter().map(Ok),
-            ))
+            Box::pin(futures::stream::iter(chunks.into_iter().map(Ok)))
         }
     }
 

@@ -127,10 +127,10 @@ impl LlmService for MultiBackendLlmService {
 mod tests {
     use futures::StreamExt;
 
-    use super::super::service::{
-        ChatChunk, ChatMessage, ChatRole, ChunkDelta, ModelInfo, ModelStatus,
+    use super::{
+        super::service::{ChatChunk, ChatMessage, ChatRole, ChunkDelta, ModelInfo, ModelStatus},
+        *,
     };
-    use super::*;
     use crate::interfaces::llm::service::{ChatContent, ModelState};
 
     /// Configurable fake for driving router tests.
