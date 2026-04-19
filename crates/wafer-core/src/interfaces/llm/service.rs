@@ -306,6 +306,18 @@ impl ModelInfo {
     }
 }
 
+impl LoadProgress {
+    /// Minimal constructor. Byte counters default to `None`; callers set them
+    /// via field access when the backend reports them.
+    pub fn new(stage: impl Into<String>) -> Self {
+        Self {
+            stage: stage.into(),
+            bytes_downloaded: None,
+            bytes_total: None,
+        }
+    }
+}
+
 impl ModelStatus {
     pub fn ready() -> Self {
         Self {
