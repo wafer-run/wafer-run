@@ -22,7 +22,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-tokio-util = { workspace = true, default-features = false }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
