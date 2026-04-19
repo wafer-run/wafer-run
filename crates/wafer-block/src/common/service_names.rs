@@ -11,6 +11,7 @@ impl ServiceName {
     pub const RUNTIME: &str = "runtime";
     pub const VECTOR: &str = "vector";
     pub const EMBEDDING: &str = "embedding";
+    pub const LLM: &str = "llm";
 }
 
 /// Service operation constants for WAFER.
@@ -54,4 +55,9 @@ impl ServiceOp {
     pub const VECTOR_DELETE: &str = "vector.delete";
     pub const VECTOR_COUNT: &str = "vector.count";
     pub const EMBEDDING_EMBED: &str = "embedding.embed";
+    pub const LLM_CHAT: &str = "llm.chat";
+    pub const LLM_LIST_MODELS: &str = "llm.list_models";
+    pub const LLM_STATUS: &str = "llm.status";
+    pub const LLM_LOAD_MODEL: &str = "llm.load_model";
+    pub const LLM_UNLOAD_MODEL: &str = "llm.unload_model";
 }
