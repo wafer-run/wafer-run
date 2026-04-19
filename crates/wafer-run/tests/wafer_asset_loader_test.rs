@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use wafer_run::{
     asset_loader::{AssetLoadStatus, LoadAssetCallback},
     Wafer,
