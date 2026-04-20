@@ -104,6 +104,34 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+impl ToolDefinition {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+}
+
+impl ToolCall {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
 impl ChatRequest {
     /// Minimal constructor. Leaves `params`, `tools`, and `extra` defaulted;
     /// callers set them via field access.
@@ -147,6 +175,22 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: Vec::new(),
         }
+    }
+
+    /// Construct a message with arbitrary role + content (no tool fields set).
+    pub fn new(role: ChatRole, content: ChatContent) -> Self {
+        Self {
+            role,
+            content,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// Builder: attach tool-call results to an assistant message.
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = tool_calls;
+        self
     }
 
     fn text(role: ChatRole, text: impl Into<String>) -> Self {
@@ -227,6 +271,15 @@ impl ChatChunk {
             delta: ChunkDelta::Empty,
             finish_reason: Some(reason),
             usage,
+        }
+    }
+
+    /// A non-terminal chunk carrying any delta variant (for tool-call events).
+    pub fn delta(delta: ChunkDelta) -> Self {
+        Self {
+            delta,
+            finish_reason: None,
+            usage: None,
         }
     }
 }
