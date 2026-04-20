@@ -37,7 +37,13 @@ impl Block for PlaygroundBlock {
             // Serve playground page
             (_, "/playground") | (_, "/playground/") => {
                 let html = include_str!("../content/playground.html");
-                OutputStream::respond(html.as_bytes().to_vec())
+                OutputStream::respond_with_meta(
+                    html.as_bytes().to_vec(),
+                    vec![MetaEntry {
+                        key: META_RESP_CONTENT_TYPE.to_string(),
+                        value: "text/html; charset=utf-8".to_string(),
+                    }],
+                )
             }
 
             // --- Proxy: Rust Playground ---

@@ -97,14 +97,21 @@ impl RegistryBlock {
         }
     }
 
-    fn handle_browse(mut msg: Message) -> OutputStream {
+    fn handle_browse() -> OutputStream {
         let html = include_str!("../content/registry.html");
-        msg.set_meta(
-            "resp.header.Content-Security-Policy",
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-        );
-        msg.set_meta(META_RESP_CONTENT_TYPE, "text/html");
-        OutputStream::respond(html.as_bytes().to_vec())
+        OutputStream::respond_with_meta(
+            html.as_bytes().to_vec(),
+            vec![
+                MetaEntry {
+                    key: META_RESP_CONTENT_TYPE.to_string(),
+                    value: "text/html; charset=utf-8".to_string(),
+                },
+                MetaEntry {
+                    key: "resp.header.Content-Security-Policy".to_string(),
+                    value: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
+                },
+            ],
+        )
     }
 
     fn handle_search(&self, msg: &Message) -> OutputStream {
@@ -311,7 +318,7 @@ impl Block for RegistryBlock {
         let path = msg.path().to_string();
         let action = msg.action().to_string();
         match (action.as_str(), path.as_str()) {
-            ("retrieve", "/registry") | ("retrieve", "/registry/") => Self::handle_browse(msg),
+            ("retrieve", "/registry") | ("retrieve", "/registry/") => Self::handle_browse(),
             ("retrieve", "/registry/search") => self.handle_search(&msg),
             ("retrieve", p) if p.starts_with("/registry/packages/") => {
                 let name = &p["/registry/packages/".len()..];

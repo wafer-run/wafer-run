@@ -34,7 +34,7 @@ impl WebBlock {
         }
     }
 
-    async fn serve_file(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> OutputStream {
+    async fn serve_file(ctx: &dyn Context, msg: &Message, config: &WebConfig) -> OutputStream {
         let mut req_path = msg.path().to_string();
 
         // Strip prefix
@@ -96,15 +96,24 @@ impl WebBlock {
                 };
 
                 let cc = cache_control(key, &content_type, config);
-                msg.set_meta("resp.header.Cache-Control", &cc);
-                msg.set_meta(META_RESP_CONTENT_TYPE, &content_type);
-
-                OutputStream::respond(data)
+                OutputStream::respond_with_meta(
+                    data,
+                    vec![
+                        MetaEntry {
+                            key: META_RESP_CONTENT_TYPE.to_string(),
+                            value: content_type,
+                        },
+                        MetaEntry {
+                            key: "resp.header.Cache-Control".to_string(),
+                            value: cc,
+                        },
+                    ],
+                )
             }
             Err(_) => {
                 // File not found — if SPA mode, serve index
                 if config.spa {
-                    return serve_index_spa(ctx, msg, config).await;
+                    return serve_index_spa(ctx, config).await;
                 }
                 OutputStream::error(WaferError {
                     code: ErrorCode::NotFound,
@@ -203,13 +212,21 @@ fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
     format!("public, max-age={}", config.cache_max_age)
 }
 
-async fn serve_index_spa(ctx: &dyn Context, msg: &mut Message, config: &WebConfig) -> OutputStream {
+async fn serve_index_spa(ctx: &dyn Context, config: &WebConfig) -> OutputStream {
     match store::get(ctx, &config.folder, &config.index_file).await {
-        Ok((data, _)) => {
-            msg.set_meta("resp.header.Cache-Control", "no-cache");
-            msg.set_meta(META_RESP_CONTENT_TYPE, "text/html; charset=utf-8");
-            OutputStream::respond(data)
-        }
+        Ok((data, _)) => OutputStream::respond_with_meta(
+            data,
+            vec![
+                MetaEntry {
+                    key: META_RESP_CONTENT_TYPE.to_string(),
+                    value: "text/html; charset=utf-8".to_string(),
+                },
+                MetaEntry {
+                    key: "resp.header.Cache-Control".to_string(),
+                    value: "no-cache".to_string(),
+                },
+            ],
+        ),
         Err(_) => OutputStream::error(WaferError {
             code: ErrorCode::NotFound,
             message: "Index file not found".to_string(),
@@ -253,9 +270,7 @@ impl Block for WebBlock {
             immutable_max_age: 31536000,
         });
 
-        // Need mutable msg for set_meta calls in serve_file
-        let mut msg = msg;
-        Self::serve_file(ctx, &mut msg, &config).await
+        Self::serve_file(ctx, &msg, &config).await
     }
 
     async fn lifecycle(
