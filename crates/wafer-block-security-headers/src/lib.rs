@@ -1,10 +1,18 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use wafer_block::*;
 
+const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
 /// SecurityHeadersBlock adds standard security headers to responses.
+///
+/// CSP is configurable via `block_config` — the runtime serializes the
+/// config JSON to bytes and passes them in at `lifecycle(Init)`. Until
+/// Init runs, the block uses the restrictive `DEFAULT_CSP`. Store via
+/// `RwLock<String>` because `handle` takes `&self` and the config is
+/// written once at Init, read on every request.
 pub struct SecurityHeadersBlock {
-    csp: String,
+    csp: RwLock<String>,
 }
 
 impl Default for SecurityHeadersBlock {
@@ -16,7 +24,7 @@ impl Default for SecurityHeadersBlock {
 impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {
-            csp: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'".to_string(),
+            csp: RwLock::new(DEFAULT_CSP.to_string()),
         }
     }
 }
@@ -35,12 +43,12 @@ impl Block for SecurityHeadersBlock {
         .category(BlockCategory::Infrastructure)
     }
 
-    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
-        // Read CSP from config if available
-        let csp = ctx
-            .config_get("csp")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.csp.clone());
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let csp = self
+            .csp
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| DEFAULT_CSP.to_string());
 
         let mut out_msg = msg;
         out_msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
@@ -66,8 +74,17 @@ impl Block for SecurityHeadersBlock {
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if let LifecycleType::Init = event.event_type {
+            if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
+                if let Some(csp) = cfg.get("csp").and_then(|v| v.as_str()) {
+                    if let Ok(mut guard) = self.csp.write() {
+                        *guard = csp.to_string();
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

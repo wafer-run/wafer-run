@@ -585,6 +585,13 @@ pub struct ConfigVar {
     /// Used for secrets like JWT signing keys and webhook HMAC secrets.
     #[serde(default)]
     pub auto_generate: bool,
+    /// If true, this variable is admin-configurable but not required for
+    /// block startup. Blocks mark vars `.optional()` when they degrade
+    /// gracefully without them (e.g., OAuth credentials — block boots
+    /// without them, just disables that provider). The required-config
+    /// startup validator skips optional vars.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl ConfigVar {
@@ -599,6 +606,7 @@ impl ConfigVar {
             input_type: InputType::Text,
             warning: String::new(),
             auto_generate: false,
+            optional: false,
         }
     }
 
@@ -631,6 +639,12 @@ impl ConfigVar {
     /// On first startup, a random secret is generated and stored.
     pub fn auto_generate(mut self) -> Self {
         self.auto_generate = true;
+        self
+    }
+
+    /// Mark this variable as optional. See the `optional` field doc.
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
         self
     }
 

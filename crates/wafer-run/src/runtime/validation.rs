@@ -16,7 +16,9 @@ pub struct MissingConfig {
 
 /// Collect every required config key that is missing or empty, across the given blocks.
 ///
-/// A `ConfigVar` is "required" when `default.is_empty() && !auto_generate`.
+/// A `ConfigVar` is "required" when `default.is_empty() && !auto_generate && !optional`.
+/// Optional vars (`optional == true`) are admin-configurable-later and skipped by this
+/// check — the block degrades gracefully when they are absent.
 /// Config is passed as a `serde_json::Value` object (the shape stored in
 /// `Wafer::block_configs`); presence is checked by reading the string-coerced
 /// value for the declared key.
@@ -26,7 +28,7 @@ pub fn collect_missing_config<'a>(
     let mut out = Vec::new();
     for (info, cfg) in blocks {
         for cv in &info.config_keys {
-            if !cv.default.is_empty() || cv.auto_generate {
+            if !cv.default.is_empty() || cv.auto_generate || cv.optional {
                 continue;
             }
             let provided = cfg.get(&cv.key).is_some_and(|v| match v {
@@ -314,5 +316,14 @@ mod tests {
         let cfg = serde_json::json!({ "ORG__A__KEY": null });
         let missing = collect_missing_config(&[(info, &cfg)]);
         assert_eq!(missing.len(), 1);
+    }
+
+    #[test]
+    fn config_optional_skipped() {
+        let mut cv = ConfigVar::new("ORG__A__KEY", "desc", "");
+        cv.optional = true;
+        let info = mk_block("org/a", vec![cv]);
+        let cfg = serde_json::json!({});
+        assert!(collect_missing_config(&[(info, &cfg)]).is_empty());
     }
 }
