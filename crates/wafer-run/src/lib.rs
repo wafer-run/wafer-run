@@ -52,6 +52,7 @@ pub use types::{
     MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
 };
 pub use wafer_block::{
+    registry::BlockRegistry,
     streams,
     streams::{
         input::InputStream,

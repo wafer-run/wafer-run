@@ -60,4 +60,8 @@ impl ServiceOp {
     pub const LLM_STATUS: &str = "llm.status";
     pub const LLM_LOAD_MODEL: &str = "llm.load_model";
     pub const LLM_UNLOAD_MODEL: &str = "llm.unload_model";
+    pub const AUTH_REQUIRE_USER: &str = "auth.require_user";
+    pub const AUTH_REQUIRE_TOKEN: &str = "auth.require_token";
+    pub const AUTH_REQUIRE_ROLE: &str = "auth.require_role";
+    pub const AUTH_USER_PROFILE: &str = "auth.user_profile";
 }

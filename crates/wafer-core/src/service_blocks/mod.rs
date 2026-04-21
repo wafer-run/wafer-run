@@ -4,6 +4,7 @@
 //! in `wafer_core::interfaces`. Platform-specific code only provides the service
 //! implementation; the block struct, `info()`, and message routing are shared.
 
+pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod database;
