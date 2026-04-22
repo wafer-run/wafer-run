@@ -5642,28 +5642,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wafer-site"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wafer-block-config",
- "wafer-block-crypto",
- "wafer-block-inspector",
- "wafer-block-local-storage",
- "wafer-block-logger",
- "wafer-block-web",
- "wafer-core",
- "wafer-flow-http-server",
- "wafer-run",
-]
-
-[[package]]
 name = "wafer-sql-utils"
 version = "0.1.0"
 dependencies = [
