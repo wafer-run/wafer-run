@@ -5289,21 +5289,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wafer-block-auth-validator"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde_json",
- "tokio",
- "tracing",
- "wafer-block",
- "wafer-core",
- "wafer-run",
- "wafer-test-support",
-]
-
-[[package]]
 name = "wafer-block-config"
 version = "0.1.0"
 dependencies = [
@@ -5639,8 +5624,6 @@ dependencies = [
  "tracing-test",
  "url",
  "wafer-block",
- "wafer-block-auth-validator",
- "wafer-block-iam-guard",
  "wafer-block-ip-rate-limit",
  "wafer-block-readonly-guard",
  "wafer-flow",
@@ -5683,10 +5666,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "wafer-block-auth-validator",
  "wafer-block-config",
  "wafer-block-crypto",
- "wafer-block-iam-guard",
  "wafer-block-inspector",
  "wafer-block-local-storage",
  "wafer-block-logger",

@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/wafer-block",
     "crates/wafer-block-macro",
-    "crates/wafer-block-auth-validator",
     "crates/wafer-block-config",
     "crates/wafer-block-cors",
     "crates/wafer-block-crypto",

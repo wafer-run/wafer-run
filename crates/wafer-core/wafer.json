@@ -2,7 +2,6 @@
   "name": "wafer-run-blocks",
   "version": "0.0.1",
   "blocks": [
-    { "name": "auth-validator", "source": "src/blocks/auth_validator", "interface": "middleware@v1", "summary": "Authentication and JWT token validation", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-auth-validator", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_auth_validator::register(&mut wafer)" } },
     { "name": "config", "source": "src/blocks/config", "interface": "config@v1", "summary": "Block configuration service", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-config", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_config::register(&mut wafer)" } },
     { "name": "cors", "source": "src/blocks/cors", "interface": "middleware@v1", "summary": "CORS header management", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-cors", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_cors::register(&mut wafer)" } },
     { "name": "crypto", "source": "src/blocks/crypto", "interface": "crypto@v1", "summary": "Cryptographic operations via CryptoService", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-crypto", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_crypto::register(&mut wafer)" } },
@@ -26,7 +25,7 @@
   "publish": {
     "repo": "wafer-run/wafer-run-blocks",
     "blocks": [
-      "auth-validator", "config", "cors", "crypto", "http-listener", "iam-guard", "inspector",
+      "config", "cors", "crypto", "http-listener", "iam-guard", "inspector",
       "local-storage", "logger", "monitoring", "network", "postgres",
       "ip-rate-limit", "readonly-guard", "router", "s3",
       "security-headers", "sqlite", "web"

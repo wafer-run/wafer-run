@@ -51,8 +51,6 @@ tempfile = { workspace = true }
 tracing-test = "0.2"
 wat = "1"
 wafer-test-support = { path = "../wafer-test-support" }
-wafer-block-auth-validator = { path = "../wafer-block-auth-validator" }
-wafer-block-iam-guard = { path = "../wafer-block-iam-guard" }
 wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 async-trait = { workspace = true }

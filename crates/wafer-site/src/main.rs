@@ -95,9 +95,14 @@ async fn main() {
         .expect("register crypto");
     }
 
-    // Register infrastructure blocks
-    wafer_block_auth_validator::register(&mut w).expect("register auth-validator");
-    wafer_block_iam_guard::register(&mut w).expect("register iam-guard");
+    // Register infrastructure blocks.
+    //
+    // Note: auth + role checks previously lived in the standalone
+    // `wafer-block-auth-validator` + `wafer-block-iam-guard` crates. They are
+    // now absorbed into the `suppers-ai/auth` block (solobase-core) and are
+    // reached via `wafer_core::interfaces::auth::AuthService`. The site does
+    // not currently need them; consumers that do should register
+    // `suppers-ai/auth` directly.
     wafer_block_inspector::register(&mut w).expect("register inspector");
     w.add_block_config(
         "wafer-run/inspector",
