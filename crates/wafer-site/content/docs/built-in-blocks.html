@@ -91,18 +91,15 @@ ACTIVE: built-in-blocks
 <h3>wafer-run/monitoring</h3>
 <p>Tracks request metrics: total count, error count, status code distribution, and path frequency. Exposes a stats endpoint at <code>/_stats</code> or <code>/_monitoring</code> that returns JSON with uptime and request data.</p>
 
-<h3>wafer-run/auth-validator</h3>
-<p>Authentication middleware supporting three token types:</p>
-<ul>
-    <li><strong>JWT Bearer tokens</strong> — validated via the crypto service</li>
-    <li><strong>API keys</strong> (<code>sb_</code> prefix) — hashed with SHA-256 and checked against the database for revocation/expiration</li>
-    <li><strong>httpOnly cookies</strong> — session-based authentication</li>
-</ul>
-<p>On success, sets <code>auth.user_id</code>, <code>auth.user_email</code>, and <code>auth.user_roles</code> in the message meta for downstream blocks.</p>
-
-<h3>wafer-run/iam-guard</h3>
-<p>Role-based access control. Checks if the authenticated user has the required role. Returns <code>401</code> if not authenticated, <code>403</code> if the role is missing.</p>
-<p>Config: <code>role</code> — required role name (default: <code>"admin"</code>).</p>
+<h3>suppers-ai/auth</h3>
+<p>Authentication and role-based access control, absorbing what used to be the
+separate <code>wafer-run/auth-validator</code> and <code>wafer-run/iam-guard</code>
+blocks. Lives in the <code>solobase-core</code> crate and is reached through
+<code>wafer_core::interfaces::auth::AuthService</code>. Supports JWT Bearer
+tokens, <code>sb_</code>-prefixed API keys, and httpOnly session cookies; sets
+<code>auth.user_id</code>, <code>auth.user_email</code>, and
+<code>auth.user_roles</code> on success and enforces required roles on
+protected handlers.</p>
 
 <h3>wafer-run/web</h3>
 <p>Static file server with MIME detection, SPA support, and intelligent caching. Blocks path traversal and dotfile access.</p>
@@ -126,7 +123,7 @@ ACTIVE: built-in-blocks
         "next": [{
             "block": "wafer-run/cors",
             "next": [{
-                "block": "wafer-run/auth-validator",
+                "block": "suppers-ai/auth",
                 "next": [{
                     "block": "my-handler"
                 }]

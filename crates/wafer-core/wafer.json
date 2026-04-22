@@ -6,7 +6,6 @@
     { "name": "cors", "source": "src/blocks/cors", "interface": "middleware@v1", "summary": "CORS header management", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-cors", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_cors::register(&mut wafer)" } },
     { "name": "crypto", "source": "src/blocks/crypto", "interface": "crypto@v1", "summary": "Cryptographic operations via CryptoService", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-crypto", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_crypto::register(&mut wafer)" } },
     { "name": "http-listener", "source": "src/blocks/http_listener", "interface": "http-listener@v1", "summary": "HTTP transport — listens for requests and converts to messages", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-http-listener", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_http_listener::register(&mut wafer)" } },
-    { "name": "iam-guard", "source": "src/blocks/iam_guard", "interface": "middleware@v1", "summary": "Identity and access management guard", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-iam-guard", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_iam_guard::register(&mut wafer)" } },
     { "name": "inspector", "source": "src/blocks/inspector", "interface": "handler@v1", "summary": "Runtime introspection and debugging", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-inspector", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_inspector::register(&mut wafer)" } },
     { "name": "local-storage", "source": "src/blocks/local_storage", "interface": "storage@v1", "summary": "Local filesystem storage", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-local-storage", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_local_storage::register(&mut wafer)" } },
     { "name": "logger", "source": "src/blocks/logger", "interface": "logger@v1", "summary": "Structured logging via tracing", "runtime": "native", "build": { "type": "cargo", "crate": "wafer-block-logger", "git": "https://github.com/wafer-run/wafer-run", "register": "wafer_block_logger::register(&mut wafer)" } },
@@ -25,7 +24,7 @@
   "publish": {
     "repo": "wafer-run/wafer-run-blocks",
     "blocks": [
-      "config", "cors", "crypto", "http-listener", "iam-guard", "inspector",
+      "config", "cors", "crypto", "http-listener", "inspector",
       "local-storage", "logger", "monitoring", "network", "postgres",
       "ip-rate-limit", "readonly-guard", "router", "s3",
       "security-headers", "sqlite", "web"

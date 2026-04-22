@@ -160,8 +160,6 @@ impl Block for ApiBlock {
                         {"name": "wafer-run/ip-rate-limit", "version": "0.1.0"},
                         {"name": "wafer-run/readonly-guard", "version": "0.1.0"},
                         {"name": "wafer-run/monitoring", "version": "0.1.0"},
-                        {"name": "wafer-run/auth-validator", "version": "0.1.0"},
-                        {"name": "wafer-run/iam-guard", "version": "0.1.0"},
                         {"name": "wafer-run/web", "version": "0.2.0"}
                     ]
                 }))

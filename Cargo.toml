@@ -8,7 +8,6 @@ members = [
     "crates/wafer-block-crypto",
     "crates/wafer-block-fastembed",
     "crates/wafer-block-http-listener",
-    "crates/wafer-block-iam-guard",
     "crates/wafer-block-inspector",
     "crates/wafer-block-ip-rate-limit",
     "crates/wafer-block-local-storage",
