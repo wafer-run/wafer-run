@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::credentials;
 
-#[derive(Debug)]
 pub enum YankOp {
     Yank,
     Unyank,
@@ -44,7 +43,7 @@ pub async fn run(
         action
     );
 
-    let mut req = reqwest::Client::new()
+    let mut req = crate::registry_client::client()
         .post(&endpoint)
         .bearer_auth(&entry.token);
     if let (YankOp::Yank, Some(r)) = (&op, &reason) {
@@ -53,9 +52,12 @@ pub async fn run(
     let resp = req.send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{op:?} failed: {status} {body}");
+        anyhow::bail!("{action} failed: {status}");
     }
-    println!("\u{2714} {op:?}: {org}/{block}@{version}");
+    let past_tense = match op {
+        YankOp::Yank => "Yanked",
+        YankOp::Unyank => "Unyanked",
+    };
+    println!("\u{2714} {past_tense} {org}/{block}@{version}");
     Ok(())
 }
