@@ -1,8 +1,10 @@
 mod build;
+mod commands;
 mod credentials;
 mod detect;
 mod manifest;
 mod package;
+mod registry_client;
 mod scaffold;
 mod test_runner;
 mod validate;
@@ -40,9 +42,26 @@ enum Commands {
     },
     /// Package the built block for publishing.
     Package,
+    /// Log in to a WAFER registry.
+    Login {
+        /// Registry URL (overrides WAFER_REGISTRY env).
+        #[arg(long)]
+        registry: Option<String>,
+    },
+    /// Remove stored credentials for a registry.
+    Logout {
+        #[arg(long)]
+        registry: Option<String>,
+    },
+    /// Show the user associated with the stored token.
+    Whoami {
+        #[arg(long)]
+        registry: Option<String>,
+    },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -59,6 +78,15 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Package => {
             package::package(&std::env::current_dir()?)?;
+        }
+        Commands::Login { registry } => {
+            commands::login::run(registry).await?;
+        }
+        Commands::Logout { registry } => {
+            commands::logout::run(registry).await?;
+        }
+        Commands::Whoami { registry } => {
+            commands::whoami::run(registry).await?;
         }
     }
 

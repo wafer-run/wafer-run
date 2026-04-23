@@ -27,6 +27,8 @@ rpassword = "7"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = "0.6"
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true
