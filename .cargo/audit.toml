@@ -10,5 +10,6 @@ ignore = [
     "RUSTSEC-2026-0097", # rand — waiting for upstream fix
     "RUSTSEC-2025-0119", # number_prefix unmaintained — transitive via fastembed → hf-hub → indicatif
     "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed → tokenizers
+    "RUSTSEC-2026-0104", # rustls-webpki panic on malformed CRL — 0.101.7 pinned by aws-sdk-s3, 0.103.12 pinned by reqwest-rustls 0.26 chain; DoS-only, no code exec
 ]
 informational_warnings = ["unmaintained"]
