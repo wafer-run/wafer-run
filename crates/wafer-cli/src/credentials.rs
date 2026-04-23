@@ -11,7 +11,7 @@ pub struct CredentialsFile {
     pub registries: HashMap<String, Entry>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Entry {
     pub registry: String,
     pub token: String,
@@ -99,6 +99,52 @@ mod tests {
             let p = path().unwrap();
             let m = std::fs::metadata(&p).unwrap();
             assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn resolve_returns_none_when_url_not_present() {
+        let cf = CredentialsFile {
+            default: Some(Entry {
+                registry: "https://wafer.run".into(),
+                token: "token1".into(),
+            }),
+            registries: Default::default(),
+        };
+        let result = resolve(&cf, "http://no-such-registry");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_default_wins_over_named_on_url_collision() {
+        let mut registries = std::collections::HashMap::new();
+        registries.insert(
+            "alt".into(),
+            Entry {
+                registry: "https://example.com".into(),
+                token: "ALT".into(),
+            },
+        );
+        let cf = CredentialsFile {
+            default: Some(Entry {
+                registry: "https://example.com".into(),
+                token: "DEFAULT".into(),
+            }),
+            registries,
+        };
+        let result = resolve(&cf, "https://example.com");
+        assert_eq!(result.map(|e| e.token.as_str()), Some("DEFAULT"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn path_with_home_unset_errors() {
+        let old_home = std::env::var("HOME").ok();
+        std::env::remove_var("HOME");
+        let result = path();
+        assert!(result.is_err());
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
         }
     }
 }
