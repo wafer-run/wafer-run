@@ -2,7 +2,7 @@
 
 **Goal:** Add `LlmService` trait + `MultiBackendLlmService` router + `wafer-run/llm` service block to wafer-core, mirroring the `DatabaseService`/`DatabaseBlock` pattern.
 
-**Spec:** `solobase/docs/superpowers/specs/2026-04-15-llm-service-refactor-design.md`
+**Spec:** `../../../docs/superpowers/specs/2026-04-15-llm-service-refactor-design.md`
 
 **Architecture:** The trait lives in `wafer-core/src/interfaces/llm/`. The service block lives in `wafer-core/src/service_blocks/llm.rs`. The block buffers the `ChatRequest` from `InputStream`, calls the service, streams `ChatChunk`s out as `StreamEvent::Chunk` (JSON-encoded) on `OutputStream`, terminates with `Complete` or `Error`. Cancellation on drop via `OutputStream`'s built-in `CancellationToken`.
 

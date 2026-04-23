@@ -8,15 +8,21 @@
 //! `http.header.x-auth-scope` and `http.header.x-auth-role` (the same
 //! convention `Message::header()` reads for ordinary HTTP headers).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
     *,
 };
 
-use super::service::{AuthError, AuthService, Role, TokenScope};
-use crate::interfaces::handler_util::to_output;
+use super::service::{AuthError, AuthService, Role, TokenScope, UserId};
+use crate::interfaces::handler_util::{decode_or_err, to_output};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserProfileRequest {
+    user_id: String,
+}
 
 fn err_to_wafer(e: AuthError) -> WaferError {
     match e {
@@ -34,11 +40,7 @@ struct UserIdResponse {
 }
 
 /// Handle an auth message by delegating to the given service.
-pub async fn handle_message(
-    service: &dyn AuthService,
-    msg: &Message,
-    _body: &[u8],
-) -> OutputStream {
+pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8]) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::AUTH_REQUIRE_USER => match service.require_user(msg).await {
             Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
@@ -68,6 +70,13 @@ pub async fn handle_message(
             };
             match service.require_role(msg, role).await {
                 Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
+                Err(e) => OutputStream::error(err_to_wafer(e)),
+            }
+        }
+        ServiceOp::AUTH_USER_PROFILE => {
+            let req = decode_or_err!(body, UserProfileRequest, "auth.user_profile");
+            match service.user_profile(UserId(req.user_id)).await {
+                Ok(p) => to_output(&p),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
         }
