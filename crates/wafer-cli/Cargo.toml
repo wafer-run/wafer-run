@@ -19,7 +19,7 @@ wafer-block = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
 toml = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = ["full"] }
 dirs = "5"
 webbrowser = "1"
