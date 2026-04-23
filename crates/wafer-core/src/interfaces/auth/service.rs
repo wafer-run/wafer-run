@@ -6,10 +6,10 @@ use thiserror::Error;
 use wafer_block::Message;
 
 /// Opaque user identifier. Wraps a uuid v7 string.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct UserId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     User,
     Admin,
@@ -20,7 +20,7 @@ pub enum TokenScope {
     Publish,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OrgSummary {
     pub name: String,
     pub verified_via: Option<String>,
@@ -28,7 +28,7 @@ pub struct OrgSummary {
     pub is_reserved: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserProfile {
     pub id: UserId,
     pub email: String,

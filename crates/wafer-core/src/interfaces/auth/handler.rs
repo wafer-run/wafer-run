@@ -8,15 +8,20 @@
 //! `http.header.x-auth-scope` and `http.header.x-auth-role` (the same
 //! convention `Message::header()` reads for ordinary HTTP headers).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
     *,
 };
 
-use super::service::{AuthError, AuthService, Role, TokenScope};
+use super::service::{AuthError, AuthService, Role, TokenScope, UserId};
 use crate::interfaces::handler_util::to_output;
+
+#[derive(Deserialize)]
+struct UserProfileRequest {
+    user_id: String,
+}
 
 fn err_to_wafer(e: AuthError) -> WaferError {
     match e {
@@ -68,6 +73,21 @@ pub async fn handle_message(
             };
             match service.require_role(msg, role).await {
                 Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
+                Err(e) => OutputStream::error(err_to_wafer(e)),
+            }
+        }
+        ServiceOp::AUTH_USER_PROFILE => {
+            let req: UserProfileRequest = match serde_json::from_slice(_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return OutputStream::error(WaferError::new(
+                        ErrorCode::INVALID_ARGUMENT,
+                        format!("user_profile: bad body: {e}"),
+                    ))
+                }
+            };
+            match service.user_profile(UserId(req.user_id)).await {
+                Ok(p) => to_output(&p),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
         }
