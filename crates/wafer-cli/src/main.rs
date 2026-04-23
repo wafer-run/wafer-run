@@ -1,4 +1,5 @@
 mod build;
+mod credentials;
 mod detect;
 mod manifest;
 mod package;
