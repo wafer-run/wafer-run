@@ -39,6 +39,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
         );
     }
 
+    // TODO: stream via reqwest::Body::wrap_stream once the registry cap grows past a few hundred MiB.
     let bytes =
         std::fs::read(&tarball_path).with_context(|| format!("read {}", tarball_path.display()))?;
 
@@ -69,7 +70,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     );
 
     let endpoint = format!("{}/registry/api/publish", url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
+    let resp = crate::registry_client::client_with_timeout(120)
         .post(&endpoint)
         .bearer_auth(&entry.token)
         .multipart(form)

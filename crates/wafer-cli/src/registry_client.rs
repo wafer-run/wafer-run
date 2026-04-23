@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
@@ -18,13 +20,30 @@ pub struct MeResponse {
     pub is_admin: bool,
 }
 
+/// Build a reqwest client with a default 60-second timeout and user-agent.
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .user_agent(concat!("wafer-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("build reqwest client")
+}
+
+/// Build a reqwest client with a custom timeout and user-agent.
+pub fn client_with_timeout(secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(secs))
+        .user_agent(concat!("wafer-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("build reqwest client")
+}
+
 pub async fn exchange_code(registry: &str, code: &str) -> Result<ExchangeResponse> {
     let url = format!(
         "{}/registry/api/cli-login/exchange",
         registry.trim_end_matches('/')
     );
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(&url)
         .json(&serde_json::json!({ "code": code }))
         .send()
@@ -44,8 +63,7 @@ pub async fn exchange_code(registry: &str, code: &str) -> Result<ExchangeRespons
 
 pub async fn me(registry: &str, token: &str) -> Result<MeResponse> {
     let url = format!("{}/registry/api/me", registry.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .get(&url)
         .bearer_auth(token)
         .send()
