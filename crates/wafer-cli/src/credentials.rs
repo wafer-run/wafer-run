@@ -1,6 +1,7 @@
+use std::{collections::HashMap, fs, path::PathBuf};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct CredentialsFile {

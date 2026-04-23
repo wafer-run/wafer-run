@@ -1,5 +1,7 @@
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{
+    matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_wafer")

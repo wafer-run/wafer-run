@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::credentials;
-use crate::registry_client;
+use crate::{credentials, registry_client};
 
 fn resolve_registry(flag: Option<String>) -> String {
     flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
