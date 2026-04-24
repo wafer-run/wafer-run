@@ -16,7 +16,7 @@
 //!   rejected on parse.
 //! - `[[package]]` entries are stored sorted by `name`. `insert_or_replace`
 //!   + `to_toml_string` preserve that invariant so any consumer can rely on
-//!   deterministic output regardless of insertion order.
+//!     deterministic output regardless of insertion order.
 //! - `source` follows the Cargo convention `registry+<base-url>` — forward-
 //!   compatible with future multi-registry support.
 

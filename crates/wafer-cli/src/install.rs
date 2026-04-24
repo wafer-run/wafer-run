@@ -37,6 +37,7 @@ pub struct InstallOutcome {
     pub org: String,
     pub block: String,
     pub version: String,
+    #[allow(dead_code)]
     pub sha256: String,
     pub from_cache: bool,
 }

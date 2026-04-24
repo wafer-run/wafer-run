@@ -1,4 +1,5 @@
 pub mod info;
+pub mod install;
 pub mod login;
 pub mod logout;
 pub mod publish;
