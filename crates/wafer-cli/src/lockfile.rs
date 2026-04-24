@@ -38,7 +38,7 @@ pub struct LockfilePackage {
     pub source: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Lockfile {
     pub version: u32,
     #[serde(default, rename = "package")]
@@ -97,8 +97,14 @@ impl Lockfile {
         Ok(out)
     }
 
-    /// Atomically write the lockfile to `path` via a temp file + rename.
-    /// Creates parent directories as needed.
+    /// Atomically (w.r.t. concurrent readers on the same filesystem) write the
+    /// lockfile to `path` via a temp file + rename. Creates parent directories
+    /// as needed.
+    ///
+    /// Not crash-atomic — a power loss between the temp write and the rename
+    /// can leave the temp file behind, and the Linux kernel does not fsync the
+    /// parent directory on rename. For a lockfile this is acceptable: the
+    /// next `wafer install` re-derives the entry.
     pub fn write_atomic(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -107,7 +113,7 @@ impl Lockfile {
             }
         }
         let body = self.to_toml_string()?;
-        let tmp = tmp_sibling(path);
+        let tmp = tmp_sibling(path)?;
         fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
         fs::rename(&tmp, path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -116,10 +122,14 @@ impl Lockfile {
 }
 
 /// Produce a sibling temp-file path, e.g. `wafer.lock` → `wafer.lock.tmp-<uuid>`.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut out = path.as_os_str().to_os_string();
-    out.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
-    PathBuf::from(out)
+/// Handles trailing slashes and produces an error for invalid paths.
+fn tmp_sibling(path: &Path) -> Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!("invalid lockfile path (no file name): {}", path.display())
+    })?;
+    let mut name_os = file_name.to_os_string();
+    name_os.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    Ok(path.with_file_name(name_os))
 }
 
 #[cfg(test)]
@@ -238,5 +248,20 @@ source = "registry+https://wafer.run"
         let parsed: Lockfile = toml::from_str(&s1).unwrap();
         let s2 = parsed.to_toml_string().unwrap();
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn load_rejects_missing_version_field() {
+        let body =
+            "[[package]]\nname = \"a/b\"\nversion = \"0.1.0\"\nsha256 = \"abc\"\nsource = \"x\"\n";
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("wafer.lock");
+        fs::write(&path, body).unwrap();
+        let err = format!("{:#}", Lockfile::load(&path).unwrap_err());
+        // With Default gone, serde reports the missing field directly.
+        assert!(
+            err.contains("missing field") && err.contains("version"),
+            "expected missing-version diagnostic, got: {err}"
+        );
     }
 }
