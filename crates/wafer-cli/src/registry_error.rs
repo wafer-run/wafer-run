@@ -77,8 +77,9 @@ impl std::error::Error for RegistryError {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use reqwest::StatusCode;
+
+    use super::*;
 
     #[test]
     fn parses_envelope_and_renders_message() {
