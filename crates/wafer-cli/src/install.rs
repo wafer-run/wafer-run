@@ -142,10 +142,36 @@ pub async fn install_cache_only(
     block: &str,
     version_req: Option<&str>,
 ) -> Result<InstallOutcome> {
-    // Step 1: resolve version.
+    // Pre-load lockfile for fast-path checks: if an explicit version was
+    // requested and the lockfile already knows about it, we can skip both
+    // the registry call and the flock entirely.
+    let pre_lock_lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
+
+    // Step 1: resolve version. For explicit versions, try the lockfile first
+    // to avoid a network call if we already have it cached.
     let (resolved_version, expected_sha, yanked_warning): (String, String, Option<String>) =
         match version_req {
             Some(ver) => {
+                // Fast path: if the lockfile already has this version + the
+                // cache is populated with it, skip the registry call entirely.
+                let name = format!("{org}/{block}");
+                if let Some(entry) = pre_lock_lf
+                    .packages
+                    .iter()
+                    .find(|p| p.name == name && p.version == ver)
+                {
+                    if cache.is_populated(org, block, ver) {
+                        // Network-free: use the lockfile entry.
+                        return Ok(InstallOutcome {
+                            org: org.into(),
+                            block: block.into(),
+                            version: entry.version.clone(),
+                            sha256: entry.sha256.clone(),
+                            from_cache: true,
+                        });
+                    }
+                }
+                // Fallback: ask the registry.
                 let vd: VersionDetail =
                     registry_client::get_version(registry, org, block, ver).await?;
                 let warn = if vd.yanked != 0 {
@@ -169,9 +195,7 @@ pub async fn install_cache_only(
     }
 
     // Step 2 (pre-lock): load the lockfile for the fast-path cache_hit check.
-    // A second, canonical load happens under the lock below — this one is
-    // only to skip the flock when we're already satisfied.
-    let pre_lock_lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
+    // (Already loaded above for the explicit-version optimization.)
 
     // Step 3: pre-lock cache-hit shortcut.
     if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version) {
