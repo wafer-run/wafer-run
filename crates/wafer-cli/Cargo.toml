@@ -26,8 +26,10 @@ sha2 = { workspace = true }
 tar = "0.4"
 tempfile = { workspace = true }
 terminal_size = "0.3"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
+toml_edit = "0.22"
 uuid = { workspace = true }
 wafer-block = { workspace = true }
 wasmi = { workspace = true }
