@@ -52,6 +52,13 @@ pub enum RuntimeError {
     #[error("registry error: {0}")]
     Registry(String),
 
+    /// Error loading blocks from `wafer.lock` + cache (Path B).
+    /// Carries a formatted message from the internal `LockLoaderError`
+    /// in wafer-run (structured upstream, flattened here to keep wafer-block
+    /// free of wafer-run / toml / wasmi deps).
+    #[error("lockfile error: {0}")]
+    Lockfile(String),
+
     /// The remote block requires a newer ABI version than the runtime supports.
     #[error("ABI mismatch for block '{name}': requires {required}, runtime supports {supported}")]
     AbiMismatch {
