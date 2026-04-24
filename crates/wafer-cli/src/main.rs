@@ -12,6 +12,7 @@ mod registry_error;
 mod scaffold;
 mod test_runner;
 mod validate;
+mod wafer_toml;
 
 use std::path::PathBuf;
 
