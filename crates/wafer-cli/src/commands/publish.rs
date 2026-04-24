@@ -78,11 +78,8 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
         .await
         .with_context(|| format!("POST {endpoint}"))?;
 
-    let status = resp.status();
+    let resp = crate::registry_client::ensure_ok(resp, "publish").await?;
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!("publish failed: {status} {body}");
-    }
 
     let json: serde_json::Value =
         serde_json::from_str(&body).with_context(|| format!("decode publish response: {body}"))?;

@@ -5,6 +5,7 @@ mod detect;
 mod manifest;
 mod package;
 mod registry_client;
+mod registry_error;
 mod scaffold;
 mod test_runner;
 mod validate;
