@@ -50,10 +50,9 @@ pub async fn run(
         req = req.json(&serde_json::json!({ "reason": r }));
     }
     let resp = req.send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        anyhow::bail!("{action} failed: {status}");
-    }
+    // `action` is a &'static str ("yank" or "unyank") so it satisfies the
+    // ensure_ok op parameter.
+    let _resp = crate::registry_client::ensure_ok(resp, action).await?;
     let past_tense = match op {
         YankOp::Yank => "Yanked",
         YankOp::Unyank => "Unyanked",
