@@ -12,9 +12,10 @@ use anyhow::{bail, Result};
 
 use crate::registry_client::{self, PackageDetail, VersionDetail, VersionSummary};
 
-/// Parse `org/block` or `org/block@version`. Extra `/` or missing segments
-/// are rejected with a user-friendly error.
+/// Parse `org/block` or `org/block@version`. Extra `/`, missing segments,
+/// or stray whitespace are rejected with a user-friendly error.
 pub(crate) fn parse_target(target: &str) -> Result<(String, String, Option<String>)> {
+    let target = target.trim();
     let (left, version) = match target.split_once('@') {
         Some((l, v)) if !v.is_empty() => (l, Some(v.to_string())),
         Some((_, _)) => bail!("target must be org/block or org/block@version"),
@@ -204,6 +205,21 @@ mod tests {
     #[test]
     fn parse_target_rejects_too_many_segments() {
         assert!(parse_target("acme/widget/sub").is_err());
+    }
+
+    #[test]
+    fn parse_target_rejects_interior_empty_segments() {
+        // Leading slash, empty middle segment, bare slash, empty string.
+        assert!(parse_target("/widget").is_err());
+        assert!(parse_target("acme//widget").is_err());
+        assert!(parse_target("/").is_err());
+        assert!(parse_target("").is_err());
+    }
+
+    #[test]
+    fn parse_target_trims_whitespace() {
+        let (o, b, v) = parse_target("  acme/widget  ").unwrap();
+        assert_eq!((o.as_str(), b.as_str(), v), ("acme", "widget", None));
     }
 
     #[test]
