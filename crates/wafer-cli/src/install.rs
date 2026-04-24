@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
 use sha2::{Digest, Sha256};
-use tar::Archive;
+use tar::{Archive, EntryType};
 
 use crate::{
     cache::CacheRoot,
@@ -109,8 +109,20 @@ pub(crate) fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<usize> {
             bail!("tarball contains unsafe path: {}", entry_path.display());
         }
 
+        // Refuse symlink / hardlink entries. A symlink entry whose target
+        // escapes `dest` (e.g. `foo -> ../../etc`) followed by a regular
+        // file written through that symlink would bypass the path check
+        // above. Block archives shouldn't contain links at all.
+        let entry_type = entry.header().entry_type();
+        if entry_type == EntryType::Symlink || entry_type == EntryType::Link {
+            bail!(
+                "tarball contains link entry (not allowed): {}",
+                entry_path.display()
+            );
+        }
+
         let target = dest.join(&entry_path);
-        if entry.header().entry_type().is_dir() {
+        if entry_type.is_dir() {
             fs::create_dir_all(&target).with_context(|| format!("mkdir {}", target.display()))?;
             continue;
         }
@@ -417,6 +429,42 @@ mod tests {
         let dest2 = tmp.path().join("out2");
         let err = extract_tarball(&bad, &dest2).unwrap_err().to_string();
         assert!(err.contains("unsafe path"), "{err}");
+    }
+
+    #[test]
+    fn extract_tarball_rejects_symlink_and_hardlink_entries() {
+        use flate2::{write::GzEncoder, Compression};
+        use tempfile::tempdir;
+
+        fn build(entry_type: tar::EntryType) -> Vec<u8> {
+            let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+            {
+                let mut tb = tar::Builder::new(&mut gz);
+                let mut h = tar::Header::new_gnu();
+                h.set_path("link").unwrap();
+                h.set_size(0);
+                h.set_entry_type(entry_type);
+                h.set_link_name("../../escape").unwrap();
+                h.set_cksum();
+                tb.append(&h, std::io::empty()).unwrap();
+                tb.finish().unwrap();
+            }
+            gz.finish().unwrap()
+        }
+
+        let tmp = tempdir().unwrap();
+
+        let sym_bytes = build(tar::EntryType::Symlink);
+        let err = extract_tarball(&sym_bytes, &tmp.path().join("sym"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("link entry"), "{err}");
+
+        let hard_bytes = build(tar::EntryType::Link);
+        let err = extract_tarball(&hard_bytes, &tmp.path().join("hard"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("link entry"), "{err}");
     }
 
     #[test]
