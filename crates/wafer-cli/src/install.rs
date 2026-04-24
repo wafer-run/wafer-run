@@ -313,6 +313,29 @@ pub async fn install_cache_only(
     })
 }
 
+/// Full install: `install_cache_only` + mutate `wafer.toml`'s
+/// `[dependencies]` to pin the resolved version.
+pub async fn install_full(
+    registry: &str,
+    cache: &CacheRoot,
+    lockfile_path: &std::path::Path,
+    wafer_toml_path: &std::path::Path,
+    org: &str,
+    block: &str,
+    version_req: Option<&str>,
+) -> Result<InstallOutcome> {
+    let outcome =
+        install_cache_only(registry, cache, lockfile_path, org, block, version_req).await?;
+
+    // Mutate wafer.toml to pin the resolved version.
+    let mut wt = crate::wafer_toml::WaferToml::read(wafer_toml_path)?;
+    let name = format!("{org}/{block}");
+    wt.insert_or_replace_dependency(&name, &outcome.version);
+    wt.write_atomic(wafer_toml_path)?;
+
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
