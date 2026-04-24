@@ -23,6 +23,8 @@ pub mod router;
 pub mod runtime;
 pub mod schema;
 pub mod security;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod static_registration;
 pub mod types;
 pub mod waferflow;
 pub mod wasm;
@@ -39,6 +41,7 @@ pub use executor::{extract_path_vars, match_path, matches_pattern};
 #[cfg(not(target_arch = "wasm32"))]
 pub use helpers::expand_env_vars;
 pub use helpers::sha256_hex;
+pub use inventory;
 pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};
 pub use router::Router;
@@ -47,6 +50,8 @@ pub use runtime::RuntimeHandle;
 pub use runtime::Wafer;
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
+#[cfg(not(target_arch = "wasm32"))]
+pub use static_registration::StaticBlockRegistration;
 pub use types::{
     AuthLevel, ErrorCode, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType, Message,
     MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
