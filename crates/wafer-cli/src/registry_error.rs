@@ -9,7 +9,6 @@ use std::fmt;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ErrorEnvelope {
-    #[expect(dead_code, reason = "read by hint() which is wired in a later task")]
     pub error: String,
     pub message: String,
 }
@@ -37,7 +36,19 @@ impl RegistryError {
     }
 
     fn hint(&self) -> Option<&'static str> {
-        None // filled in by a later task
+        if self.status == reqwest::StatusCode::UNAUTHORIZED {
+            return Some("run 'wafer login' (or '--registry URL' for a non-default registry)");
+        }
+        let code = self.envelope.as_ref().map(|e| e.error.as_str());
+        match code {
+            Some("version-exists") => Some(
+                "bump 'version' in wafer.toml, or run 'wafer unyank' if you meant to re-publish",
+            ),
+            Some("invalid-tarball") => {
+                Some("'wafer publish --dry-run' validates locally without uploading")
+            }
+            _ => None,
+        }
     }
 }
 
@@ -114,5 +125,45 @@ mod tests {
             "len={}",
             err.raw_body.chars().count()
         );
+    }
+
+    #[test]
+    fn hint_on_401_even_without_envelope() {
+        let err = RegistryError::new("publish", StatusCode::UNAUTHORIZED, String::new());
+        let s = err.to_string();
+        assert!(s.contains("\nhint: run 'wafer login'"), "{s}");
+    }
+
+    #[test]
+    fn hint_on_version_exists() {
+        let err = RegistryError::new(
+            "publish",
+            StatusCode::CONFLICT,
+            r#"{"error":"version-exists","message":"already published"}"#.into(),
+        );
+        let s = err.to_string();
+        assert!(s.contains("\nhint: bump 'version' in wafer.toml"), "{s}");
+    }
+
+    #[test]
+    fn hint_on_invalid_tarball() {
+        let err = RegistryError::new(
+            "publish",
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid-tarball","message":"missing manifest"}"#.into(),
+        );
+        let s = err.to_string();
+        assert!(s.contains("\nhint: 'wafer publish --dry-run'"), "{s}");
+    }
+
+    #[test]
+    fn no_hint_for_unknown_code() {
+        let err = RegistryError::new(
+            "publish",
+            StatusCode::IM_A_TEAPOT,
+            r#"{"error":"unknown-code","message":"who knows"}"#.into(),
+        );
+        let s = err.to_string();
+        assert!(!s.contains("hint:"), "{s}");
     }
 }
