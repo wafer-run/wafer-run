@@ -1,0 +1,26 @@
+error[E0599]: no function or associated item named `new` found for struct `Widget` in the current scope
+  --> tests/fixtures/fail_missing_new.rs:12:1
+   |
+ 7 |   struct Widget;
+   |   ------------- function or associated item `new` not found for this struct
+...
+12 |   #[wafer_block(
+   |  _^
+13 | |     name = "acme/widget",
+14 | |     version = "0.1.0",
+15 | |     interface = "handler@v1",
+16 | |     summary = "Test widget"
+17 | | )]
+   | |__^ function or associated item not found in `Widget`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `new`, perhaps you need to implement one of them:
+           candidate #1: `crypto_common::KeyInit`
+           candidate #2: `crypto_common::KeyIvInit`
+           candidate #3: `digest::VariableOutput`
+           candidate #4: `digest::core_api::VariableOutputCore`
+           candidate #5: `digest::digest::Digest`
+           candidate #6: `parking_lot_core::thread_parker::ThreadParkerT`
+           candidate #7: `ring::aead::BoundKey`
+           candidate #8: `typenum::marker_traits::Bit`
+   = note: this error originates in the attribute macro `wafer_block` (in Nightly builds, run with -Z macro-backtrace for more info)

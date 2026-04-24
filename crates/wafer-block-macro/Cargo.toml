@@ -19,6 +19,7 @@ wafer-sdk = { path = "../../sdks/rust" }
 wafer-run = { path = "../wafer-run" }
 async-trait = "0.1"
 serde_json = { workspace = true }
+trybuild = "1"
 
 [lints]
 workspace = true
