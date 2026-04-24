@@ -513,7 +513,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        #[cfg(not(test))]
+        #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_info() -> i64 {
             let info = <#struct_ty>::block_info();
@@ -524,7 +524,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
-        #[cfg(not(test))]
+        #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
             let msg_bytes = unsafe {
@@ -542,7 +542,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
-        #[cfg(not(test))]
+        #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_lifecycle(evt_ptr: i32, evt_len: i32) -> i64 {
             let evt_bytes = unsafe {
@@ -556,6 +556,15 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             let len = result_bytes.len() as u32;
             ::std::mem::forget(result_bytes);
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        ::wafer_run::inventory::submit! {
+            ::wafer_run::StaticBlockRegistration {
+                name: #name,
+                factory: || ::std::sync::Arc::new(<#struct_ty>::new())
+                    as ::std::sync::Arc<dyn ::wafer_run::Block>,
+            }
         }
     };
 

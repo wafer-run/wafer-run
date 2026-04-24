@@ -5,6 +5,17 @@
 //! generated `#[no_mangle]` ABI exports (`__wafer_info`, `__wafer_handle`,
 //! `__wafer_lifecycle`). Tests call the generated `block_info()` associated
 //! function which returns `BlockInfo` directly without the WASM ABI overhead.
+//!
+//! NOTE: These tests are gated to `cfg(target_arch = "wasm32")` because the
+//! host-side expansion of `#[wafer_block]` now emits a
+//! `::wafer_run::inventory::submit!` entry which requires the annotated type
+//! to expose `fn new() -> Self` and implement `::wafer_run::Block`, plus the
+//! test crate to depend on `wafer-run`. That would introduce a dependency
+//! cycle (`wafer-run` already depends on `wafer-block-macro`), so the
+//! host-path coverage for block metadata has been moved to the `wafer-run`
+//! integration tests instead.
+
+#![cfg(target_arch = "wasm32")]
 
 use wafer_block::Message;
 use wafer_block_macro::wafer_block;
