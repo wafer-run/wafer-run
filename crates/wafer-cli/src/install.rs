@@ -167,11 +167,13 @@ pub async fn install_cache_only(
         eprintln!("{w}");
     }
 
-    // Step 2: load/create the lockfile.
-    let mut lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
+    // Step 2 (pre-lock): load the lockfile for the fast-path cache_hit check.
+    // A second, canonical load happens under the lock below — this one is
+    // only to skip the flock when we're already satisfied.
+    let pre_lock_lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
 
     // Step 3: pre-lock cache-hit shortcut.
-    if let Some(cached_sha) = cache_hit(cache, &lf, org, block, &resolved_version) {
+    if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version) {
         if cached_sha == expected_sha {
             return Ok(InstallOutcome {
                 org: org.into(),
@@ -183,8 +185,14 @@ pub async fn install_cache_only(
         }
     }
 
-    // Step 4: download under the flock.
+    // Step 4: acquire the flock.
     let guard = cache.acquire_lock()?;
+
+    // Reload the lockfile under the lock — another installer may have
+    // written a newer lockfile while we were waiting for the flock, and
+    // we must not stomp their entry when we write below.
+    let mut lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
+
     let final_dir = cache.package_dir(org, block, &resolved_version);
     let bytes = if final_dir.is_dir() {
         // Another process may have populated while we waited for the lock.
@@ -193,7 +201,7 @@ pub async fn install_cache_only(
                 && p.version == resolved_version
                 && p.sha256 == expected_sha
         }) {
-            drop(guard);
+            // `guard` drops on return — RAII releases the flock.
             return Ok(InstallOutcome {
                 org: org.into(),
                 block: block.into(),
@@ -226,7 +234,12 @@ pub async fn install_cache_only(
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let tmp_name = format!(".extract-{}", uuid::Uuid::new_v4());
     let tmp_dir = parent.join(&tmp_name);
-    extract_tarball(&bytes, &tmp_dir)?;
+    if let Err(e) = extract_tarball(&bytes, &tmp_dir) {
+        // Mid-stream failure (disk full, bad tarball, ...) may have left
+        // a partially populated tmp dir — remove it before bailing.
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
     if let Err(e) = fs::rename(&tmp_dir, &final_dir) {
         // Clean up on failure; one common cause is a race where another
         // process completed the same install first.
@@ -239,9 +252,10 @@ pub async fn install_cache_only(
             )
         });
     }
-    drop(guard);
 
-    // Step 5: update lockfile.
+    // Step 5: update lockfile. This must happen while we still hold the
+    // flock, otherwise another installer could acquire the lock, write its
+    // own entry, and our write below would silently overwrite it.
     lf.insert_or_replace(lockfile_entry(
         registry,
         org,
@@ -250,6 +264,8 @@ pub async fn install_cache_only(
         &expected_sha,
     ));
     lf.write_atomic(lockfile_path)?;
+
+    drop(guard);
 
     Ok(InstallOutcome {
         org: org.into(),
@@ -376,6 +392,17 @@ mod tests {
         let dest2 = tmp.path().join("out2");
         let err = extract_tarball(&bad, &dest2).unwrap_err().to_string();
         assert!(err.contains("unsafe path"), "{err}");
+    }
+
+    #[test]
+    fn cache_hit_returns_none_when_dir_exists_but_no_lockfile_entry() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        fs::create_dir_all(cache.package_dir("a", "b", "1.0.0")).unwrap();
+        let lf = Lockfile::new();
+        // This is the "stale dir" case: dir present, no lockfile entry.
+        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").is_none());
     }
 
     #[test]
