@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -49,11 +49,7 @@ pub async fn exchange_code(registry: &str, code: &str) -> Result<ExchangeRespons
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        bail!("exchange failed: {status} {body}");
-    }
+    let resp = ensure_ok(resp, "login").await?;
     let parsed: ExchangeResponse = resp
         .json()
         .await
@@ -69,14 +65,21 @@ pub async fn me(registry: &str, token: &str) -> Result<MeResponse> {
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        bail!("me failed: {status} {body}");
-    }
+    let resp = ensure_ok(resp, "whoami").await?;
     let parsed: MeResponse = resp
         .json()
         .await
         .with_context(|| format!("decode me response from {url}"))?;
     Ok(parsed)
+}
+
+/// Convert a reqwest `Response` into an error if the status is not 2xx.
+/// The body is consumed so callers should only call this before reading JSON.
+pub async fn ensure_ok(resp: reqwest::Response, op: &'static str) -> Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Err(crate::registry_error::RegistryError::new(op, status, body).into())
 }

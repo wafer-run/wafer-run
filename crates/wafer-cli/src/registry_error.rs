@@ -5,12 +5,11 @@
 //! and renders a one-line error with an optional hint. Callers go through
 //! [`crate::registry_client::ensure_ok`] which constructs [`RegistryError`].
 
-#![allow(dead_code)] // removed once ensure_ok is wired in Task 2
-
 use std::fmt;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ErrorEnvelope {
+    #[expect(dead_code, reason = "read by hint() which is wired in a later task")]
     pub error: String,
     pub message: String,
 }
