@@ -92,10 +92,12 @@ impl CacheRoot {
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
 
-        let timeout_secs = std::env::var(LOCK_TIMEOUT_ENV)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(DEFAULT_LOCK_TIMEOUT_SECS as i64);
+        let timeout_secs = match std::env::var(LOCK_TIMEOUT_ENV) {
+            Ok(s) => s
+                .parse::<i64>()
+                .with_context(|| format!("{LOCK_TIMEOUT_ENV} must be an integer, got {s:?}"))?,
+            Err(_) => DEFAULT_LOCK_TIMEOUT_SECS as i64,
+        };
         let deadline = if timeout_secs > 0 {
             Some(Instant::now() + Duration::from_secs(timeout_secs as u64))
         } else {
@@ -141,11 +143,25 @@ impl Drop for CacheLock {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread, time::Instant};
+    use std::{
+        sync::{Arc, Mutex, OnceLock},
+        thread,
+        time::Instant,
+    };
 
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Serializes tests that mutate the process-wide
+    /// `WAFER_INSTALL_LOCK_TIMEOUT_SECS` env var so parallel test threads
+    /// don't race each other.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn package_dir_composes_segments() {
@@ -176,6 +192,7 @@ mod tests {
 
     #[test]
     fn acquire_lock_then_release_allows_next_acquire() {
+        let _guard = env_guard();
         let tmp = tempdir().unwrap();
         let c = CacheRoot::at(tmp.path().to_path_buf());
         {
@@ -187,6 +204,7 @@ mod tests {
 
     #[test]
     fn concurrent_acquire_blocks_until_first_releases() {
+        let _guard = env_guard();
         let tmp = tempdir().unwrap();
         let c = Arc::new(CacheRoot::at(tmp.path().to_path_buf()));
 
@@ -217,7 +235,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_timeout_env_produces_clear_error() {
+        let _guard = env_guard();
+        let tmp = tempdir().unwrap();
+        let c = CacheRoot::at(tmp.path().to_path_buf());
+        std::env::set_var(LOCK_TIMEOUT_ENV, "5s");
+        let err = c.acquire_lock().unwrap_err().to_string();
+        std::env::remove_var(LOCK_TIMEOUT_ENV);
+        assert!(
+            err.contains("must be an integer") && err.contains("\"5s\""),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn lock_timeout_surfaces_as_error() {
+        let _guard = env_guard();
         // NOTE: process-level flocks are per-file-descriptor on Linux but
         // per-process-open on some OSes. Rather than mix threads (which
         // share the fd table on Linux) we simulate contention by opening a
