@@ -75,7 +75,10 @@ pub async fn me(registry: &str, token: &str) -> Result<MeResponse> {
 
 /// Convert a reqwest `Response` into an error if the status is not 2xx.
 /// The body is consumed so callers should only call this before reading JSON.
-pub async fn ensure_ok(resp: reqwest::Response, op: &'static str) -> Result<reqwest::Response> {
+pub(crate) async fn ensure_ok(
+    resp: reqwest::Response,
+    op: &'static str,
+) -> Result<reqwest::Response> {
     if resp.status().is_success() {
         return Ok(resp);
     }
