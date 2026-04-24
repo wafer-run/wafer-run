@@ -52,9 +52,8 @@ impl WaferToml {
     /// empty vector if the table is absent. Values that aren't strings
     /// are skipped silently — v1 only supports exact-pin strings.
     pub fn dependencies(&self) -> Vec<(String, String)> {
-        let deps = match self.doc.get("dependencies").and_then(|i| i.as_table()) {
-            Some(t) => t,
-            None => return Vec::new(),
+        let Some(deps) = self.doc.get("dependencies").and_then(|i| i.as_table()) else {
+            return Vec::new();
         };
         deps.iter()
             .filter_map(|(k, v)| match v {
@@ -78,6 +77,10 @@ impl WaferToml {
 
     /// Remove a `[dependencies]."{name}"` entry if present. Returns true
     /// when an entry was removed.
+    ///
+    /// Not yet wired to a CLI command; kept as the symmetric counterpart
+    /// to [`Self::insert_or_replace_dependency`] for future `wafer remove`.
+    #[allow(dead_code)]
     pub fn remove_dependency(&mut self, name: &str) -> bool {
         let Some(table) = self
             .doc

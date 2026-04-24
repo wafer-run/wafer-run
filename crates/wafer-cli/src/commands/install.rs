@@ -1,32 +1,47 @@
-//! `wafer install <org>/<block>[@<ver>] --cache-only [--registry URL]`
+//! `wafer install [<target>] [--cache-only] [--frozen] [--registry URL]`
 //!
-//! PR b ships only the `--cache-only` path. Full install (wafer.toml
-//! mutation, argument-less install, `--frozen`) lands in PR c.
+//! Invocation matrix:
+//!
+//! | target | --cache-only | --frozen | mode                     |
+//! |--------|--------------|----------|--------------------------|
+//! | Some   | false        | false    | Full install             |
+//! | Some   | true         | false    | Cache-only (PR b)        |
+//! | None   | false        | false    | From manifest            |
+//! | None   | false        | true     | Frozen install           |
+//!
+//! Other combinations are rejected up front.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
 use crate::{
-    cache::CacheRoot, commands::info::parse_target, install::install_cache_only, registry_client,
+    cache::CacheRoot,
+    commands::info::parse_target,
+    install::{install_cache_only, install_from_manifest, install_full},
+    registry_client,
 };
 
-pub async fn run(target: Option<String>, cache_only: bool, registry: Option<String>) -> Result<()> {
-    if !cache_only {
-        bail!(
-            "PR b only supports `wafer install <org>/<block>[@<ver>] --cache-only`. \
-             Full install (wafer.toml mutation, --frozen, argument-less) lands in the next PR."
-        );
+pub async fn run(
+    target: Option<String>,
+    cache_only: bool,
+    frozen: bool,
+    registry: Option<String>,
+) -> Result<()> {
+    // Flag validation.
+    if cache_only && frozen {
+        bail!("--cache-only and --frozen are mutually exclusive");
     }
-    let target = target.ok_or_else(|| {
-        anyhow::anyhow!("wafer install --cache-only requires an <org>/<block>[@<ver>] argument")
-    })?;
-    let (org, block, ver) = parse_target(&target)?;
+    if frozen && target.is_some() {
+        bail!("--frozen does not accept a target; run `wafer install --frozen` with no argument");
+    }
+    if cache_only && target.is_none() {
+        bail!("wafer install --cache-only requires an <org>/<block>[@<ver>] argument");
+    }
 
-    // Honour spec §wafer install step 1: wafer.toml must exist to ground us
-    // in a project directory.
-    let wafer_toml = PathBuf::from("wafer.toml");
-    if !wafer_toml.is_file() {
+    // Spec §wafer install step 1: wafer.toml must exist.
+    let wafer_toml_path = PathBuf::from("wafer.toml");
+    if !wafer_toml_path.is_file() {
         bail!("wafer.toml not found in current directory");
     }
 
@@ -34,13 +49,53 @@ pub async fn run(target: Option<String>, cache_only: bool, registry: Option<Stri
     let cache = CacheRoot::default_location()?;
     let lockfile_path = PathBuf::from("wafer.lock");
 
-    let outcome =
-        install_cache_only(&url, &cache, &lockfile_path, &org, &block, ver.as_deref()).await?;
+    match (target, cache_only, frozen) {
+        (Some(target), true, false) => {
+            // Cache-only single package (PR b).
+            let (org, block, ver) = parse_target(&target)?;
+            let outcome =
+                install_cache_only(&url, &cache, &lockfile_path, &org, &block, ver.as_deref())
+                    .await?;
+            let source = if outcome.from_cache { " (cached)" } else { "" };
+            println!(
+                "\u{2714} installed {}/{}@{}{}",
+                outcome.org, outcome.block, outcome.version, source
+            );
+        }
+        (Some(target), false, false) => {
+            // Full install: single package + wafer.toml mutation.
+            let (org, block, ver) = parse_target(&target)?;
+            let outcome = install_full(
+                &url,
+                &cache,
+                &lockfile_path,
+                &wafer_toml_path,
+                &org,
+                &block,
+                ver.as_deref(),
+            )
+            .await?;
+            let source = if outcome.from_cache { " (cached)" } else { "" };
+            println!(
+                "\u{2714} installed {}/{}@{}{}",
+                outcome.org, outcome.block, outcome.version, source
+            );
+        }
+        (None, false, _) => {
+            // From manifest — frozen or not.
+            let outcomes =
+                install_from_manifest(&url, &cache, &wafer_toml_path, &lockfile_path, frozen)
+                    .await?;
+            for o in &outcomes {
+                let source = if o.from_cache { " (cached)" } else { "" };
+                println!(
+                    "\u{2714} installed {}/{}@{}{}",
+                    o.org, o.block, o.version, source
+                );
+            }
+        }
+        _ => unreachable!("flag validation above handles all invalid cases"),
+    }
 
-    let source = if outcome.from_cache { " (cached)" } else { "" };
-    println!(
-        "\u{2714} installed {}/{}@{}{}",
-        outcome.org, outcome.block, outcome.version, source
-    );
     Ok(())
 }
