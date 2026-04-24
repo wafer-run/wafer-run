@@ -10,20 +10,22 @@ name = "wafer"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+dirs = "5"
+hex = "0.4"
+reqwest = { workspace = true, features = ["multipart"] }
+rpassword = "7"
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = "1"
-wasmi = { workspace = true }
-wafer-block = { workspace = true }
 sha2 = { workspace = true }
-hex = "0.4"
+terminal_size = "0.3"
 toml = { workspace = true }
-reqwest = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = ["full"] }
-dirs = "5"
+wafer-block = { workspace = true }
+wasmi = { workspace = true }
 webbrowser = "1"
-rpassword = "7"
 
 [dev-dependencies]
 tempfile = { workspace = true }
