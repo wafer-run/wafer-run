@@ -8,23 +8,23 @@
 use std::fmt;
 
 #[derive(Debug, serde::Deserialize)]
-pub struct ErrorEnvelope {
-    pub error: String,
-    pub message: String,
+pub(crate) struct ErrorEnvelope {
+    pub(crate) error: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug)]
-pub struct RegistryError {
-    pub op: &'static str,
-    pub status: reqwest::StatusCode,
-    pub envelope: Option<ErrorEnvelope>,
-    pub raw_body: String,
+pub(crate) struct RegistryError {
+    pub(crate) op: &'static str,
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) envelope: Option<ErrorEnvelope>,
+    pub(crate) raw_body: String,
 }
 
 impl RegistryError {
     /// Build from a reqwest response body. Truncates the raw body to
     /// 512 chars (on a char boundary) for safe display.
-    pub fn new(op: &'static str, status: reqwest::StatusCode, body: String) -> Self {
+    pub(crate) fn new(op: &'static str, status: reqwest::StatusCode, body: String) -> Self {
         let envelope = serde_json::from_str::<ErrorEnvelope>(&body).ok();
         let raw_body = truncate_chars(body, 512);
         Self {
