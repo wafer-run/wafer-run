@@ -10,6 +10,7 @@ mod package;
 mod registry_client;
 mod registry_error;
 mod scaffold;
+mod sync_check;
 mod test_runner;
 mod validate;
 mod wafer_toml;
