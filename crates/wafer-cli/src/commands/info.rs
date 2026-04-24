@@ -61,7 +61,7 @@ pub(crate) fn format_size(bytes: i64) -> String {
 pub(crate) fn render_package(pkg: &PackageDetail, all: bool) -> String {
     let mut versions = pkg.versions.clone();
     // Newest first by published_at desc; stable — preserve input order on ties.
-    versions.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    versions.sort_by_key(|v| std::cmp::Reverse(v.published_at));
 
     let yanked_count = versions.iter().filter(|v| v.yanked != 0).count();
     let latest = versions
