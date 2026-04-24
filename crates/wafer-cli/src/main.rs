@@ -2,6 +2,7 @@ mod build;
 mod commands;
 mod credentials;
 mod detect;
+mod lockfile;
 mod manifest;
 mod package;
 mod registry_client;
