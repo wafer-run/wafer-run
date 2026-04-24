@@ -16,6 +16,8 @@ proc-macro2 = "1"
 [dev-dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-sdk = { path = "../../sdks/rust" }
+wafer-run = { path = "../wafer-run" }
+async-trait = "0.1"
 serde_json = { workspace = true }
 
 [lints]

@@ -5,17 +5,6 @@
 //! generated `#[no_mangle]` ABI exports (`__wafer_info`, `__wafer_handle`,
 //! `__wafer_lifecycle`). Tests call the generated `block_info()` associated
 //! function which returns `BlockInfo` directly without the WASM ABI overhead.
-//!
-//! NOTE: These tests are gated to `cfg(target_arch = "wasm32")` because the
-//! host-side expansion of `#[wafer_block]` now emits a
-//! `::wafer_run::inventory::submit!` entry which requires the annotated type
-//! to expose `fn new() -> Self` and implement `::wafer_run::Block`, plus the
-//! test crate to depend on `wafer-run`. That would introduce a dependency
-//! cycle (`wafer-run` already depends on `wafer-block-macro`), so the
-//! host-path coverage for block metadata has been moved to the `wafer-run`
-//! integration tests instead.
-
-#![cfg(target_arch = "wasm32")]
 
 use wafer_block::Message;
 use wafer_block_macro::wafer_block;
@@ -51,6 +40,28 @@ mod fully_declared_block {
         fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
             let _ = msg;
             GuestResult::respond(b"{}".to_vec())
+        }
+    }
+
+    impl FullyDeclared {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl wafer_block::block::Block for FullyDeclared {
+        fn info(&self) -> wafer_block::types::BlockInfo {
+            Self::block_info()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::core_types::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::drop_request()
         }
     }
 }
@@ -91,6 +102,28 @@ mod undeclared_block {
         fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
             let _ = msg;
             GuestResult::respond(b"{}".to_vec())
+        }
+    }
+
+    impl Undeclared {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl wafer_block::block::Block for Undeclared {
+        fn info(&self) -> wafer_block::types::BlockInfo {
+            Self::block_info()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::core_types::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::drop_request()
         }
     }
 }

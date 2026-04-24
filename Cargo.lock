@@ -5659,11 +5659,13 @@ dependencies = [
 name = "wafer-block-macro"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "proc-macro2",
  "quote",
  "serde_json",
  "syn",
  "wafer-block",
+ "wafer-run",
  "wafer-sdk",
 ]
 
