@@ -266,12 +266,9 @@ async fn frozen_errors_on_drift_with_hint() {
 }
 
 #[tokio::test]
-async fn frozen_happy_path_uses_cache_and_doesnt_rewrite_lockfile() {
-    let server = MockServer::start().await;
+async fn frozen_happy_path_uses_cached_package_and_leaves_lockfile_unchanged() {
     let tarball = make_tarball("0.3.1");
     let sha = sha256_hex(&tarball);
-    mount_version(&server, "0.3.1", &sha, tarball.len()).await;
-    mount_tarball(&server, "0.3.1", tarball.clone()).await;
 
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -281,11 +278,72 @@ async fn frozen_happy_path_uses_cache_and_doesnt_rewrite_lockfile() {
         &cwd,
         "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
     );
+
+    // Pre-seed the cache as if a prior install put it there. Contents
+    // don't need to match the tarball — frozen trusts the lockfile's sha.
+    let cache_dir = home.join(".wafer/cache/acme/widget/0.3.1");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("wafer.toml"), b"[package]\n").unwrap();
+    fs::write(cache_dir.join("widget.wasm"), b"\0asm\x01\x00\x00\x00").unwrap();
+
+    // Seed the matching lockfile.
     let lock_body = format!(
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nsource = \"registry+{uri}\"\n",
-        uri = server.uri(),
+        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nsource = \"registry+http://127.0.0.1:1\"\n",
     );
     fs::write(cwd.join("wafer.lock"), &lock_body).unwrap();
+
+    // Point at an unreachable registry — if frozen tries to hit it, the
+    // test will fail with a connection error.
+    let out = std::process::Command::new(bin())
+        .env("HOME", &home)
+        .env_remove("WAFER_REGISTRY")
+        .env("WAFER_INSTALL_LOCK_TIMEOUT_SECS", "5")
+        .current_dir(&cwd)
+        .args(["install", "--frozen", "--registry", "http://127.0.0.1:1"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Lockfile bytes MUST be unchanged.
+    let lock_after = fs::read_to_string(cwd.join("wafer.lock")).unwrap();
+    assert_eq!(lock_after, lock_body, "frozen rewrote the lockfile");
+
+    // Output mentions cached.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("installed acme/widget@0.3.1"), "{stdout}");
+    assert!(stdout.contains("(cached)"), "{stdout}");
+}
+
+#[tokio::test]
+async fn frozen_bails_when_registry_sha_doesnt_match_lockfile() {
+    let server = MockServer::start().await;
+    let tarball = make_tarball("0.3.1");
+    // Registry serves `tarball`, but we'll pin a DIFFERENT sha in the lockfile.
+    let real_sha = sha256_hex(&tarball);
+    let wrong_sha = "0".repeat(64);
+    assert_ne!(real_sha, wrong_sha);
+    mount_tarball(&server, "0.3.1", tarball).await;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = tmp.path().join("proj");
+    setup_project(
+        &home,
+        &cwd,
+        "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
+    );
+    fs::write(
+        cwd.join("wafer.lock"),
+        format!(
+            "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{wrong_sha}\"\nsource = \"registry+{uri}\"\n",
+            uri = server.uri(),
+        ),
+    )
+    .unwrap();
 
     let out = std::process::Command::new(bin())
         .env("HOME", &home)
@@ -295,13 +353,10 @@ async fn frozen_happy_path_uses_cache_and_doesnt_rewrite_lockfile() {
         .args(["install", "--frozen", "--registry", &server.uri()])
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let lock_after = fs::read_to_string(cwd.join("wafer.lock")).unwrap();
-    assert_eq!(lock_after, lock_body, "frozen mutated the lockfile");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("integrity check failed"), "{stderr}");
+    assert!(stderr.contains("wafer.lock pins sha256"), "{stderr}");
 }
 
 #[tokio::test]

@@ -313,6 +313,88 @@ pub async fn install_cache_only(
     })
 }
 
+/// Frozen variant: download + verify against a caller-supplied sha256
+/// (the lockfile's pinned sha). No registry metadata fetch, no lockfile
+/// mutation. Returns cached+no-op if the cache already has a matching
+/// dir and `expected_sha` matches what's provided.
+///
+/// Used by `install_from_manifest(frozen=true)` to preserve reproducibility:
+/// if the registry silently swapped the tarball under the same version,
+/// the sha check fails and we bail loudly.
+pub async fn install_cache_only_frozen(
+    registry: &str,
+    cache: &CacheRoot,
+    org: &str,
+    block: &str,
+    version: &str,
+    expected_sha: &str,
+) -> Result<InstallOutcome> {
+    // Fast path: if the cache is populated, trust the lockfile sha as the
+    // proof of provenance (that's what --frozen means: lockfile is truth).
+    if cache.is_populated(org, block, version) {
+        return Ok(InstallOutcome {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: expected_sha.into(),
+            from_cache: true,
+        });
+    }
+
+    // Slow path: download, hash, verify, extract under the flock.
+    let _guard = cache.acquire_lock()?;
+
+    // Re-check under the lock — another installer may have populated.
+    let final_dir = cache.package_dir(org, block, version);
+    if final_dir.is_dir() {
+        return Ok(InstallOutcome {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: expected_sha.into(),
+            from_cache: true,
+        });
+    }
+
+    let bytes = registry_client::download_tarball(registry, org, block, version).await?;
+    let actual = sha256_hex(&bytes);
+    if actual != expected_sha {
+        anyhow::bail!(
+            "integrity check failed: {org}/{block}@{version} — wafer.lock pins sha256 {expected_sha}, but the registry served a tarball with sha256 {actual}. --frozen refuses to install a version the lockfile doesn't pin."
+        );
+    }
+
+    // Extract into a sibling temp dir, then atomic rename.
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("cache package path has no parent"))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let tmp_name = format!(".extract-{}", uuid::Uuid::new_v4());
+    let tmp_dir = parent.join(&tmp_name);
+    if let Err(e) = extract_tarball(&bytes, &tmp_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_dir, &final_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e).with_context(|| {
+            format!(
+                "promote {} -> {} (concurrent install may have completed)",
+                tmp_dir.display(),
+                final_dir.display(),
+            )
+        });
+    }
+
+    Ok(InstallOutcome {
+        org: org.into(),
+        block: block.into(),
+        version: version.into(),
+        sha256: expected_sha.into(),
+        from_cache: false,
+    })
+}
+
 /// Full install: `install_cache_only` + mutate `wafer.toml`'s
 /// `[dependencies]` to pin the resolved version.
 pub async fn install_full(
@@ -370,15 +452,9 @@ pub async fn install_from_manifest(
         let mut out = Vec::with_capacity(lf.packages.len());
         for pkg in &lf.packages {
             let (org, block) = split_name(&pkg.name)?;
-            let outcome = install_cache_only(
-                registry,
-                cache,
-                lockfile_path,
-                &org,
-                &block,
-                Some(&pkg.version),
-            )
-            .await?;
+            let outcome =
+                install_cache_only_frozen(registry, cache, &org, &block, &pkg.version, &pkg.sha256)
+                    .await?;
             out.push(outcome);
         }
         return Ok(out);
