@@ -8,11 +8,6 @@ use anyhow::{bail, Result};
 
 use crate::registry_client::{self, PackageSummary};
 
-fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
-}
-
 /// Width for non-TTY output per spec.
 const DEFAULT_WIDTH: usize = 80;
 
@@ -43,7 +38,9 @@ pub(crate) fn render_table(packages: &[PackageSummary], width: usize) -> String 
         .unwrap_or(0)
         .max(HEADER_LATEST.len());
 
-    // Summary column gets whatever's left.
+    // Summary column gets whatever's left, with a legibility floor equal to
+    // the header label ("SUMMARY"). At very narrow widths the full line may
+    // exceed `width` — a narrow terminal trades overflow for readability.
     let summary_budget = width
         .saturating_sub(name_width + GAP + latest_width + GAP)
         .max(HEADER_SUMMARY.len());
@@ -66,6 +63,10 @@ pub(crate) fn render_table(packages: &[PackageSummary], width: usize) -> String 
 /// Truncate `s` to `max` chars, appending `…` if truncation occurred.
 /// If `max < 1`, returns empty. If `max == 1` and truncation needed,
 /// returns `"…"`.
+///
+/// Note: truncation is codepoint-based, not grapheme-based. Wide glyphs
+/// (CJK, emoji, ZWJ sequences) may visually exceed the nominal budget or
+/// split across a grapheme boundary. Accepted for package-summary use.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -86,7 +87,7 @@ pub async fn run(query: String, json: bool, registry: Option<String>) -> Result<
     if query.is_empty() {
         bail!("search requires a non-empty query");
     }
-    let url = resolve_registry(registry);
+    let url = registry_client::resolve_registry(registry);
     let resp = registry_client::search(&url, &query).await?;
 
     if json {

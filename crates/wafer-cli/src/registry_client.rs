@@ -173,6 +173,18 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
+/// Resolve the registry URL from (in priority order):
+/// 1. `flag` (e.g. `--registry` command-line option)
+/// 2. `WAFER_REGISTRY` environment variable
+/// 3. Hardcoded default `https://wafer.run`
+///
+/// Future: also consult `wafer.toml [registry].url` and the default
+/// credential entry — see parent spec §Registry URL resolution.
+pub fn resolve_registry(flag: Option<String>) -> String {
+    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
+        .unwrap_or_else(|| "https://wafer.run".to_string())
+}
+
 /// Build a reqwest client with a default 60-second timeout and user-agent.
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()

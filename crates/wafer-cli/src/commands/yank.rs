@@ -1,15 +1,10 @@
 use anyhow::Result;
 
-use crate::credentials;
+use crate::{credentials, registry_client};
 
 pub enum YankOp {
     Yank,
     Unyank,
-}
-
-fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
 }
 
 pub async fn run(
@@ -25,7 +20,7 @@ pub async fn run(
         .split_once('@')
         .ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
 
-    let url = resolve_registry(registry);
+    let url = registry_client::resolve_registry(registry);
     let cf = credentials::load().unwrap_or_default();
     let entry = credentials::resolve(&cf, &url)
         .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;
