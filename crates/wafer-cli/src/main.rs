@@ -3,6 +3,7 @@ mod cache;
 mod commands;
 mod credentials;
 mod detect;
+mod install;
 mod lockfile;
 mod manifest;
 mod package;
