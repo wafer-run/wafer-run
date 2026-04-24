@@ -1,4 +1,5 @@
 mod build;
+mod cache;
 mod commands;
 mod credentials;
 mod detect;
