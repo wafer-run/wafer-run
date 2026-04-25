@@ -157,6 +157,36 @@ pub async fn get_version(
         .with_context(|| format!("decode version detail from {url}"))
 }
 
+/// `GET /registry/download/{org}/{block}/{version}.wafer` — returns the
+/// raw gzipped tarball bytes. Callers are responsible for hashing +
+/// verifying against the registry's stored sha256.
+pub async fn download_tarball(
+    registry: &str,
+    org: &str,
+    block: &str,
+    version: &str,
+) -> Result<Vec<u8>> {
+    let url = format!(
+        "{}/registry/download/{}/{}/{}.wafer",
+        registry.trim_end_matches('/'),
+        urlencoding_encode(org),
+        urlencoding_encode(block),
+        urlencoding_encode(version),
+    );
+    // Larger timeout than the JSON endpoints — tarballs can be ~MiB-sized.
+    let resp = client_with_timeout(120)
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let resp = ensure_ok(resp, "install").await?;
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("read tarball bytes from {url}"))?;
+    Ok(bytes.to_vec())
+}
+
 /// Minimal percent-encoder for the subset we care about: path segments and
 /// query values. Encodes everything outside unreserved + `-`, `.`, `_`, `~`.
 /// Keeps the wafer-cli crate free of an extra `url`/`percent-encoding` dep.

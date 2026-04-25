@@ -1,7 +1,10 @@
 mod build;
+mod cache;
 mod commands;
 mod credentials;
 mod detect;
+mod install;
+mod lockfile;
 mod manifest;
 mod package;
 mod registry_client;
@@ -115,6 +118,18 @@ enum Commands {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Install a package into the cache (PR b: --cache-only only).
+    Install {
+        /// Target in `org/block` or `org/block@version` form. Optional in
+        /// future PRs (argument-less install from wafer.toml) — required now.
+        target: Option<String>,
+        /// Download + cache + write wafer.lock, but do not touch wafer.toml.
+        #[arg(long)]
+        cache_only: bool,
+        /// Registry URL (overrides WAFER_REGISTRY env).
+        #[arg(long)]
+        registry: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -176,6 +191,13 @@ async fn main() -> anyhow::Result<()> {
             registry,
         } => {
             commands::info::run(target, json, all, registry).await?;
+        }
+        Commands::Install {
+            target,
+            cache_only,
+            registry,
+        } => {
+            commands::install::run(target, cache_only, registry).await?;
         }
     }
 
