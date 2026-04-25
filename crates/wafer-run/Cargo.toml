@@ -52,6 +52,7 @@ tempfile = { workspace = true }
 tracing-test = "0.2"
 wat = "1"
 wafer-block-macro = { path = "../wafer-block-macro" }
+wafer-sdk = { path = "../../sdks/rust" }
 wafer-test-support = { path = "../wafer-test-support" }
 wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
