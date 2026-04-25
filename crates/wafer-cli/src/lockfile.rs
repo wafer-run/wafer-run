@@ -134,8 +134,9 @@ fn tmp_sibling(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     fn pkg(name: &str, version: &str) -> LockfilePackage {
         LockfilePackage {

@@ -379,8 +379,9 @@ mod tests {
 
     #[test]
     fn extract_tarball_writes_files_and_rejects_traversal() {
-        use flate2::{write::GzEncoder, Compression};
         use std::io::Cursor;
+
+        use flate2::{write::GzEncoder, Compression};
         use tempfile::tempdir;
 
         // Happy archive.
