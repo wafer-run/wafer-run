@@ -357,9 +357,11 @@ fn default_cache_root_or_err() -> Result<PathBuf, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     const VALID_WAFER_TOML: &str =
         "[package]\norg = \"acme\"\nname = \"widget\"\nversion = \"0.1.0\"\nabi = 1\n";
