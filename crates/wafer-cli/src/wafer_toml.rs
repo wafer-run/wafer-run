@@ -114,8 +114,9 @@ fn tmp_sibling(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     const BASE: &str = r#"[package]
 org = "mine"

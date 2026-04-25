@@ -70,10 +70,12 @@ pub fn check(toml: &WaferToml, lock: &Lockfile) -> Result<(), DriftError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::*;
     use crate::lockfile::LockfilePackage;
-    use std::fs;
-    use tempfile::TempDir;
 
     fn mk_pkg(name: &str, version: &str) -> LockfilePackage {
         LockfilePackage {
