@@ -5,11 +5,6 @@ use crate::{
     registry_client,
 };
 
-fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
-}
-
 fn read_code() -> Result<String> {
     // rpassword falls back to stdin on non-TTY. If that fails (some builds),
     // drop to a plain stdin read so piped input still works.
@@ -29,7 +24,7 @@ fn read_code() -> Result<String> {
 }
 
 pub async fn run(registry: Option<String>) -> Result<()> {
-    let url = resolve_registry(registry);
+    let url = registry_client::resolve_registry(registry);
     let login_page = format!("{}/registry/cli-login", url.trim_end_matches('/'));
 
     // Best-effort browser open; ignore errors (e.g. headless / CI).

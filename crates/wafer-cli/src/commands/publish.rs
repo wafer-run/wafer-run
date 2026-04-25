@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::credentials;
+use crate::{credentials, registry_client};
 
 #[derive(serde::Deserialize)]
 struct CargoPackageRelease {
@@ -14,11 +14,6 @@ struct CargoPackageRelease {
 #[derive(serde::Deserialize)]
 struct WaferTomlMin {
     package: CargoPackageRelease,
-}
-
-fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
 }
 
 pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool) -> Result<()> {
@@ -54,7 +49,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
         return Ok(());
     }
 
-    let url = resolve_registry(registry);
+    let url = registry_client::resolve_registry(registry);
     let cf = credentials::load().unwrap_or_default();
     let entry = credentials::resolve(&cf, &url)
         .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;

@@ -1,14 +1,9 @@
 use anyhow::Result;
 
-use crate::credentials;
-
-fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
-}
+use crate::{credentials, registry_client};
 
 pub async fn run(registry: Option<String>) -> Result<()> {
-    let url = resolve_registry(registry);
+    let url = registry_client::resolve_registry(registry);
     let mut cf = credentials::load()?;
 
     let mut removed = false;

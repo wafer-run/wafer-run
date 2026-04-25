@@ -40,13 +40,14 @@ impl RegistryError {
             return Some("run 'wafer login' (or '--registry URL' for a non-default registry)");
         }
         let code = self.envelope.as_ref().map(|e| e.error.as_str());
-        match code {
-            Some("version-exists") => Some(
+        match (self.op, code) {
+            (_, Some("version-exists")) => Some(
                 "bump 'version' in wafer.toml, or run 'wafer unyank' if you meant to re-publish",
             ),
-            Some("invalid-tarball") => {
+            (_, Some("invalid-tarball")) => {
                 Some("'wafer publish --dry-run' validates locally without uploading")
             }
+            ("info", Some("not-found")) => Some("'wafer search' can help find the right name"),
             _ => None,
         }
     }
@@ -166,5 +167,28 @@ mod tests {
         );
         let s = err.to_string();
         assert!(!s.contains("hint:"), "{s}");
+    }
+
+    #[test]
+    fn hint_on_info_not_found_suggests_search() {
+        let err = RegistryError::new(
+            "info",
+            StatusCode::NOT_FOUND,
+            r#"{"error":"not-found","message":"acme/widget not found"}"#.into(),
+        );
+        let s = err.to_string();
+        assert!(s.contains("\nhint: 'wafer search' can help"), "{s}");
+    }
+
+    #[test]
+    fn no_info_hint_on_publish_not_found() {
+        // Ensures the new hint is scoped to op=info, not leaking to other ops.
+        let err = RegistryError::new(
+            "publish",
+            StatusCode::NOT_FOUND,
+            r#"{"error":"not-found","message":"nope"}"#.into(),
+        );
+        let s = err.to_string();
+        assert!(!s.contains("wafer search"), "{s}");
     }
 }

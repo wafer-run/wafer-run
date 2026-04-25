@@ -90,6 +90,31 @@ enum Commands {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Search the registry for packages matching `query`.
+    Search {
+        /// Query string (substring match on package name).
+        query: String,
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+        /// Registry URL (overrides WAFER_REGISTRY env).
+        #[arg(long)]
+        registry: Option<String>,
+    },
+    /// Show package or version detail.
+    Info {
+        /// Target in `org/block` or `org/block@version` form.
+        target: String,
+        /// Emit JSON instead of a formatted view.
+        #[arg(long)]
+        json: bool,
+        /// Show all versions (default caps at 5 most-recent).
+        #[arg(long)]
+        all: bool,
+        /// Registry URL (overrides WAFER_REGISTRY env).
+        #[arg(long)]
+        registry: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -136,6 +161,21 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Unyank { target, registry } => {
             commands::yank::run(target, None, registry, commands::yank::YankOp::Unyank).await?;
+        }
+        Commands::Search {
+            query,
+            json,
+            registry,
+        } => {
+            commands::search::run(query, json, registry).await?;
+        }
+        Commands::Info {
+            target,
+            json,
+            all,
+            registry,
+        } => {
+            commands::info::run(target, json, all, registry).await?;
         }
     }
 
