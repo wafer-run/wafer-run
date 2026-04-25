@@ -313,6 +313,186 @@ pub async fn install_cache_only(
     })
 }
 
+/// Frozen variant: download + verify against a caller-supplied sha256
+/// (the lockfile's pinned sha). No registry metadata fetch, no lockfile
+/// mutation. Returns cached+no-op if the cache already has a matching
+/// dir and `expected_sha` matches what's provided.
+///
+/// Used by `install_from_manifest(frozen=true)` to preserve reproducibility:
+/// if the registry silently swapped the tarball under the same version,
+/// the sha check fails and we bail loudly.
+pub async fn install_cache_only_frozen(
+    registry: &str,
+    cache: &CacheRoot,
+    org: &str,
+    block: &str,
+    version: &str,
+    expected_sha: &str,
+) -> Result<InstallOutcome> {
+    // Fast path: if the cache is populated, trust the lockfile sha as the
+    // proof of provenance (that's what --frozen means: lockfile is truth).
+    if cache.is_populated(org, block, version) {
+        return Ok(InstallOutcome {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: expected_sha.into(),
+            from_cache: true,
+        });
+    }
+
+    // Slow path: download, hash, verify, extract under the flock.
+    let _guard = cache.acquire_lock()?;
+
+    // Re-check under the lock — another installer may have populated.
+    let final_dir = cache.package_dir(org, block, version);
+    if final_dir.is_dir() {
+        return Ok(InstallOutcome {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: expected_sha.into(),
+            from_cache: true,
+        });
+    }
+
+    let bytes = registry_client::download_tarball(registry, org, block, version).await?;
+    let actual = sha256_hex(&bytes);
+    if actual != expected_sha {
+        anyhow::bail!(
+            "integrity check failed: {org}/{block}@{version} — wafer.lock pins sha256 {expected_sha}, but the registry served a tarball with sha256 {actual}. --frozen refuses to install a version the lockfile doesn't pin."
+        );
+    }
+
+    // Extract into a sibling temp dir, then atomic rename.
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("cache package path has no parent"))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let tmp_name = format!(".extract-{}", uuid::Uuid::new_v4());
+    let tmp_dir = parent.join(&tmp_name);
+    if let Err(e) = extract_tarball(&bytes, &tmp_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_dir, &final_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e).with_context(|| {
+            format!(
+                "promote {} -> {} (concurrent install may have completed)",
+                tmp_dir.display(),
+                final_dir.display(),
+            )
+        });
+    }
+
+    Ok(InstallOutcome {
+        org: org.into(),
+        block: block.into(),
+        version: version.into(),
+        sha256: expected_sha.into(),
+        from_cache: false,
+    })
+}
+
+/// Full install: `install_cache_only` + mutate `wafer.toml`'s
+/// `[dependencies]` to pin the resolved version.
+pub async fn install_full(
+    registry: &str,
+    cache: &CacheRoot,
+    lockfile_path: &std::path::Path,
+    wafer_toml_path: &std::path::Path,
+    org: &str,
+    block: &str,
+    version_req: Option<&str>,
+) -> Result<InstallOutcome> {
+    let outcome =
+        install_cache_only(registry, cache, lockfile_path, org, block, version_req).await?;
+
+    // Mutate wafer.toml to pin the resolved version.
+    let mut wt = crate::wafer_toml::WaferToml::read(wafer_toml_path)?;
+    let name = format!("{org}/{block}");
+    wt.insert_or_replace_dependency(&name, &outcome.version);
+    wt.write_atomic(wafer_toml_path)?;
+
+    Ok(outcome)
+}
+
+/// Argument-less install. Reads `[dependencies]` from `wafer.toml`, optionally
+/// enforces strict sync via `frozen`, installs each entry into the cache,
+/// and (when not frozen) rewrites `wafer.lock` from the manifest (pruning
+/// orphans).
+pub async fn install_from_manifest(
+    registry: &str,
+    cache: &CacheRoot,
+    wafer_toml_path: &std::path::Path,
+    lockfile_path: &std::path::Path,
+    frozen: bool,
+) -> Result<Vec<InstallOutcome>> {
+    let wt = crate::wafer_toml::WaferToml::read(wafer_toml_path)?;
+    let deps = wt.dependencies();
+    if deps.is_empty() {
+        println!("no dependencies");
+        return Ok(Vec::new());
+    }
+
+    if frozen {
+        // Load lockfile; missing → error.
+        let lf = crate::lockfile::Lockfile::load(lockfile_path)?.ok_or_else(|| {
+            anyhow::anyhow!("wafer.lock not found — --frozen requires an existing lockfile")
+        })?;
+        // Drift → error with hint.
+        if let Err(e) = crate::sync_check::check(&wt, &lf) {
+            anyhow::bail!("{e}\nhint: run 'wafer install' without --frozen to update wafer.lock");
+        }
+        // All good — install each lockfile entry. install_cache_only is
+        // idempotent when the sha matches and the cache is populated
+        // (reproducibility preserved; lockfile bytes unchanged if nothing
+        // really needs to be fetched).
+        let mut out = Vec::with_capacity(lf.packages.len());
+        for pkg in &lf.packages {
+            let (org, block) = split_name(&pkg.name)?;
+            let outcome =
+                install_cache_only_frozen(registry, cache, &org, &block, &pkg.version, &pkg.sha256)
+                    .await?;
+            out.push(outcome);
+        }
+        return Ok(out);
+    }
+
+    // Non-frozen: install each [dependencies] entry. install_cache_only
+    // updates the lockfile as it goes. After we're done, prune orphans.
+    let mut out = Vec::with_capacity(deps.len());
+    for (name, version) in &deps {
+        let (org, block) = split_name(name)?;
+        let outcome =
+            install_cache_only(registry, cache, lockfile_path, &org, &block, Some(version)).await?;
+        out.push(outcome);
+    }
+
+    // Prune lockfile orphans — wafer.toml is the source of truth.
+    let kept: std::collections::BTreeSet<String> = deps.iter().map(|(n, _)| n.clone()).collect();
+    let mut lf = crate::lockfile::Lockfile::load(lockfile_path)?
+        .unwrap_or_else(crate::lockfile::Lockfile::new);
+    let before = lf.packages.len();
+    lf.packages.retain(|p| kept.contains(&p.name));
+    if lf.packages.len() != before {
+        lf.write_atomic(lockfile_path)?;
+    }
+
+    Ok(out)
+}
+
+fn split_name(name: &str) -> Result<(String, String)> {
+    let (org, block) = name
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid package name {name:?}: expected org/block"))?;
+    if org.is_empty() || block.is_empty() || block.contains('/') {
+        anyhow::bail!("invalid package name {name:?}: expected org/block");
+    }
+    Ok((org.into(), block.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +684,25 @@ mod tests {
             cache_hit(&cache, &lf, "a", "b", "1.0.0"),
             Some("zzz".into())
         );
+    }
+
+    #[test]
+    fn split_name_accepts_valid() {
+        assert_eq!(
+            split_name("acme/widget").unwrap(),
+            ("acme".into(), "widget".into())
+        );
+    }
+
+    #[test]
+    fn split_name_rejects_missing_slash() {
+        assert!(split_name("justname").is_err());
+    }
+
+    #[test]
+    fn split_name_rejects_empty_segments() {
+        assert!(split_name("/b").is_err());
+        assert!(split_name("a/").is_err());
+        assert!(split_name("a/b/c").is_err());
     }
 }

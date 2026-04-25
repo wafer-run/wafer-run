@@ -10,8 +10,10 @@ mod package;
 mod registry_client;
 mod registry_error;
 mod scaffold;
+mod sync_check;
 mod test_runner;
 mod validate;
+mod wafer_toml;
 
 use std::path::PathBuf;
 
@@ -118,14 +120,18 @@ enum Commands {
         #[arg(long)]
         registry: Option<String>,
     },
-    /// Install a package into the cache (PR b: --cache-only only).
+    /// Install a package into the cache, and/or install the manifest.
     Install {
-        /// Target in `org/block` or `org/block@version` form. Optional in
-        /// future PRs (argument-less install from wafer.toml) — required now.
+        /// Target in `org/block` or `org/block@version` form. Optional —
+        /// omitting it installs everything from wafer.toml's [dependencies].
         target: Option<String>,
-        /// Download + cache + write wafer.lock, but do not touch wafer.toml.
+        /// Download + cache + update wafer.lock, but do not touch wafer.toml.
         #[arg(long)]
         cache_only: bool,
+        /// Require wafer.lock to exist and match wafer.toml; no mutations.
+        /// Cannot be combined with a target or --cache-only.
+        #[arg(long)]
+        frozen: bool,
         /// Registry URL (overrides WAFER_REGISTRY env).
         #[arg(long)]
         registry: Option<String>,
@@ -195,9 +201,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Install {
             target,
             cache_only,
+            frozen,
             registry,
         } => {
-            commands::install::run(target, cache_only, registry).await?;
+            commands::install::run(target, cache_only, frozen, registry).await?;
         }
     }
 

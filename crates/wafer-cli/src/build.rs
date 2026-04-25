@@ -31,6 +31,12 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
     println!("Building block: {}", manifest.name);
 
     // -----------------------------------------------------------------------
+    // 1b. Lockfile ↔ wafer.toml sync check.
+    // Silent when either file is absent; errors on drift with a hint.
+    // -----------------------------------------------------------------------
+    check_wafer_lock_sync(dir)?;
+
+    // -----------------------------------------------------------------------
     // 2. Detect language.
     // -----------------------------------------------------------------------
     let lang = detect_language(dir)?;
@@ -285,4 +291,26 @@ fn find_wasm_in_dir(dir: &Path) -> anyhow::Result<std::path::PathBuf> {
             Ok(found.into_iter().next().unwrap())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lockfile sync check
+// ---------------------------------------------------------------------------
+
+/// If wafer.toml + wafer.lock both exist, enforce §Lockfile ↔ manifest sync.
+/// Missing wafer.toml OR wafer.lock is silent — pre-install projects are
+/// allowed to build.
+fn check_wafer_lock_sync(dir: &Path) -> anyhow::Result<()> {
+    let toml_path = dir.join("wafer.toml");
+    let lock_path = dir.join("wafer.lock");
+    if !toml_path.is_file() || !lock_path.is_file() {
+        return Ok(());
+    }
+    let wt = crate::wafer_toml::WaferToml::read(&toml_path)?;
+    let lf = crate::lockfile::Lockfile::load(&lock_path)?
+        .ok_or_else(|| anyhow::anyhow!("wafer.lock exists but failed to load (unreachable)"))?;
+    if let Err(e) = crate::sync_check::check(&wt, &lf) {
+        anyhow::bail!("{e}\nhint: run 'wafer install' without --frozen to update wafer.lock");
+    }
+    Ok(())
 }
