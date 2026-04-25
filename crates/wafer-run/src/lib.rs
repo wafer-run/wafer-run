@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod meta;
 pub mod observability;
 pub mod platform;
+mod registry_loader;
 pub mod router;
 pub mod runtime;
 pub mod schema;
