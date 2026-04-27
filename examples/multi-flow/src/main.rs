@@ -107,12 +107,12 @@ impl Block for StubBlock {
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter("info,wafer=debug")
         .init();
 
-    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
+    let mut wafer = Wafer::new()?;
 
     // --- Standard HTTP server flow ---
     wafer_flow_http_server::register(
@@ -229,7 +229,8 @@ async fn main() {
     tracing::info!("  GET /health");
     tracing::info!("  GET /_inspector/ui     — visualize all 3 flows");
 
-    let wafer = wafer.start().await.expect("failed to start");
+    let wafer = wafer.start().await?;
     tokio::signal::ctrl_c().await.ok();
     wafer.shutdown().await;
+    Ok(())
 }

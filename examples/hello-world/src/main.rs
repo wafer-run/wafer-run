@@ -27,10 +27,10 @@ impl Block for HelloBlock {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
+    let mut wafer = Wafer::new()?;
 
     // Register the HTTP server (infra + router)
     wafer_flow_http_server::register(
@@ -48,8 +48,9 @@ async fn main() {
         .expect("register hello");
 
     tracing::info!("starting on http://localhost:8080");
-    let wafer = wafer.start().await.expect("failed to start");
+    let wafer = wafer.start().await?;
 
     tokio::signal::ctrl_c().await.ok();
     wafer.shutdown().await;
+    Ok(())
 }

@@ -8,10 +8,10 @@
 use wafer_run::*;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
+    let mut wafer = Wafer::new()?;
 
     // --- Register blocks ---
     wafer_flow_http_server::register(
@@ -43,8 +43,9 @@ async fn main() {
     }
 
     tracing::info!("serving static files from ./public on http://localhost:8080");
-    let wafer = wafer.start().await.expect("failed to start");
+    let wafer = wafer.start().await?;
 
     tokio::signal::ctrl_c().await.ok();
     wafer.shutdown().await;
+    Ok(())
 }

@@ -121,14 +121,12 @@ unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 #[no_mangle]
 pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     let result = std::panic::catch_unwind(|| {
-        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-        let wr = WaferRuntime {
-            inner: Wafer::new().expect("failed to initialise Wafer runtime"),
-            rt,
-        };
-        Box::into_raw(Box::new(wr))
+        let rt = tokio::runtime::Runtime::new().ok()?;
+        let inner = Wafer::new().ok()?;
+        let wr = WaferRuntime { inner, rt };
+        Some(Box::into_raw(Box::new(wr)))
     });
-    result.unwrap_or(std::ptr::null_mut())
+    result.ok().flatten().unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a WAFER runtime instance.
