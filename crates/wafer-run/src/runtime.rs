@@ -297,11 +297,13 @@ impl Wafer {
         }
     }
 
-    /// Return a snapshot of `BlockInfo` for every currently-registered block.
-    /// Used by hosts that need to look up manifest metadata by block or asset
-    /// id (e.g. the SW-side asset loader in solobase-web). The returned list
-    /// is a snapshot — later registrations are not reflected.
-    pub fn registered_block_infos(&self) -> Vec<crate::block::BlockInfo> {
+    /// Return `BlockInfo` for every registered block. Used by consumers to
+    /// generate discovery documents (e.g., OpenAPI, A2A agent.json) without
+    /// having to maintain a duplicate registry.
+    ///
+    /// Order is unspecified. The returned list is a snapshot — later
+    /// registrations are not reflected.
+    pub fn block_infos(&self) -> Vec<crate::block::BlockInfo> {
         self.blocks.values().map(|b| b.info()).collect()
     }
 

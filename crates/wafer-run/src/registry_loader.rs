@@ -16,15 +16,16 @@
 //! └── README.md        (optional)
 //! ```
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+#[cfg(feature = "wasmi")]
+use std::sync::Arc;
 
 use serde::Deserialize;
 use wafer_block::error::RuntimeError;
 
-use crate::{runtime::Wafer, wasm::WasmiBlock};
+use crate::runtime::Wafer;
+#[cfg(feature = "wasmi")]
+use crate::wasm::WasmiBlock;
 
 /// Structured lockfile-loader errors. Kept internal to this module; the
 /// `impl Wafer` methods below convert to `RuntimeError::Lockfile(String)`
@@ -68,6 +69,16 @@ pub(crate) enum LockLoaderError {
 
     #[error("invalid lockfile at {}: unsupported version {version} (expected 1)", path.display())]
     UnsupportedVersion { path: PathBuf, version: u32 },
+
+    // Only constructed when the `wasmi` feature is absent; suppress the dead-code
+    // lint that fires in full builds where the cfg(not(feature="wasmi")) arm is
+    // compiled out.
+    #[cfg_attr(feature = "wasmi", allow(dead_code))]
+    #[error(
+        "{name}@{version}: wafer-run was compiled without the 'wasmi' feature; \
+         WASM block loading from a lockfile requires the 'wasmi' feature to be enabled"
+    )]
+    WasmiFeatureDisabled { name: String, version: String },
 }
 
 impl From<LockLoaderError> for RuntimeError {
@@ -308,6 +319,7 @@ impl Wafer {
         self.load_lockfile_parsed(&lf, cache_root)
     }
 
+    #[cfg_attr(not(feature = "wasmi"), allow(unused_variables))]
     fn load_lockfile_parsed(
         &mut self,
         lf: &Lockfile,
@@ -316,29 +328,41 @@ impl Wafer {
         let mut count = 0usize;
         for pkg in &lf.packages {
             validate_source(pkg).map_err(RuntimeError::from)?;
-            let wasm_path = validate_cache(cache_root, pkg).map_err(RuntimeError::from)?;
-            let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
-                RuntimeError::from(LockLoaderError::CacheMiss {
-                    name: pkg.name.clone(),
-                    version: pkg.version.clone(),
-                    path: wasm_path.clone(),
-                    reason: format!("read wasm bytes: {e}"),
-                })
-            })?;
-            let block = WasmiBlock::load_from_bytes(&wasm_bytes).map_err(|source| {
-                RuntimeError::from(LockLoaderError::WasmLoadFailed {
-                    name: pkg.name.clone(),
-                    version: pkg.version.clone(),
-                    source,
-                })
-            })?;
-            self.register_block(pkg.name.clone(), Arc::new(block))?;
-            tracing::debug!(
-                name = %pkg.name,
-                source = %format!("lockfile:{}", pkg.source),
-                "auto-registered block"
-            );
-            count += 1;
+
+            // Without wasmi there is no engine to run WASM blocks; surface a
+            // clear error rather than silently skipping the entry.
+            #[cfg(not(feature = "wasmi"))]
+            return Err(RuntimeError::from(LockLoaderError::WasmiFeatureDisabled {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+            }));
+
+            #[cfg(feature = "wasmi")]
+            {
+                let wasm_path = validate_cache(cache_root, pkg).map_err(RuntimeError::from)?;
+                let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
+                    RuntimeError::from(LockLoaderError::CacheMiss {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        path: wasm_path.clone(),
+                        reason: format!("read wasm bytes: {e}"),
+                    })
+                })?;
+                let block = WasmiBlock::load_from_bytes(&wasm_bytes).map_err(|source| {
+                    RuntimeError::from(LockLoaderError::WasmLoadFailed {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        source,
+                    })
+                })?;
+                self.register_block(pkg.name.clone(), Arc::new(block))?;
+                tracing::debug!(
+                    name = %pkg.name,
+                    source = %format!("lockfile:{}", pkg.source),
+                    "auto-registered block"
+                );
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -503,6 +527,7 @@ source = "registry+https://wafer.run"
         );
     }
 
+    #[cfg(feature = "wasmi")]
     #[test]
     fn load_lockfile_happy_path_registers_block() {
         let tmp = tempdir().unwrap();
@@ -527,6 +552,7 @@ source = "registry+https://wafer.run"
         assert_eq!(n, 1);
     }
 
+    #[cfg(feature = "wasmi")]
     #[test]
     fn load_lockfile_duplicate_name_errors() {
         let tmp = tempdir().unwrap();
@@ -560,6 +586,7 @@ source = "registry+https://wafer.run"
         assert!(err.to_string().contains("already registered"), "{err}");
     }
 
+    #[cfg(feature = "wasmi")]
     #[test]
     fn load_lockfile_cache_missing_surfaces_cache_miss() {
         let tmp = tempdir().unwrap();
@@ -585,5 +612,42 @@ source = "registry+https://wafer.run"
         let msg = err.to_string();
         assert!(msg.contains("acme/widget"), "{msg}");
         assert!(msg.contains("cache dir missing"), "{msg}");
+    }
+
+    /// Without the `wasmi` feature, loading a lockfile with WASM entries must
+    /// fail with a clear `WasmiFeatureDisabled` error rather than a compiler
+    /// error or silent no-op.
+    #[cfg(not(feature = "wasmi"))]
+    #[test]
+    fn load_lockfile_without_wasmi_errors_clearly() {
+        let tmp = tempdir().unwrap();
+        let lock_body = r#"version = 1
+
+[[package]]
+name = "acme/widget"
+version = "0.1.0"
+sha256 = "abc"
+source = "registry+https://wafer.run"
+"#;
+        let lock_path = tmp.path().join("wafer.lock");
+        fs::write(&lock_path, lock_body).unwrap();
+
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+        let err = w
+            .load_lockfile_with_cache(&lock_path, tmp.path())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wasmi"),
+            "expected wasmi feature error, got: {msg}"
+        );
+        assert!(
+            msg.contains("acme/widget"),
+            "expected package name in error, got: {msg}"
+        );
     }
 }
