@@ -1344,8 +1344,6 @@ mod unversioned_block_tests {
 #[cfg(feature = "wasm")]
 #[tokio::test]
 async fn test_resolve_versioned_block_download_error() {
-    
-
     let mut w = empty_wafer();
 
     // Use a nonexistent remote block in a flow to trigger resolve error
@@ -1367,8 +1365,6 @@ async fn test_resolve_versioned_block_download_error() {
 #[cfg(feature = "wasm")]
 #[tokio::test]
 async fn test_resolve_unversioned_block_download_error() {
-    
-
     let mut w = empty_wafer();
 
     w.add_flow(single_step_flow(

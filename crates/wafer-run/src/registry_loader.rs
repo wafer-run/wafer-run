@@ -270,7 +270,6 @@ pub(crate) fn default_cache_root() -> Option<PathBuf> {
 impl Wafer {
     /// Attempt to load blocks from the default lockfile path (`./wafer.lock`).
     /// No-op if missing. `pub(crate)` — wired into WaferBuilder in PR γ.
-    #[allow(dead_code)]
     pub(crate) fn try_load_lockfile_cwd(&mut self) -> Result<usize, RuntimeError> {
         let path = PathBuf::from("wafer.lock");
         match parse_lockfile(&path).map_err(RuntimeError::from)? {
@@ -281,7 +280,6 @@ impl Wafer {
 
     /// Load blocks from an explicit lockfile path. Errors if missing.
     /// `pub(crate)` — wired into WaferBuilder in PR γ.
-    #[allow(dead_code)]
     pub(crate) fn load_lockfile(&mut self, path: &Path) -> Result<usize, RuntimeError> {
         let lf = parse_lockfile(path)
             .map_err(RuntimeError::from)?

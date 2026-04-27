@@ -21,7 +21,12 @@ use crate::runtime::Wafer;
 /// How `WaferBuilder` should locate `wafer.lock`.
 #[derive(Debug, Clone)]
 pub(crate) enum LockfileSource {
-    /// Resolve via `WAFER_LOCKFILE` env var, then `./wafer.lock`. No-op if neither exists.
+    /// Resolve via `WAFER_LOCKFILE` env var, then fall back to `./wafer.lock` in CWD.
+    ///
+    /// Behaviour:
+    /// - `WAFER_LOCKFILE` set and non-empty: the named path is **required**;
+    ///   missing → error. (User opted in by setting the env var.)
+    /// - `WAFER_LOCKFILE` unset/empty: `./wafer.lock` is **optional**; missing → no-op.
     Auto,
     /// User-supplied path. Errors if missing.
     Explicit(PathBuf),
