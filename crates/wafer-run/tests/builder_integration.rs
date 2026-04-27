@@ -104,9 +104,8 @@ fn missing_explicit_lockfile_errors() {
         .disable_inventory()
         .lockfile(&missing)
         .build();
-    let err = match result {
-        Err(e) => e,
-        Ok(_) => panic!("builder with missing explicit lockfile must error"),
+    let Err(err) = result else {
+        panic!("builder with missing explicit lockfile must error");
     };
 
     let msg = err.to_string();
