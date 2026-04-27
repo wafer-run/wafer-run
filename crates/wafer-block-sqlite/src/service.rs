@@ -736,8 +736,8 @@ mod tests {
     #[test]
     fn test_json_to_sql_float() {
         assert_eq!(
-            json_to_sql_value(&serde_json::json!(3.14)),
-            SqlValue::Real(3.14)
+            json_to_sql_value(&serde_json::json!(2.5)),
+            SqlValue::Real(2.5)
         );
     }
 
@@ -780,7 +780,7 @@ mod tests {
         let sea_vals = vec![
             SeaValue::String(Some(Box::new("hello".to_string()))),
             SeaValue::BigInt(Some(42)),
-            SeaValue::Double(Some(3.14)),
+            SeaValue::Double(Some(2.5)),
             SeaValue::Bool(Some(true)),
             SeaValue::String(None), // NULL
         ];
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(params.len(), 5);
         assert_eq!(params[0], SqlValue::Text("hello".to_string()));
         assert_eq!(params[1], SqlValue::Integer(42));
-        assert_eq!(params[2], SqlValue::Real(3.14));
+        assert_eq!(params[2], SqlValue::Real(2.5));
         assert_eq!(params[3], SqlValue::Integer(1)); // bool true → 1
         assert_eq!(params[4], SqlValue::Null);
     }
