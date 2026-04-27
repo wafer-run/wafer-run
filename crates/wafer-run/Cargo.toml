@@ -60,3 +60,4 @@ wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serial_test = "3"
