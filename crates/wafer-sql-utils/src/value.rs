@@ -77,8 +77,8 @@ mod tests {
     #[test]
     fn test_float() {
         assert_eq!(
-            json_to_sea_value(&serde_json::json!(3.14)),
-            Value::Double(Some(3.14))
+            json_to_sea_value(&serde_json::json!(2.5)),
+            Value::Double(Some(2.5))
         );
     }
 

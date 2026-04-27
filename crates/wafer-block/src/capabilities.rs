@@ -381,9 +381,10 @@ mod tests {
     use std::collections::HashSet;
 
     fn caps_with_collections(items: &[&str]) -> BlockCapabilities {
-        let mut c = BlockCapabilities::default();
-        c.collections = items.iter().map(|s| s.to_string()).collect();
-        c
+        BlockCapabilities {
+            collections: items.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
     }
 
     #[test]
