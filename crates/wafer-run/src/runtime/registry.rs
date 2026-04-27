@@ -221,7 +221,11 @@ mod tests {
 
     #[test]
     fn register_block_rejects_invalid_name() {
-        let mut wafer = Wafer::new();
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         let block = Arc::new(NoopBlock);
         assert!(wafer.register_block("my_org/block", block.clone()).is_err());
         assert!(wafer.register_block("noSlash", block.clone()).is_err());

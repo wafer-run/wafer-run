@@ -174,7 +174,7 @@ async fn main() {
         .with_env_filter("info,wafer=debug")
         .init();
 
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
 
     // --- Custom HTTP server flow with extra middleware ---
     wafer.add_flow_json(r#"{

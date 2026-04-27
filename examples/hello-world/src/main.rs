@@ -30,7 +30,7 @@ impl Block for HelloBlock {
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
 
     // Register the HTTP server (infra + router)
     wafer_flow_http_server::register(

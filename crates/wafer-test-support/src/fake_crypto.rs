@@ -230,7 +230,11 @@ mod tests {
     #[tokio::test]
     async fn sign_and_verify_roundtrip() {
         let crypto = Arc::new(FakeCrypto::new());
-        let mut w = Wafer::new();
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         w.register_block("test/fake-crypto", crypto.clone())
             .unwrap();
         w.add_alias("wafer-run/crypto", "test/fake-crypto");
@@ -269,7 +273,11 @@ mod tests {
         let signing = Arc::new(FakeCrypto::with_secret(b"secret-a".to_vec()));
         let verifying = Arc::new(FakeCrypto::with_secret(b"secret-b".to_vec()));
 
-        let mut w1 = Wafer::new();
+        let mut w1 = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         w1.register_block("test/fake-crypto", signing.clone())
             .unwrap();
         w1.add_alias("wafer-run/crypto", "test/fake-crypto");
@@ -290,7 +298,11 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let mut w2 = Wafer::new();
+        let mut w2 = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         w2.register_block("test/fake-crypto", verifying.clone())
             .unwrap();
         w2.add_alias("wafer-run/crypto", "test/fake-crypto");

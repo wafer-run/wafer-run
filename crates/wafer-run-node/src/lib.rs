@@ -41,10 +41,9 @@ impl WaferRuntime {
     pub fn new() -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {e}")))?;
-        Ok(Self {
-            inner: Wafer::new(),
-            rt,
-        })
+        let inner = Wafer::new()
+            .map_err(|e| Error::from_reason(format!("failed to initialise Wafer runtime: {e}")))?;
+        Ok(Self { inner, rt })
     }
 
     /// Register a block or flow definition from a file path.

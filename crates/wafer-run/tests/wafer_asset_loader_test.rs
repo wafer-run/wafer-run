@@ -16,14 +16,22 @@ impl LoadAssetCallback for TestLoader {
 
 #[test]
 fn wafer_default_loader_is_noop() {
-    let wafer = Wafer::new();
+    let wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     let status = futures::executor::block_on(wafer.asset_loader().load("ffmpeg"));
     assert!(matches!(status, AssetLoadStatus::Failed(_)));
 }
 
 #[test]
 fn wafer_can_register_loader() {
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     wafer.set_asset_loader(Arc::new(TestLoader));
     let status = futures::executor::block_on(wafer.asset_loader().load("ffmpeg"));
     assert!(matches!(status, AssetLoadStatus::Ready));

@@ -198,8 +198,29 @@ pub struct Wafer {
 }
 
 impl Wafer {
-    /// Create a new Wafer runtime.
-    pub fn new() -> Self {
+    /// Construct a new Wafer runtime with default auto-registration:
+    /// link-time `inventory` of `#[wafer_block]` blocks (Path A) plus
+    /// `./wafer.lock` cache loading (Path B). For finer control, use
+    /// `Wafer::builder()`.
+    ///
+    /// Returns an error if either path fails: a duplicate block name,
+    /// a malformed lockfile, or a cache miss for a lockfile entry. A
+    /// missing `./wafer.lock` is **not** an error — Path B simply
+    /// no-ops in that case.
+    pub fn new() -> Result<Self, RuntimeError> {
+        Self::builder().build()
+    }
+
+    /// Builder for fine-grained control: opt-out of either auto-registration
+    /// path, or point at a non-default lockfile location.
+    pub fn builder() -> crate::WaferBuilder {
+        crate::WaferBuilder::default()
+    }
+
+    /// Construct an empty Wafer with no blocks registered. Used by
+    /// `WaferBuilder::build()` as the starting point before Path A
+    /// (inventory) and Path B (lockfile) populate registrations.
+    pub(crate) fn empty() -> Self {
         Self {
             blocks: HashMap::new(),
             flows: HashMap::new(),
@@ -359,12 +380,6 @@ impl Wafer {
     }
 }
 
-impl Default for Wafer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Deep-merge `src` into `dst`. For objects, keys are combined recursively.
 /// For non-object values, `dst`'s existing value wins (contributors cannot
 /// override the target block's own scalar values).
@@ -512,6 +527,31 @@ impl Wafer {
         }
 
         self.blocks.insert(name.to_string(), block);
+        Ok(())
+    }
+
+    /// Path A: register every `#[wafer_block]`-annotated native block
+    /// collected by the `inventory` crate at link time. Called by
+    /// `WaferBuilder::build()` when inventory is enabled (default).
+    ///
+    /// On collision (e.g. a block name registered twice across crates),
+    /// surfaces `RuntimeError::Inventory { name, source }` wrapping the
+    /// underlying `DuplicateBlock` so the offender is named.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn load_inventory_blocks(&mut self) -> Result<(), RuntimeError> {
+        for entry in inventory::iter::<crate::StaticBlockRegistration> {
+            let block = (entry.factory)();
+            self.register_block_inner(entry.name, block)
+                .map_err(|e| RuntimeError::Inventory {
+                    name: entry.name.to_string(),
+                    source: Box::new(e),
+                })?;
+            tracing::debug!(
+                name = %entry.name,
+                source = "inventory",
+                "auto-registered block"
+            );
+        }
         Ok(())
     }
 }

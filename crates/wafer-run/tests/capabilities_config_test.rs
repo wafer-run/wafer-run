@@ -49,7 +49,11 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
         BlockInfo::new("test/declaring", "0.1.0", "middleware@v1", "").capabilities(declared);
     let block = Arc::new(DeclaringNative { info });
 
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test/declaring", block).unwrap();
     w.add_block_config(
         "test/declaring",
@@ -83,7 +87,11 @@ async fn config_capabilities_subkey_stripped_from_regular_config() {
     let info = BlockInfo::new("test/echo-config", "0.1.0", "middleware@v1", "");
     let block = Arc::new(DeclaringNative { info });
 
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test/echo-config", block).unwrap();
     w.add_block_config(
         "test/echo-config",

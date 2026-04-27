@@ -123,7 +123,7 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     let result = std::panic::catch_unwind(|| {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         let wr = WaferRuntime {
-            inner: Wafer::new(),
+            inner: Wafer::new().expect("failed to initialise Wafer runtime"),
             rt,
         };
         Box::into_raw(Box::new(wr))

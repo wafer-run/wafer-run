@@ -11,7 +11,7 @@ use wafer_run::*;
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::new().expect("failed to initialise Wafer runtime");
 
     // --- Register blocks ---
     wafer_flow_http_server::register(

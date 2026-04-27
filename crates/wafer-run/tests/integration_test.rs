@@ -165,7 +165,11 @@ async fn run_flow(w: &Wafer, flow_id: &str, msg: Message, body: Vec<u8>) -> Test
 
 #[test]
 fn test_create_runtime() {
-    let w = Wafer::new();
+    let w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     assert!(w.flows_info().is_empty());
 }
 
@@ -185,7 +189,11 @@ impl Block for EchoBlock {
 
 #[test]
 fn test_register_inline_block() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
     assert!(w.has_block("test/echo"));
     assert!(!w.has_block("nonexistent"));
@@ -212,7 +220,11 @@ impl Block for UpperBlock {
 
 #[tokio::test]
 async fn test_single_block_flow() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test/upper", Arc::new(UpperBlock))
         .unwrap();
     w.add_flow(single_step_flow("to-upper", "test/upper"));
@@ -251,7 +263,11 @@ impl Block for AppendBlock {
 
 #[tokio::test]
 async fn test_sequential_flow() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     // Block A: append "-A"
     w.register_block("test/append-a", Arc::new(AppendBlock("-A".to_string())))
@@ -497,7 +513,11 @@ impl Block for NoopBlock {
 
 #[tokio::test]
 async fn test_observability_flow_hooks() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     let flow_start_count = Arc::new(AtomicUsize::new(0));
     let flow_end_count = Arc::new(AtomicUsize::new(0));
@@ -554,7 +574,11 @@ impl Block for Step2Block {
 
 #[tokio::test]
 async fn test_observability_block_hooks() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     let block_names = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
     let bn = block_names.clone();
@@ -629,7 +653,11 @@ impl Block for StoreBlock {
 
 #[tokio::test]
 async fn test_flow_reference() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/validate", Arc::new(ValidateBlock))
         .unwrap();
@@ -679,7 +707,11 @@ impl Block for ShouldNotRunBlock {
 // Drop is the only way to stop processing without an error.
 #[tokio::test]
 async fn test_drop_short_circuits_flow() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/dropper-2", Arc::new(DropperBlock))
         .unwrap();
@@ -705,7 +737,11 @@ async fn test_drop_short_circuits_flow() {
 
 #[tokio::test]
 async fn test_flow_reference_not_found() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/noop-2", Arc::new(NoopBlock))
         .unwrap();
@@ -761,7 +797,11 @@ impl Block for AfterFailBlock {
 
 #[tokio::test]
 async fn test_on_error_stop() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/fail", Arc::new(FailBlock)).unwrap();
     w.register_block("test/after-fail", Arc::new(AfterFailBlock))
@@ -782,7 +822,11 @@ async fn test_on_error_stop() {
 
 #[tokio::test]
 async fn test_on_error_continue() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     let fail_count = Arc::new(AtomicUsize::new(0));
     let fc = fail_count.clone();
@@ -836,7 +880,11 @@ async fn test_on_error_continue() {
 
 #[tokio::test]
 async fn test_on_error_continue_no_more_nodes() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     struct FailAtEndBlock;
     #[async_trait::async_trait]
@@ -890,7 +938,11 @@ impl Block for DropperBlock {
 
 #[tokio::test]
 async fn test_drop_action() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/dropper", Arc::new(DropperBlock))
         .unwrap();
@@ -916,7 +968,11 @@ async fn test_drop_action() {
 
 #[tokio::test]
 async fn test_execute_nonexistent_flow() {
-    let w = Wafer::new();
+    let w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     let result = run_flow(&w, "nonexistent", Message::new("test"), b"data".to_vec()).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
@@ -951,7 +1007,11 @@ impl Block for ConfigurableBlock {
 
 #[tokio::test]
 async fn test_block_with_config() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/configurable", Arc::new(ConfigurableBlock))
         .unwrap();
@@ -1019,7 +1079,11 @@ fn test_message_methods() {
 
 #[tokio::test]
 async fn test_resolve_missing_block() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.add_flow(single_step_flow("broken", "unregistered-block"));
 
@@ -1033,7 +1097,11 @@ async fn test_resolve_missing_block() {
 
 #[tokio::test]
 async fn test_add_flow_json() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/echo-2", Arc::new(EchoBlock))
         .unwrap();
@@ -1075,7 +1143,11 @@ impl Block for PanickerBlock {
 
 #[tokio::test]
 async fn test_panic_recovery() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/panicker", Arc::new(PanickerBlock))
         .unwrap();
@@ -1097,7 +1169,11 @@ async fn test_panic_recovery() {
 
 #[test]
 fn test_flows_info() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/noop-3", Arc::new(NoopBlock))
         .unwrap();
@@ -1137,7 +1213,11 @@ impl Block for LifecycleBlock {
 
 #[tokio::test]
 async fn test_start_and_stop() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.register_block("test/lifecycle-block", Arc::new(LifecycleBlock))
         .unwrap();
@@ -1335,7 +1415,11 @@ mod unversioned_block_tests {
 async fn test_resolve_versioned_block_download_error() {
     use wafer_run::*;
 
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     // Use a nonexistent remote block in a flow to trigger resolve error
     w.add_flow(single_step_flow(
@@ -1358,7 +1442,11 @@ async fn test_resolve_versioned_block_download_error() {
 async fn test_resolve_unversioned_block_download_error() {
     use wafer_run::*;
 
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     w.add_flow(single_step_flow(
         "unversioned-test",
@@ -1382,7 +1470,11 @@ async fn test_resolve_unversioned_block_download_error() {
 
 #[tokio::test]
 async fn test_waferflow_simple_pipeline() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     // Block that uppercases the "text" field
     struct UppercaseBlock;
@@ -1468,7 +1560,11 @@ async fn test_waferflow_simple_pipeline() {
 
 #[tokio::test]
 async fn test_waferflow_conditional_routing() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     struct CheckSignBlock;
     #[async_trait::async_trait]
@@ -1598,7 +1694,11 @@ async fn test_waferflow_conditional_routing() {
 
 #[tokio::test]
 async fn test_waferflow_validation_errors() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     // Duplicate step IDs
     let result = w.add_flow_json(
@@ -1618,7 +1718,11 @@ async fn test_waferflow_validation_errors() {
 
 #[tokio::test]
 async fn test_waferflow_max_steps_limit() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
 
     struct LoopBlock;
     #[async_trait::async_trait]
@@ -1670,7 +1774,11 @@ async fn test_waferflow_max_steps_limit() {
 
 #[tokio::test]
 async fn test_waferflow_not_found() {
-    let w = Wafer::new();
+    let w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     let result = run_flow(&w, "nonexistent", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(

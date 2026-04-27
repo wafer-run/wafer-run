@@ -147,7 +147,11 @@ async fn run(w: &Wafer, flow_id: &str, body: Vec<u8>) -> Result<Vec<u8>, Termina
 }
 
 fn setup() -> Wafer {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     for (name, block) in [
         ("test/echo", Arc::new(EchoBlock) as Arc<dyn Block>),
         ("test/upper", Arc::new(UpperBlock)),

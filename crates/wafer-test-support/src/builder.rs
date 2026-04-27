@@ -20,7 +20,11 @@ impl Default for WaferBuilder {
 impl WaferBuilder {
     pub fn new() -> Self {
         Self {
-            wafer: Wafer::new(),
+            wafer: Wafer::builder()
+                .disable_inventory()
+                .disable_lockfile()
+                .build()
+                .expect("empty wafer build is infallible"),
         }
     }
 

@@ -53,6 +53,8 @@ pub use runtime::Wafer;
 pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
 #[cfg(not(target_arch = "wasm32"))]
 pub use static_registration::StaticBlockRegistration;
+mod builder;
+pub use builder::WaferBuilder;
 pub use types::{
     AuthLevel, ErrorCode, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType, Message,
     MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
