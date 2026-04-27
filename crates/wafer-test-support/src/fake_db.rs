@@ -315,7 +315,11 @@ mod tests {
         let db = Arc::new(FakeDb::new());
         db.seed("users", vec![json!({"id": "u1", "name": "Alice"})]);
 
-        let mut w = Wafer::new();
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         w.register_block("test/fake-db", db.clone()).unwrap();
         w.add_alias("wafer-run/database", "test/fake-db");
         let wafer = w.start().await.unwrap();

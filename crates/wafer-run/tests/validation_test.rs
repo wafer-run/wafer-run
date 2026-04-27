@@ -52,7 +52,11 @@ impl Block for NeedsConfigBlock {
 
 #[tokio::test]
 async fn start_fails_on_missing_required_config() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test-org/needs-config", Arc::new(NeedsConfigBlock))
         .unwrap();
     // No add_block_config call => required key is absent
@@ -77,7 +81,11 @@ async fn start_fails_on_missing_required_config() {
 
 #[tokio::test]
 async fn start_succeeds_when_all_required_present() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test-org/needs-config", Arc::new(NeedsConfigBlock))
         .unwrap();
     // Provide the required key
@@ -136,7 +144,11 @@ impl Block for BadActionCallerBlock {
 
 #[tokio::test]
 async fn call_block_rejects_wrong_action_for_interface() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test-org/db-block", Arc::new(DbBlock))
         .unwrap();
     w.register_block("test-org/bad-action-caller", Arc::new(BadActionCallerBlock))
@@ -219,7 +231,11 @@ impl Block for CustomIfaceCallerBlock {
 
 #[tokio::test]
 async fn call_block_allows_custom_interface_with_warning() {
-    let mut w = Wafer::new();
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     w.register_block("test-org/custom-iface", Arc::new(CustomInterfaceBlock))
         .unwrap();
     w.register_block(

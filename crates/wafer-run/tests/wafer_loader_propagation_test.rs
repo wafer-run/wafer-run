@@ -109,7 +109,11 @@ mod tests {
 
     #[tokio::test]
     async fn set_loader_after_register_propagates() {
-        let mut wafer = wafer_run::Wafer::new();
+        let mut wafer = wafer_run::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
 
         // Register block before the loader is set.
         let wasm_bytes = compiled_wasm();
@@ -144,7 +148,11 @@ mod tests {
 
     #[tokio::test]
     async fn set_loader_before_register_propagates() {
-        let mut wafer = wafer_run::Wafer::new();
+        let mut wafer = wafer_run::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
 
         // Install the recording loader before any block is registered.
         let loader = RecordingLoader::ready();

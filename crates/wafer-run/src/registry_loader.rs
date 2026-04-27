@@ -270,7 +270,6 @@ pub(crate) fn default_cache_root() -> Option<PathBuf> {
 impl Wafer {
     /// Attempt to load blocks from the default lockfile path (`./wafer.lock`).
     /// No-op if missing. `pub(crate)` — wired into WaferBuilder in PR γ.
-    #[allow(dead_code)]
     pub(crate) fn try_load_lockfile_cwd(&mut self) -> Result<usize, RuntimeError> {
         let path = PathBuf::from("wafer.lock");
         match parse_lockfile(&path).map_err(RuntimeError::from)? {
@@ -281,7 +280,6 @@ impl Wafer {
 
     /// Load blocks from an explicit lockfile path. Errors if missing.
     /// `pub(crate)` — wired into WaferBuilder in PR γ.
-    #[allow(dead_code)]
     pub(crate) fn load_lockfile(&mut self, path: &Path) -> Result<usize, RuntimeError> {
         let lf = parse_lockfile(path)
             .map_err(RuntimeError::from)?
@@ -520,7 +518,11 @@ source = "registry+https://wafer.run"
         fs::write(&lock_path, lock_body).unwrap();
         seed_cache(tmp.path(), "acme", "widget", "0.1.0");
 
-        let mut w = Wafer::new();
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         let n = w.load_lockfile_with_cache(&lock_path, tmp.path()).unwrap();
         assert_eq!(n, 1);
     }
@@ -547,7 +549,11 @@ source = "registry+https://wafer.run"
         seed_cache(tmp.path(), "acme", "widget", "0.1.0");
         seed_cache(tmp.path(), "acme", "widget", "0.2.0");
 
-        let mut w = Wafer::new();
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         let err = w
             .load_lockfile_with_cache(&lock_path, tmp.path())
             .unwrap_err();
@@ -568,7 +574,11 @@ source = "registry+https://wafer.run"
         let lock_path = tmp.path().join("wafer.lock");
         fs::write(&lock_path, lock_body).unwrap();
 
-        let mut w = Wafer::new();
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
         let err = w
             .load_lockfile_with_cache(&lock_path, tmp.path())
             .unwrap_err();

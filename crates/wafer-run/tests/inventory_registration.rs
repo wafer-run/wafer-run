@@ -67,3 +67,15 @@ fn factory_builds_concrete_block() {
     let block: Arc<dyn Block> = (reg.factory)();
     assert_eq!(block.info().name, "test/inventory");
 }
+
+#[test]
+fn builder_loads_inventory_blocks() {
+    let w = wafer_run::Wafer::builder()
+        .disable_lockfile()
+        .build()
+        .expect("inventory-only build should succeed");
+    assert!(
+        w.has_block("test/inventory"),
+        "WaferBuilder should register inventory-collected blocks"
+    );
+}

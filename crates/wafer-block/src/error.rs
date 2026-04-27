@@ -67,6 +67,14 @@ pub enum RuntimeError {
         supported: u32,
     },
 
+    /// Inventory registration of a block failed.
+    #[error("inventory registration of '{name}' failed: {source}")]
+    Inventory {
+        name: String,
+        #[source]
+        source: Box<RuntimeError>,
+    },
+
     // ── Catch-all ───────────────────────────────────────────────────────
     /// An error that doesn't fit any specific category.
     #[error("{0}")]
@@ -82,5 +90,27 @@ impl From<String> for RuntimeError {
 impl From<&str> for RuntimeError {
     fn from(s: &str) -> Self {
         RuntimeError::Other(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_variant_renders() {
+        // Use Lockfile(String) as the inner because PR β already added it,
+        // so its shape is stable. Any other RuntimeError variant works equally.
+        let inner = RuntimeError::Lockfile("collision".into());
+        let e = RuntimeError::Inventory {
+            name: "acme/widget".into(),
+            source: Box::new(inner),
+        };
+        let s = e.to_string();
+        assert!(
+            s.contains("acme/widget"),
+            "name should appear in display: {s}"
+        );
+        assert!(s.contains("inventory"), "should mention inventory: {s}");
     }
 }

@@ -35,7 +35,11 @@ impl Block for StubBlock {
 
 #[test]
 fn registered_block_infos_lists_registered_blocks() {
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
     wafer
         .register_block(
             "test/first",

@@ -169,12 +169,12 @@ impl Block for FallbackBlock {
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter("info,wafer=debug")
         .init();
 
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::new()?;
 
     // --- Custom HTTP server flow with extra middleware ---
     wafer.add_flow_json(r#"{
@@ -254,7 +254,8 @@ async fn main() {
     tracing::info!("  GET  /stats");
     tracing::info!("  GET  /_inspector/ui");
 
-    let wafer = wafer.start().await.expect("failed to start");
+    let wafer = wafer.start().await?;
     tokio::signal::ctrl_c().await.ok();
     wafer.shutdown().await;
+    Ok(())
 }

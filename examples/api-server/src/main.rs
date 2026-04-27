@@ -14,12 +14,12 @@ use wafer_core::clients::database as db;
 use wafer_run::*;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter("info,wafer=debug")
         .init();
 
-    let mut wafer = Wafer::new();
+    let mut wafer = Wafer::new()?;
 
     // --- Register blocks ---
     wafer_flow_http_server::register(
@@ -69,10 +69,11 @@ async fn main() {
     );
 
     tracing::info!("API server starting on http://localhost:8080");
-    let wafer = wafer.start().await.expect("failed to start");
+    let wafer = wafer.start().await?;
 
     tokio::signal::ctrl_c().await.ok();
     wafer.shutdown().await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
