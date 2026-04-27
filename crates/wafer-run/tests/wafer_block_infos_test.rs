@@ -1,4 +1,4 @@
-//! Test that Wafer exposes registered block info via `registered_block_infos()`.
+//! Test that Wafer exposes registered block info via `block_infos()`.
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ impl Block for StubBlock {
 }
 
 #[test]
-fn registered_block_infos_lists_registered_blocks() {
+fn block_infos_lists_registered_blocks() {
     let mut wafer = Wafer::builder()
         .disable_inventory()
         .disable_lockfile()
@@ -59,7 +59,7 @@ fn registered_block_infos_lists_registered_blocks() {
         )
         .expect("register second");
 
-    let infos = wafer.registered_block_infos();
+    let infos = wafer.block_infos();
     assert_eq!(infos.len(), 2);
     assert!(infos.iter().any(|i| i.name == "test/first"));
     let second = infos

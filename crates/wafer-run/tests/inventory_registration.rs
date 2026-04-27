@@ -79,3 +79,17 @@ fn builder_loads_inventory_blocks() {
         "WaferBuilder should register inventory-collected blocks"
     );
 }
+
+#[test]
+fn block_infos_includes_inventory_registered_block() {
+    let w = wafer_run::Wafer::builder()
+        .disable_lockfile()
+        .build()
+        .expect("inventory-only build should succeed");
+    let infos = w.block_infos();
+    assert!(
+        infos.iter().any(|i| i.name == "test/inventory"),
+        "block_infos() should include inventory-registered 'test/inventory', got: {:?}",
+        infos.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()
+    );
+}
