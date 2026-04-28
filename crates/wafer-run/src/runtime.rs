@@ -199,9 +199,9 @@ pub struct Wafer {
 
 impl Wafer {
     /// Construct a new Wafer runtime with default auto-registration:
-    /// link-time `inventory` of `#[wafer_block]` blocks (Path A) plus
-    /// `./wafer.lock` cache loading (Path B). For finer control, use
-    /// `Wafer::builder()`.
+    /// link-time `linkme` of `register_static_block!`-registered blocks
+    /// (Path A) plus `./wafer.lock` cache loading (Path B). For finer
+    /// control, use `Wafer::builder()`.
     ///
     /// Returns an error if either path fails: a duplicate block name,
     /// a malformed lockfile, or a cache miss for a lockfile entry. A
@@ -219,7 +219,7 @@ impl Wafer {
 
     /// Construct an empty Wafer with no blocks registered. Used by
     /// `WaferBuilder::build()` as the starting point before Path A
-    /// (inventory) and Path B (lockfile) populate registrations.
+    /// (linkme static registration) and Path B (lockfile) populate registrations.
     pub(crate) fn empty() -> Self {
         Self {
             blocks: HashMap::new(),
@@ -533,15 +533,20 @@ impl Wafer {
     }
 
     /// Path A: register every `#[wafer_block]`-annotated native block
-    /// collected by the `inventory` crate at link time. Called by
-    /// `WaferBuilder::build()` when inventory is enabled (default).
+    /// collected via `linkme` at link time. Called by
+    /// `WaferBuilder::build()` when static registration is enabled (default).
+    ///
+    /// `linkme` preserves entries in the ELF section even for standalone crates
+    /// that have no other code-level references from the consumer binary —
+    /// unlike `inventory`, which was silently DCE'd by the linker for such
+    /// crates.
     ///
     /// On collision (e.g. a block name registered twice across crates),
     /// surfaces `RuntimeError::Inventory { name, source }` wrapping the
     /// underlying `DuplicateBlock` so the offender is named.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn load_inventory_blocks(&mut self) -> Result<(), RuntimeError> {
-        for entry in inventory::iter::<crate::StaticBlockRegistration> {
+        for entry in crate::static_registration::STATIC_BLOCK_REGISTRATIONS.iter() {
             let block = (entry.factory)();
             self.register_block_inner(entry.name, block)
                 .map_err(|e| RuntimeError::Inventory {
@@ -550,7 +555,7 @@ impl Wafer {
                 })?;
             tracing::debug!(
                 name = %entry.name,
-                source = "inventory",
+                source = "linkme",
                 "auto-registered block"
             );
         }

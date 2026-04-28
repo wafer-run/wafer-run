@@ -1,9 +1,14 @@
-//! Host-side static block registration collected via the `inventory` crate.
+//! Host-side static block registration collected via `linkme`.
+//!
+//! `linkme` uses an ELF section that the linker preserves even when no
+//! code-level reference exists from the consumer binary, unlike `inventory`
+//! which gets linker-DCE'd for standalone crates whose only consumer reference
+//! was a `pub fn register()` call.
 //!
 //! The `#[wafer_block]` proc-macro emits one of these entries per annotated
 //! block, gated on `cfg(not(target_arch = "wasm32"))` so WASM guest builds
 //! don't carry the machinery. The collection is harvested at startup by
-//! `WaferBuilder` (landing in PR γ).
+//! `WaferBuilder`.
 
 use std::sync::Arc;
 
@@ -20,6 +25,10 @@ pub struct StaticBlockRegistration {
     pub factory: fn() -> Arc<dyn Block>,
 }
 
-// Only one `collect!` call per type per binary is allowed; wafer-run owns
-// it so consumer crates don't need to repeat it.
-inventory::collect!(StaticBlockRegistration);
+/// The link-time distributed slice that collects every `StaticBlockRegistration`
+/// contributed by any crate linked into the final binary.
+///
+/// Consumer crates must use the `register_static_block!` macro rather than
+/// touching this slice directly.
+#[linkme::distributed_slice]
+pub static STATIC_BLOCK_REGISTRATIONS: [StaticBlockRegistration] = [..];

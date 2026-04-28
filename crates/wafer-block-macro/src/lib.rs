@@ -558,14 +558,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        ::wafer_run::inventory::submit! {
-            ::wafer_run::StaticBlockRegistration {
-                name: #name,
-                factory: || ::std::sync::Arc::new(<#struct_ty>::new())
-                    as ::std::sync::Arc<dyn ::wafer_run::Block>,
-            }
-        }
+        ::wafer_run::register_static_block!(#name, #struct_ty);
     };
 
     expanded.into()
