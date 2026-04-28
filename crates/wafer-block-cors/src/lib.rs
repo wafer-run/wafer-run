@@ -98,11 +98,4 @@ impl Block for CorsBlock {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-::wafer_run::inventory::submit! {
-    ::wafer_run::StaticBlockRegistration {
-        name: "wafer-run/cors",
-        factory: || ::std::sync::Arc::new(CorsBlock::new())
-            as ::std::sync::Arc<dyn ::wafer_run::Block>,
-    }
-}
+wafer_run::register_static_block!("wafer-run/cors", CorsBlock);

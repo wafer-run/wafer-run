@@ -23,7 +23,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 dirs = "5"
-inventory = { workspace = true }
+linkme = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }
@@ -58,6 +58,7 @@ wafer-sdk = { path = "../../sdks/rust" }
 wafer-test-support = { path = "../wafer-test-support" }
 wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
+wafer-block-cors = { path = "../wafer-block-cors" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"

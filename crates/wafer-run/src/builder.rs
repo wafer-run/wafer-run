@@ -1,8 +1,8 @@
 //! `WaferBuilder` — opt-in/out construction over `Wafer::empty()`.
 //!
-//! Wires Path A (link-time `inventory` of `#[wafer_block]` blocks) and
-//! Path B (`wafer.lock` cache loader) into a single fallible entry
-//! point. `Wafer::new()` is `Self::builder().build()`.
+//! Wires Path A (link-time `linkme` of `register_static_block!`-registered
+//! blocks) and Path B (`wafer.lock` cache loader) into a single fallible
+//! entry point. `Wafer::new()` is `Self::builder().build()`.
 //!
 //! Resolution order for the lockfile path:
 //! 1. `WaferBuilder::lockfile(path)` — explicit override.
@@ -36,8 +36,8 @@ pub(crate) enum LockfileSource {
 
 /// Builder for a `Wafer` runtime with auto-registration knobs.
 ///
-/// Both Path A (inventory) and Path B (lockfile) default to enabled.
-/// Use `disable_inventory()` / `disable_lockfile()` to opt out.
+/// Both Path A (linkme static registration) and Path B (lockfile) default
+/// to enabled. Use `disable_inventory()` / `disable_lockfile()` to opt out.
 #[derive(Debug, Clone)]
 pub struct WaferBuilder {
     enable_inventory: bool,
@@ -54,8 +54,8 @@ impl Default for WaferBuilder {
 }
 
 impl WaferBuilder {
-    /// Skip the link-time `inventory` pass. Useful for tests that want
-    /// a pristine runtime without picking up `#[wafer_block]`-annotated
+    /// Skip the link-time `linkme` pass. Useful for tests that want
+    /// a pristine runtime without picking up `register_static_block!`-annotated
     /// blocks that happen to be linked into the test binary.
     pub fn disable_inventory(mut self) -> Self {
         self.enable_inventory = false;

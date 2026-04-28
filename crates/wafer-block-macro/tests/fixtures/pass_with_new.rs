@@ -12,7 +12,7 @@ use wafer_block::{
     types::BlockInfo,
 };
 use wafer_block_macro::wafer_block;
-use wafer_run::StaticBlockRegistration;
+use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 struct Widget;
 
@@ -51,13 +51,15 @@ impl Widget {
 }
 
 fn main() {
-    // Inventory entry exists at link time.
-    let found = wafer_run::inventory::iter::<StaticBlockRegistration>()
+    // linkme entry exists at link time.
+    let found = STATIC_BLOCK_REGISTRATIONS
+        .iter()
         .any(|r| r.name == "acme/widget");
-    assert!(found, "inventory entry missing");
+    assert!(found, "linkme entry missing");
 
     // Factory produces an Arc<dyn Block>.
-    let reg = wafer_run::inventory::iter::<StaticBlockRegistration>()
+    let reg = STATIC_BLOCK_REGISTRATIONS
+        .iter()
         .find(|r| r.name == "acme/widget")
         .unwrap();
     let _block: Arc<dyn Block> = (reg.factory)();

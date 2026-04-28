@@ -1,8 +1,9 @@
 //! Verify that `#[wafer_block]`-annotated native blocks are collected by
-//! the `inventory` crate and exposed via `StaticBlockRegistration`.
+//! `linkme` and exposed via `StaticBlockRegistration`.
 //!
-//! This test does NOT exercise `Wafer::builder()` — that arrives in PR γ.
-//! It just pins the link-time collection contract.
+//! Pins the link-time collection contract for the `inventory` → `linkme`
+//! migration. `linkme` preserves entries even for standalone crates that have
+//! no other code-level references from the consumer binary.
 
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use wafer_block::{
     types::BlockInfo,
 };
 use wafer_block_macro::wafer_block;
-use wafer_run::{inventory, StaticBlockRegistration};
+use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 struct TestBlock;
 
@@ -37,10 +38,10 @@ impl Block for TestBlock {
 }
 
 #[wafer_block(
-    name = "test/inventory",
+    name = "test/linkme",
     version = "0.1.0",
     interface = "handler@v1",
-    summary = "Test block for inventory registration"
+    summary = "Test block for linkme registration"
 )]
 impl TestBlock {
     fn handle(_msg: Message, _body: Vec<u8>) -> wafer_sdk::core_abi::GuestResult {
@@ -49,47 +50,46 @@ impl TestBlock {
 }
 
 #[test]
-fn annotated_block_appears_in_inventory() {
-    let names: Vec<&str> = inventory::iter::<StaticBlockRegistration>()
-        .map(|r| r.name)
-        .collect();
+fn annotated_block_appears_in_slice() {
+    let names: Vec<&str> = STATIC_BLOCK_REGISTRATIONS.iter().map(|r| r.name).collect();
     assert!(
-        names.contains(&"test/inventory"),
-        "expected 'test/inventory' in inventory, got: {names:?}"
+        names.contains(&"test/linkme"),
+        "expected 'test/linkme' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
     );
 }
 
 #[test]
 fn factory_builds_concrete_block() {
-    let reg = inventory::iter::<StaticBlockRegistration>()
-        .find(|r| r.name == "test/inventory")
+    let reg = STATIC_BLOCK_REGISTRATIONS
+        .iter()
+        .find(|r| r.name == "test/linkme")
         .expect("registered");
     let block: Arc<dyn Block> = (reg.factory)();
-    assert_eq!(block.info().name, "test/inventory");
+    assert_eq!(block.info().name, "test/linkme");
 }
 
 #[test]
-fn builder_loads_inventory_blocks() {
+fn builder_loads_linkme_blocks() {
     let w = wafer_run::Wafer::builder()
         .disable_lockfile()
         .build()
-        .expect("inventory-only build should succeed");
+        .expect("linkme-only build should succeed");
     assert!(
-        w.has_block("test/inventory"),
-        "WaferBuilder should register inventory-collected blocks"
+        w.has_block("test/linkme"),
+        "WaferBuilder should register linkme-collected blocks"
     );
 }
 
 #[test]
-fn block_infos_includes_inventory_registered_block() {
+fn block_infos_includes_linkme_registered_block() {
     let w = wafer_run::Wafer::builder()
         .disable_lockfile()
         .build()
-        .expect("inventory-only build should succeed");
+        .expect("linkme-only build should succeed");
     let infos = w.block_infos();
     assert!(
-        infos.iter().any(|i| i.name == "test/inventory"),
-        "block_infos() should include inventory-registered 'test/inventory', got: {:?}",
+        infos.iter().any(|i| i.name == "test/linkme"),
+        "block_infos() should include linkme-registered 'test/linkme', got: {:?}",
         infos.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()
     );
 }
