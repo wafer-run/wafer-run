@@ -5864,6 +5864,7 @@ dependencies = [
  "async-trait",
  "tracing",
  "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]
@@ -5918,6 +5919,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]
@@ -6028,6 +6030,7 @@ dependencies = [
  "async-trait",
  "tracing",
  "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]
@@ -6051,6 +6054,7 @@ dependencies = [
  "async-trait",
  "serde_json",
  "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]
@@ -6079,6 +6083,7 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-core",
+ "wafer-run",
 ]
 
 [[package]]
@@ -6154,13 +6159,8 @@ name = "wafer-flow-http-server"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "wafer-block-cors",
- "wafer-block-http-listener",
  "wafer-block-ip-rate-limit",
  "wafer-block-monitoring",
- "wafer-block-readonly-guard",
- "wafer-block-router",
- "wafer-block-security-headers",
  "wafer-run",
 ]
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use wafer_block::*;
 
@@ -285,6 +285,11 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
-    w.register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()))
+#[cfg(not(target_arch = "wasm32"))]
+::wafer_run::inventory::submit! {
+    ::wafer_run::StaticBlockRegistration {
+        name: "wafer-run/inspector",
+        factory: || ::std::sync::Arc::new(InspectorBlock::new())
+            as ::std::sync::Arc<dyn ::wafer_run::Block>,
+    }
 }

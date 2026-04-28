@@ -7,6 +7,7 @@ description = "WAFER block: CORS preflight handler and header injection"
 
 [dependencies]
 wafer-block = { path = "../wafer-block" }
+wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 

@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )
     .expect("register http server");
-    wafer_block_web::register(&mut wafer).expect("register web");
+    // wafer-run/web is loaded automatically by Wafer::new() via inventory autoreg.
     wafer.add_block_config(
         "wafer-run/web",
         serde_json::json!({

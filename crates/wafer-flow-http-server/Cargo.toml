@@ -7,13 +7,8 @@ description = "WAFER flow: batteries-included HTTP server with security headers,
 
 [dependencies]
 wafer-run = { path = "../wafer-run" }
-wafer-block-cors = { path = "../wafer-block-cors" }
-wafer-block-router = { path = "../wafer-block-router" }
-wafer-block-security-headers = { path = "../wafer-block-security-headers" }
-wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 wafer-block-monitoring = { path = "../wafer-block-monitoring" }
-wafer-block-http-listener = { path = "../wafer-block-http-listener" }
 serde_json = { workspace = true }
 
 [lints]

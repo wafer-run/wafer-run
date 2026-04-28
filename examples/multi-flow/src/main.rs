@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .expect("register http server");
 
     // --- Inspector (anonymous for dev) ---
-    wafer_block_inspector::register(&mut wafer).expect("register inspector");
+    // wafer-run/inspector is loaded automatically by Wafer::new() via inventory autoreg.
     wafer.add_block_config(
         "wafer-run/inspector",
         serde_json::json!({

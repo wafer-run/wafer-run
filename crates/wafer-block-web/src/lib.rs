@@ -1,9 +1,6 @@
 mod mime;
 
-use std::{
-    path::Path,
-    sync::{Arc, OnceLock},
-};
+use std::{path::Path, sync::OnceLock};
 
 use wafer_block::*;
 use wafer_core::clients::storage as store;
@@ -292,6 +289,11 @@ impl Block for WebBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
-    w.register_block("wafer-run/web", Arc::new(WebBlock::new()))
+#[cfg(not(target_arch = "wasm32"))]
+::wafer_run::inventory::submit! {
+    ::wafer_run::StaticBlockRegistration {
+        name: "wafer-run/web",
+        factory: || ::std::sync::Arc::new(WebBlock::new())
+            as ::std::sync::Arc<dyn ::wafer_run::Block>,
+    }
 }

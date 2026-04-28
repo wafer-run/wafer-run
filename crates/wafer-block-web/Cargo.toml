@@ -8,6 +8,7 @@ description = "WAFER block: static file server with caching and SPA support"
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core" }
+wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 

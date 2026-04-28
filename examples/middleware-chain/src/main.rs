@@ -205,12 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }"#).expect("valid flow JSON");
 
-    // Register standard infra blocks
-    wafer_block_inspector::register(&mut wafer).expect("register inspector");
-    wafer_block_http_listener::register(&mut wafer).expect("register http-listener");
-    wafer_block_security_headers::register(&mut wafer).expect("register security-headers");
-    wafer_block_cors::register(&mut wafer).expect("register cors");
-    wafer_block_router::register(&mut wafer).expect("register router");
+    // Standard infra blocks (inspector, http-listener, security-headers, cors, router)
+    // are loaded automatically by Wafer::new() via inventory autoreg.
 
     // Flow-level config
     wafer.add_block_config(

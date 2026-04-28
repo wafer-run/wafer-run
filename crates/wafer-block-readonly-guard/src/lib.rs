@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use wafer_block::*;
 
 /// ReadonlyGuardBlock blocks write operations when in read-only mode.
@@ -65,11 +63,13 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
-    w.register_block(
-        "wafer-run/readonly-guard",
-        Arc::new(ReadonlyGuardBlock::new()),
-    )
+#[cfg(not(target_arch = "wasm32"))]
+::wafer_run::inventory::submit! {
+    ::wafer_run::StaticBlockRegistration {
+        name: "wafer-run/readonly-guard",
+        factory: || ::std::sync::Arc::new(ReadonlyGuardBlock::new())
+            as ::std::sync::Arc<dyn ::wafer_run::Block>,
+    }
 }
 
 #[cfg(test)]
