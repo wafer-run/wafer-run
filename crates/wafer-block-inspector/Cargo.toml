@@ -7,7 +7,7 @@ description = "WAFER block: runtime introspection — blocks, flows, and visual 
 
 [dependencies]
 wafer-block = { path = "../wafer-block" }
-wafer-run = { path = "../wafer-run" }
+wafer-run = { path = "../wafer-run", default-features = false }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
