@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use wafer_block::*;
 
@@ -166,8 +166,4 @@ impl Block for RouterBlock {
         factory: || ::std::sync::Arc::new(RouterBlock::new())
             as ::std::sync::Arc<dyn ::wafer_run::Block>,
     }
-}
-
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
-    w.register_block("wafer-run/router", Arc::new(RouterBlock::new()))
 }

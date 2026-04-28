@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use axum::{
     body::Body,
@@ -450,11 +450,4 @@ impl Block for HttpListenerBlock {
         factory: || ::std::sync::Arc::new(HttpListenerBlock::new())
             as ::std::sync::Arc<dyn ::wafer_run::Block>,
     }
-}
-
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
-    w.register_block(
-        "wafer-run/http-listener",
-        Arc::new(HttpListenerBlock::new()),
-    )
 }

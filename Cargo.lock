@@ -6159,13 +6159,8 @@ name = "wafer-flow-http-server"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "wafer-block-cors",
- "wafer-block-http-listener",
  "wafer-block-ip-rate-limit",
  "wafer-block-monitoring",
- "wafer-block-readonly-guard",
- "wafer-block-router",
- "wafer-block-security-headers",
  "wafer-run",
 ]
 

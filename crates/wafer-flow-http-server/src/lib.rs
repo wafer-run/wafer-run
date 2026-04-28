@@ -46,6 +46,11 @@ const FLOW_JSON: &str = r#"{
 
 /// Register the `wafer-run/http-server` flow with native blocks and config.
 ///
+/// The inventory-managed blocks (security-headers, cors, readonly-guard, router,
+/// http-listener) are loaded automatically by `Wafer::new()`. This function
+/// registers the two non-inventory blocks (ip-rate-limit, monitoring), adds the
+/// flow definition, and applies config.
+///
 /// ```rust,ignore
 /// wafer_flow_http_server::register(&mut wafer, json!({
 ///     "listen": "0.0.0.0:8080",
@@ -56,27 +61,12 @@ pub fn register(
     w: &mut wafer_run::Wafer,
     config: serde_json::Value,
 ) -> Result<(), wafer_run::RuntimeError> {
-    // Register native blocks (idempotent — skips if already registered)
-    if !w.has_block("wafer-run/security-headers") {
-        wafer_block_security_headers::register(w)?;
-    }
-    if !w.has_block("wafer-run/cors") {
-        wafer_block_cors::register(w)?;
-    }
-    if !w.has_block("wafer-run/readonly-guard") {
-        wafer_block_readonly_guard::register(w)?;
-    }
+    // ip-rate-limit and monitoring are not inventory-managed — register explicitly.
     if !w.has_block("wafer-run/ip-rate-limit") {
         wafer_block_ip_rate_limit::register(w)?;
     }
     if !w.has_block("wafer-run/monitoring") {
         wafer_block_monitoring::register(w)?;
-    }
-    if !w.has_block("wafer-run/router") {
-        wafer_block_router::register(w)?;
-    }
-    if !w.has_block("wafer-run/http-listener") {
-        wafer_block_http_listener::register(w)?;
     }
 
     // Register flow
