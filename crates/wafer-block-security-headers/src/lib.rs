@@ -89,6 +89,15 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+::wafer_run::inventory::submit! {
+    ::wafer_run::StaticBlockRegistration {
+        name: "wafer-run/security-headers",
+        factory: || ::std::sync::Arc::new(SecurityHeadersBlock::new())
+            as ::std::sync::Arc<dyn ::wafer_run::Block>,
+    }
+}
+
 pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
     w.register_block(
         "wafer-run/security-headers",
