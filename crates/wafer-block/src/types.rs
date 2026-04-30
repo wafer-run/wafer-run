@@ -1155,6 +1155,11 @@ pub struct SkillTool {
 ///
 /// New loader values require a host update; new assets that target an
 /// existing loader do not.
+///
+/// `timeout_ms` lets the block override the host's default load timeout
+/// (currently 120s in solobase-browser's `bridge.js`). `None` keeps the
+/// host default. Useful for assets whose CDN download legitimately takes
+/// longer than the default on slow links (e.g. ffmpeg-core ~31 MB).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExternalAsset {
     pub id: String,
@@ -1162,6 +1167,12 @@ pub struct ExternalAsset {
     pub version: String,
     pub url: String,
     pub sha256: String,
+    /// Optional per-asset load timeout in milliseconds. When `None`, the
+    /// host applies its default. `skip_serializing_if = "Option::is_none"`
+    /// keeps the JSON wire format byte-identical for callers that don't
+    /// set the field, so existing serialized payloads remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
