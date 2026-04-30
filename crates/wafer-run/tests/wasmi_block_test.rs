@@ -198,7 +198,7 @@ mod tests {
             r#"
             (module
               (import "wafer" "__wafer_host_call_block"
-                (func $call_block (param i32 i32 i32 i32) (result i64)))
+                (func $call_block (param i32 i32 i32 i32 i32 i32) (result i64)))
               (memory (export "memory") 1)
               (data (i32.const 0) "test/target")
               (data (i32.const 16) "{}")
@@ -207,7 +207,8 @@ mod tests {
               (func (export "__wafer_handle") (param i32 i32) (result i64)
                 (call $call_block
                   (i32.const 0) (i32.const 11)   ;; name: "test/target"
-                  (i32.const 16) (i32.const 2))  ;; msg: "{}"
+                  (i32.const 16) (i32.const 2)   ;; msg: "{}"
+                  (i32.const 0) (i32.const 0))   ;; body: empty
               )
               (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
             )
@@ -237,6 +238,123 @@ mod tests {
                 panic!("call_block with no capabilities should produce an error, got: {other:?}")
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7b: call_block body passing — guest body bytes reach the target
+    //          block's InputStream, and the target's response body comes back
+    //          in the GuestResult JSON's `response.data`.
+    // -----------------------------------------------------------------------
+
+    /// Context that captures the body bytes seen on the most recent
+    /// call_block invocation, then echoes them back as the response body.
+    struct BodyEchoContext {
+        seen_body: std::sync::Mutex<Vec<u8>>,
+        seen_block_name: std::sync::Mutex<String>,
+    }
+
+    impl BodyEchoContext {
+        fn new() -> Self {
+            Self {
+                seen_body: std::sync::Mutex::new(Vec::new()),
+                seen_block_name: std::sync::Mutex::new(String::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl wafer_run::context::Context for BodyEchoContext {
+        async fn call_block(&self, name: &str, _msg: Message, input: InputStream) -> OutputStream {
+            *self.seen_block_name.lock().unwrap() = name.to_string();
+            let body = input.collect_to_bytes().await;
+            *self.seen_body.lock().unwrap() = body.clone();
+            OutputStream::respond(body)
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn test_call_block_passes_body_in_both_directions() {
+        // WAT module:
+        //   - Imports __wafer_host_call_block with the new 6-arg signature.
+        //   - data segment 0..11   = "test/target"
+        //   - data segment 16..18  = "{}" (JSON for empty Message)
+        //   - data segment 32..43  = "hello world" (request body — 11 bytes)
+        //   - __wafer_handle calls call_block with name + msg + body.
+        //   - The host runs phase 1 (traps with body bytes captured), the
+        //     resume loop dispatches to BodyEchoContext (which echoes), then
+        //     phase 2 writes the GuestResult JSON into guest memory and
+        //     returns its packed (ptr,len). __wafer_handle forwards that
+        //     back to the host as its return value, so the host's
+        //     `collect_buffered()` sees the GuestResult JSON as the response
+        //     body.
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (import "wafer" "__wafer_host_call_block"
+                (func $call_block (param i32 i32 i32 i32 i32 i32) (result i64)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "test/target")
+              (data (i32.const 16) "{\"kind\":\"x\",\"meta\":[]}")
+              (data (i32.const 64) "hello world")
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (call $call_block
+                  (i32.const 0)  (i32.const 11)   ;; name: "test/target"
+                  (i32.const 16) (i32.const 22)   ;; msg: {"kind":"x","meta":[]}
+                  (i32.const 64) (i32.const 11))  ;; body: "hello world"
+              )
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT should parse");
+
+        // Allow any call_block target so the capability check passes.
+        let caps = BlockCapabilities::unrestricted();
+        let block = WasmiBlock::load_with_capabilities(&wasm_bytes, caps)
+            .expect("body-passing module should load");
+
+        let ctx = BodyEchoContext::new();
+        let msg = Message::new("test.body");
+
+        let out = block.handle(&ctx, msg, InputStream::empty()).await;
+        let buf = out
+            .collect_buffered()
+            .await
+            .expect("expected Respond, got non-respond terminal");
+
+        // 1) The receiving block (mock context) actually saw the body bytes.
+        assert_eq!(
+            *ctx.seen_block_name.lock().unwrap(),
+            "test/target",
+            "ctx should have seen call_block named 'test/target'"
+        );
+        assert_eq!(
+            ctx.seen_body.lock().unwrap().as_slice(),
+            b"hello world",
+            "ctx.call_block must receive the guest's request body bytes"
+        );
+
+        // 2) The response that bubbles back to the WASM caller (and out of
+        //    its __wafer_handle return value) is the GuestResult JSON the
+        //    host wrote into guest memory after the call_block trap. Because
+        //    our WAT guest forwards that pointer directly as its own return
+        //    value, the outer host runtime decodes it as a Respond GuestAbiResult
+        //    whose `response.data` holds the target's response body bytes —
+        //    which is exactly the 11-byte "hello world" the target echoed.
+        assert_eq!(
+            buf.body, b"hello world",
+            "response body bytes must round-trip back to the WASM caller"
+        );
     }
 
     // -----------------------------------------------------------------------
