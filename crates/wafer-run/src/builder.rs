@@ -11,6 +11,11 @@
 //!
 //! Missing at the default location is silent (zero-config friction).
 //! Missing at an explicit path errors loudly (misconfig surfaces).
+//!
+//! On `wasm32` targets there is no filesystem, env, or cwd, so the `Auto`
+//! branch is compiled out — symmetric with `load_inventory_blocks()` (Path A),
+//! which is also gated. Explicit `.lockfile(path)` still compiles on every
+//! target and errors loudly when the path can't be read.
 
 use std::path::PathBuf;
 
@@ -84,10 +89,20 @@ impl WaferBuilder {
         }
         match self.lockfile {
             LockfileSource::Auto => {
-                if let Some(path) = resolve_lockfile_auto() {
-                    w.load_lockfile(&path)?;
-                } else {
-                    w.try_load_lockfile_cwd()?;
+                // Auto-discovery requires a filesystem (env var lookup of
+                // WAFER_LOCKFILE, fallback to ./wafer.lock). On wasm32 there
+                // is no fs/cwd/env, so the search is meaningless — skip it
+                // entirely. Symmetric with the inventory gate above.
+                // Explicit `.lockfile(path)` still runs on every target and
+                // surfaces an error loudly per the doctrine in the module
+                // header.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(path) = resolve_lockfile_auto() {
+                        w.load_lockfile(&path)?;
+                    } else {
+                        w.try_load_lockfile_cwd()?;
+                    }
                 }
             }
             LockfileSource::Explicit(p) => {
@@ -102,6 +117,7 @@ impl WaferBuilder {
 /// Returns the env-var override path if `WAFER_LOCKFILE` is set and
 /// non-empty. `None` falls through to the default `./wafer.lock`
 /// behaviour (which is silent if missing).
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_lockfile_auto() -> Option<PathBuf> {
     match std::env::var("WAFER_LOCKFILE") {
         Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
