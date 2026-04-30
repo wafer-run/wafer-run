@@ -76,6 +76,37 @@ pub fn format_banner(blocks: Option<usize>, flows: usize, addr: Option<&str>) ->
     }
 }
 
+/// Aggregator state for the boot-summary banner.
+#[derive(Debug, Default)]
+pub struct BannerState {
+    pub blocks: Option<usize>,
+    pub flows: usize,
+}
+
+impl BannerState {
+    /// Apply an event. Returns `Some(banner_string)` when a `Listening` event
+    /// arrives (caller should print it), and `None` otherwise. After emitting
+    /// a banner, the state is reset for the next spawn.
+    pub fn apply(&mut self, ev: BootEvent) -> Option<String> {
+        match ev {
+            BootEvent::Starting { blocks } => {
+                self.blocks = Some(blocks);
+                None
+            }
+            BootEvent::FlowRegistered { .. } => {
+                self.flows += 1;
+                None
+            }
+            BootEvent::Listening { addr } => {
+                let banner = format_banner(self.blocks, self.flows, Some(&addr));
+                self.blocks = None;
+                self.flows = 0;
+                Some(banner)
+            }
+        }
+    }
+}
+
 fn pretty_url(addr: &str) -> String {
     // 0.0.0.0:8080 → http://localhost:8080
     // 127.0.0.1:3000 → http://localhost:3000
@@ -93,13 +124,13 @@ mod tests {
 
     #[test]
     fn parses_starting_event() {
-        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer-run: wafer runtime starting blocks=12 event="starting""#;
+        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer.runtime: wafer runtime starting blocks=12 event="starting""#;
         assert_eq!(parse_event(line), Some(BootEvent::Starting { blocks: 12 }));
     }
 
     #[test]
     fn parses_flow_registered_event() {
-        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer-run: registered flow flow=site-main event="flow_registered""#;
+        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer.runtime: registered flow flow=site-main event="flow_registered""#;
         assert_eq!(
             parse_event(line),
             Some(BootEvent::FlowRegistered {
@@ -110,7 +141,7 @@ mod tests {
 
     #[test]
     fn parses_listening_event() {
-        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer-run: wafer-run/http-listener listening addr=0.0.0.0:8080 event="listening""#;
+        let line = r#"2026-04-30T10:00:00.000Z  INFO wafer.runtime: wafer-run/http-listener listening addr=0.0.0.0:8080 event="listening""#;
         assert_eq!(
             parse_event(line),
             Some(BootEvent::Listening {
@@ -143,5 +174,50 @@ mod tests {
     fn pretty_url_strips_bind_addr() {
         assert_eq!(pretty_url("0.0.0.0:8080"), "http://localhost:8080");
         assert_eq!(pretty_url("127.0.0.1:3000"), "http://localhost:3000");
+    }
+
+    #[test]
+    fn aggregator_counts_flows_registered_before_starting() {
+        // Real wafer-run ordering: flows register BEFORE start, then listen.
+        let mut s = BannerState::default();
+        assert!(s
+            .apply(BootEvent::FlowRegistered {
+                flow: "site-main".into()
+            })
+            .is_none());
+        assert!(s
+            .apply(BootEvent::FlowRegistered {
+                flow: "extra".into()
+            })
+            .is_none());
+        assert!(s.apply(BootEvent::Starting { blocks: 12 }).is_none());
+        let banner = s
+            .apply(BootEvent::Listening {
+                addr: "0.0.0.0:8080".into(),
+            })
+            .expect("listening should produce a banner");
+        assert!(banner.contains("12 blocks"));
+        assert!(banner.contains("2 flows"));
+        assert!(banner.contains("http://localhost:8080"));
+    }
+
+    #[test]
+    fn aggregator_resets_between_spawns() {
+        let mut s = BannerState::default();
+        s.apply(BootEvent::FlowRegistered { flow: "a".into() });
+        s.apply(BootEvent::Starting { blocks: 5 });
+        let _ = s.apply(BootEvent::Listening {
+            addr: "0.0.0.0:80".into(),
+        });
+        // Next spawn:
+        s.apply(BootEvent::FlowRegistered { flow: "b".into() });
+        s.apply(BootEvent::Starting { blocks: 7 });
+        let banner = s
+            .apply(BootEvent::Listening {
+                addr: "0.0.0.0:81".into(),
+            })
+            .unwrap();
+        assert!(banner.contains("7 blocks"));
+        assert!(banner.contains("1 flows"));
     }
 }

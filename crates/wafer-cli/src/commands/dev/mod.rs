@@ -55,25 +55,17 @@ pub async fn run(args: DevArgs) -> Result<()> {
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     // Summary aggregator: accumulates per-spawn state, prints the banner on
-    // `event = "listening"`. Resets on each new "starting" event.
+    // `event = "listening"`. Resets after each banner so the next spawn
+    // starts fresh. Note that flows register BEFORE `starting` (they're
+    // queued via `add_flow_json` before `Wafer::start()`), so we cannot
+    // reset on `Starting`.
     tokio::spawn(async move {
-        use summary::BootEvent;
-        let mut blocks: Option<usize> = None;
-        let mut flows: usize = 0;
+        let mut state = summary::BannerState::default();
         while let Some(line) = line_rx.recv().await {
-            match summary::parse_event(&line) {
-                Some(BootEvent::Starting { blocks: n }) => {
-                    blocks = Some(n);
-                    flows = 0;
-                }
-                Some(BootEvent::FlowRegistered { .. }) => {
-                    flows += 1;
-                }
-                Some(BootEvent::Listening { addr }) => {
-                    let banner = summary::format_banner(blocks, flows, Some(&addr));
+            if let Some(ev) = summary::parse_event(&line) {
+                if let Some(banner) = state.apply(ev) {
                     eprintln!("[wafer dev] {banner}");
                 }
-                None => {}
             }
         }
     });
