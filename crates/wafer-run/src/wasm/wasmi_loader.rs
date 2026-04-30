@@ -342,10 +342,11 @@ struct WasmiHostState {
     /// Used by host function enforcement (e.g. `allows_call_block`).
     capabilities: BlockCapabilities,
     /// Set by __wafer_host_call_block to request an async call.
+    /// The resume loop in `call_guest_resumable` consumes this, dispatches
+    /// the call via `Context::call_block`, allocates guest memory for the
+    /// resulting GuestResult JSON, writes it, and resumes the guest with
+    /// the packed (ptr, len) as the host call's return value (no re-entry).
     pending_call: Option<PendingCall>,
-    /// Set by the host after resolving a pending_call; the guest reads this
-    /// on the resumed/replayed invocation.
-    pending_result: Option<Vec<u8>>,
     /// Set by __wafer_host_load_asset to request an async asset load.
     /// The resume loop consumes this, drives the LoadAssetCallback, and
     /// resumes the guest with the resolved i32 status code as the return
@@ -357,6 +358,7 @@ struct WasmiHostState {
 struct PendingCall {
     block_name: String,
     msg_bytes: Vec<u8>,
+    body_bytes: Vec<u8>,
 }
 
 impl wasmi::ResourceLimiter for WasmiHostState {
@@ -518,11 +520,19 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_log: {e}")))?;
 
-    // __wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
+    // __wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
     //
-    // Two-phase protocol:
-    //   Phase 1 (no pending_result): read args, store PendingCall, trap.
-    //   Phase 2 (pending_result set): write result into guest memory, return packed ptr.
+    // Reads the call args (incl. request body) from guest memory, stores a
+    // PendingCall, and traps. The resume loop in `call_guest_resumable`
+    // catches the trap, dispatches to the target block via `Context::call_block`
+    // (passing the request body bytes as the target's InputStream), allocates
+    // guest memory for the response GuestResult JSON, writes it, and resumes
+    // the guest with the packed (ptr, len) as the host call's return value.
+    //
+    // The request body is forwarded to the target as InputStream
+    // (symmetric with `handle(msg, body)`); the response body is encoded
+    // inside the GuestResult JSON returned from this call (see the `Respond`
+    // payload's `response.data` field).
     linker
         .func_wrap(
             "wafer",
@@ -531,37 +541,11 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
              name_ptr: i32,
              name_len: i32,
              msg_ptr: i32,
-             msg_len: i32|
+             msg_len: i32,
+             body_ptr: i32,
+             body_len: i32|
              -> Result<i64, WasmiError> {
-                // Phase 2: if we already have a result from a previous resolution,
-                // return it to the guest.
-                if let Some(result_bytes) = caller.data_mut().pending_result.take() {
-                    let memory = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
-                    // Use __wafer_alloc to allocate in guest memory.
-                    let alloc_fn = caller
-                        .get_export("__wafer_alloc")
-                        .and_then(|e| e.into_func())
-                        .ok_or_else(|| WasmiError::new("guest has no __wafer_alloc export"))?;
-                    let len = result_bytes.len() as i32;
-                    let mut alloc_result = [Val::I32(0)];
-                    alloc_fn
-                        .call(&mut caller, &[Val::I32(len)], &mut alloc_result)
-                        .map_err(|e| {
-                            WasmiError::new(format!("__wafer_alloc in call_block phase 2: {e}"))
-                        })?;
-                    let Val::I32(ptr) = alloc_result[0] else {
-                        return Err(WasmiError::new("__wafer_alloc returned non-i32"));
-                    };
-                    memory
-                        .write(&mut caller, ptr as usize, &result_bytes)
-                        .map_err(|e| WasmiError::new(format!("writing call_block result: {e}")))?;
-                    return Ok(pack_ptr_len(ptr as u32, len as u32));
-                }
-
-                // Phase 1: read block name and message from guest memory, then trap.
+                // Read block name, message, and body from guest memory, then trap.
                 let memory = caller
                     .get_export("memory")
                     .and_then(|e| e.into_memory())
@@ -586,10 +570,18 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
                     .read(&caller, msg_ptr as usize, &mut msg_buf)
                     .map_err(|e| WasmiError::new(format!("reading call_block message: {e}")))?;
 
+                let mut body_buf = vec![0u8; body_len as usize];
+                if body_len > 0 {
+                    memory
+                        .read(&caller, body_ptr as usize, &mut body_buf)
+                        .map_err(|e| WasmiError::new(format!("reading call_block body: {e}")))?;
+                }
+
                 // Store the pending call and trap to yield control.
                 caller.data_mut().pending_call = Some(PendingCall {
                     block_name,
                     msg_bytes: msg_buf,
+                    body_bytes: body_buf,
                 });
                 Err(WasmiError::host(CallBlockTrap))
             },
@@ -785,7 +777,6 @@ fn instantiate(
         context: None,
         capabilities: caps.clone(),
         pending_call: None,
-        pending_result: None,
         pending_load_asset: None,
     };
     let mut store = Store::new(engine, host_state);
@@ -962,17 +953,24 @@ impl WasmiBlock {
                 debug!(
                     block = pending.block_name,
                     msg_len = pending.msg_bytes.len(),
+                    body_len = pending.body_bytes.len(),
                     "resolving call_block from WASM guest"
                 );
 
-                // Deserialize the message, call the block, collect and serialize the result.
+                // Deserialize the message, call the block with the
+                // guest-supplied body as InputStream, collect and serialize
+                // the result.
                 let msg: Message = serde_json::from_slice(&pending.msg_bytes).map_err(|e| {
                     RuntimeError::Wasm(format!("deserializing call_block message: {e}"))
                 })?;
 
-                let out = ctx
-                    .call_block(&pending.block_name, msg, InputStream::empty())
-                    .await;
+                let input = if pending.body_bytes.is_empty() {
+                    InputStream::empty()
+                } else {
+                    InputStream::from_bytes(pending.body_bytes)
+                };
+
+                let out = ctx.call_block(&pending.block_name, msg, input).await;
                 let buf = out.collect_buffered().await;
                 // Serialize the outcome for the WASM guest.
                 // The guest expects a guest ABI format JSON with action/response/error.
@@ -1037,19 +1035,28 @@ impl WasmiBlock {
                     }
                 };
 
-                // Provide the result for phase 2.
-                store.data_mut().pending_result = Some(result_bytes);
+                // Allocate guest memory via __wafer_alloc and write the
+                // GuestResult JSON there, then resume with the packed
+                // (ptr, len) as the host call's return value. wasmi's
+                // resumable.resume value IS the return value of the
+                // trapped host function — there is no re-entry, so we
+                // must materialize the response bytes in guest memory
+                // before resuming.
+                let alloc_fn = instance
+                    .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!(
+                            "getting __wafer_alloc for call_block resume: {e}"
+                        ))
+                    })?;
+                let result_ptr = write_guest_bytes(&mut store, alloc_fn, memory, &result_bytes)?;
+                let packed = pack_ptr_len(result_ptr, result_bytes.len() as u32);
 
-                // Resume. The host func (__wafer_host_call_block) returns i64,
-                // so we must provide a single i64 Val. However, the resumption
-                // re-enters the host function which checks pending_result, so
-                // the value we pass here is not directly used — the host func
-                // will overwrite it. We pass 0 as a placeholder; wasmi requires
-                // the correct number/type of resume inputs matching the host
-                // function's return type.
-                match resumable.resume(&mut store, &[Val::I64(0)]).map_err(|e| {
-                    RuntimeError::Wasm(format!("resuming guest after call_block: {e}"))
-                })? {
+                match resumable
+                    .resume(&mut store, &[Val::I64(packed)])
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!("resuming guest after call_block: {e}"))
+                    })? {
                     TypedResumableCall::Finished(packed) => {
                         let (ptr, len) = unpack_ptr_len(packed);
                         let result = read_guest_bytes(&store, memory, ptr, len)?;

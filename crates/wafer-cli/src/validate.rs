@@ -48,13 +48,20 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
         )
         .context("Failed to define __wafer_host_log stub")?;
 
-    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
+    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
     // Return 0 — the validator never actually exercises call_block paths.
     linker
         .func_wrap(
             "wafer",
             "__wafer_host_call_block",
-            |_: Caller<()>, _name_ptr: i32, _name_len: i32, _msg_ptr: i32, _msg_len: i32| 0i64,
+            |_: Caller<()>,
+             _name_ptr: i32,
+             _name_len: i32,
+             _msg_ptr: i32,
+             _msg_len: i32,
+             _body_ptr: i32,
+             _body_len: i32|
+             -> i64 { 0i64 },
         )
         .context("Failed to define __wafer_host_call_block stub")?;
 

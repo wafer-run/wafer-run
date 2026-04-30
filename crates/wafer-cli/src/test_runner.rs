@@ -116,7 +116,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
         )
         .context("Failed to define __wafer_host_log stub")?;
 
-    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len) -> i64
+    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
     //
     // Looks up the block name in mock_results. Writes the mock JSON into guest
     // memory at the current mock_write_offset (starting at MOCK_BUF_OFFSET) and
@@ -129,7 +129,9 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
              name_ptr: i32,
              name_len: i32,
              _msg_ptr: i32,
-             _msg_len: i32|
+             _msg_len: i32,
+             _body_ptr: i32,
+             _body_len: i32|
              -> i64 {
                 // Read block name from guest memory
                 let block_name =
