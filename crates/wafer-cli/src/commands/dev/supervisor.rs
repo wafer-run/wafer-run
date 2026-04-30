@@ -159,8 +159,13 @@ async fn kill_with_grace(child: &mut Child, timeout: Duration) {
         Some(p) => p as i32,
         None => return,
     };
-    // SIGTERM
-    // SAFETY: libc::kill is FFI; passing a valid pid + signal number is safe.
+    // SAFETY: We hold `&mut Child` across both `child.id()` and the
+    // `libc::kill` call. tokio::process::Child reserves the pid until
+    // `wait()` is called (zombies are not reaped automatically), and we
+    // do not wait between the two calls. Therefore the pid cannot be
+    // recycled by the kernel under us, and SIGTERM is delivered to the
+    // intended process. Calling libc::kill itself is safe FFI given a
+    // valid signal number.
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
