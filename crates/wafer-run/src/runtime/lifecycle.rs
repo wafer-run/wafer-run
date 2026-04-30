@@ -94,6 +94,12 @@ impl Wafer {
     /// See `crates/wafer-run/src/runtime/validation.rs`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
+        tracing::info!(
+            target: "wafer.runtime",
+            event = "starting",
+            blocks = self.blocks.len(),
+            "wafer runtime starting"
+        );
         self.start_without_bind().await?;
 
         for (name, block) in &self.blocks {

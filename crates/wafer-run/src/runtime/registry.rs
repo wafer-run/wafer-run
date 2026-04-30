@@ -177,7 +177,14 @@ impl Wafer {
                     .join("; "),
             )
         })?;
+        let flow_id = flow.id.clone();
         self.add_flow(flow);
+        tracing::info!(
+            target: "wafer.runtime",
+            event = "flow_registered",
+            flow = %flow_id,
+            "registered flow"
+        );
         Ok(())
     }
 }
