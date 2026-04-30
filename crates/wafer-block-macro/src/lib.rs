@@ -558,6 +558,14 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
             wafer_sdk::core_abi::pack_ptr_len(ptr, len)
         }
 
+        // The link-time block registry uses `linkme`, which is only used on
+        // native targets. On `wasm32-*` the registry doesn't exist, and skill
+        // blocks compiled for wasm32-wasip1 don't (and shouldn't) depend on
+        // `wafer-run`. Cfg-gate the emission so wasm32 expansions never
+        // reference `::wafer_run::...`, which would fail path resolution at
+        // macro-expansion time when the consumer crate has no `wafer-run`
+        // dep in its graph.
+        #[cfg(not(target_arch = "wasm32"))]
         ::wafer_run::register_static_block!(#name, #struct_ty);
     };
 
