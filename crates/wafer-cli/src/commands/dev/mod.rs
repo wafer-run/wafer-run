@@ -6,9 +6,9 @@ use anyhow::Result;
 use clap::Args;
 
 mod bin_detect;
+mod summary;
 mod supervisor;
 mod watcher;
-// More submodules added in subsequent tasks: summary.
 
 /// Arguments for the `wafer dev` subcommand.
 #[derive(Args, Debug, Clone)]
@@ -52,10 +52,31 @@ pub async fn run(args: DevArgs) -> Result<()> {
     let patterns = watcher::merge_patterns(&args.watch, !args.no_default_watch);
     let change_rx = watcher::spawn_watcher(&patterns, debounce)?;
 
-    // line_rx is fed by the supervisor's stderr tee; Task 6 will read it for
-    // the boot summary. For now, drain it silently.
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(64);
-    tokio::spawn(async move { while line_rx.recv().await.is_some() {} });
+
+    // Summary aggregator: accumulates per-spawn state, prints the banner on
+    // `event = "listening"`. Resets on each new "starting" event.
+    tokio::spawn(async move {
+        use summary::BootEvent;
+        let mut blocks: Option<usize> = None;
+        let mut flows: usize = 0;
+        while let Some(line) = line_rx.recv().await {
+            match summary::parse_event(&line) {
+                Some(BootEvent::Starting { blocks: n }) => {
+                    blocks = Some(n);
+                    flows = 0;
+                }
+                Some(BootEvent::FlowRegistered { .. }) => {
+                    flows += 1;
+                }
+                Some(BootEvent::Listening { addr }) => {
+                    let banner = summary::format_banner(blocks, flows, Some(&addr));
+                    eprintln!("[wafer dev] {banner}");
+                }
+                None => {}
+            }
+        }
+    });
 
     let cfg = supervisor::SupervisorConfig {
         bin: bin.clone(),
