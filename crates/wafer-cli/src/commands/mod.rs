@@ -1,3 +1,4 @@
+pub mod dev;
 pub mod info;
 pub mod install;
 pub mod login;
