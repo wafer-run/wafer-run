@@ -41,7 +41,9 @@ pub fn spawn_watcher(patterns: &[String], debounce: Duration) -> Result<mpsc::Re
     let (async_tx, async_rx) = mpsc::channel::<()>(8);
 
     let mut debouncer = new_debouncer(debounce, move |res| {
-        sync_tx.send(res).expect("watcher rx dropped")
+        // Bridge may have exited before the debouncer's last tick;
+        // dropping the event is correct in that case.
+        let _ = sync_tx.send(res);
     })
     .context("failed to construct file-system debouncer")?;
 
@@ -72,6 +74,9 @@ pub fn spawn_watcher(patterns: &[String], debounce: Duration) -> Result<mpsc::Re
     // bridge — dropping it would stop notify from emitting events.
     std::thread::spawn(move || {
         let _debouncer = debouncer;
+        // Drop order: when this thread returns, _debouncer drops, which drops
+        // notify's internal channel sender; the receiver in this thread is gone
+        // already, so there's nothing to deliver to. No zombie thread.
         while let Ok(res) = sync_rx.recv() {
             match res {
                 Ok(events) if !events.is_empty() => {
