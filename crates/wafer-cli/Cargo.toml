@@ -33,6 +33,7 @@ terminal_size = "0.3"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
+tracing = { workspace = true }
 toml_edit = "0.22"
 uuid = { workspace = true }
 wafer-block = { workspace = true }

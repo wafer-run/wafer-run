@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::Args;
 
 mod bin_detect;
-// More submodules added in subsequent tasks: watcher, supervisor, summary.
+mod watcher;
+// More submodules added in subsequent tasks: supervisor, summary.
 
 /// Arguments for the `wafer dev` subcommand.
 #[derive(Args, Debug, Clone)]
@@ -44,9 +45,23 @@ pub struct DevArgs {
 pub async fn run(args: DevArgs) -> Result<()> {
     let manifest = PathBuf::from("Cargo.toml");
     let detected = bin_detect::detect_bins(&manifest)?;
-    let _bin = bin_detect::resolve_bin(detected, args.bin.as_deref())?;
-    let _debounce = Duration::from_millis(args.debounce);
+    let bin = bin_detect::resolve_bin(detected, args.bin.as_deref())?;
+    let debounce = Duration::from_millis(args.debounce);
 
-    // Watcher + supervisor + summary wired in subsequent tasks.
-    anyhow::bail!("wafer dev: not yet implemented (Task 3 skeleton; tasks 4-6 wire watcher/supervisor/summary)")
+    let patterns = watcher::merge_patterns(&args.watch, !args.no_default_watch);
+    let mut change_rx = watcher::spawn_watcher(&patterns, debounce)?;
+
+    tracing::info!(
+        bin = %bin,
+        patterns = ?patterns,
+        debounce_ms = args.debounce,
+        "wafer dev starting (supervisor pending — Task 5)"
+    );
+
+    // Drain change events. Replaced by the real supervisor loop in Task 5.
+    while change_rx.recv().await.is_some() {
+        tracing::info!("change detected (no-op until Task 5)");
+    }
+
+    Ok(())
 }
