@@ -1,12 +1,13 @@
 //! Integration test for `wafer dev`. Runs against a fake-app fixture that
 //! emits the three tracing events the real runtime emits.
 
-use std::process::Stdio;
-use std::time::Duration;
+use std::{process::Stdio, time::Duration};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+    time::timeout,
+};
 
 const FIXTURE_DIR: &str = "tests/fixtures/dev-fake-app";
 
