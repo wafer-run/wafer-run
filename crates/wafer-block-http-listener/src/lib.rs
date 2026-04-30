@@ -426,7 +426,17 @@ impl Block for HttpListenerBlock {
                 }
             };
 
-            tracing::info!("wafer-run/http-listener listening on {}", listen);
+            // CONTRACT: See wafer-run/src/runtime/lifecycle.rs::start for the
+            // full description. This event must remain
+            // target = "wafer.runtime", event = "listening", with an `addr`
+            // field carrying the bind address. Consumed by `wafer dev`'s boot
+            // summary in wafer-cli/src/commands/dev/summary.rs.
+            tracing::info!(
+                target: "wafer.runtime",
+                event = "listening",
+                addr = %listen,
+                "wafer-run/http-listener listening"
+            );
 
             let serve = axum::serve(listener, app).with_graceful_shutdown(async {
                 let _ = rx.await;

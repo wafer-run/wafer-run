@@ -43,6 +43,12 @@ enum Commands {
     },
     /// Build the block in the current directory.
     Build,
+    /// Run the wafer-run app in this directory with file-watch + restart on save.
+    ///
+    /// Reads Cargo.toml from cwd, picks a bin target (or use --bin), runs
+    /// `cargo run`, watches Rust source + Cargo.toml + wafer.lock, restarts
+    /// on changes. Prints a wafer-aware boot summary on each successful start.
+    Dev(commands::dev::DevArgs),
     /// Run tests against the block.
     Test {
         /// Path to a test fixture or directory (default: ./tests/).
@@ -150,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Build => {
             build::build(&std::env::current_dir()?)?;
+        }
+        Commands::Dev(args) => {
+            commands::dev::run(args).await?;
         }
         Commands::Test { path } => {
             test_runner::run_tests(&std::env::current_dir()?, path.as_deref())?;

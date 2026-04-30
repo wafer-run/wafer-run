@@ -162,7 +162,20 @@ impl Wafer {
 
     /// Register a WaferFlow definition.
     pub fn add_flow(&mut self, flow: wafer_flow::WaferFlow) {
-        self.flows.insert(flow.id.clone(), flow);
+        let flow_id = flow.id.clone();
+        self.flows.insert(flow_id.clone(), flow);
+        // CONTRACT: See lifecycle.rs::start for the full description. This
+        // event must remain target = "wafer.runtime", event = "flow_registered",
+        // with a `flow` field carrying the flow id. Consumed by `wafer dev`'s
+        // boot summary in wafer-cli/src/commands/dev/summary.rs. Mirrors the
+        // emit previously only in add_flow_json so consumers using the typed
+        // API are also visible to `wafer dev`'s boot summary.
+        tracing::info!(
+            target: "wafer.runtime",
+            event = "flow_registered",
+            flow = %flow_id,
+            "registered flow"
+        );
     }
 
     /// Parse, validate, and register a WaferFlow from a JSON string.
