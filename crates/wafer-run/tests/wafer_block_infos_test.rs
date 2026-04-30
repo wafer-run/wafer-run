@@ -22,6 +22,7 @@ impl Block for StubBlock {
                 version: "0.0.1".to_string(),
                 url: "https://example/asset.wasm".to_string(),
                 sha256: "deadbeef".to_string(),
+                timeout_ms: None,
             }])
         } else {
             info

@@ -32,6 +32,7 @@ fn external_asset_round_trips() {
         url: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm"
             .to_string(),
         sha256: "abc123".to_string(),
+        timeout_ms: None,
     };
 
     let s = serde_json::to_string(&asset).expect("serialize");
@@ -40,6 +41,63 @@ fn external_asset_round_trips() {
     assert_eq!(back.id, asset.id);
     assert_eq!(back.url, asset.url);
     assert_eq!(back.sha256, asset.sha256);
+}
+
+#[test]
+fn external_asset_timeout_ms_round_trips() {
+    let asset = ExternalAsset {
+        id: "ffmpeg".to_string(),
+        loader: "ffmpeg.wasm".to_string(),
+        version: "0.12.6".to_string(),
+        url: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm"
+            .to_string(),
+        sha256: "abc123".to_string(),
+        timeout_ms: Some(300_000),
+    };
+
+    let s = serde_json::to_string(&asset).expect("serialize");
+    assert!(
+        s.contains("\"timeout_ms\":300000"),
+        "serialized form should include timeout_ms when Some: {s}"
+    );
+
+    let back: ExternalAsset = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(back.timeout_ms, Some(300_000));
+}
+
+#[test]
+fn external_asset_timeout_ms_defaults_to_none() {
+    // JSON written without the field (legacy payloads, e.g. from older
+    // block-info JSON) must deserialize cleanly with `timeout_ms == None`.
+    let legacy_json = r#"{
+        "id": "ffmpeg",
+        "loader": "ffmpeg.wasm",
+        "version": "0.12.6",
+        "url": "https://example.test/ffmpeg.wasm",
+        "sha256": "deadbeef"
+    }"#;
+    let parsed: ExternalAsset = serde_json::from_str(legacy_json).expect("deserialize legacy");
+    assert_eq!(parsed.timeout_ms, None);
+}
+
+#[test]
+fn external_asset_omits_timeout_ms_when_none() {
+    // skip_serializing_if = "Option::is_none" keeps wire format byte-identical
+    // for callers that don't set the field — important for any persisted
+    // block-info payloads.
+    let asset = ExternalAsset {
+        id: "ffmpeg".to_string(),
+        loader: "ffmpeg.wasm".to_string(),
+        version: "0.12.6".to_string(),
+        url: "https://example.test/ffmpeg.wasm".to_string(),
+        sha256: "deadbeef".to_string(),
+        timeout_ms: None,
+    };
+    let s = serde_json::to_string(&asset).expect("serialize");
+    assert!(
+        !s.contains("timeout_ms"),
+        "serialized form should omit timeout_ms when None: {s}"
+    );
 }
 
 #[test]
@@ -66,6 +124,7 @@ fn block_info_skill_builder_sets_fields() {
             version: "0.12.6".to_string(),
             url: "https://example.test/ffmpeg.wasm".to_string(),
             sha256: "deadbeef".to_string(),
+            timeout_ms: None,
         }]);
 
     assert!(matches!(info.role, Some(SkillRole::Skill)));
