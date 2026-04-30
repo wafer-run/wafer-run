@@ -21,11 +21,13 @@ pub struct DevArgs {
     #[arg(long)]
     pub release: bool,
 
-    /// Add an extra path/glob to watch. Repeatable.
+    /// Add an extra path/glob to watch. Repeatable. Default watch list:
+    /// `src` (recursive), `Cargo.toml`, `wafer.lock`. Use --no-default-watch
+    /// to skip the defaults.
     #[arg(long = "watch", value_name = "PATTERN")]
     pub watch: Vec<String>,
 
-    /// Disable the default watch list (src/**/*.rs, Cargo.toml, wafer.lock).
+    /// Disable the default watch list (src, Cargo.toml, wafer.lock).
     #[arg(long)]
     pub no_default_watch: bool,
 

@@ -94,6 +94,12 @@ impl Wafer {
     /// See `crates/wafer-run/src/runtime/validation.rs`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
+        // CONTRACT: This event is consumed by `wafer dev` (in
+        // `wafer-cli/src/commands/dev/summary.rs`) to detect the start of a
+        // runtime spawn. The combination of target = "wafer.runtime",
+        // event = "starting", and the `blocks` field name is part of the
+        // public boot-event contract. Renaming any of those breaks the dev
+        // loop's boot summary; coordinate with wafer-cli when changing.
         tracing::info!(
             target: "wafer.runtime",
             event = "starting",
