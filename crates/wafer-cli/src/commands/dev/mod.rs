@@ -6,8 +6,9 @@ use anyhow::Result;
 use clap::Args;
 
 mod bin_detect;
+mod supervisor;
 mod watcher;
-// More submodules added in subsequent tasks: supervisor, summary.
+// More submodules added in subsequent tasks: summary.
 
 /// Arguments for the `wafer dev` subcommand.
 #[derive(Args, Debug, Clone)]
@@ -49,19 +50,20 @@ pub async fn run(args: DevArgs) -> Result<()> {
     let debounce = Duration::from_millis(args.debounce);
 
     let patterns = watcher::merge_patterns(&args.watch, !args.no_default_watch);
-    let mut change_rx = watcher::spawn_watcher(&patterns, debounce)?;
+    let change_rx = watcher::spawn_watcher(&patterns, debounce)?;
 
-    tracing::info!(
-        bin = %bin,
-        patterns = ?patterns,
-        debounce_ms = args.debounce,
-        "wafer dev starting (supervisor pending — Task 5)"
-    );
+    // line_rx is fed by the supervisor's stderr tee; Task 6 will read it for
+    // the boot summary. For now, drain it silently.
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(64);
+    tokio::spawn(async move { while line_rx.recv().await.is_some() {} });
 
-    // Drain change events. Replaced by the real supervisor loop in Task 5.
-    while change_rx.recv().await.is_some() {
-        tracing::info!("change detected (no-op until Task 5)");
-    }
+    let cfg = supervisor::SupervisorConfig {
+        bin: bin.clone(),
+        release: args.release,
+        cargo_args: args.cargo_args.clone(),
+        kill_timeout: Duration::from_secs(args.kill_timeout),
+    };
 
-    Ok(())
+    eprintln!("[wafer dev] watching {patterns:?}; running bin = {bin}");
+    supervisor::run(cfg, change_rx, line_tx).await
 }
