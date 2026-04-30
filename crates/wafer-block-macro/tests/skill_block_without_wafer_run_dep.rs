@@ -17,8 +17,7 @@
 //! locally (CI must keep that toolchain available for the test to be
 //! meaningful).
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 #[test]
 fn skill_block_without_wafer_run_dep_compiles_for_wasm32() {
@@ -61,9 +60,7 @@ fn skill_block_without_wafer_run_dep_compiles_for_wasm32() {
             || stderr.contains("the `wasm32-wasip1` target may not be installed")
             || stderr.contains("can't find crate for `core`"))
     {
-        eprintln!(
-            "skipping: wasm32-wasip1 toolchain not installed\nstderr:\n{stderr}"
-        );
+        eprintln!("skipping: wasm32-wasip1 toolchain not installed\nstderr:\n{stderr}");
         return;
     }
 
