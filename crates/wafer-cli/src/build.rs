@@ -49,9 +49,6 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
     match lang {
         Lang::Rust => build_rust(dir, &block_wasm_path)?,
         Lang::Go => build_go(dir, &block_wasm_path)?,
-        Lang::TypeScript => {
-            bail!("TypeScript blocks are no longer supported. Please use Rust or Go.")
-        }
     }
 
     // -----------------------------------------------------------------------

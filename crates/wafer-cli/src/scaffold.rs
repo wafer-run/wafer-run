@@ -35,9 +35,6 @@ pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     match lang {
         Lang::Rust => scaffold_rust(dir, name, block_name)?,
         Lang::Go => scaffold_go(dir, name, block_name)?,
-        Lang::TypeScript => {
-            bail!("TypeScript blocks are no longer supported. Please use Rust or Go.")
-        }
     }
 
     println!("Created block project in ./{block_name}/");
@@ -52,7 +49,6 @@ pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
             println!("  go.mod");
             println!("  main.go");
         }
-        Lang::TypeScript => unreachable!("rejected above"),
     }
 
     Ok(())

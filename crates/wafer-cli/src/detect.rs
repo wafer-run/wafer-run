@@ -7,7 +7,6 @@ use anyhow::bail;
 pub enum Lang {
     Rust,
     Go,
-    TypeScript,
 }
 
 impl Lang {
@@ -16,8 +15,7 @@ impl Lang {
         match s.to_ascii_lowercase().as_str() {
             "rust" | "rs" => Ok(Lang::Rust),
             "go" | "golang" => Ok(Lang::Go),
-            "typescript" | "ts" => Ok(Lang::TypeScript),
-            other => bail!("Unknown language {other:?}. Supported: rust, go, typescript"),
+            other => bail!("Unknown language {other:?}. Supported: rust, go"),
         }
     }
 }
@@ -29,7 +27,6 @@ impl Lang {
 /// Detection order:
 ///   1. `Cargo.toml`  → Rust
 ///   2. `go.mod`      → Go
-///   3. `package.json` → TypeScript
 pub fn detect_language(dir: &Path) -> anyhow::Result<Lang> {
     if dir.join("Cargo.toml").exists() {
         return Ok(Lang::Rust);
@@ -37,11 +34,8 @@ pub fn detect_language(dir: &Path) -> anyhow::Result<Lang> {
     if dir.join("go.mod").exists() {
         return Ok(Lang::Go);
     }
-    if dir.join("package.json").exists() {
-        return Ok(Lang::TypeScript);
-    }
     bail!(
-        "Could not detect language in {}: no Cargo.toml, go.mod, or package.json found",
+        "Could not detect language in {}: no Cargo.toml or go.mod found",
         dir.display()
     )
 }
