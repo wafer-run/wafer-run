@@ -178,36 +178,6 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
         )
         .context("Failed to define random_get stub")?;
 
-    // wasi_snapshot_preview1::poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr) -> errno
-    // Required by boa_engine-compiled WASM modules (JS/TS blocks).
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "poll_oneoff",
-            |mut caller: Caller<()>,
-             _in_ptr: i32,
-             _out_ptr: i32,
-             _nsubscriptions: i32,
-             nevents_ptr: i32|
-             -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, nevents_ptr as usize, &0u32.to_le_bytes());
-                }
-                0
-            },
-        )
-        .context("Failed to define poll_oneoff stub")?;
-
-    // wasi_snapshot_preview1::sched_yield() -> errno
-    // Required by boa_engine-compiled WASM modules (JS/TS blocks).
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "sched_yield",
-            |_: Caller<()>| -> i32 { 0 },
-        )
-        .context("Failed to define sched_yield stub")?;
-
     // -----------------------------------------------------------------------
     // 3. Instantiate.
     // -----------------------------------------------------------------------

@@ -37,7 +37,7 @@ enum Commands {
     New {
         /// Block name in {org}/{block} format (e.g. myorg/my-block).
         name: String,
-        /// Programming language: rust | go | typescript.
+        /// Programming language: rust | go.
         #[arg(long, default_value = "rust")]
         lang: String,
     },
