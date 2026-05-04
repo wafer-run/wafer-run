@@ -5,6 +5,7 @@
 //! type definitions, and optionally use the `#[wafer_block]` proc macro for
 //! reduced boilerplate.
 
+pub mod codec;
 pub mod core_types;
 pub mod error;
 pub mod meta;
