@@ -10,6 +10,7 @@ pub mod core_types;
 pub mod error;
 pub mod meta;
 pub mod types;
+pub mod wire;
 
 // Re-export the proc macro.
 // Re-export core types at crate root.
