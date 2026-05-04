@@ -750,7 +750,172 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking random_get stub: {e}")))?;
 
+    // ---- Spike-only host imports (gated behind the `spike` feature) ----
+    //
+    // These imports exist solely to measure per-chunk overhead of the
+    // proposed streaming ABI design. They are NOT part of the production
+    // ABI and are removed when the real `__wafer_host_stream_*` imports
+    // land in Task 7.
+    #[cfg(feature = "spike")]
+    register_spike_imports(&mut linker)?;
+
     Ok(linker)
+}
+
+// ---------------------------------------------------------------------------
+// Spike host imports (gate validation only)
+// ---------------------------------------------------------------------------
+
+/// Throwaway host imports used by `tests/streaming_spike.rs` to measure
+/// per-chunk overhead of N back-to-back host→guest data transfers.
+///
+/// The host writes a recognisable byte pattern (`b[i] = i % 256`) into a
+/// guest-provided buffer. The guest verifies the pattern and accumulates the
+/// total bytes read. When the host's per-thread call counter reaches the
+/// configured target, `next_chunk` returns 0 (end-of-stream) and resets state.
+///
+/// This deliberately avoids re-entering `__wafer_alloc` from inside a host
+/// call — the streaming ABI design assumes the host writes into a buffer the
+/// guest has pre-allocated. Recursive guest calls inside a wasmi host
+/// function would also be a poor stand-in for the real ABI's straight-line
+/// per-chunk cost.
+#[cfg(feature = "spike")]
+fn register_spike_imports(linker: &mut Linker<WasmiHostState>) -> Result<(), RuntimeError> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// (current chunk count, target chunk count). Reset to (0, target)
+        /// by `set_target` and incremented by each `next_chunk` call. When
+        /// `current == target` the next `next_chunk` returns 0 and resets.
+        static SPIKE_STATE: RefCell<(u32, u32)> = const { RefCell::new((0, 100)) };
+    }
+
+    // wafer_spike::set_target(n: i32)
+    //
+    // Resets the per-thread chunk counter and sets the target number of
+    // chunks before `next_chunk` returns end-of-stream.
+    linker
+        .func_wrap(
+            "wafer_spike",
+            "set_target",
+            |_caller: Caller<WasmiHostState>, n: i32| {
+                SPIKE_STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    *s = (0, n.max(0) as u32);
+                });
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::set_target: {e}")))?;
+
+    // wafer_spike::next_chunk(buf_ptr: i32, chunk_size: i32) -> i32
+    //
+    // If `current < target`: writes `chunk_size` bytes of the pattern
+    // `b[i] = i % 256` to guest memory at `buf_ptr`, increments the counter,
+    // returns 1.
+    // Otherwise: resets the counter to 0 (target preserved) and returns 0.
+    linker
+        .func_wrap(
+            "wafer_spike",
+            "next_chunk",
+            |mut caller: Caller<WasmiHostState>, buf_ptr: i32, chunk_size: i32| -> i32 {
+                let done = SPIKE_STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    if st.0 >= st.1 {
+                        st.0 = 0;
+                        true
+                    } else {
+                        st.0 += 1;
+                        false
+                    }
+                });
+                if done {
+                    return 0;
+                }
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return 0;
+                };
+                // Build the recognisable pattern. For 512 KiB this allocates
+                // a 512 KiB Vec per call — that's exactly the cost we want
+                // to measure (host-side encode + guest write).
+                let n = chunk_size.max(0) as usize;
+                let mut buf = vec![0u8; n];
+                for (i, b) in buf.iter_mut().enumerate() {
+                    *b = (i % 256) as u8;
+                }
+                if memory.write(&mut caller, buf_ptr as usize, &buf).is_err() {
+                    return 0;
+                }
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::next_chunk: {e}")))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Spike test entry point
+// ---------------------------------------------------------------------------
+
+/// Spike-only helper exposed to `tests/streaming_spike.rs`.
+///
+/// Compiles the supplied `wasm_bytes` (the spike guest), instantiates it
+/// with the `wafer_spike::*` host imports wired up, calls
+/// `spike_set_target(target_chunks)` followed by `read_all_chunks(chunk_size)`,
+/// and returns `(total_bytes_read, elapsed_during_read)`.
+///
+/// The elapsed measurement isolates the streaming-loop cost — module
+/// compilation, instantiation and target-config calls are NOT included.
+#[cfg(feature = "spike")]
+pub fn run_spike(
+    wasm_bytes: &[u8],
+    target_chunks: i32,
+    chunk_size: i32,
+) -> Result<(i64, std::time::Duration), RuntimeError> {
+    let mut config = wasmi::Config::default();
+    // No fuel metering for the spike — we want raw overhead numbers.
+    config.consume_fuel(false);
+    let engine = Engine::new(&config);
+
+    let module = Module::new(&engine, wasm_bytes)
+        .map_err(|e| RuntimeError::Wasm(format!("compiling spike guest: {e}")))?;
+
+    let mut linker = Linker::<WasmiHostState>::new(&engine);
+    register_spike_imports(&mut linker)?;
+
+    let host_state = WasmiHostState {
+        context: None,
+        capabilities: BlockCapabilities::unrestricted(),
+        pending_call: None,
+        pending_load_asset: None,
+    };
+    let mut store = Store::new(&engine, host_state);
+
+    let pre = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| RuntimeError::Wasm(format!("instantiating spike guest: {e}")))?;
+    let instance = pre
+        .start(&mut store)
+        .map_err(|e| RuntimeError::Wasm(format!("starting spike guest: {e}")))?;
+
+    let set_target_fn = instance
+        .get_typed_func::<i32, ()>(&store, "spike_set_target")
+        .map_err(|e| RuntimeError::Wasm(format!("getting spike_set_target: {e}")))?;
+    let read_all_fn = instance
+        .get_typed_func::<i32, i64>(&store, "read_all_chunks")
+        .map_err(|e| RuntimeError::Wasm(format!("getting read_all_chunks: {e}")))?;
+
+    set_target_fn
+        .call(&mut store, target_chunks)
+        .map_err(|e| RuntimeError::Wasm(format!("calling spike_set_target: {e}")))?;
+
+    let start = std::time::Instant::now();
+    let total = read_all_fn
+        .call(&mut store, chunk_size)
+        .map_err(|e| RuntimeError::Wasm(format!("calling read_all_chunks: {e}")))?;
+    let elapsed = start.elapsed();
+
+    Ok((total, elapsed))
 }
 
 // ---------------------------------------------------------------------------
