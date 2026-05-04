@@ -8,6 +8,12 @@ use crate::{ErrorCode, WaferError};
 use serde::{de::DeserializeOwned, Serialize};
 
 pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
+    // `to_vec_named` (not `to_vec`) encodes structs as named maps rather than
+    // positional arrays. This keeps the wire format forward-compatible:
+    // adding a field to a struct in a newer version doesn't break older
+    // decoders, and removing/reordering fields stays decodable as long as
+    // the named entries match. Locked in by the
+    // `unknown_field_is_forward_compatible` test below.
     rmp_serde::to_vec_named(v).map_err(|e| {
         WaferError::new(
             ErrorCode::INTERNAL,
