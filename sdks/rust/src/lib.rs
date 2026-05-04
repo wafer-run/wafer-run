@@ -20,6 +20,7 @@
 
 pub mod core_abi;
 pub mod pure;
+pub mod stream;
 
 // Re-export everything from wafer-block (types, traits, helpers, macros).
 // Re-export runtime functions and guest result types for block authors.
