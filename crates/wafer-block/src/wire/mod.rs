@@ -5,6 +5,12 @@
 //! Each service interface gets its own submodule. Types are pure DTOs —
 //! `#[derive(Serialize, Deserialize, Debug, Clone)]` only, no behavior.
 
+pub mod auth;
+pub mod config;
+pub mod crypto;
+pub mod database;
+pub mod llm;
+pub mod logger;
 pub mod network;
 pub mod storage;
-// Subsequent services added in their own tasks: database, vector, etc.
+pub mod vector;
