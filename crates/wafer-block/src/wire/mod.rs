@@ -6,4 +6,5 @@
 //! `#[derive(Serialize, Deserialize, Debug, Clone)]` only, no behavior.
 
 pub mod network;
-// Subsequent services added in their own tasks: storage, database, vector, etc.
+pub mod storage;
+// Subsequent services added in their own tasks: database, vector, etc.
