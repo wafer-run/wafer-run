@@ -15,8 +15,7 @@
 
 #![cfg(feature = "wasm")]
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use wafer_block::{

@@ -12,6 +12,11 @@ use wafer_block::context::Context;
 use wafer_block::stream::StreamEvent;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
+/// Buffered response from an outbound network request.
+///
+/// Re-exported from `wafer_block::wire::network::Response` so the native
+/// client and the SDK share one wire-format type.
+pub use wafer_block::wire::network::Response as NetworkResponse;
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::network::{Request, ResponseHeader},
@@ -22,12 +27,6 @@ use wafer_block::{
 use super::{buffered_header_and_body, call_service_streaming, read_header_frame};
 #[cfg(feature = "wasm-component")]
 use super::{call_service, decode};
-
-/// Buffered response from an outbound network request.
-///
-/// Re-exported from `wafer_block::wire::network::Response` so the native
-/// client and the SDK share one wire-format type.
-pub use wafer_block::wire::network::Response as NetworkResponse;
 
 const BLOCK: &str = "wafer-run/network";
 

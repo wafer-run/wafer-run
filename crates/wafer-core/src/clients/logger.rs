@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use wafer_block::common::ServiceOp;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::wire::logger::LogRequest;
+use wafer_block::{common::ServiceOp, wire::logger::LogRequest};
 
 use super::call_service;
 

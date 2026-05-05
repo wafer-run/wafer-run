@@ -11,20 +11,22 @@
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::wire::vector::{
-    CountRequest, CountResponse, CreateIndexRequest, DeleteIndexRequest, DeleteRequest,
-    EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, UpsertRequest,
-};
-use wafer_block::{common::ServiceOp, WaferError};
-
-use super::{call_service, decode, dual_api, svc};
-
 // Re-export wire types for callers — byte-identical to the legacy
 // `interfaces::vector::service::*` types (the wire crate is the canonical
 // home for these vector data types now).
 pub use wafer_block::wire::vector::{
     DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
 };
+use wafer_block::{
+    common::ServiceOp,
+    wire::vector::{
+        CountRequest, CountResponse, CreateIndexRequest, DeleteIndexRequest, DeleteRequest,
+        EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, UpsertRequest,
+    },
+    WaferError,
+};
+
+use super::{call_service, decode, dual_api, svc};
 
 const VECTOR_BLOCK: &str = "wafer-run/vector";
 

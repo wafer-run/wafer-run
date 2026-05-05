@@ -2,13 +2,17 @@ use std::collections::HashMap;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::wire::database::{
-    CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereRequest, ExecRawRequest,
-    ExecRawResponse, FilterDef as WireFilterDef, GetRequest, ListRequest, QueryRawRequest,
-    SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, UpdateRequest, UpdateWhereRequest,
-};
+// `Record` and `RecordList` are byte-identical to the wire types; collapse
+// the duplicate by re-exporting from the wire crate.
+pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    wire::database::{
+        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereRequest,
+        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, GetRequest, ListRequest,
+        QueryRawRequest, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, UpdateRequest,
+        UpdateWhereRequest,
+    },
     WaferError,
 };
 
@@ -24,9 +28,6 @@ pub use crate::interfaces::database::service::{
 // wrappers (no wire-format derives); keep them on the interfaces type and
 // convert to `wire::*Def` at the wire boundary inside each fn.
 pub use crate::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
-// `Record` and `RecordList` are byte-identical to the wire types; collapse
-// the duplicate by re-exporting from the wire crate.
-pub use wafer_block::wire::database::{Record, RecordList};
 
 const BLOCK: &str = "wafer-run/database";
 

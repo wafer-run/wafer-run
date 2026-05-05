@@ -13,11 +13,15 @@
 //! the wasmi `Store` is dropped, which cancels in-flight `OutputStream`s via
 //! their paired `CancellationToken`.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use wafer_block::streams::output::{OutputStream, TerminalNotResponse};
-use wafer_block::{ErrorCode, Message, WaferError};
+use wafer_block::{
+    streams::output::{OutputStream, TerminalNotResponse},
+    ErrorCode, Message, WaferError,
+};
 
 /// State machine phase. The legal transitions are
 /// `WritingRequest -> ReadingResponse -> Closed`. `Closed` is terminal.
@@ -285,8 +289,9 @@ impl Drop for StreamRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_block::streams::output::OutputStream;
+
+    use super::*;
 
     fn msg() -> Message {
         Message::new("test.kind")

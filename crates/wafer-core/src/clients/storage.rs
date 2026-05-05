@@ -13,21 +13,20 @@ use wafer_block::stream::StreamEvent;
 use wafer_block::streams::output::OutputStream;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::wire::storage::GetRequest;
-use wafer_block::wire::storage::{
-    CreateFolderRequest, DeleteFolderRequest, DeleteRequest, ListRequest, PutRequest,
-};
+// Re-export wire types for callers — byte-identical to the legacy
+// `interfaces::storage::service::*` types.
+pub use wafer_block::wire::storage::{FolderInfo, ObjectInfo, ObjectList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    wire::storage::{
+        CreateFolderRequest, DeleteFolderRequest, DeleteRequest, ListRequest, PutRequest,
+    },
     WaferError,
 };
 
 #[cfg(not(feature = "wasm-component"))]
 use super::{buffered_header_and_body, call_service_streaming, read_header_frame};
 use super::{call_service, decode, dual_api, svc};
-
-// Re-export wire types for callers — byte-identical to the legacy
-// `interfaces::storage::service::*` types.
-pub use wafer_block::wire::storage::{FolderInfo, ObjectInfo, ObjectList};
 // `ListOptions` is a runtime-only ergonomic wrapper (no serde derives); keep
 // it pointing at the interfaces type and convert to `ListRequest` at the wire
 // boundary inside `list`.

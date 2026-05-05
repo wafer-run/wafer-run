@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::wire::crypto::{
-    CompareHashRequest, CompareHashResponse, HashRequest, HashResponse, RandomBytesRequest,
-    RandomBytesResponse, SignRequest, SignResponse, VerifyRequest, VerifyResponse,
-};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    wire::crypto::{
+        CompareHashRequest, CompareHashResponse, HashRequest, HashResponse, RandomBytesRequest,
+        RandomBytesResponse, SignRequest, SignResponse, VerifyRequest, VerifyResponse,
+    },
     WaferError,
 };
 

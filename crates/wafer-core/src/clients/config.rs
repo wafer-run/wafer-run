@@ -1,7 +1,10 @@
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::wire::config::{GetRequest, GetResponse, SetRequest};
-use wafer_block::{common::ServiceOp, WaferError};
+use wafer_block::{
+    common::ServiceOp,
+    wire::config::{GetRequest, GetResponse, SetRequest},
+    WaferError,
+};
 
 use super::{call_service, decode, dual_api, svc, svc_fn};
 

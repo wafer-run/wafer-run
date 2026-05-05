@@ -4,8 +4,9 @@
 //! postcard or CBOR), only this file changes; `wire::*` types and consumers
 //! are unaffected.
 
-use crate::{ErrorCode, WaferError};
 use serde::{de::DeserializeOwned, Serialize};
+
+use crate::{ErrorCode, WaferError};
 
 pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     // `to_vec_named` (not `to_vec`) encodes structs as named maps rather than
@@ -33,8 +34,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WaferError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde::{Deserialize, Serialize};
+
+    use super::*;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct Sample {
