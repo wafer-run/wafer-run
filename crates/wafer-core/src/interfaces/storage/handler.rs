@@ -12,6 +12,7 @@ use wafer_block::{
 };
 
 use super::service::{StorageError, StorageService};
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 // --- Helpers ---
 
@@ -52,34 +53,6 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
         public: info.public,
         created_at: info.created_at,
     }
-}
-
-/// Decode a request body or return an error stream.
-macro_rules! decode_or_err {
-    ($body:expr, $ty:ty, $op_name:expr) => {
-        match codec::decode::<$ty>($body) {
-            Ok(r) => r,
-            Err(e) => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
-                    format!("invalid {} request: {}", $op_name, e.message),
-                ))
-            }
-        }
-    };
-}
-
-/// Encode a response value or return an error stream.
-macro_rules! respond_encoded {
-    ($value:expr, $op_name:expr) => {
-        match codec::encode(&$value) {
-            Ok(bytes) => OutputStream::respond(bytes),
-            Err(e) => OutputStream::error(WaferError::new(
-                ErrorCode::INTERNAL,
-                format!("encoding {} response: {}", $op_name, e.message),
-            )),
-        }
-    };
 }
 
 /// Handle a storage message using the given service.
@@ -154,10 +127,7 @@ pub async fn handle_message(
                 offset: req.offset,
             };
             match service.list(&req.folder, &opts).await {
-                Ok(list) => {
-                    let wire_list = service_object_list_to_wire(list);
-                    respond_encoded!(wire_list, "storage.list")
-                }
+                Ok(list) => to_output(service_object_list_to_wire(list)),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
@@ -181,7 +151,7 @@ pub async fn handle_message(
                     .into_iter()
                     .map(service_folder_info_to_wire)
                     .collect();
-                respond_encoded!(wire_folders, "storage.list_folders")
+                to_output(&wire_folders)
             }
             Err(e) => OutputStream::error(storage_error_to_wafer(e)),
         },

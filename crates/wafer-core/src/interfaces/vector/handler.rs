@@ -4,81 +4,67 @@
 //! delegate to these functions to avoid duplicating the message protocol
 //! handling.
 
-use serde::{Deserialize, Serialize};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    wire::vector as wire,
     *,
 };
 
-use super::service::{
-    EmbeddingService, MetadataFilter, SearchMode, VectorEntry, VectorError, VectorIndexConfig,
-    VectorMatch, VectorService,
-};
+use super::service::{self, EmbeddingService, VectorError, VectorService};
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
-// --- Request types ---
+// --- Wire <-> service conversions ---
+//
+// Field-identical types — conversion is mechanical. We keep them in the
+// handler rather than implementing `From` on the service crate because the
+// service trait is intentionally agnostic of the wire representation.
 
-#[derive(Deserialize)]
-struct CreateIndexRequest {
-    config: VectorIndexConfig,
+fn wire_metric_to_service(m: wire::DistanceMetric) -> service::DistanceMetric {
+    match m {
+        wire::DistanceMetric::Cosine => service::DistanceMetric::Cosine,
+        wire::DistanceMetric::Euclidean => service::DistanceMetric::Euclidean,
+        wire::DistanceMetric::DotProduct => service::DistanceMetric::DotProduct,
+    }
 }
 
-#[derive(Deserialize)]
-struct DeleteIndexRequest {
-    name: String,
+fn wire_search_mode_to_service(m: wire::SearchMode) -> service::SearchMode {
+    match m {
+        wire::SearchMode::Vector => service::SearchMode::Vector,
+        wire::SearchMode::Keyword => service::SearchMode::Keyword,
+        wire::SearchMode::Hybrid => service::SearchMode::Hybrid,
+    }
 }
 
-#[derive(Deserialize)]
-struct UpsertRequest {
-    index: String,
-    entries: Vec<VectorEntry>,
+fn wire_index_config_to_service(c: wire::VectorIndexConfig) -> service::VectorIndexConfig {
+    service::VectorIndexConfig {
+        name: c.name,
+        model: c.model,
+        dimensions: c.dimensions,
+        metric: wire_metric_to_service(c.metric),
+        keyword_search: c.keyword_search,
+    }
 }
 
-#[derive(Deserialize)]
-struct QueryRequest {
-    index: String,
-    vector: Vec<f32>,
-    top_k: usize,
-    #[serde(default)]
-    filter: Option<MetadataFilter>,
-    mode: SearchMode,
-    #[serde(default)]
-    keyword_query: Option<String>,
+fn wire_entry_to_service(e: wire::VectorEntry) -> service::VectorEntry {
+    service::VectorEntry {
+        id: e.id,
+        vector: e.vector,
+        metadata: e.metadata,
+        text: e.text,
+    }
 }
 
-#[derive(Deserialize)]
-struct DeleteRequest {
-    index: String,
-    ids: Vec<String>,
+fn wire_metadata_filter_to_service(f: wire::MetadataFilter) -> service::MetadataFilter {
+    service::MetadataFilter { equals: f.equals }
 }
 
-#[derive(Deserialize)]
-struct CountRequest {
-    index: String,
-}
-
-#[derive(Deserialize)]
-struct EmbedRequest {
-    texts: Vec<String>,
-}
-
-// --- Response types ---
-
-#[derive(Serialize)]
-struct QueryResponse {
-    matches: Vec<VectorMatch>,
-}
-
-#[derive(Serialize)]
-struct CountResponse {
-    count: u64,
-}
-
-#[derive(Serialize)]
-struct EmbedResponse {
-    model: String,
-    dimensions: u32,
-    vectors: Vec<Vec<f32>>,
+fn service_match_to_wire(m: service::VectorMatch) -> wire::VectorMatch {
+    wire::VectorMatch {
+        id: m.id,
+        score: m.score,
+        metadata: m.metadata,
+    }
 }
 
 // --- Helpers ---
@@ -103,8 +89,6 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
     }
 }
 
-use crate::interfaces::handler_util::{decode_or_err, to_output};
-
 /// Handle a vector message using the given service.
 pub async fn handle_message(
     service: &dyn VectorService,
@@ -113,54 +97,67 @@ pub async fn handle_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::VECTOR_CREATE_INDEX => {
-            let req = decode_or_err!(body, CreateIndexRequest, "vector.create_index");
-            match service.create_index(req.config).await {
+            let req = decode_or_err!(body, wire::CreateIndexRequest, "vector.create_index");
+            match service
+                .create_index(wire_index_config_to_service(req.config))
+                .await
+            {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_DELETE_INDEX => {
-            let req = decode_or_err!(body, DeleteIndexRequest, "vector.delete_index");
+            let req = decode_or_err!(body, wire::DeleteIndexRequest, "vector.delete_index");
             match service.delete_index(&req.name).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_UPSERT => {
-            let req = decode_or_err!(body, UpsertRequest, "vector.upsert");
-            match service.upsert(&req.index, req.entries).await {
+            let req = decode_or_err!(body, wire::UpsertRequest, "vector.upsert");
+            let entries: Vec<service::VectorEntry> =
+                req.entries.into_iter().map(wire_entry_to_service).collect();
+            match service.upsert(&req.index, entries).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_QUERY => {
-            let req = decode_or_err!(body, QueryRequest, "vector.query");
+            let req = decode_or_err!(body, wire::QueryRequest, "vector.query");
+            let filter = req.filter.map(wire_metadata_filter_to_service);
+            let mode = wire_search_mode_to_service(req.mode);
             match service
                 .query(
                     &req.index,
                     req.vector,
                     req.top_k,
-                    req.filter,
-                    req.mode,
+                    filter,
+                    mode,
                     req.keyword_query,
                 )
                 .await
             {
-                Ok(matches) => to_output(&QueryResponse { matches }),
+                Ok(matches) => {
+                    let wire_matches: Vec<wire::VectorMatch> =
+                        matches.into_iter().map(service_match_to_wire).collect();
+                    to_output(&wire::QueryResponse {
+                        matches: wire_matches,
+                    })
+                }
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_DELETE => {
-            let req = decode_or_err!(body, DeleteRequest, "vector.delete");
+            let req = decode_or_err!(body, wire::DeleteRequest, "vector.delete");
             match service.delete(&req.index, req.ids).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_COUNT => {
-            let req = decode_or_err!(body, CountRequest, "vector.count");
+            let req = decode_or_err!(body, wire::CountRequest, "vector.count");
             match service.count(&req.index).await {
-                Ok(count) => to_output(&CountResponse { count }),
+                Ok(count) => to_output(&wire::CountResponse { count }),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
@@ -179,9 +176,9 @@ pub async fn handle_embedding_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::EMBEDDING_EMBED => {
-            let req = decode_or_err!(body, EmbedRequest, "embedding.embed");
+            let req = decode_or_err!(body, wire::EmbedRequest, "embedding.embed");
             match service.embed(req.texts).await {
-                Ok(vectors) => to_output(&EmbedResponse {
+                Ok(vectors) => to_output(&wire::EmbedResponse {
                     model: service.model().to_string(),
                     dimensions: service.dimensions(),
                     vectors,

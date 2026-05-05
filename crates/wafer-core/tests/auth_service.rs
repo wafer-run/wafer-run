@@ -8,7 +8,9 @@
 //! return UNIMPLEMENTED.
 
 use futures::StreamExt;
-use wafer_block::{common::ServiceOp, core_types::Message, stream::StreamEvent};
+use wafer_block::{
+    codec, common::ServiceOp, core_types::Message, stream::StreamEvent, wire::auth as wire,
+};
 use wafer_core::interfaces::auth::{
     handler,
     service::{AuthError, AuthService, Role, UserId, UserProfile},
@@ -106,11 +108,18 @@ async fn auth_user_profile_happy_path() {
     };
     let service = ScriptedAuth::with_user(user.clone());
 
-    let body = serde_json::to_vec(&serde_json::json!({ "user_id": "u1" })).unwrap();
+    let body = codec::encode(&wire::UserProfileRequest {
+        user_id: "u1".into(),
+    })
+    .unwrap();
     let stream = handler::handle_message(&service, &msg(ServiceOp::AUTH_USER_PROFILE), &body).await;
     let buffered = stream.collect_buffered().await.unwrap();
-    let decoded: UserProfile = serde_json::from_slice(&buffered.body).unwrap();
-    assert_eq!(decoded, user);
+    let decoded: wire::UserProfileResponse = codec::decode(&buffered.body).unwrap();
+    assert_eq!(decoded.id, user.id.0);
+    assert_eq!(decoded.email, user.email);
+    assert_eq!(decoded.display_name, user.display_name);
+    assert_eq!(decoded.role, "User");
+    assert!(decoded.orgs.is_empty());
 }
 
 #[tokio::test]
@@ -127,7 +136,10 @@ async fn auth_user_profile_bad_body_422() {
 async fn auth_user_profile_not_found() {
     let service = ScriptedAuth::with_not_found();
 
-    let body = serde_json::to_vec(&serde_json::json!({ "user_id": "u_missing" })).unwrap();
+    let body = codec::encode(&wire::UserProfileRequest {
+        user_id: "u_missing".into(),
+    })
+    .unwrap();
     let stream = handler::handle_message(&service, &msg(ServiceOp::AUTH_USER_PROFILE), &body).await;
     let events: Vec<_> = stream.collect().await;
     assert_eq!(events.len(), 1);
