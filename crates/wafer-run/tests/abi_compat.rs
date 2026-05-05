@@ -71,11 +71,10 @@ mod tests {
             .collect_buffered()
             .await;
 
-        let err = match result {
-            Ok(_) => panic!(
+        let Err(err) = result else {
+            panic!(
                 "instantiating a module that imports the legacy __wafer_host_call_block should fail"
-            ),
-            Err(e) => e,
+            )
         };
         let msg = format!("{err:?}").to_lowercase();
         assert!(
