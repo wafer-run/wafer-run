@@ -18,6 +18,7 @@
 //! }
 //! ```
 
+pub mod clients;
 pub mod core_abi;
 pub mod pure;
 pub mod stream;
