@@ -2,24 +2,15 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    wire::logger as wire,
     *,
 };
 
 use super::service::{Field, FieldValue, LoggerService};
-
-// --- Request types ---
-
-#[derive(Deserialize)]
-struct LogRequest {
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    fields: HashMap<String, serde_json::Value>,
-}
+use crate::interfaces::handler_util::decode_or_err;
 
 // --- Helpers ---
 
@@ -47,14 +38,14 @@ fn json_fields_to_service_fields(fields: &HashMap<String, serde_json::Value>) ->
 }
 
 /// Handle a logger message by delegating to the given service.
+///
+/// All four verbs share `wire::LogRequest`; only `Message::kind` distinguishes
+/// the level. Logger calls are fire-and-forget — return an empty
+/// `OutputStream::respond(vec![])`.
 pub fn handle_message(service: &dyn LoggerService, msg: &Message, body: &[u8]) -> OutputStream {
-    let (log_msg, fields) = match serde_json::from_slice::<LogRequest>(body) {
-        Ok(req) => (req.message, json_fields_to_service_fields(&req.fields)),
-        Err(_) => {
-            let text = String::from_utf8_lossy(body).to_string();
-            (text, Vec::new())
-        }
-    };
+    let req = decode_or_err!(body, wire::LogRequest, "logger.log");
+    let log_msg = req.message;
+    let fields = json_fields_to_service_fields(&req.fields);
 
     match msg.kind.as_str() {
         ServiceOp::LOGGER_DEBUG => {

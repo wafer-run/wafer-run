@@ -37,6 +37,11 @@ members = [
     "examples/middleware-chain",
     "crates/wafer-cli",
 ]
+exclude = [
+    # Throwaway WASM guest crate compiled to wasm32-unknown-unknown for the
+    # streaming-ABI spike test (see wafer-run/tests/streaming_spike.rs).
+    "crates/wafer-run/tests/spike_guest",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    wire::crypto::{
+        CompareHashRequest, CompareHashResponse, HashRequest, HashResponse, RandomBytesRequest,
+        RandomBytesResponse, SignRequest, SignResponse, VerifyRequest, VerifyResponse,
+    },
     WaferError,
 };
 
@@ -12,82 +15,29 @@ use super::{call_service, decode, dual_api, svc};
 
 const BLOCK: &str = "wafer-run/crypto";
 
-// --- Wire-format types ---
-
-#[derive(Serialize)]
-struct HashReq<'a> {
-    password: &'a str,
-}
-
-#[derive(Deserialize)]
-struct HashResp {
-    hash: String,
-}
-
-#[derive(Serialize)]
-struct CompareHashReq<'a> {
-    password: &'a str,
-    hash: &'a str,
-}
-
-#[derive(Deserialize)]
-struct CompareHashResp {
-    #[serde(rename = "match")]
-    matches: bool,
-}
-
-#[derive(Serialize)]
-struct SignReq<'a> {
-    claims: &'a HashMap<String, serde_json::Value>,
-    expiry_secs: u64,
-}
-
-#[derive(Deserialize)]
-struct SignResp {
-    token: String,
-}
-
-#[derive(Serialize)]
-struct VerifyReq<'a> {
-    token: &'a str,
-}
-
-#[derive(Deserialize)]
-struct VerifyResp {
-    claims: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct RandomBytesReq {
-    n: usize,
-}
-
-#[derive(Deserialize)]
-struct RandomBytesResp {
-    bytes: Vec<u8>,
-}
-
 // ===========================================================================
 // Public API — generated as async (native) or sync (wasm-component)
 // ===========================================================================
 
 dual_api! {
     pub fn hash(ctx, password: &str) -> Result<String, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &HashReq { password }, None, false, Some("crypto"))?;
-        let resp: HashResp = decode(&data)?;
+        let req = HashRequest { password: password.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &req, None, false, Some("crypto"))?;
+        let resp: HashResponse = decode(&data)?;
         Ok(resp.hash)
     }
 
     pub fn compare_hash(ctx, password: &str, hash: &str) -> Result<(), WaferError> {
+        let req = CompareHashRequest { password: password.to_string(), hash: hash.to_string() };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::CRYPTO_COMPARE_HASH,
-            &CompareHashReq { password, hash },
+            &req,
             None,
             false,
             Some("crypto")
         )?;
-        let resp: CompareHashResp = decode(&data)?;
+        let resp: CompareHashResponse = decode(&data)?;
         if resp.matches {
             Ok(())
         } else {
@@ -100,27 +50,30 @@ dual_api! {
         claims: &HashMap<String, serde_json::Value>,
         expiry: std::time::Duration,
     ) -> Result<String, WaferError> {
+        let req = SignRequest { claims: claims.clone(), expiry_secs: expiry.as_secs() };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::CRYPTO_SIGN,
-            &SignReq { claims, expiry_secs: expiry.as_secs() },
+            &req,
             None,
             false,
             Some("crypto")
         )?;
-        let resp: SignResp = decode(&data)?;
+        let resp: SignResponse = decode(&data)?;
         Ok(resp.token)
     }
 
     pub fn verify(ctx, token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &VerifyReq { token }, None, false, Some("crypto"))?;
-        let resp: VerifyResp = decode(&data)?;
+        let req = VerifyRequest { token: token.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, None, false, Some("crypto"))?;
+        let resp: VerifyResponse = decode(&data)?;
         Ok(resp.claims)
     }
 
     pub fn random_bytes(ctx, n: usize) -> Result<Vec<u8>, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &RandomBytesReq { n }, None, false, Some("crypto"))?;
-        let resp: RandomBytesResp = decode(&data)?;
+        let req = RandomBytesRequest { n };
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &req, None, false, Some("crypto"))?;
+        let resp: RandomBytesResponse = decode(&data)?;
         Ok(resp.bytes)
     }
 }

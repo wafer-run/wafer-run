@@ -4,32 +4,16 @@
 //! sets `wrap.resource` to the config key, and the runtime checks ownership
 //! and grants before dispatching here. This handler is pure business logic.
 
-use serde::{Deserialize, Serialize};
 use wafer_block::{
+    codec,
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    wire::config as wire,
     *,
 };
 
 use super::service::ConfigService;
-
-#[derive(Deserialize)]
-struct GetRequest {
-    key: String,
-}
-
-#[derive(Deserialize)]
-struct SetRequest {
-    key: String,
-    value: String,
-}
-
-#[derive(Serialize)]
-struct GetResponse {
-    value: String,
-}
-
-use crate::interfaces::handler_util::to_output;
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 /// Handle a config message by delegating to the given service.
 ///
@@ -37,7 +21,10 @@ use crate::interfaces::handler_util::to_output;
 pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::CONFIG_GET => {
-            let key = match serde_json::from_slice::<GetRequest>(body) {
+            // Accept either a codec-encoded `GetRequest` body or a `key` meta
+            // field on the message (a fallback for callers that route through
+            // headers — preserves the original handler's behavior).
+            let key = match codec::decode::<wire::GetRequest>(body) {
                 Ok(req) => req.key,
                 Err(_) => {
                     let meta_key = msg.get_meta("key");
@@ -52,7 +39,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             };
 
             match service.get(&key) {
-                Some(val) => to_output(&GetResponse { value: val }),
+                Some(val) => to_output(&wire::GetResponse { value: val }),
                 None => OutputStream::error(WaferError::new(
                     ErrorCode::NOT_FOUND,
                     format!("config key not found: {key}"),
@@ -60,16 +47,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             }
         }
         ServiceOp::CONFIG_SET => {
-            let req: SetRequest = match serde_json::from_slice(body) {
-                Ok(r) => r,
-                Err(e) => {
-                    return OutputStream::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
-                        format!("invalid config.set request: {e}"),
-                    ))
-                }
-            };
-
+            let req = decode_or_err!(body, wire::SetRequest, "config.set");
             service.set(&req.key, &req.value);
             OutputStream::respond(vec![])
         }

@@ -1,10 +1,18 @@
 use std::collections::HashMap;
 
-use serde::Serialize;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
+// `Record` and `RecordList` are byte-identical to the wire types; collapse
+// the duplicate by re-exporting from the wire crate.
+pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    wire::database::{
+        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereRequest,
+        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, GetRequest, ListRequest,
+        QueryRawRequest, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, UpdateRequest,
+        UpdateWhereRequest,
+    },
     WaferError,
 };
 
@@ -16,116 +24,12 @@ pub use crate::interfaces::database::service::{
     default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
     DefaultVal, DefaultValue, Index, Reference, Table,
 };
-// Re-export the data types so callers can use `clients::database::Record` etc.
-pub use crate::interfaces::database::service::{
-    Filter, FilterOp, ListOptions, Record, RecordList, SortField,
-};
+// `Filter`, `FilterOp`, `ListOptions`, `SortField` are runtime-only ergonomic
+// wrappers (no wire-format derives); keep them on the interfaces type and
+// convert to `wire::*Def` at the wire boundary inside each fn.
+pub use crate::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
 
 const BLOCK: &str = "wafer-run/database";
-
-// --- Wire-format request types ---
-
-#[derive(Serialize)]
-struct GetReq<'a> {
-    collection: &'a str,
-    id: &'a str,
-}
-
-#[derive(Serialize)]
-struct ListReq<'a> {
-    collection: &'a str,
-    filters: Vec<FilterDef<'a>>,
-    sort: Vec<SortDef<'a>>,
-    limit: i64,
-    offset: i64,
-}
-
-#[derive(Serialize)]
-struct CreateReq<'a> {
-    collection: &'a str,
-    data: &'a HashMap<String, serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct UpdateReq<'a> {
-    collection: &'a str,
-    id: &'a str,
-    data: &'a HashMap<String, serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct DeleteReq<'a> {
-    collection: &'a str,
-    id: &'a str,
-}
-
-#[derive(Serialize)]
-struct CountReq<'a> {
-    collection: &'a str,
-    filters: Vec<FilterDef<'a>>,
-}
-
-#[derive(Serialize)]
-struct SumReq<'a> {
-    collection: &'a str,
-    field: &'a str,
-    filters: Vec<FilterDef<'a>>,
-}
-
-#[derive(Serialize)]
-struct QueryRawReq<'a> {
-    query: &'a str,
-    args: &'a [serde_json::Value],
-}
-
-#[derive(Serialize)]
-struct ExecRawReq<'a> {
-    query: &'a str,
-    args: &'a [serde_json::Value],
-}
-
-#[derive(Serialize)]
-struct DeleteWhereReq<'a> {
-    collection: &'a str,
-    filters: Vec<FilterDef<'a>>,
-}
-
-#[derive(Serialize)]
-struct UpdateWhereReq<'a> {
-    collection: &'a str,
-    filters: Vec<FilterDef<'a>>,
-    data: &'a HashMap<String, serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct FilterDef<'a> {
-    field: &'a str,
-    operator: &'a str,
-    value: &'a serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct SortDef<'a> {
-    field: &'a str,
-    desc: bool,
-}
-
-// --- Wire-format response types ---
-
-#[derive(serde::Deserialize)]
-struct CountResp {
-    count: i64,
-}
-
-#[derive(serde::Deserialize)]
-struct SumResp {
-    sum: f64,
-}
-
-#[derive(serde::Deserialize)]
-struct ExecRawResp {
-    rows_affected: i64,
-}
 
 // --- Helpers ---
 
@@ -144,21 +48,21 @@ fn filter_op_str(op: &FilterOp) -> &'static str {
     }
 }
 
-fn to_filter_defs(filters: &[Filter]) -> Vec<FilterDef<'_>> {
+fn to_wire_filters(filters: &[Filter]) -> Vec<WireFilterDef> {
     filters
         .iter()
-        .map(|f| FilterDef {
-            field: &f.field,
-            operator: filter_op_str(&f.operator),
-            value: &f.value,
+        .map(|f| WireFilterDef {
+            field: f.field.clone(),
+            operator: filter_op_str(&f.operator).to_string(),
+            value: f.value.clone(),
         })
         .collect()
 }
 
-fn to_sort_defs(sort: &[SortField]) -> Vec<SortDef<'_>> {
+fn to_wire_sort(sort: &[SortField]) -> Vec<WireSortFieldDef> {
     sort.iter()
-        .map(|s| SortDef {
-            field: &s.field,
+        .map(|s| WireSortFieldDef {
+            field: s.field.clone(),
             desc: s.desc,
         })
         .collect()
@@ -172,21 +76,23 @@ dual_api! {
     // --- Core CRUD ---
 
     pub fn get(ctx, collection: &str, id: &str) -> Result<Record, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_GET, &GetReq { collection, id }, Some(collection), false, Some("db"))?;
+        let req = GetRequest { collection: collection.to_string(), id: id.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_GET, &req, Some(collection), false, Some("db"))?;
         decode(&data)
     }
 
     pub fn list(ctx, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
+        let req = ListRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&opts.filters),
+            sort: to_wire_sort(&opts.sort),
+            limit: opts.limit,
+            offset: opts.offset,
+        };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_LIST,
-            &ListReq {
-                collection,
-                filters: to_filter_defs(&opts.filters),
-                sort: to_sort_defs(&opts.sort),
-                limit: opts.limit,
-                offset: opts.offset,
-            },
+            &req,
             Some(collection),
             false,
             Some("db")
@@ -195,10 +101,11 @@ dual_api! {
     }
 
     pub fn create(ctx, collection: &str, data: HashMap<String, serde_json::Value>) -> Result<Record, WaferError> {
+        let req = CreateRequest { collection: collection.to_string(), data };
         let resp = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_CREATE,
-            &CreateReq { collection, data: &data },
+            &req,
             Some(collection),
             true,
             Some("db")
@@ -207,10 +114,11 @@ dual_api! {
     }
 
     pub fn update(ctx, collection: &str, id: &str, data: HashMap<String, serde_json::Value>) -> Result<Record, WaferError> {
+        let req = UpdateRequest { collection: collection.to_string(), id: id.to_string(), data };
         let resp = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_UPDATE,
-            &UpdateReq { collection, id, data: &data },
+            &req,
             Some(collection),
             true,
             Some("db")
@@ -219,41 +127,52 @@ dual_api! {
     }
 
     pub fn delete(ctx, collection: &str, id: &str) -> Result<(), WaferError> {
-        svc!(ctx, BLOCK, ServiceOp::DATABASE_DELETE, &DeleteReq { collection, id }, Some(collection), true, Some("db"))?;
+        let req = DeleteRequest { collection: collection.to_string(), id: id.to_string() };
+        svc!(ctx, BLOCK, ServiceOp::DATABASE_DELETE, &req, Some(collection), true, Some("db"))?;
         Ok(())
     }
 
     pub fn count(ctx, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
+        let req = CountRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(filters),
+        };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_COUNT,
-            &CountReq { collection, filters: to_filter_defs(filters) },
+            &req,
             Some(collection),
             false,
             Some("db")
         )?;
-        let resp: CountResp = decode(&data)?;
+        let resp: CountResponse = decode(&data)?;
         Ok(resp.count)
     }
 
     pub fn sum(ctx, collection: &str, field: &str, filters: &[Filter]) -> Result<f64, WaferError> {
+        let req = SumRequest {
+            collection: collection.to_string(),
+            field: field.to_string(),
+            filters: to_wire_filters(filters),
+        };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_SUM,
-            &SumReq { collection, field, filters: to_filter_defs(filters) },
+            &req,
             Some(collection),
             false,
             Some("db")
         )?;
-        let resp: SumResp = decode(&data)?;
+        let resp: SumResponse = decode(&data)?;
         Ok(resp.sum)
     }
 
     pub fn query_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, WaferError> {
+        let req = QueryRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_QUERY_RAW,
-            &QueryRawReq { query, args },
+            &req,
             Some("__raw_sql__"),
             false,
             Some("db")
@@ -262,15 +181,16 @@ dual_api! {
     }
 
     pub fn exec_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<i64, WaferError> {
+        let req = ExecRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_EXEC_RAW,
-            &ExecRawReq { query, args },
+            &req,
             Some("__raw_sql__"),
             true,
             Some("db")
         )?;
-        let resp: ExecRawResp = decode(&data)?;
+        let resp: ExecRawResponse = decode(&data)?;
         Ok(resp.rows_affected)
     }
 
@@ -389,10 +309,14 @@ dual_api! {
     }
 
     pub fn delete_by_filters(ctx, collection: &str, filters: Vec<Filter>) -> Result<(), WaferError> {
+        let req = DeleteWhereRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&filters),
+        };
         svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_DELETE_WHERE,
-            &DeleteWhereReq { collection, filters: to_filter_defs(&filters) },
+            &req,
             Some(collection),
             true,
             Some("db")
@@ -406,10 +330,15 @@ dual_api! {
         filters: Vec<Filter>,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), WaferError> {
+        let req = UpdateWhereRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&filters),
+            data,
+        };
         svc!(
             ctx, BLOCK,
             ServiceOp::DATABASE_UPDATE_WHERE,
-            &UpdateWhereReq { collection, filters: to_filter_defs(&filters), data: &data },
+            &req,
             Some(collection),
             true,
             Some("db")

@@ -12,6 +12,7 @@ default = []
 json-schema = ["schemars"]
 
 [dependencies]
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -22,6 +23,7 @@ wafer-flow = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
+rmp-serde = "1.3"
 
 # Async primitives — `tokio` channels (`sync` feature only, no `net`/`io` so
 # wasm32 builds). Buffered `OutputStream` constructors (`respond`, `error`,

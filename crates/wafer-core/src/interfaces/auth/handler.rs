@@ -8,21 +8,15 @@
 //! `http.header.x-auth-scope` and `http.header.x-auth-role` (the same
 //! convention `Message::header()` reads for ordinary HTTP headers).
 
-use serde::{Deserialize, Serialize};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    wire::auth as wire,
     *,
 };
 
-use super::service::{AuthError, AuthService, Role, TokenScope, UserId};
+use super::service::{self, AuthError, AuthService, Role, TokenScope, UserId};
 use crate::interfaces::handler_util::{decode_or_err, to_output};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UserProfileRequest {
-    user_id: String,
-}
 
 fn err_to_wafer(e: AuthError) -> WaferError {
     match e {
@@ -34,16 +28,38 @@ fn err_to_wafer(e: AuthError) -> WaferError {
     }
 }
 
-#[derive(Serialize)]
-struct UserIdResponse {
-    user_id: String,
+fn service_role_to_wire(r: Role) -> String {
+    match r {
+        Role::User => "User".to_string(),
+        Role::Admin => "Admin".to_string(),
+    }
+}
+
+fn service_org_to_wire(o: service::OrgSummary) -> wire::OrgSummary {
+    wire::OrgSummary {
+        name: o.name,
+        verified_via: o.verified_via,
+        verified_ref: o.verified_ref,
+        is_reserved: o.is_reserved,
+    }
+}
+
+fn service_profile_to_wire(p: service::UserProfile) -> wire::UserProfileResponse {
+    wire::UserProfileResponse {
+        id: p.id.0,
+        email: p.email,
+        display_name: p.display_name,
+        avatar_url: p.avatar_url,
+        role: service_role_to_wire(p.role),
+        orgs: p.orgs.into_iter().map(service_org_to_wire).collect(),
+    }
 }
 
 /// Handle an auth message by delegating to the given service.
 pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8]) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::AUTH_REQUIRE_USER => match service.require_user(msg).await {
-            Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
+            Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
             Err(e) => OutputStream::error(err_to_wafer(e)),
         },
         ServiceOp::AUTH_REQUIRE_TOKEN => {
@@ -59,7 +75,7 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
                 }
             };
             match service.require_token(msg, scope).await {
-                Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
+                Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
         }
@@ -69,14 +85,14 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
                 _ => Role::User,
             };
             match service.require_role(msg, role).await {
-                Ok(u) => to_output(&UserIdResponse { user_id: u.0 }),
+                Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
         }
         ServiceOp::AUTH_USER_PROFILE => {
-            let req = decode_or_err!(body, UserProfileRequest, "auth.user_profile");
+            let req = decode_or_err!(body, wire::UserProfileRequest, "auth.user_profile");
             match service.user_profile(UserId(req.user_id)).await {
-                Ok(p) => to_output(&p),
+                Ok(p) => to_output(service_profile_to_wire(p)),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
         }

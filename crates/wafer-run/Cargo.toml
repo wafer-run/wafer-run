@@ -11,6 +11,12 @@ default = ["wasm"]
 wasmi = ["dep:wasmi", "dep:getrandom"]
 wasm = ["wasmi", "dep:reqwest", "dep:tokio"]
 full = ["wasm", "dep:tracing-subscriber"]
+# Throwaway feature flag that gates a streaming-ABI spike test (see
+# tests/streaming_spike.rs). Registers an extra `wafer_spike` host import
+# module used only by the spike guest. NOT for production builds — the
+# real streaming ABI lives behind `__wafer_host_stream_*` and is the
+# subject of a separate task.
+spike = []
 
 [dependencies]
 # Shared block types

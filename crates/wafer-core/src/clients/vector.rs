@@ -9,83 +9,26 @@
 //! at the HTTP boundary. If per-index WRAP typing is needed later, add
 //! `Vector` and `Embedding` variants to `ResourceType` in `wafer-block`.
 
-use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-use wafer_block::{common::ServiceOp, WaferError};
-
-use super::{call_service, decode, dual_api, svc};
-// Re-export types for callers.
-pub use crate::interfaces::vector::service::{
+// Re-export wire types for callers — byte-identical to the legacy
+// `interfaces::vector::service::*` types (the wire crate is the canonical
+// home for these vector data types now).
+pub use wafer_block::wire::vector::{
     DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
 };
+use wafer_block::{
+    common::ServiceOp,
+    wire::vector::{
+        CountRequest, CountResponse, CreateIndexRequest, DeleteIndexRequest, DeleteRequest,
+        EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, UpsertRequest,
+    },
+    WaferError,
+};
+
+use super::{call_service, decode, dual_api, svc};
 
 const VECTOR_BLOCK: &str = "wafer-run/vector";
-
-// --- Wire-format request types ---
-
-#[derive(Serialize)]
-struct CreateIndexReq<'a> {
-    config: &'a VectorIndexConfig,
-}
-
-#[derive(Serialize)]
-struct DeleteIndexReq<'a> {
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct UpsertReq<'a> {
-    index: &'a str,
-    entries: &'a [VectorEntry],
-}
-
-#[derive(Serialize)]
-struct QueryReq<'a> {
-    index: &'a str,
-    vector: &'a [f32],
-    top_k: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    filter: Option<&'a MetadataFilter>,
-    mode: SearchMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    keyword_query: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct DeleteReq<'a> {
-    index: &'a str,
-    ids: &'a [String],
-}
-
-#[derive(Serialize)]
-struct CountReq<'a> {
-    index: &'a str,
-}
-
-#[derive(Serialize)]
-struct EmbedReq<'a> {
-    texts: &'a [String],
-}
-
-// --- Wire-format response types ---
-
-#[derive(Deserialize)]
-struct QueryResp {
-    matches: Vec<VectorMatch>,
-}
-
-#[derive(Deserialize)]
-struct CountResp {
-    count: u64,
-}
-
-#[derive(Deserialize)]
-struct EmbedResp {
-    model: String,
-    dimensions: u32,
-    vectors: Vec<Vec<f32>>,
-}
 
 // ===========================================================================
 // Public API — generated as async (native) or sync (wasm-component)
@@ -93,10 +36,11 @@ struct EmbedResp {
 
 dual_api! {
     pub fn create_index(ctx, config: VectorIndexConfig) -> Result<(), WaferError> {
+        let req = CreateIndexRequest { config };
         svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_CREATE_INDEX,
-            &CreateIndexReq { config: &config },
+            &req,
             None::<&str>,
             false,
             None::<&str>
@@ -105,10 +49,11 @@ dual_api! {
     }
 
     pub fn delete_index(ctx, name: &str) -> Result<(), WaferError> {
+        let req = DeleteIndexRequest { name: name.to_string() };
         svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE_INDEX,
-            &DeleteIndexReq { name },
+            &req,
             None::<&str>,
             false,
             None::<&str>
@@ -117,10 +62,11 @@ dual_api! {
     }
 
     pub fn upsert(ctx, index: &str, entries: Vec<VectorEntry>) -> Result<(), WaferError> {
+        let req = UpsertRequest { index: index.to_string(), entries };
         svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_UPSERT,
-            &UpsertReq { index, entries: &entries },
+            &req,
             None::<&str>,
             false,
             None::<&str>
@@ -137,30 +83,32 @@ dual_api! {
         mode: SearchMode,
         keyword_query: Option<String>,
     ) -> Result<Vec<VectorMatch>, WaferError> {
+        let req = QueryRequest {
+            index: index.to_string(),
+            vector,
+            top_k,
+            filter,
+            mode,
+            keyword_query,
+        };
         let data = svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_QUERY,
-            &QueryReq {
-                index,
-                vector: &vector,
-                top_k,
-                filter: filter.as_ref(),
-                mode,
-                keyword_query: keyword_query.as_deref(),
-            },
+            &req,
             None::<&str>,
             false,
             None::<&str>
         )?;
-        let resp: QueryResp = decode(&data)?;
+        let resp: QueryResponse = decode(&data)?;
         Ok(resp.matches)
     }
 
     pub fn delete(ctx, index: &str, ids: Vec<String>) -> Result<(), WaferError> {
+        let req = DeleteRequest { index: index.to_string(), ids };
         svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE,
-            &DeleteReq { index, ids: &ids },
+            &req,
             None::<&str>,
             false,
             None::<&str>
@@ -169,15 +117,16 @@ dual_api! {
     }
 
     pub fn count(ctx, index: &str) -> Result<u64, WaferError> {
+        let req = CountRequest { index: index.to_string() };
         let data = svc!(
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_COUNT,
-            &CountReq { index },
+            &req,
             None::<&str>,
             false,
             None::<&str>
         )?;
-        let resp: CountResp = decode(&data)?;
+        let resp: CountResponse = decode(&data)?;
         Ok(resp.count)
     }
 
@@ -190,15 +139,16 @@ dual_api! {
         embedding_block: &str,
         texts: Vec<String>,
     ) -> Result<(String, u32, Vec<Vec<f32>>), WaferError> {
+        let req = EmbedRequest { texts };
         let data = svc!(
             ctx, embedding_block,
             ServiceOp::EMBEDDING_EMBED,
-            &EmbedReq { texts: &texts },
+            &req,
             None::<&str>,
             false,
             None::<&str>
         )?;
-        let resp: EmbedResp = decode(&data)?;
+        let resp: EmbedResponse = decode(&data)?;
         Ok((resp.model, resp.dimensions, resp.vectors))
     }
 }

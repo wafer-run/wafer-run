@@ -3,7 +3,7 @@
 //! Exercises `interfaces::llm::handler::handle_message` — the shared dispatch
 //! logic used by `LlmBlock` — against a `MultiBackendLlmService` router
 //! populated with a scripted fake backend. Verifies that streaming chat frames
-//! are JSON-encoded onto `Chunk` events, buffered ops produce a single
+//! are codec-encoded onto `Chunk` events, buffered ops produce a single
 //! `Chunk + Complete`, unknown ops return `InvalidArgument`, and consumer
 //! drop cancels the upstream service.
 
@@ -14,13 +14,15 @@ use std::sync::{
 
 use futures::{stream::BoxStream, StreamExt};
 use tokio_util::sync::CancellationToken;
-use wafer_block::{common::ServiceOp, core_types::Message, stream::StreamEvent};
+use wafer_block::{
+    codec, common::ServiceOp, core_types::Message, stream::StreamEvent, wire::llm as wire,
+};
 use wafer_core::interfaces::llm::{
     handler,
     router::MultiBackendLlmService,
     service::{
-        ChatChunk, ChatMessage, ChatRequest, ChunkDelta, FinishReason, LlmError, LlmService,
-        ModelCapabilities, ModelInfo, ModelState, ModelStatus, TokenUsage,
+        ChatChunk, ChatRequest, FinishReason, LlmError, LlmService, ModelCapabilities, ModelInfo,
+        ModelStatus, TokenUsage,
     },
 };
 
@@ -103,8 +105,21 @@ impl LlmService for ScriptedLlm {
     }
 }
 
-fn chat_request() -> ChatRequest {
-    ChatRequest::new("test", "m", vec![ChatMessage::user("hi")])
+fn wire_chat_request_bytes() -> Vec<u8> {
+    let req = wire::ChatRequest {
+        backend_id: "test".into(),
+        model: "m".into(),
+        messages: vec![wire::ChatMessage {
+            role: wire::ChatRole::User,
+            content: wire::ChatContent::Text("hi".into()),
+            tool_call_id: None,
+            tool_calls: vec![],
+        }],
+        params: wire::ChatParams::default(),
+        tools: vec![],
+        extra: serde_json::Value::Null,
+    };
+    codec::encode(&req).unwrap()
 }
 
 fn msg(kind: &str) -> Message {
@@ -132,25 +147,26 @@ async fn chat_streams_chunks_then_completes() {
     ];
     let service = build_router(ScriptedLlm::new("test").with_chunks(chunks.clone()));
 
-    let body = serde_json::to_vec(&chat_request()).unwrap();
+    let body = wire_chat_request_bytes();
     let stream = handler::handle_message(service, &msg(ServiceOp::LLM_CHAT), body).await;
     let events: Vec<_> = stream.collect().await;
 
     // 3 Chunks + 1 Complete
     assert_eq!(events.len(), 4, "got events: {events:?}");
 
-    let decoded: Vec<Result<ChatChunk, LlmError>> = events
+    let decoded: Vec<wire::ChatChunk> = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::Chunk(b) => Some(serde_json::from_slice(b).unwrap()),
+            StreamEvent::Chunk(b) => Some(codec::decode(b).unwrap()),
             _ => None,
         })
         .collect();
     assert_eq!(decoded.len(), 3);
-    assert!(
-        matches!(&decoded[0], Ok(c) if matches!(&c.delta, ChunkDelta::Text(t) if t == "hello "))
-    );
-    assert!(matches!(&decoded[2], Ok(c) if c.finish_reason == Some(FinishReason::Stop)));
+    assert!(matches!(&decoded[0].delta, wire::ChunkDelta::Text(t) if t == "hello "));
+    assert!(matches!(
+        decoded[2].finish_reason,
+        Some(wire::FinishReason::Stop)
+    ));
     assert!(matches!(events.last(), Some(StreamEvent::Complete { .. })));
 }
 
@@ -185,31 +201,36 @@ async fn list_models_buffered_payload_is_aggregated_json() {
 
     let stream = handler::handle_message(service, &msg(ServiceOp::LLM_LIST_MODELS), vec![]).await;
     let buffered = stream.collect_buffered().await.unwrap();
-    let decoded: Vec<ModelInfo> = serde_json::from_slice(&buffered.body).unwrap();
-    assert_eq!(decoded, models);
+    let decoded: Vec<wire::ModelInfo> = codec::decode(&buffered.body).unwrap();
+    assert_eq!(decoded.len(), models.len());
+    assert_eq!(decoded[0].backend_id, models[0].backend_id);
+    assert_eq!(decoded[0].model_id, models[0].model_id);
+    assert_eq!(decoded[0].display_name, models[0].display_name);
+    assert!(decoded[0].capabilities.streaming);
+    assert_eq!(decoded[1].model_id, models[1].model_id);
 }
 
 #[tokio::test]
 async fn status_dispatches_and_returns_state() {
     let service = build_router(ScriptedLlm::new("test"));
-    let body = serde_json::to_vec(&serde_json::json!({
-        "backend_id": "test",
-        "model_id": "m1"
-    }))
+    let body = codec::encode(&wire::StatusRequest {
+        backend_id: "test".into(),
+        model_id: "m1".into(),
+    })
     .unwrap();
     let stream = handler::handle_message(service, &msg(ServiceOp::LLM_STATUS), body).await;
     let buffered = stream.collect_buffered().await.unwrap();
-    let decoded: ModelStatus = serde_json::from_slice(&buffered.body).unwrap();
-    assert_eq!(decoded.state, ModelState::Ready);
+    let decoded: wire::ModelStatus = codec::decode(&buffered.body).unwrap();
+    assert!(matches!(decoded.state, wire::ModelState::Ready));
 }
 
 #[tokio::test]
 async fn unload_model_returns_empty_complete() {
     let service = build_router(ScriptedLlm::new("test"));
-    let body = serde_json::to_vec(&serde_json::json!({
-        "backend_id": "test",
-        "model_id": "m1"
-    }))
+    let body = codec::encode(&wire::UnloadModelRequest {
+        backend_id: "test".into(),
+        model_id: "m1".into(),
+    })
     .unwrap();
     let stream = handler::handle_message(service, &msg(ServiceOp::LLM_UNLOAD_MODEL), body).await;
     let buffered = stream.collect_buffered().await.unwrap();
@@ -222,7 +243,7 @@ async fn dropping_chat_stream_cancels_service() {
     let cancel_flag = scripted.cancel_flag();
     let service = build_router(scripted);
 
-    let body = serde_json::to_vec(&chat_request()).unwrap();
+    let body = wire_chat_request_bytes();
     let stream = handler::handle_message(service, &msg(ServiceOp::LLM_CHAT), body).await;
     // Consumer drop should cancel the service through the OutputStream cancel token.
     drop(stream);

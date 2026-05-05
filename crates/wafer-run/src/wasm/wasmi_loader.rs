@@ -5,7 +5,11 @@ use tracing::{debug, warn};
 use wafer_block::streams::{input::InputStream, output::OutputStream};
 use wasmi::{Caller, Engine, Error as WasmiError, Linker, Module, Store, TypedResumableCall, Val};
 
-use super::{capabilities::BlockCapabilities, host::ContextGuard};
+use super::{
+    capabilities::BlockCapabilities,
+    host::ContextGuard,
+    stream::{StreamRegistry, StreamState},
+};
 use crate::{
     block::{Block, BlockInfo},
     context::Context,
@@ -341,24 +345,30 @@ struct WasmiHostState {
     /// Capabilities (resource limits) for this block.
     /// Used by host function enforcement (e.g. `allows_call_block`).
     capabilities: BlockCapabilities,
-    /// Set by __wafer_host_call_block to request an async call.
-    /// The resume loop in `call_guest_resumable` consumes this, dispatches
-    /// the call via `Context::call_block`, allocates guest memory for the
-    /// resulting GuestResult JSON, writes it, and resumes the guest with
-    /// the packed (ptr, len) as the host call's return value (no re-entry).
-    pending_call: Option<PendingCall>,
+    /// Per-instance stream registry. Drops with the Store, cancelling any
+    /// in-flight response streams via their paired `CancellationToken`s.
+    streams: StreamRegistry,
+    /// Set by __wafer_host_stream_finish to request the host resume loop
+    /// drive `Context::call_block` for this handle. The loop calls
+    /// `take_finish_request` on the StreamState, dispatches, and installs
+    /// the resulting OutputStream on the StreamState before resuming the
+    /// guest with the i32 status code (0 = ok, negative = ErrorCode).
+    pending_stream_finish: Option<u64>,
+    /// Set by __wafer_host_stream_read_chunk to request the host resume loop
+    /// pull the next frame off the response stream. The loop allocates guest
+    /// memory for the bytes (if any) and resumes with the packed (ptr, len)
+    /// — or 0 for end-of-stream — or a negative ErrorCode sentinel.
+    pending_stream_read: Option<u64>,
+    /// Set by __wafer_host_stream_take_error to request the host resume loop
+    /// allocate guest memory and write the rmp-serde-encoded WaferError. The
+    /// loop resumes with packed (ptr, len), or 0 if no error is present.
+    pending_stream_take_error: Option<u64>,
     /// Set by __wafer_host_load_asset to request an async asset load.
     /// The resume loop consumes this, drives the LoadAssetCallback, and
     /// resumes the guest with the resolved i32 status code as the return
     /// value (wasmi's `resumable.resume(..)` value IS the return value of
     /// the trapped host function — no phase-2 re-entry like call_block).
     pending_load_asset: Option<String>,
-}
-
-struct PendingCall {
-    block_name: String,
-    msg_bytes: Vec<u8>,
-    body_bytes: Vec<u8>,
 }
 
 impl wasmi::ResourceLimiter for WasmiHostState {
@@ -384,26 +394,55 @@ impl wasmi::ResourceLimiter for WasmiHostState {
 }
 
 // ---------------------------------------------------------------------------
-// Sentinel error for call_block trap+resume
+// Sentinel errors for trap+resume
 // ---------------------------------------------------------------------------
 
-/// Marker error returned by `__wafer_host_call_block` to suspend execution.
-/// wasmi's resumable-call machinery catches this and lets the host resolve
-/// the async call before resuming.
+/// Marker trap for `__wafer_host_stream_finish` — the resume loop catches this
+/// and dispatches the call to `Context::call_block`, installing the resulting
+/// `OutputStream` on the StreamState before resuming the guest with an i32
+/// status code.
 #[derive(Debug)]
-struct CallBlockTrap;
+struct StreamFinishTrap;
 
-impl std::fmt::Display for CallBlockTrap {
+impl std::fmt::Display for StreamFinishTrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "call_block trap (expected — will be resumed)")
+        write!(f, "stream_finish trap (expected — will be resumed)")
     }
 }
 
-impl wasmi::core::HostError for CallBlockTrap {}
+impl wasmi::core::HostError for StreamFinishTrap {}
+
+/// Marker trap for `__wafer_host_stream_read_chunk` — the resume loop drives
+/// `OutputStream::next()`, allocates guest memory for the bytes (if any), and
+/// resumes the guest with the packed (ptr, len) i64.
+#[derive(Debug)]
+struct StreamReadTrap;
+
+impl std::fmt::Display for StreamReadTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stream_read trap (expected — will be resumed)")
+    }
+}
+
+impl wasmi::core::HostError for StreamReadTrap {}
+
+/// Marker trap for `__wafer_host_stream_take_error` — the resume loop pops the
+/// stream's `last_error`, encodes it via rmp-serde, allocates guest memory, and
+/// resumes with the packed (ptr, len) i64.
+#[derive(Debug)]
+struct StreamTakeErrorTrap;
+
+impl std::fmt::Display for StreamTakeErrorTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stream_take_error trap (expected — will be resumed)")
+    }
+}
+
+impl wasmi::core::HostError for StreamTakeErrorTrap {}
 
 /// Marker error returned by `__wafer_host_load_asset` to suspend execution.
-/// Mirrors `CallBlockTrap` — the resume loop catches it and drives the
-/// registered `LoadAssetCallback` before resuming the guest.
+/// The resume loop catches it and drives the registered `LoadAssetCallback`
+/// before resuming the guest.
 #[derive(Debug)]
 struct LoadAssetTrap;
 
@@ -414,6 +453,49 @@ impl std::fmt::Display for LoadAssetTrap {
 }
 
 impl wasmi::core::HostError for LoadAssetTrap {}
+
+// ---------------------------------------------------------------------------
+// Negative-i64 / negative-i32 ErrorCode sentinels for the streaming ABI
+// ---------------------------------------------------------------------------
+
+/// Map a `WaferError` to a negative `i32` sentinel suitable for returning from
+/// host imports declared as `... -> i32`. The low byte carries an opaque
+/// numeric code corresponding to the `ErrorCode` discriminant; `-1` is the
+/// generic fallback. The guest unpacks via `take_error` for full details.
+fn error_code_to_neg_i32(code: ErrorCode) -> i32 {
+    -(error_code_ordinal(code) as i32)
+}
+
+/// Negative-i64 variant. Same encoding as `error_code_to_neg_i32` but widened.
+fn error_code_to_neg_i64(code: ErrorCode) -> i64 {
+    -(error_code_ordinal(code) as i64)
+}
+
+/// Stable opaque numeric tag for an `ErrorCode`. We hand-roll this rather than
+/// using `as i32` on the enum so the wire mapping is independent of source
+/// ordering. Values are 1..=17 (skipping 0 which means "ok / no error"); the
+/// guest's `take_error` is the source of truth for full structured details.
+fn error_code_ordinal(code: ErrorCode) -> u8 {
+    match code {
+        ErrorCode::Ok => 0,
+        ErrorCode::Cancelled => 1,
+        ErrorCode::Unknown => 2,
+        ErrorCode::InvalidArgument => 3,
+        ErrorCode::DeadlineExceeded => 4,
+        ErrorCode::NotFound => 5,
+        ErrorCode::AlreadyExists => 6,
+        ErrorCode::PermissionDenied => 7,
+        ErrorCode::ResourceExhausted => 8,
+        ErrorCode::FailedPrecondition => 9,
+        ErrorCode::Aborted => 10,
+        ErrorCode::OutOfRange => 11,
+        ErrorCode::Unimplemented => 12,
+        ErrorCode::Internal => 13,
+        ErrorCode::Unavailable => 14,
+        ErrorCode::DataLoss => 15,
+        ErrorCode::Unauthenticated => 16,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Guest memory helpers
@@ -520,32 +602,33 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_log: {e}")))?;
 
-    // __wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
+    // ---- Streaming call ABI: 6 host imports ------------------------------
     //
-    // Reads the call args (incl. request body) from guest memory, stores a
-    // PendingCall, and traps. The resume loop in `call_guest_resumable`
-    // catches the trap, dispatches to the target block via `Context::call_block`
-    // (passing the request body bytes as the target's InputStream), allocates
-    // guest memory for the response GuestResult JSON, writes it, and resumes
-    // the guest with the packed (ptr, len) as the host call's return value.
+    // Lifecycle: stream_init → write_chunk* → finish → read_chunk* → close.
+    // See `wasm/stream.rs` for the StreamState state machine.
     //
-    // The request body is forwarded to the target as InputStream
-    // (symmetric with `handle(msg, body)`); the response body is encoded
-    // inside the GuestResult JSON returned from this call (see the `Respond`
-    // payload's `response.data` field).
+    // Synchronous host imports (no trap): init, write_chunk, close.
+    // Trap+resume host imports (need async dispatch or guest allocation):
+    // finish, read_chunk, take_error.
+
+    // __wafer_host_stream_init(name_ptr, name_len, msg_ptr, msg_len) -> i64
+    //
+    // Reads the target block name + serialized Message from guest memory,
+    // allocates a fresh StreamState in the registry, returns the handle as
+    // a positive i64. On capability denial returns a negative i64 carrying
+    // the ErrorCode sentinel (the guest can call `take_error` for details
+    // — but `init` failure leaves no handle, so the SDK must treat negative
+    // returns as immediate errors without further state.)
     linker
         .func_wrap(
             "wafer",
-            "__wafer_host_call_block",
+            "__wafer_host_stream_init",
             |mut caller: Caller<WasmiHostState>,
              name_ptr: i32,
              name_len: i32,
              msg_ptr: i32,
-             msg_len: i32,
-             body_ptr: i32,
-             body_len: i32|
+             msg_len: i32|
              -> Result<i64, WasmiError> {
-                // Read block name, message, and body from guest memory, then trap.
                 let memory = caller
                     .get_export("memory")
                     .and_then(|e| e.into_memory())
@@ -558,35 +641,152 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
                 let block_name = String::from_utf8(name_buf)
                     .map_err(|e| WasmiError::new(format!("block name not UTF-8: {e}")))?;
 
-                // Capability check: deny if block is not allowed to call the target.
+                // Capability check: deny if block is not allowed to call target.
                 if !caller.data().capabilities.allows_call_block(&block_name) {
-                    return Err(WasmiError::new(format!(
-                        "call_block to '{block_name}' denied by block capabilities"
-                    )));
+                    return Ok(error_code_to_neg_i64(ErrorCode::PermissionDenied));
                 }
 
                 let mut msg_buf = vec![0u8; msg_len as usize];
                 memory
                     .read(&caller, msg_ptr as usize, &mut msg_buf)
-                    .map_err(|e| WasmiError::new(format!("reading call_block message: {e}")))?;
+                    .map_err(|e| WasmiError::new(format!("reading stream message: {e}")))?;
 
-                let mut body_buf = vec![0u8; body_len as usize];
-                if body_len > 0 {
-                    memory
-                        .read(&caller, body_ptr as usize, &mut body_buf)
-                        .map_err(|e| WasmiError::new(format!("reading call_block body: {e}")))?;
-                }
+                // Decode the message. The SDK encodes via rmp-serde (codec
+                // module); historically the guest sent JSON. We try rmp first
+                // and fall back to JSON for forward compatibility with any
+                // pre-codec callers — but the production path is rmp.
+                let msg: Message = match wafer_block::codec::decode::<Message>(&msg_buf) {
+                    Ok(m) => m,
+                    Err(_) => match serde_json::from_slice::<Message>(&msg_buf) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument));
+                        }
+                    },
+                };
 
-                // Store the pending call and trap to yield control.
-                caller.data_mut().pending_call = Some(PendingCall {
-                    block_name,
-                    msg_bytes: msg_buf,
-                    body_bytes: body_buf,
-                });
-                Err(WasmiError::host(CallBlockTrap))
+                let state = StreamState::new(block_name, msg);
+                let handle = caller.data_mut().streams.alloc(state);
+                Ok(handle as i64)
             },
         )
-        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_call_block: {e}")))?;
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_init: {e}")))?;
+
+    // __wafer_host_stream_write_chunk(handle, body_ptr, body_len) -> i32
+    //
+    // Append a chunk to the request buffer for the given handle. Returns 0
+    // on success, negative ErrorCode sentinel on error.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_write_chunk",
+            |caller: Caller<WasmiHostState>,
+             handle: i64,
+             body_ptr: i32,
+             body_len: i32|
+             -> Result<i32, WasmiError> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
+
+                let mut buf = vec![0u8; body_len as usize];
+                if body_len > 0 {
+                    memory
+                        .read(&caller, body_ptr as usize, &mut buf)
+                        .map_err(|e| WasmiError::new(format!("reading stream chunk: {e}")))?;
+                }
+
+                let mut caller = caller;
+                let Some(state) = caller.data_mut().streams.get_mut(handle as u64) else {
+                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
+                };
+                match state.write_chunk(&buf) {
+                    Ok(()) => Ok(0),
+                    Err(e) => {
+                        let code = e.code;
+                        state.record_error_and_close(e);
+                        Ok(error_code_to_neg_i32(code))
+                    }
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_write_chunk: {e}")))?;
+
+    // __wafer_host_stream_finish(handle) -> i32
+    //
+    // Traps. The resume loop dispatches `Context::call_block(target, msg,
+    // InputStream::from_bytes(buf))`, installs the OutputStream on the
+    // StreamState, and resumes with 0. On dispatch error the loop records
+    // the error on the state and resumes with a negative ErrorCode sentinel.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_finish",
+            |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i32, WasmiError> {
+                if caller.data_mut().streams.get_mut(handle as u64).is_none() {
+                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
+                }
+                caller.data_mut().pending_stream_finish = Some(handle as u64);
+                Err(WasmiError::host(StreamFinishTrap))
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_finish: {e}")))?;
+
+    // __wafer_host_stream_read_chunk(handle) -> i64
+    //
+    // Traps. The resume loop drives the OutputStream's next frame; on a
+    // Chunk it allocates guest memory + writes the bytes and resumes with
+    // the packed (ptr, len). On Complete it resumes with 0 (end-of-stream).
+    // On Error/Drop/Continue it records the error on the state and resumes
+    // with a negative ErrorCode sentinel.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_read_chunk",
+            |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i64, WasmiError> {
+                if caller.data_mut().streams.get_mut(handle as u64).is_none() {
+                    return Ok(error_code_to_neg_i64(ErrorCode::NotFound));
+                }
+                caller.data_mut().pending_stream_read = Some(handle as u64);
+                Err(WasmiError::host(StreamReadTrap))
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_read_chunk: {e}")))?;
+
+    // __wafer_host_stream_take_error(handle) -> i64
+    //
+    // Traps. The resume loop pops `last_error` off the StreamState, encodes
+    // via rmp-serde, allocates guest memory + writes, resumes with packed
+    // (ptr, len). If no error is present, resumes with 0.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_take_error",
+            |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i64, WasmiError> {
+                if caller.data_mut().streams.get_mut(handle as u64).is_none() {
+                    return Ok(error_code_to_neg_i64(ErrorCode::NotFound));
+                }
+                caller.data_mut().pending_stream_take_error = Some(handle as u64);
+                Err(WasmiError::host(StreamTakeErrorTrap))
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_take_error: {e}")))?;
+
+    // __wafer_host_stream_close(handle)
+    //
+    // Synchronous: drop the stream. Idempotent — no-op if the handle is
+    // unknown. Cancels any in-flight response stream via the OutputStream
+    // drop on its CancellationToken.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_close",
+            |mut caller: Caller<WasmiHostState>, handle: i64| {
+                caller.data_mut().streams.close(handle as u64);
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_close: {e}")))?;
 
     // __wafer_host_load_asset(id_ptr, id_len) -> i32
     //
@@ -750,7 +950,175 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking random_get stub: {e}")))?;
 
+    // ---- Spike-only host imports (gated behind the `spike` feature) ----
+    //
+    // These imports exist solely to measure per-chunk overhead of the
+    // proposed streaming ABI design. They are NOT part of the production
+    // ABI and are removed when the real `__wafer_host_stream_*` imports
+    // land in Task 7.
+    #[cfg(feature = "spike")]
+    register_spike_imports(&mut linker)?;
+
     Ok(linker)
+}
+
+// ---------------------------------------------------------------------------
+// Spike host imports (gate validation only)
+// ---------------------------------------------------------------------------
+
+/// Throwaway host imports used by `tests/streaming_spike.rs` to measure
+/// per-chunk overhead of N back-to-back host→guest data transfers.
+///
+/// The host writes a recognisable byte pattern (`b[i] = i % 256`) into a
+/// guest-provided buffer. The guest verifies the pattern and accumulates the
+/// total bytes read. When the host's per-thread call counter reaches the
+/// configured target, `next_chunk` returns 0 (end-of-stream) and resets state.
+///
+/// This deliberately avoids re-entering `__wafer_alloc` from inside a host
+/// call — the streaming ABI design assumes the host writes into a buffer the
+/// guest has pre-allocated. Recursive guest calls inside a wasmi host
+/// function would also be a poor stand-in for the real ABI's straight-line
+/// per-chunk cost.
+#[cfg(feature = "spike")]
+fn register_spike_imports(linker: &mut Linker<WasmiHostState>) -> Result<(), RuntimeError> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// (current chunk count, target chunk count). Reset to (0, target)
+        /// by `set_target` and incremented by each `next_chunk` call. When
+        /// `current == target` the next `next_chunk` returns 0 and resets.
+        static SPIKE_STATE: RefCell<(u32, u32)> = const { RefCell::new((0, 100)) };
+    }
+
+    // wafer_spike::set_target(n: i32)
+    //
+    // Resets the per-thread chunk counter and sets the target number of
+    // chunks before `next_chunk` returns end-of-stream.
+    linker
+        .func_wrap(
+            "wafer_spike",
+            "set_target",
+            |_caller: Caller<WasmiHostState>, n: i32| {
+                SPIKE_STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    *s = (0, n.max(0) as u32);
+                });
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::set_target: {e}")))?;
+
+    // wafer_spike::next_chunk(buf_ptr: i32, chunk_size: i32) -> i32
+    //
+    // If `current < target`: writes `chunk_size` bytes of the pattern
+    // `b[i] = i % 256` to guest memory at `buf_ptr`, increments the counter,
+    // returns 1.
+    // Otherwise: resets the counter to 0 (target preserved) and returns 0.
+    linker
+        .func_wrap(
+            "wafer_spike",
+            "next_chunk",
+            |mut caller: Caller<WasmiHostState>, buf_ptr: i32, chunk_size: i32| -> i32 {
+                let done = SPIKE_STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    if st.0 >= st.1 {
+                        st.0 = 0;
+                        true
+                    } else {
+                        st.0 += 1;
+                        false
+                    }
+                });
+                if done {
+                    return 0;
+                }
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return 0;
+                };
+                // Build the recognisable pattern. For 512 KiB this allocates
+                // a 512 KiB Vec per call — that's exactly the cost we want
+                // to measure (host-side encode + guest write).
+                let n = chunk_size.max(0) as usize;
+                let mut buf = vec![0u8; n];
+                for (i, b) in buf.iter_mut().enumerate() {
+                    *b = (i % 256) as u8;
+                }
+                if memory.write(&mut caller, buf_ptr as usize, &buf).is_err() {
+                    return 0;
+                }
+                1
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::next_chunk: {e}")))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Spike test entry point
+// ---------------------------------------------------------------------------
+
+/// Spike-only helper exposed to `tests/streaming_spike.rs`.
+///
+/// Compiles the supplied `wasm_bytes` (the spike guest), instantiates it
+/// with the `wafer_spike::*` host imports wired up, calls
+/// `spike_set_target(target_chunks)` followed by `read_all_chunks(chunk_size)`,
+/// and returns `(total_bytes_read, elapsed_during_read)`.
+///
+/// The elapsed measurement isolates the streaming-loop cost — module
+/// compilation, instantiation and target-config calls are NOT included.
+#[cfg(feature = "spike")]
+pub fn run_spike(
+    wasm_bytes: &[u8],
+    target_chunks: i32,
+    chunk_size: i32,
+) -> Result<(i64, std::time::Duration), RuntimeError> {
+    let mut config = wasmi::Config::default();
+    // No fuel metering for the spike — we want raw overhead numbers.
+    config.consume_fuel(false);
+    let engine = Engine::new(&config);
+
+    let module = Module::new(&engine, wasm_bytes)
+        .map_err(|e| RuntimeError::Wasm(format!("compiling spike guest: {e}")))?;
+
+    let mut linker = Linker::<WasmiHostState>::new(&engine);
+    register_spike_imports(&mut linker)?;
+
+    let host_state = WasmiHostState {
+        context: None,
+        capabilities: BlockCapabilities::unrestricted(),
+        streams: StreamRegistry::new(),
+        pending_stream_finish: None,
+        pending_stream_read: None,
+        pending_stream_take_error: None,
+        pending_load_asset: None,
+    };
+    let mut store = Store::new(&engine, host_state);
+
+    let pre = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| RuntimeError::Wasm(format!("instantiating spike guest: {e}")))?;
+    let instance = pre
+        .start(&mut store)
+        .map_err(|e| RuntimeError::Wasm(format!("starting spike guest: {e}")))?;
+
+    let set_target_fn = instance
+        .get_typed_func::<i32, ()>(&store, "spike_set_target")
+        .map_err(|e| RuntimeError::Wasm(format!("getting spike_set_target: {e}")))?;
+    let read_all_fn = instance
+        .get_typed_func::<i32, i64>(&store, "read_all_chunks")
+        .map_err(|e| RuntimeError::Wasm(format!("getting read_all_chunks: {e}")))?;
+
+    set_target_fn
+        .call(&mut store, target_chunks)
+        .map_err(|e| RuntimeError::Wasm(format!("calling spike_set_target: {e}")))?;
+
+    let start = std::time::Instant::now();
+    let total = read_all_fn
+        .call(&mut store, chunk_size)
+        .map_err(|e| RuntimeError::Wasm(format!("calling read_all_chunks: {e}")))?;
+    let elapsed = start.elapsed();
+
+    Ok((total, elapsed))
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +1144,10 @@ fn instantiate(
     let host_state = WasmiHostState {
         context: None,
         capabilities: caps.clone(),
-        pending_call: None,
+        streams: StreamRegistry::new(),
+        pending_stream_finish: None,
+        pending_stream_read: None,
+        pending_stream_take_error: None,
         pending_load_asset: None,
     };
     let mut store = Store::new(engine, host_state);
@@ -949,113 +1320,48 @@ impl WasmiBlock {
         // Resolve pending calls in a loop.
         loop {
             // Dispatch based on which pending field is set by the host import.
-            if let Some(pending) = store.data_mut().pending_call.take() {
-                debug!(
-                    block = pending.block_name,
-                    msg_len = pending.msg_bytes.len(),
-                    body_len = pending.body_bytes.len(),
-                    "resolving call_block from WASM guest"
-                );
-
-                // Deserialize the message, call the block with the
-                // guest-supplied body as InputStream, collect and serialize
-                // the result.
-                let msg: Message = serde_json::from_slice(&pending.msg_bytes).map_err(|e| {
-                    RuntimeError::Wasm(format!("deserializing call_block message: {e}"))
-                })?;
-
-                let input = if pending.body_bytes.is_empty() {
-                    InputStream::empty()
-                } else {
-                    InputStream::from_bytes(pending.body_bytes)
+            if let Some(handle) = store.data_mut().pending_stream_finish.take() {
+                // Pull the request out of the StreamState, dispatch via
+                // Context::call_block, install the resulting OutputStream on
+                // the StreamState. Resume with i32 0 on success, negative
+                // ErrorCode on failure.
+                let take_result = store
+                    .data_mut()
+                    .streams
+                    .get_mut(handle)
+                    .map(|s| s.take_finish_request());
+                let resume_code: i32 = match take_result {
+                    Some(Ok((target, msg, body))) => {
+                        debug!(
+                            block = target,
+                            body_len = body.len(),
+                            "resolving stream_finish from WASM guest"
+                        );
+                        let input = if body.is_empty() {
+                            InputStream::empty()
+                        } else {
+                            InputStream::from_bytes(body)
+                        };
+                        let out = ctx.call_block(&target, msg, input).await;
+                        if let Some(state) = store.data_mut().streams.get_mut(handle) {
+                            state.finish_with_stream(out);
+                        }
+                        0
+                    }
+                    Some(Err(e)) => {
+                        let code = e.code;
+                        if let Some(state) = store.data_mut().streams.get_mut(handle) {
+                            state.record_error_and_close(e);
+                        }
+                        error_code_to_neg_i32(code)
+                    }
+                    None => error_code_to_neg_i32(ErrorCode::NotFound),
                 };
-
-                let out = ctx.call_block(&pending.block_name, msg, input).await;
-                let buf = out.collect_buffered().await;
-                // Serialize the outcome for the WASM guest.
-                // The guest expects a guest ABI format JSON with action/response/error.
-                // We map BufferedResponse → respond, Error → error terminal.
-                use wafer_block::streams::output::TerminalNotResponse;
-                let result_bytes = match buf {
-                    Ok(response) => {
-                        // Build a guest ABI format response JSON the WASM guest can decode
-                        let payload = serde_json::json!({
-                            "action": "Respond",
-                            "response": { "data": response.body, "meta": response.meta },
-                            "error": null,
-                            "message": null
-                        });
-                        serde_json::to_vec(&payload).map_err(|e| {
-                            RuntimeError::Wasm(format!("serializing call_block result: {e}"))
-                        })?
-                    }
-                    Err(TerminalNotResponse::Error(e)) => {
-                        let payload = serde_json::json!({
-                            "action": "Error",
-                            "response": null,
-                            "error": { "code": format!("{:?}", e.code), "message": e.message, "meta": [] },
-                            "message": null
-                        });
-                        serde_json::to_vec(&payload).map_err(|e| {
-                            RuntimeError::Wasm(format!("serializing call_block error: {e}"))
-                        })?
-                    }
-                    Err(TerminalNotResponse::Drop) => {
-                        let payload = serde_json::json!({
-                            "action": "Drop",
-                            "response": null,
-                            "error": null,
-                            "message": null
-                        });
-                        serde_json::to_vec(&payload).map_err(|e| {
-                            RuntimeError::Wasm(format!("serializing call_block drop: {e}"))
-                        })?
-                    }
-                    Err(TerminalNotResponse::Continue(next_msg)) => {
-                        let payload = serde_json::json!({
-                            "action": "Continue",
-                            "response": null,
-                            "error": null,
-                            "message": next_msg
-                        });
-                        serde_json::to_vec(&payload).map_err(|e| {
-                            RuntimeError::Wasm(format!("serializing call_block continue: {e}"))
-                        })?
-                    }
-                    Err(TerminalNotResponse::Malformed) => {
-                        let payload = serde_json::json!({
-                            "action": "Error",
-                            "response": null,
-                            "error": { "code": "Internal", "message": "malformed output stream", "meta": [] },
-                            "message": null
-                        });
-                        serde_json::to_vec(&payload).map_err(|e| {
-                            RuntimeError::Wasm(format!("serializing malformed error: {e}"))
-                        })?
-                    }
-                };
-
-                // Allocate guest memory via __wafer_alloc and write the
-                // GuestResult JSON there, then resume with the packed
-                // (ptr, len) as the host call's return value. wasmi's
-                // resumable.resume value IS the return value of the
-                // trapped host function — there is no re-entry, so we
-                // must materialize the response bytes in guest memory
-                // before resuming.
-                let alloc_fn = instance
-                    .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!(
-                            "getting __wafer_alloc for call_block resume: {e}"
-                        ))
-                    })?;
-                let result_ptr = write_guest_bytes(&mut store, alloc_fn, memory, &result_bytes)?;
-                let packed = pack_ptr_len(result_ptr, result_bytes.len() as u32);
 
                 match resumable
-                    .resume(&mut store, &[Val::I64(packed)])
+                    .resume(&mut store, &[Val::I32(resume_code)])
                     .map_err(|e| {
-                        RuntimeError::Wasm(format!("resuming guest after call_block: {e}"))
+                        RuntimeError::Wasm(format!("resuming guest after stream_finish: {e}"))
                     })? {
                     TypedResumableCall::Finished(packed) => {
                         let (ptr, len) = unpack_ptr_len(packed);
@@ -1065,7 +1371,96 @@ impl WasmiBlock {
                     }
                     TypedResumableCall::Resumable(next) => {
                         resumable = next;
-                        // Continue the loop: another call_block from the same invocation.
+                    }
+                }
+            } else if let Some(handle) = store.data_mut().pending_stream_read.take() {
+                // Drive the response stream's next frame. On Chunk: allocate
+                // guest memory + write bytes, resume with packed (ptr, len).
+                // On end-of-stream: resume with 0. On error: resume with
+                // negative ErrorCode sentinel (the guest can call take_error
+                // for full details).
+                let next = match store.data_mut().streams.get_mut(handle) {
+                    Some(s) => s.next_chunk().await,
+                    None => Err(WaferError::new(
+                        ErrorCode::NotFound,
+                        "unknown stream handle",
+                    )),
+                };
+
+                let resume_packed: i64 = match next {
+                    Ok(Some(bytes)) => {
+                        let alloc_fn = instance
+                            .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
+                            .map_err(|e| {
+                                RuntimeError::Wasm(format!(
+                                    "getting __wafer_alloc for stream_read resume: {e}"
+                                ))
+                            })?;
+                        let ptr = write_guest_bytes(&mut store, alloc_fn, memory, &bytes)?;
+                        pack_ptr_len(ptr, bytes.len() as u32)
+                    }
+                    Ok(None) => 0,
+                    Err(e) => error_code_to_neg_i64(e.code),
+                };
+
+                match resumable
+                    .resume(&mut store, &[Val::I64(resume_packed)])
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!("resuming guest after stream_read: {e}"))
+                    })? {
+                    TypedResumableCall::Finished(packed) => {
+                        let (ptr, len) = unpack_ptr_len(packed);
+                        let result = read_guest_bytes(&store, memory, ptr, len)?;
+                        store.data_mut().context = None;
+                        return Ok(result);
+                    }
+                    TypedResumableCall::Resumable(next) => {
+                        resumable = next;
+                    }
+                }
+            } else if let Some(handle) = store.data_mut().pending_stream_take_error.take() {
+                // Pop the StreamState's last_error, encode via rmp-serde,
+                // allocate guest memory + write bytes, resume with packed
+                // (ptr, len). Resume with 0 if no error is present.
+                let err_opt = store
+                    .data_mut()
+                    .streams
+                    .get_mut(handle)
+                    .and_then(|s| s.take_error());
+
+                let resume_packed: i64 = match err_opt {
+                    Some(err) => {
+                        let bytes = wafer_block::codec::encode(&err).map_err(|e| {
+                            RuntimeError::Wasm(format!(
+                                "encoding WaferError for stream_take_error: {e}"
+                            ))
+                        })?;
+                        let alloc_fn = instance
+                            .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
+                            .map_err(|e| {
+                                RuntimeError::Wasm(format!(
+                                    "getting __wafer_alloc for stream_take_error resume: {e}"
+                                ))
+                            })?;
+                        let ptr = write_guest_bytes(&mut store, alloc_fn, memory, &bytes)?;
+                        pack_ptr_len(ptr, bytes.len() as u32)
+                    }
+                    None => 0,
+                };
+
+                match resumable
+                    .resume(&mut store, &[Val::I64(resume_packed)])
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!("resuming guest after stream_take_error: {e}"))
+                    })? {
+                    TypedResumableCall::Finished(packed) => {
+                        let (ptr, len) = unpack_ptr_len(packed);
+                        let result = read_guest_bytes(&store, memory, ptr, len)?;
+                        store.data_mut().context = None;
+                        return Ok(result);
+                    }
+                    TypedResumableCall::Resumable(next) => {
+                        resumable = next;
                     }
                 }
             } else if let Some(asset_id) = store.data_mut().pending_load_asset.take() {
