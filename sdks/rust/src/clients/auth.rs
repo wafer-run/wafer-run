@@ -19,6 +19,9 @@ use super::common::{collect_single_frame, open_buffered, open_no_body_with_meta}
 
 const BLOCK: &str = "suppers-ai/auth";
 
+const SCOPE_META_KEY: &str = "http.header.x-auth-scope";
+const ROLE_META_KEY: &str = "http.header.x-auth-role";
+
 /// Buffered: require an authenticated user on the current request.
 ///
 /// Carries no request body — the host reads any required hints from the
@@ -42,7 +45,7 @@ pub fn require_user() -> Result<UserIdResponse, WaferError> {
 /// No request body is sent. Returns the resolved user id.
 pub fn require_token(scope: &str) -> Result<UserIdResponse, WaferError> {
     let meta = vec![MetaEntry {
-        key: "http.header.x-auth-scope".into(),
+        key: SCOPE_META_KEY.into(),
         value: scope.into(),
     }];
     let mut response_stream = open_no_body_with_meta(BLOCK, ServiceOp::AUTH_REQUIRE_TOKEN, meta)?;
@@ -62,7 +65,7 @@ pub fn require_token(scope: &str) -> Result<UserIdResponse, WaferError> {
 /// No request body is sent. Returns the resolved user id.
 pub fn require_role(role: &str) -> Result<UserIdResponse, WaferError> {
     let meta = vec![MetaEntry {
-        key: "http.header.x-auth-role".into(),
+        key: ROLE_META_KEY.into(),
         value: role.into(),
     }];
     let mut response_stream = open_no_body_with_meta(BLOCK, ServiceOp::AUTH_REQUIRE_ROLE, meta)?;
