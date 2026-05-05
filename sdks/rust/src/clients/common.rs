@@ -5,7 +5,7 @@
 //! so only sibling client modules under [`super`] can call them; the
 //! module itself is private to `clients/`.
 
-use wafer_block::{ErrorCode, Message, WaferError};
+use wafer_block::{ErrorCode, Message, MetaEntry, WaferError};
 
 use crate::stream::{CallStream, ResponseStream};
 
@@ -24,6 +24,25 @@ pub(super) fn open_buffered(
     };
     let mut call = CallStream::open(block, &msg)?;
     call.write_chunk(req_bytes)?;
+    call.finish()
+}
+
+/// Open a streaming call with custom meta headers and no request body.
+///
+/// Closes the request side immediately via `finish()`. Used when the op
+/// carries its parameters in `Message::meta` headers rather than the body
+/// (e.g. the auth `require_*` ops, which read scope/role from
+/// `http.header.x-auth-scope` / `http.header.x-auth-role`).
+pub(super) fn open_no_body_with_meta(
+    block: &str,
+    op: &str,
+    meta: Vec<MetaEntry>,
+) -> Result<ResponseStream, WaferError> {
+    let msg = Message {
+        kind: op.to_string(),
+        meta,
+    };
+    let call = CallStream::open(block, &msg)?;
     call.finish()
 }
 
