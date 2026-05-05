@@ -1,11 +1,11 @@
 use std::collections::HashMap;
+#[cfg(not(feature = "wasm-component"))]
 use std::pin::Pin;
+#[cfg(not(feature = "wasm-component"))]
 use std::task::{Context as TaskContext, Poll};
 
 #[cfg(not(feature = "wasm-component"))]
 use futures::Stream;
-#[cfg(not(feature = "wasm-component"))]
-use futures::StreamExt;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
 #[cfg(not(feature = "wasm-component"))]
@@ -13,14 +13,13 @@ use wafer_block::stream::StreamEvent;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
 use wafer_block::{
-    codec,
     common::{ErrorCode, ServiceOp},
     wire::network::{Request, ResponseHeader},
     WaferError,
 };
 
 #[cfg(not(feature = "wasm-component"))]
-use super::call_service_streaming;
+use super::{buffered_header_and_body, call_service_streaming, read_header_frame};
 #[cfg(feature = "wasm-component")]
 use super::{call_service, decode};
 
@@ -83,7 +82,13 @@ pub async fn do_request_via(
         Some("network"),
     )
     .await?;
-    buffered_response(out).await
+    let (header, body): (ResponseHeader, Vec<u8>) =
+        buffered_header_and_body(out, "decoding network response").await?;
+    Ok(NetworkResponse {
+        status_code: header.status_code,
+        headers: header.headers,
+        body,
+    })
 }
 
 /// Streaming: fetch a URL and return a [`NativeNetworkResponseStream`] whose
@@ -116,101 +121,12 @@ pub async fn do_request_stream(
         Some("network"),
     )
     .await?;
-    let header = read_header_frame(&mut out).await?;
+    let header: ResponseHeader = read_header_frame(&mut out, "decoding network response").await?;
     Ok(NativeNetworkResponseStream {
         inner: out,
         header,
         finished: false,
     })
-}
-
-/// Drain an `OutputStream` carrying a two-frame network response into a
-/// [`NetworkResponse`].
-///
-/// Frame 1 is decoded as `ResponseHeader`; subsequent `Chunk` events are
-/// concatenated into the body. Non-`Complete` terminals are mapped to
-/// `WaferError`. A stream that ends without any terminal event is reported
-/// as a malformed protocol violation.
-#[cfg(not(feature = "wasm-component"))]
-async fn buffered_response(mut out: OutputStream) -> Result<NetworkResponse, WaferError> {
-    let header = read_header_frame(&mut out).await?;
-    let mut body = Vec::new();
-    while let Some(evt) = out.next().await {
-        match evt {
-            StreamEvent::Chunk(bytes) => body.extend_from_slice(&bytes),
-            StreamEvent::Meta(_) => {}
-            StreamEvent::Complete { .. } => {
-                return Ok(NetworkResponse {
-                    status_code: header.status_code,
-                    headers: header.headers,
-                    body,
-                });
-            }
-            StreamEvent::Error(e) => return Err(*e),
-            StreamEvent::Drop => {
-                return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    "network handler returned Drop",
-                ));
-            }
-            StreamEvent::Continue(msg) => {
-                return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("network handler returned Continue (kind: {})", msg.kind),
-                ));
-            }
-        }
-    }
-    Err(WaferError::new(
-        ErrorCode::INTERNAL,
-        "network response stream ended without terminal event",
-    ))
-}
-
-/// Pull events from `out` until the first `Chunk` (the header frame), decode
-/// it as `ResponseHeader`, and return it. Skips `Meta` events. Any non-Chunk
-/// terminal arriving before the header is mapped to a `WaferError`.
-#[cfg(not(feature = "wasm-component"))]
-async fn read_header_frame(out: &mut OutputStream) -> Result<ResponseHeader, WaferError> {
-    while let Some(evt) = out.next().await {
-        match evt {
-            StreamEvent::Chunk(bytes) => {
-                return codec::decode::<ResponseHeader>(&bytes).map_err(|e| {
-                    WaferError::new(
-                        e.code,
-                        format!("decoding network response header: {}", e.message),
-                    )
-                });
-            }
-            StreamEvent::Meta(_) => continue,
-            StreamEvent::Error(e) => return Err(*e),
-            StreamEvent::Drop => {
-                return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    "network handler returned Drop before header frame",
-                ));
-            }
-            StreamEvent::Continue(msg) => {
-                return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!(
-                        "network handler returned Continue before header frame (kind: {})",
-                        msg.kind
-                    ),
-                ));
-            }
-            StreamEvent::Complete { .. } => {
-                return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    "network response stream ended before header frame",
-                ));
-            }
-        }
-    }
-    Err(WaferError::new(
-        ErrorCode::INTERNAL,
-        "network response stream ended without header frame",
-    ))
 }
 
 /// Streaming response wrapper for [`do_request_stream`].

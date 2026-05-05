@@ -97,21 +97,8 @@ pub(crate) async fn call_service(
     is_write: bool,
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
-    let payload = codec::encode(data)?;
-    let mut msg = Message::new(kind);
-    // Set META_REQ_ACTION so call_block's interface-action validator can check
-    // the action against the target block's declared interface spec.
-    msg.set_meta(META_REQ_ACTION, kind);
-    if let Some(res) = resource {
-        msg.set_meta(META_WRAP_RESOURCE, res);
-        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
-        if let Some(rt) = resource_type {
-            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
-        }
-    }
-    let out = ctx
-        .call_block(block, msg, InputStream::from_bytes(payload))
-        .await;
+    let out =
+        call_service_streaming(ctx, block, kind, data, resource, is_write, resource_type).await?;
     match out.collect_buffered().await {
         Ok(buf) => Ok(buf.body),
         Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => Err(e),
@@ -206,4 +193,105 @@ pub(crate) fn call_service_streaming(
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, WaferError> {
     codec::decode(data)
         .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("decode error: {}", e.message)))
+}
+
+/// Pull events from `out` until the first `Chunk` (the header frame), decode
+/// it as `H`, and return it. Skips `Meta` events. Any non-`Chunk` terminal
+/// arriving before the header is mapped to a `WaferError` whose message is
+/// prefixed by `context` so callers can attribute the failure to a specific
+/// service operation (e.g. `"network do_request"`).
+///
+/// Used by services whose handlers emit a typed header frame followed by
+/// zero-or-more body chunks (network, storage GET, …).
+#[cfg(not(feature = "wasm-component"))]
+pub(crate) async fn read_header_frame<H>(
+    out: &mut OutputStream,
+    context: &str,
+) -> Result<H, WaferError>
+where
+    H: serde::de::DeserializeOwned,
+{
+    use futures::StreamExt;
+    use wafer_block::stream::StreamEvent;
+    while let Some(evt) = out.next().await {
+        match evt {
+            StreamEvent::Chunk(bytes) => {
+                return codec::decode::<H>(&bytes).map_err(|e| {
+                    WaferError::new(e.code, format!("{context} header decode: {}", e.message))
+                });
+            }
+            StreamEvent::Meta(_) => continue,
+            StreamEvent::Error(e) => return Err(*e),
+            StreamEvent::Drop => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: block dropped before header frame"),
+                ));
+            }
+            StreamEvent::Continue(msg) => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!(
+                        "{context}: unexpected Continue before header frame (kind: {})",
+                        msg.kind
+                    ),
+                ));
+            }
+            StreamEvent::Complete { .. } => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: stream complete before header frame"),
+                ));
+            }
+        }
+    }
+    Err(WaferError::new(
+        ErrorCode::INTERNAL,
+        format!("{context}: stream ended before header frame"),
+    ))
+}
+
+/// Read header (decoded as `H`) plus the accumulated body chunks from a
+/// two-frame response.
+///
+/// Frame 1 is decoded as `H` via [`read_header_frame`]; subsequent `Chunk`
+/// events are concatenated into the body. Non-`Complete` terminals are mapped
+/// to `WaferError`. A stream that ends without any terminal event is reported
+/// as a malformed protocol violation, prefixed with `context`.
+#[cfg(not(feature = "wasm-component"))]
+pub(crate) async fn buffered_header_and_body<H>(
+    mut out: OutputStream,
+    context: &str,
+) -> Result<(H, Vec<u8>), WaferError>
+where
+    H: serde::de::DeserializeOwned,
+{
+    use futures::StreamExt;
+    use wafer_block::stream::StreamEvent;
+    let header: H = read_header_frame(&mut out, context).await?;
+    let mut body = Vec::new();
+    while let Some(evt) = out.next().await {
+        match evt {
+            StreamEvent::Chunk(bytes) => body.extend_from_slice(&bytes),
+            StreamEvent::Meta(_) => continue,
+            StreamEvent::Complete { .. } => return Ok((header, body)),
+            StreamEvent::Error(e) => return Err(*e),
+            StreamEvent::Drop => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: block dropped"),
+                ));
+            }
+            StreamEvent::Continue(msg) => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: unexpected Continue (kind: {})", msg.kind),
+                ));
+            }
+        }
+    }
+    Err(WaferError::new(
+        ErrorCode::INTERNAL,
+        format!("{context}: stream ended without terminal event"),
+    ))
 }
