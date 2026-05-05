@@ -48,22 +48,61 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
         )
         .context("Failed to define __wafer_host_log stub")?;
 
-    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
-    // Return 0 — the validator never actually exercises call_block paths.
+    // wafer::__wafer_host_stream_init(name_ptr, name_len, msg_ptr, msg_len) -> i64
+    // wafer::__wafer_host_stream_write_chunk(handle, body_ptr, body_len) -> i32
+    // wafer::__wafer_host_stream_finish(handle) -> i32
+    // wafer::__wafer_host_stream_read_chunk(handle) -> i64
+    // wafer::__wafer_host_stream_take_error(handle) -> i64
+    // wafer::__wafer_host_stream_close(handle)
+    //
+    // The validator never exercises call paths — these stubs only need to
+    // satisfy the import linker. Returning 0 from init/finish/read_chunk
+    // models "permission denied" / "end-of-stream" / "no error" respectively;
+    // the validator stops after `__wafer_info`, never reaching block calls.
     linker
         .func_wrap(
             "wafer",
-            "__wafer_host_call_block",
-            |_: Caller<()>,
-             _name_ptr: i32,
-             _name_len: i32,
-             _msg_ptr: i32,
-             _msg_len: i32,
-             _body_ptr: i32,
-             _body_len: i32|
-             -> i64 { 0i64 },
+            "__wafer_host_stream_init",
+            |_: Caller<()>, _name_ptr: i32, _name_len: i32, _msg_ptr: i32, _msg_len: i32| -> i64 {
+                0i64
+            },
         )
-        .context("Failed to define __wafer_host_call_block stub")?;
+        .context("Failed to define __wafer_host_stream_init stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_write_chunk",
+            |_: Caller<()>, _handle: i64, _body_ptr: i32, _body_len: i32| -> i32 { 0i32 },
+        )
+        .context("Failed to define __wafer_host_stream_write_chunk stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_finish",
+            |_: Caller<()>, _handle: i64| -> i32 { 0i32 },
+        )
+        .context("Failed to define __wafer_host_stream_finish stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_read_chunk",
+            |_: Caller<()>, _handle: i64| -> i64 { 0i64 },
+        )
+        .context("Failed to define __wafer_host_stream_read_chunk stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_take_error",
+            |_: Caller<()>, _handle: i64| -> i64 { 0i64 },
+        )
+        .context("Failed to define __wafer_host_stream_take_error stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_close",
+            |_: Caller<()>, _handle: i64| {},
+        )
+        .context("Failed to define __wafer_host_stream_close stub")?;
 
     // wasi_snapshot_preview1::fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
     linker
