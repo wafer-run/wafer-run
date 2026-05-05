@@ -10,7 +10,10 @@ pub mod vector;
 use wafer_block::context::Context;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::input::InputStream;
+#[cfg(not(feature = "wasm-component"))]
+use wafer_block::streams::output::OutputStream;
 use wafer_block::{
+    codec,
     common::ErrorCode,
     meta::{META_REQ_ACTION, META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
     Message, WaferError,
@@ -94,8 +97,7 @@ pub(crate) async fn call_service(
     is_write: bool,
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
-    let payload = serde_json::to_vec(data)
-        .map_err(|e| WaferError::new(ErrorCode::INTERNAL, e.to_string()))?;
+    let payload = codec::encode(data)?;
     let mut msg = Message::new(kind);
     // Set META_REQ_ACTION so call_block's interface-action validator can check
     // the action against the target block's declared interface spec.
@@ -149,8 +151,59 @@ pub(crate) fn call_service(
     ))
 }
 
-/// Deserialize JSON bytes into a typed value.
+/// Native: call a block and return the raw `OutputStream` without buffering.
+///
+/// Use this when callers need frame-by-frame access to the response — for
+/// example, the network client needs to peel off the `ResponseHeader` frame
+/// before the body chunks, and `collect_buffered` (used by [`call_service`])
+/// would concatenate every `Chunk` event into one blob, destroying the frame
+/// boundary. For single-frame services, [`call_service`] is simpler.
+#[cfg(not(feature = "wasm-component"))]
+pub(crate) async fn call_service_streaming(
+    ctx: &dyn Context,
+    block: &str,
+    kind: &str,
+    data: &impl serde::Serialize,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) -> Result<OutputStream, WaferError> {
+    let payload = codec::encode(data)?;
+    let mut msg = Message::new(kind);
+    msg.set_meta(META_REQ_ACTION, kind);
+    if let Some(res) = resource {
+        msg.set_meta(META_WRAP_RESOURCE, res);
+        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
+        if let Some(rt) = resource_type {
+            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
+        }
+    }
+    Ok(ctx
+        .call_block(block, msg, InputStream::from_bytes(payload))
+        .await)
+}
+
+/// WASM-component variant of [`call_service_streaming`]. Currently
+/// unimplemented — the WASM-component path will be redesigned alongside the
+/// streaming protocol.
+#[cfg(feature = "wasm-component")]
+pub(crate) fn call_service_streaming(
+    block: &str,
+    kind: &str,
+    data: &impl serde::Serialize,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) -> Result<(), WaferError> {
+    let _ = (block, kind, data, resource, is_write, resource_type);
+    Err(WaferError::new(
+        ErrorCode::UNIMPLEMENTED,
+        "wasm-component call_service_streaming not yet implemented for streaming protocol",
+    ))
+}
+
+/// Deserialize MessagePack bytes into a typed value.
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, WaferError> {
-    serde_json::from_slice(data)
-        .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("decode error: {e}")))
+    codec::decode(data)
+        .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("decode error: {}", e.message)))
 }
