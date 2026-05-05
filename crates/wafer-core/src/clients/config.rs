@@ -1,29 +1,11 @@
-use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
+use wafer_block::wire::config::{GetRequest, GetResponse, SetRequest};
 use wafer_block::{common::ServiceOp, WaferError};
 
 use super::{call_service, decode, dual_api, svc, svc_fn};
 
 const BLOCK: &str = "wafer-run/config";
-
-// --- Wire-format types ---
-
-#[derive(Serialize)]
-struct GetReq<'a> {
-    key: &'a str,
-}
-
-#[derive(Deserialize)]
-struct GetResp {
-    value: String,
-}
-
-#[derive(Serialize)]
-struct SetReq<'a> {
-    key: &'a str,
-    value: &'a str,
-}
 
 // ===========================================================================
 // Public API — generated as async (native) or sync (wasm-component)
@@ -31,8 +13,9 @@ struct SetReq<'a> {
 
 dual_api! {
     pub fn get(ctx, key: &str) -> Result<String, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::CONFIG_GET, &GetReq { key }, Some(key), false, Some("config"))?;
-        let resp: GetResp = decode(&data)?;
+        let req = GetRequest { key: key.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::CONFIG_GET, &req, Some(key), false, Some("config"))?;
+        let resp: GetResponse = decode(&data)?;
         Ok(resp.value)
     }
 
@@ -41,7 +24,8 @@ dual_api! {
     }
 
     pub fn set(ctx, key: &str, value: &str) -> Result<(), WaferError> {
-        svc!(ctx, BLOCK, ServiceOp::CONFIG_SET, &SetReq { key, value }, Some(key), true, Some("config"))?;
+        let req = SetRequest { key: key.to_string(), value: value.to_string() };
+        svc!(ctx, BLOCK, ServiceOp::CONFIG_SET, &req, Some(key), true, Some("config"))?;
         Ok(())
     }
 }

@@ -1,22 +1,13 @@
 use std::collections::HashMap;
 
-use serde::Serialize;
 use wafer_block::common::ServiceOp;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
+use wafer_block::wire::logger::LogRequest;
 
 use super::call_service;
 
 const BLOCK: &str = "wafer-run/logger";
-
-// --- Wire-format types ---
-
-#[derive(Serialize)]
-struct LogReq<'a> {
-    message: &'a str,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    fields: &'a HashMap<String, serde_json::Value>,
-}
 
 // ===========================================================================
 // Native async
@@ -29,17 +20,11 @@ async fn log(
     message: &str,
     fields: &HashMap<String, serde_json::Value>,
 ) {
-    if let Err(e) = call_service(
-        ctx,
-        BLOCK,
-        kind,
-        &LogReq { message, fields },
-        None,
-        false,
-        None,
-    )
-    .await
-    {
+    let req = LogRequest {
+        message: message.to_string(),
+        fields: fields.clone(),
+    };
+    if let Err(e) = call_service(ctx, BLOCK, kind, &req, None, false, None).await {
         // Fall back to tracing if the logger block is unavailable.
         tracing::warn!(
             logger_error = %e,
@@ -112,7 +97,11 @@ pub async fn error_with(
 #[cfg(feature = "wasm-component")]
 fn log(kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
     // Best-effort: attempt to call the logger block. Ignore errors silently.
-    let _ = call_service(BLOCK, kind, &LogReq { message, fields }, None, false, None);
+    let req = LogRequest {
+        message: message.to_string(),
+        fields: fields.clone(),
+    };
+    let _ = call_service(BLOCK, kind, &req, None, false, None);
 }
 
 #[cfg(feature = "wasm-component")]
