@@ -18,6 +18,7 @@
 //! }
 //! ```
 
+#[cfg(target_arch = "wasm32")]
 pub mod clients;
 pub mod core_abi;
 pub mod pure;

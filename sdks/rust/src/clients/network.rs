@@ -25,7 +25,12 @@ pub fn do_request(
     let header_bytes = response_stream
         .next_chunk()?
         .ok_or_else(|| WaferError::new(ErrorCode::Internal, "stream ended before header frame"))?;
-    let header: ResponseHeader = codec::decode(&header_bytes)?;
+    let header: ResponseHeader = codec::decode(&header_bytes).map_err(|e| {
+        WaferError::new(
+            e.code,
+            format!("decoding network response header: {}", e.message),
+        )
+    })?;
 
     // Subsequent chunks are body bytes; accumulate.
     let mut full_body = Vec::new();
@@ -51,7 +56,12 @@ pub fn do_request_stream(
     let header_bytes = response_stream
         .next_chunk()?
         .ok_or_else(|| WaferError::new(ErrorCode::Internal, "stream ended before header frame"))?;
-    let header: ResponseHeader = codec::decode(&header_bytes)?;
+    let header: ResponseHeader = codec::decode(&header_bytes).map_err(|e| {
+        WaferError::new(
+            e.code,
+            format!("decoding network response header: {}", e.message),
+        )
+    })?;
     Ok(NetworkResponseStream {
         inner: response_stream,
         header,
@@ -59,20 +69,33 @@ pub fn do_request_stream(
 }
 
 /// Streaming response wrapper: exposes header metadata + chunked body access.
+///
+/// The response header has already been consumed from the underlying stream
+/// before this wrapper is returned, so calls to [`Self::next_chunk`] yield
+/// body bytes directly.
+#[must_use = "response stream must be consumed via next_chunk"]
 pub struct NetworkResponseStream {
     inner: ResponseStream,
     header: ResponseHeader,
 }
 
 impl NetworkResponseStream {
+    /// HTTP status code from the response header.
     pub fn status_code(&self) -> u16 {
         self.header.status_code
     }
 
+    /// HTTP response headers (multi-valued, as received).
     pub fn headers(&self) -> &HashMap<String, Vec<String>> {
         &self.header.headers
     }
 
+    /// Pull the next body chunk from the stream.
+    ///
+    /// Returns `Ok(Some(bytes))` for each body chunk, and `Ok(None)` once the
+    /// body has been fully delivered (end-of-stream). The response header was
+    /// already consumed before this wrapper was constructed, so callers do not
+    /// need to skip a header chunk — every chunk yielded here is body bytes.
     pub fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, WaferError> {
         self.inner.next_chunk()
     }
