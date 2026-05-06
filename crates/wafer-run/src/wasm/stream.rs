@@ -487,6 +487,7 @@ mod tests {
     #[test]
     fn stream_state_attaches_and_drains() {
         use std::collections::BTreeMap;
+
         use wafer_block::Attachment;
         let mut state = StreamState::new("test/target".into(), msg());
         let att = Attachment {

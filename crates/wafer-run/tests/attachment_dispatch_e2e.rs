@@ -3,8 +3,10 @@
 //! `Context::lookup_attachment`. No wasm involved — proves the runtime-side
 //! plumbing wires the slot through.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use wafer_block::{

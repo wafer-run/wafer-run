@@ -8,9 +8,12 @@ use wafer_block::{Attachment, WaferError};
 /// `Ok(Some(_))` if found; `Err(_)` on any other host-reported error.
 #[cfg(target_arch = "wasm32")]
 pub fn lookup_attachment(id: &str) -> Result<Option<Attachment>, WaferError> {
-    use crate::core_abi::{__wafer_host_lookup_attachment, unpack_ptr_len};
-    use crate::stream::error_code_from_ordinal;
     use wafer_block::{codec, ErrorCode};
+
+    use crate::{
+        core_abi::{__wafer_host_lookup_attachment, unpack_ptr_len},
+        stream::error_code_from_ordinal,
+    };
 
     let packed = unsafe { __wafer_host_lookup_attachment(id.as_ptr() as i32, id.len() as i32) };
     if packed < 0 {
