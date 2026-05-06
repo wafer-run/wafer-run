@@ -840,6 +840,87 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_close: {e}")))?;
 
+    // __wafer_host_lookup_attachment(id_ptr, id_len) -> i64
+    //
+    // Returns:
+    //   - Negative ErrorCode sentinel (NotFound) if the current call frame has
+    //     no attachment under id.
+    //   - Negative ErrorCode sentinel (InvalidArgument) if id is not valid UTF-8.
+    //   - Negative ErrorCode sentinel (Internal) if encoding fails or guest-memory
+    //     allocation/write fails.
+    //   - Otherwise, positive packed (ptr, len) of an rmp-encoded Attachment,
+    //     written via the guest's __wafer_alloc export. Guest owns the allocation.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_lookup_attachment",
+            |mut caller: Caller<WasmiHostState>,
+             id_ptr: i32,
+             id_len: i32|
+             -> Result<i64, WasmiError> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| WasmiError::new("guest has no exported memory".to_string()))?;
+
+                let mut id_buf = vec![0u8; id_len as usize];
+                memory
+                    .read(&caller, id_ptr as usize, &mut id_buf)
+                    .map_err(|e| WasmiError::new(format!("reading attachment id: {e}")))?;
+
+                let id = match std::str::from_utf8(&id_buf) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument)),
+                };
+
+                // Clone the attachment before any mutable borrow of caller.
+                let att = match caller
+                    .data()
+                    .current_attachments
+                    .as_ref()
+                    .and_then(|m| m.get(&id))
+                {
+                    Some(a) => a.clone(),
+                    None => return Ok(error_code_to_neg_i64(ErrorCode::NotFound)),
+                };
+
+                // Encode the Attachment via rmp.
+                let encoded = match wafer_block::codec::encode(&att) {
+                    Ok(b) => b,
+                    Err(_) => return Ok(error_code_to_neg_i64(ErrorCode::Internal)),
+                };
+
+                // Allocate guest memory via __wafer_alloc (same pattern used in
+                // write_guest_bytes), then write the encoded bytes. The guest
+                // owns the allocation after this call returns.
+                let alloc_func = caller
+                    .get_export("__wafer_alloc")
+                    .and_then(|e| e.into_func())
+                    .ok_or_else(|| {
+                        WasmiError::new("guest has no __wafer_alloc export".to_string())
+                    })?;
+
+                let alloc_fn = alloc_func
+                    .typed::<i32, i32>(&caller)
+                    .map_err(|e| WasmiError::new(format!("typing __wafer_alloc: {e}")))?;
+
+                let ptr = alloc_fn
+                    .call(&mut caller, encoded.len() as i32)
+                    .map_err(|e| {
+                        WasmiError::new(format!("__wafer_alloc({}): {e}", encoded.len()))
+                    })?;
+
+                memory
+                    .write(&mut caller, ptr as usize, &encoded)
+                    .map_err(|_| {
+                        WasmiError::new("writing attachment bytes to guest memory".to_string())
+                    })?;
+
+                Ok(pack_ptr_len(ptr as u32, encoded.len() as u32))
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_lookup_attachment: {e}")))?;
+
     // __wafer_host_load_asset(id_ptr, id_len) -> i32
     //
     // Reads the asset id from guest memory, stashes it in pending_load_asset,
