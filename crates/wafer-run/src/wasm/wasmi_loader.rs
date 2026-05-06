@@ -1281,6 +1281,149 @@ impl WasmiBlock {
         self.asset_loader.read().clone()
     }
 
+    /// Variant of `Block::handle` that seeds inbound attachments visible to
+    /// the guest via `__wafer_host_lookup_attachment`. Called by
+    /// `RuntimeContext::call_block_with_attachments` when the callee is a
+    /// wasmi block.
+    pub(crate) async fn handle_with_attachments(
+        &self,
+        ctx: &dyn Context,
+        msg: Message,
+        input: InputStream,
+        attachments: std::collections::BTreeMap<String, wafer_block::Attachment>,
+    ) -> OutputStream {
+        self.handle_inner(ctx, msg, input, Some(attachments)).await
+    }
+
+    /// Shared body of `handle` / `handle_with_attachments`. Serialises
+    /// (msg, body) for the guest, drives `__wafer_handle` through the resume
+    /// loop with the given attachments slot, and decodes the guest ABI result
+    /// back into an `OutputStream`.
+    async fn handle_inner(
+        &self,
+        ctx: &dyn Context,
+        msg: Message,
+        input: InputStream,
+        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+    ) -> OutputStream {
+        let body = input.collect_to_bytes().await;
+
+        // Sanitize inbound message meta before passing to WASM guest.
+        let msg = {
+            let mut stripped_in: Vec<String> = Vec::new();
+            let caps_guard = self.capabilities.read();
+            let sanitized_meta = sanitize_inbound_meta(msg.meta, &caps_guard, &mut stripped_in);
+            drop(caps_guard);
+            if !stripped_in.is_empty() {
+                self.warn_once_stripped_inbound(&stripped_in);
+            }
+            Message {
+                meta: sanitized_meta,
+                ..msg
+            }
+        };
+
+        let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
+            Ok(b) => b,
+            Err(e) => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("serializing message: {e}"),
+                ));
+            }
+        };
+
+        let result_bytes = match self
+            .call_guest_resumable_with_attachments(ctx, attachments, |store, instance| {
+                let alloc_fn = instance
+                    .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
+                let handle_fn = instance
+                    .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
+                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+                let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
+                    RuntimeError::Wasm("guest has no exported memory".to_string())
+                })?;
+
+                let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
+                let len = msg_bytes.len() as i32;
+                Ok((handle_fn, ptr as i32, len))
+            })
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("WASM handle error: {e}"),
+                ));
+            }
+        };
+
+        // The guest returns a guest ABI format JSON. Map it back to OutputStream.
+        #[derive(serde::Deserialize)]
+        struct GuestAbiResult {
+            action: String,
+            response: Option<GuestAbiResponse>,
+            error: Option<WaferError>,
+            message: Option<Message>,
+        }
+        #[derive(serde::Deserialize)]
+        struct GuestAbiResponse {
+            data: Vec<u8>,
+            #[serde(default)]
+            meta: Vec<MetaEntry>,
+        }
+
+        match serde_json::from_slice::<GuestAbiResult>(&result_bytes) {
+            Ok(result) => match result.action.as_str() {
+                "Respond" => {
+                    let (data, meta) = result
+                        .response
+                        .map(|r| {
+                            let mut stripped: Vec<String> = Vec::new();
+                            let caps_guard = self.capabilities.read();
+                            let sanitized =
+                                sanitize_outbound_meta(r.meta, &caps_guard, &mut stripped);
+                            drop(caps_guard);
+                            if !stripped.is_empty() {
+                                self.warn_once_stripped_outbound(&stripped);
+                            }
+                            (r.data, sanitized)
+                        })
+                        .unwrap_or_default();
+                    if meta.is_empty() {
+                        OutputStream::respond(data)
+                    } else {
+                        OutputStream::respond_with_meta(data, meta)
+                    }
+                }
+                "Error" => {
+                    let e = result.error.unwrap_or_else(|| {
+                        WaferError::new(
+                            ErrorCode::Internal,
+                            "WASM block returned error with no details",
+                        )
+                    });
+                    OutputStream::error(e)
+                }
+                "Drop" => OutputStream::drop_request(),
+                "Continue" => {
+                    let msg = result.message.unwrap_or_else(|| Message::new("continue"));
+                    OutputStream::continue_with(msg)
+                }
+                _ => OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    format!("unknown action from WASM guest: {}", result.action),
+                )),
+            },
+            Err(e) => OutputStream::error(WaferError::new(
+                ErrorCode::Internal,
+                format!("deserializing WASM handle result: {e}"),
+            )),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -1299,11 +1442,31 @@ impl WasmiBlock {
         )
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
+        self.call_guest_resumable_with_attachments(ctx, None, setup)
+            .await
+    }
+
+    /// Variant of `call_guest_resumable` that seeds the wasmi store's
+    /// `current_attachments` slot before the guest call begins. Used by
+    /// `WasmiBlock::handle_with_attachments` so a wasmi callee's
+    /// `__wafer_host_lookup_attachment` host import can find the attachments
+    /// the caller provided via `Context::call_block_with_attachments`.
+    async fn call_guest_resumable_with_attachments(
+        &self,
+        ctx: &dyn Context,
+        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+        setup: impl FnOnce(
+            &mut Store<WasmiHostState>,
+            wasmi::Instance,
+        )
+            -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
+    ) -> Result<Vec<u8>, RuntimeError> {
         let guard = ContextGuard::new(ctx);
         let caps_snapshot = self.capabilities.read().clone();
         let (mut store, instance) =
             instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
         store.data_mut().context = Some(guard.as_arc());
+        store.data_mut().current_attachments = attachments;
 
         let (func, arg0, arg1) = setup(&mut store, instance)?;
 
@@ -1334,16 +1497,26 @@ impl WasmiBlock {
                 // Context::call_block, install the resulting OutputStream on
                 // the StreamState. Resume with i32 0 on success, negative
                 // ErrorCode on failure.
-                let take_result = store
-                    .data_mut()
-                    .streams
-                    .get_mut(handle)
-                    .map(|s| s.take_finish_request());
+                // Drain (target, msg, body) and any attachments accumulated
+                // via __wafer_host_stream_attach. Both come off the same
+                // StreamState; the attachments hand-off must happen before we
+                // await the dispatch (we don't want to keep `&mut store`
+                // borrowed across an await).
+                let take_result = {
+                    let data = store.data_mut();
+                    let state = data.streams.get_mut(handle);
+                    state.map(|s| {
+                        let req = s.take_finish_request();
+                        let atts = s.take_attachments();
+                        (req, atts)
+                    })
+                };
                 let resume_code: i32 = match take_result {
-                    Some(Ok((target, msg, body))) => {
+                    Some((Ok((target, msg, body)), attachments)) => {
                         debug!(
                             block = target,
                             body_len = body.len(),
+                            attachments = attachments.len(),
                             "resolving stream_finish from WASM guest"
                         );
                         let input = if body.is_empty() {
@@ -1351,13 +1524,18 @@ impl WasmiBlock {
                         } else {
                             InputStream::from_bytes(body)
                         };
-                        let out = ctx.call_block(&target, msg, input).await;
+                        let out = if attachments.is_empty() {
+                            ctx.call_block(&target, msg, input).await
+                        } else {
+                            ctx.call_block_with_attachments(&target, msg, input, attachments)
+                                .await
+                        };
                         if let Some(state) = store.data_mut().streams.get_mut(handle) {
                             state.finish_with_stream(out);
                         }
                         0
                     }
-                    Some(Err(e)) => {
+                    Some((Err(e), _attachments)) => {
                         let code = e.code;
                         if let Some(state) = store.data_mut().streams.get_mut(handle) {
                             state.record_error_and_close(e);
@@ -1589,126 +1767,7 @@ impl Block for WasmiBlock {
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        // Combine message + input body into a single JSON payload for the WASM guest.
-        // The guest's __wafer_handle expects serialized Message bytes.
-        // We collect the input stream and embed it into a wrapper so the guest
-        // can decode both the message and the body.
-        let body = input.collect_to_bytes().await;
-
-        // Sanitize inbound message meta before passing to WASM guest.
-        let msg = {
-            let mut stripped_in: Vec<String> = Vec::new();
-            let caps_guard = self.capabilities.read();
-            let sanitized_meta = sanitize_inbound_meta(msg.meta, &caps_guard, &mut stripped_in);
-            drop(caps_guard);
-            if !stripped_in.is_empty() {
-                self.warn_once_stripped_inbound(&stripped_in);
-            }
-            Message {
-                meta: sanitized_meta,
-                ..msg
-            }
-        };
-
-        let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
-            Ok(b) => b,
-            Err(e) => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("serializing message: {e}"),
-                ));
-            }
-        };
-
-        let result_bytes = match self
-            .call_guest_resumable(ctx, |store, instance| {
-                let alloc_fn = instance
-                    .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
-                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
-                let handle_fn = instance
-                    .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
-                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
-                let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
-                    RuntimeError::Wasm("guest has no exported memory".to_string())
-                })?;
-
-                let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
-                let len = msg_bytes.len() as i32;
-                Ok((handle_fn, ptr as i32, len))
-            })
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("WASM handle error: {e}"),
-                ));
-            }
-        };
-
-        // The guest returns a guest ABI format JSON. Map it back to OutputStream.
-        #[derive(serde::Deserialize)]
-        struct GuestAbiResult {
-            action: String,
-            response: Option<GuestAbiResponse>,
-            error: Option<WaferError>,
-            message: Option<Message>,
-        }
-        #[derive(serde::Deserialize)]
-        struct GuestAbiResponse {
-            data: Vec<u8>,
-            #[serde(default)]
-            meta: Vec<MetaEntry>,
-        }
-
-        match serde_json::from_slice::<GuestAbiResult>(&result_bytes) {
-            Ok(result) => match result.action.as_str() {
-                "Respond" => {
-                    let (data, meta) = result
-                        .response
-                        .map(|r| {
-                            let mut stripped: Vec<String> = Vec::new();
-                            let caps_guard = self.capabilities.read();
-                            let sanitized =
-                                sanitize_outbound_meta(r.meta, &caps_guard, &mut stripped);
-                            drop(caps_guard);
-                            if !stripped.is_empty() {
-                                self.warn_once_stripped_outbound(&stripped);
-                            }
-                            (r.data, sanitized)
-                        })
-                        .unwrap_or_default();
-                    if meta.is_empty() {
-                        OutputStream::respond(data)
-                    } else {
-                        OutputStream::respond_with_meta(data, meta)
-                    }
-                }
-                "Error" => {
-                    let e = result.error.unwrap_or_else(|| {
-                        WaferError::new(
-                            ErrorCode::Internal,
-                            "WASM block returned error with no details",
-                        )
-                    });
-                    OutputStream::error(e)
-                }
-                "Drop" => OutputStream::drop_request(),
-                "Continue" => {
-                    let msg = result.message.unwrap_or_else(|| Message::new("continue"));
-                    OutputStream::continue_with(msg)
-                }
-                _ => OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("unknown action from WASM guest: {}", result.action),
-                )),
-            },
-            Err(e) => OutputStream::error(WaferError::new(
-                ErrorCode::Internal,
-                format!("deserializing WASM handle result: {e}"),
-            )),
-        }
+        self.handle_inner(ctx, msg, input, None).await
     }
 
     async fn lifecycle(
