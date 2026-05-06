@@ -753,9 +753,8 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
                         Err(_) => return Ok(error_code_to_neg_i32(ErrorCode::InvalidArgument)),
                     };
 
-                let stream_state = match caller.data_mut().streams.get_mut(handle as u64) {
-                    Some(s) => s,
-                    None => return Ok(error_code_to_neg_i32(ErrorCode::NotFound)),
+                let Some(stream_state) = caller.data_mut().streams.get_mut(handle as u64) else {
+                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
                 };
 
                 match stream_state.attach(id, att) {
