@@ -12,9 +12,7 @@ use wafer_block::{
     types::BlockInfo,
     Attachment, Block, Context, Message,
 };
-// `BlockRegistry` is needed in scope so `Wafer::register_block` resolves to
-// the trait method.
-use wafer_run::{BlockRegistry as _, Wafer};
+use wafer_run::Wafer;
 
 #[derive(Clone, Default)]
 struct CalleeBlock {
