@@ -214,20 +214,79 @@ impl FlatArgs {
     }
 }
 
-/// Parsed attribute: flat key=value pairs plus an optional capabilities group.
+/// Parsed skill(...) attribute — description and JSON parameters schema for
+/// the LLM-facing tool definition.
+struct SkillArgs {
+    description: String,
+    parameters: String,
+}
+
+/// Parse a `skill(description = "...", parameters = "...")` MetaList.
+fn parse_skill(meta: &syn::MetaList) -> SkillArgs {
+    let nested: Punctuated<syn::Meta, Token![,]> = meta
+        .parse_args_with(Punctuated::parse_terminated)
+        .expect("#[wafer_block]: failed to parse skill(...)");
+    let mut description = None::<String>;
+    let mut parameters = None::<String>;
+    for item in nested {
+        match item {
+            syn::Meta::NameValue(nv) => {
+                let key = nv
+                    .path
+                    .get_ident()
+                    .expect("expected identifier in skill(...)")
+                    .to_string();
+                let val = if let Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) = &nv.value
+                {
+                    s.value()
+                } else {
+                    use quote::ToTokens;
+                    panic!(
+                        "#[wafer_block]: skill({key}) value must be a string literal, got: {}",
+                        nv.value.to_token_stream()
+                    )
+                };
+                match key.as_str() {
+                    "description" => description = Some(val),
+                    "parameters" => parameters = Some(val),
+                    other => panic!("#[wafer_block]: unknown skill attribute '{other}'"),
+                }
+            }
+            other => {
+                use quote::ToTokens;
+                panic!(
+                    "#[wafer_block]: unexpected token in skill(...): {}",
+                    other.to_token_stream()
+                );
+            }
+        }
+    }
+    SkillArgs {
+        description: description
+            .expect("#[wafer_block]: skill(...) requires description = \"...\""),
+        parameters: parameters.expect("#[wafer_block]: skill(...) requires parameters = \"...\""),
+    }
+}
+
+/// Parsed attribute: flat key=value pairs, optional capabilities group, and
+/// optional skill(...) group.
 struct ParsedAttr {
     flat: FlatArgs,
     capabilities: Option<CapabilitiesArgs>,
+    skill: Option<SkillArgs>,
 }
 
-/// Parse the full attribute token stream by splitting on `capabilities(...)`.
+/// Parse the full attribute token stream by splitting on `capabilities(...)` and
+/// `skill(...)`.
 ///
-/// Strategy: scan the token stream for `capabilities`, peel it off into a
-/// `syn::MetaList`, forward everything else to `FlatArgs`.
+/// Strategy: scan the token stream for `capabilities` / `skill`, peel them off
+/// into their respective `syn::MetaList`s, forward everything else to `FlatArgs`.
 fn parse_attr(attr: TokenStream) -> ParsedAttr {
     // We perform a two-step parse:
     //   1. Convert to a proc_macro2 TokenStream and scan Meta items.
-    //   2. Re-collect the non-capabilities items for flat parsing.
+    //   2. Re-collect the non-capabilities/non-skill items for flat parsing.
 
     use proc_macro2::TokenStream as Ts2;
     use quote::ToTokens;
@@ -238,12 +297,16 @@ fn parse_attr(attr: TokenStream) -> ParsedAttr {
         .unwrap_or_default();
 
     let mut caps: Option<CapabilitiesArgs> = None;
+    let mut skill: Option<SkillArgs> = None;
     let mut flat_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for meta in &metas {
         match meta {
             syn::Meta::List(ml) if ml.path.is_ident("capabilities") => {
                 caps = Some(parse_capabilities(ml));
+            }
+            syn::Meta::List(ml) if ml.path.is_ident("skill") => {
+                skill = Some(parse_skill(ml));
             }
             other => {
                 flat_tokens.push(other.to_token_stream());
@@ -275,6 +338,7 @@ fn parse_attr(attr: TokenStream) -> ParsedAttr {
     ParsedAttr {
         flat,
         capabilities: caps,
+        skill,
     }
 }
 
@@ -356,6 +420,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed = parse_attr(attr);
     let args = &parsed.flat;
     let capabilities_args = parsed.capabilities;
+    let skill_args = parsed.skill;
 
     let input = parse_macro_input!(item as ItemImpl);
 
@@ -491,6 +556,23 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None::<wafer_block::BlockCapabilities> }
     };
 
+    // Build the optional SkillTool expression for `block_info()`.
+    let skill_tool_expr = if let Some(skill) = &skill_args {
+        let description = &skill.description;
+        let parameters_json = &skill.parameters;
+        quote! {
+            info = info
+                .role(wafer_block::types::SkillRole::Skill)
+                .tool(wafer_block::types::SkillTool {
+                    description: #description.to_string(),
+                    parameters: serde_json::from_str(#parameters_json)
+                        .expect(concat!("skill parameters JSON parse error in block ", #name)),
+                });
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #other_impl
 
@@ -509,6 +591,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Some(c) = caps {
                     info = info.capabilities(c);
                 }
+                #skill_tool_expr
                 info
             }
         }
