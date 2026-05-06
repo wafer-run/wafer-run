@@ -273,7 +273,8 @@ impl Drop for ResponseStream {
 /// FailedPrecondition=9, Aborted=10, OutOfRange=11, Unimplemented=12,
 /// Internal=13, Unavailable=14, DataLoss=15, Unauthenticated=16
 /// ```
-pub fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
+#[allow(dead_code)]
+pub(crate) fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
     // Normalise: host always emits positive ordinals as absolute values.
     let abs = if ordinal < 0 { -ordinal } else { ordinal };
     match abs {

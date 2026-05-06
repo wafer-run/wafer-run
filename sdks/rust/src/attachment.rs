@@ -9,6 +9,7 @@ use wafer_block::{Attachment, WaferError};
 #[cfg(target_arch = "wasm32")]
 pub fn lookup_attachment(id: &str) -> Result<Option<Attachment>, WaferError> {
     use crate::core_abi::{__wafer_host_lookup_attachment, unpack_ptr_len};
+    use crate::stream::error_code_from_ordinal;
     use wafer_block::{codec, ErrorCode};
 
     let packed = unsafe { __wafer_host_lookup_attachment(id.as_ptr() as i32, id.len() as i32) };
@@ -17,9 +18,10 @@ pub fn lookup_attachment(id: &str) -> Result<Option<Attachment>, WaferError> {
         if ordinal == ErrorCode::NotFound as i32 {
             return Ok(None);
         }
+        let code = error_code_from_ordinal(ordinal);
         return Err(WaferError::new(
-            ErrorCode::Internal,
-            format!("lookup_attachment failed: code={ordinal}"),
+            code,
+            format!("lookup_attachment failed: code={code:?}"),
         ));
     }
     let (ptr, len) = unpack_ptr_len(packed);
