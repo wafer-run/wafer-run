@@ -885,9 +885,8 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
                 };
 
                 // Encode the Attachment via rmp.
-                let encoded = match wafer_block::codec::encode(&att) {
-                    Ok(b) => b,
-                    Err(_) => return Ok(error_code_to_neg_i64(ErrorCode::Internal)),
+                let Ok(encoded) = wafer_block::codec::encode(&att) else {
+                    return Ok(error_code_to_neg_i64(ErrorCode::Internal));
                 };
 
                 // Allocate guest memory via __wafer_alloc (same pattern used in
