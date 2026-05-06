@@ -389,9 +389,8 @@ impl OutputStream {
         Fut: Future<Output = ()> + 'static,
     {
         let (stream, sink, cancel) = Self::new_streaming();
-        let cancel_clone = cancel.clone();
         crate::spawn::spawn_producer(async move {
-            f(sink, cancel_clone).await;
+            f(sink, cancel).await;
         });
         stream
     }

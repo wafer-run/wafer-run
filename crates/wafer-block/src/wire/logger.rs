@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub struct LogRequest {
     #[serde(default)]
     pub message: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub fields: HashMap<String, serde_json::Value>,
 }
 
@@ -50,7 +50,7 @@ mod tests {
         let encoded = codec::encode(&req).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex, "82a76d657373616765a0a66669656c647380",
+            hex, "81a76d657373616765a0",
             "LogRequest schema changed — review consumer impact before updating this literal"
         );
     }

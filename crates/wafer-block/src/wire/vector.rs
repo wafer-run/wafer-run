@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 // ---- Index / entry types ----
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorEntry {
     pub id: String,
     pub vector: Vec<f32>,
@@ -23,7 +23,7 @@ pub struct VectorEntry {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorMatch {
     pub id: String,
     pub score: f32,
@@ -47,7 +47,7 @@ pub enum SearchMode {
     Hybrid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorIndexConfig {
     pub name: String,
     pub model: String,
@@ -58,7 +58,7 @@ pub struct VectorIndexConfig {
 }
 
 /// Equality-only metadata filter. Keys are dot-paths into the entry metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetadataFilter {
     #[serde(default)]
     pub equals: BTreeMap<String, serde_json::Value>,
@@ -66,23 +66,23 @@ pub struct MetadataFilter {
 
 // ---- Vector requests / responses ----
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateIndexRequest {
     pub config: VectorIndexConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteIndexRequest {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpsertRequest {
     pub index: String,
     pub entries: Vec<VectorEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub index: String,
     pub vector: Vec<f32>,
@@ -94,35 +94,35 @@ pub struct QueryRequest {
     pub keyword_query: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteRequest {
     pub index: String,
     pub ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountRequest {
     pub index: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub matches: Vec<VectorMatch>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountResponse {
     pub count: u64,
 }
 
 // ---- Embedding requests / responses ----
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbedRequest {
     pub texts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbedResponse {
     pub model: String,
     pub dimensions: u32,
