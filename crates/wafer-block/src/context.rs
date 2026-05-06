@@ -1,7 +1,9 @@
 //! The Context trait — runtime capabilities provided to blocks.
 
+use std::collections::BTreeMap;
+
 use crate::{
-    core_types::{Message, WaferError},
+    core_types::{Attachment, Message, WaferError},
     streams::{
         input::InputStream,
         output::{BufferedResponse, OutputStream},
@@ -34,6 +36,51 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         };
         let output = self.call_block(block_name, msg, input).await;
         output.collect_buffered().await.map_err(WaferError::from)
+    }
+
+    /// Call another block, attaching named binary blobs that the callee can
+    /// retrieve via `lookup_attachment`. Caller-attached, per-invocation; the
+    /// attachments do not propagate beyond the immediate callee.
+    ///
+    /// Default impl drops attachments and falls back to `call_block` so
+    /// existing native callers compile unchanged. wasmi-backed Context impls
+    /// override this to use `__wafer_host_stream_attach`.
+    async fn call_block_with_attachments(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: InputStream,
+        attachments: BTreeMap<String, Attachment>,
+    ) -> OutputStream {
+        let _ = attachments;
+        self.call_block(block_name, msg, input).await
+    }
+
+    /// Buffered variant — analogous to `call_block_buffered`.
+    async fn call_block_buffered_with_attachments(
+        &self,
+        block_name: &str,
+        msg: Message,
+        body: &[u8],
+        attachments: BTreeMap<String, Attachment>,
+    ) -> Result<BufferedResponse, WaferError> {
+        let input = if body.is_empty() {
+            InputStream::empty()
+        } else {
+            InputStream::from_bytes(body.to_vec())
+        };
+        let output = self
+            .call_block_with_attachments(block_name, msg, input, attachments)
+            .await;
+        output.collect_buffered().await.map_err(WaferError::from)
+    }
+
+    /// Look up an attachment in the current call frame's inbound view.
+    /// Returns `None` if the caller did not attach under `id`. Synchronous —
+    /// reads from runtime-managed state. Default impl returns `None`.
+    fn lookup_attachment(&self, id: &str) -> Option<Attachment> {
+        let _ = id;
+        None
     }
 
     /// Check if the context has been cancelled.
