@@ -25,12 +25,6 @@ use wafer_block::context::Context;
 use wafer_block::stream::StreamEvent;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
-use wafer_block::{
-    codec,
-    common::{ErrorCode, ServiceOp},
-    WaferError,
-};
-
 /// Re-export the wire types so callers use one path for both the request
 /// payloads and the typed stream items.
 pub use wafer_block::wire::llm::{
@@ -38,6 +32,11 @@ pub use wafer_block::wire::llm::{
     ContentPart, FinishReason, LoadModelRequest, LoadProgress, ModelCapabilities, ModelInfo,
     ModelState, ModelStatus, ResponseFormat, StatusRequest, TokenUsage, ToolCall, ToolDefinition,
     UnloadModelRequest,
+};
+use wafer_block::{
+    codec,
+    common::{ErrorCode, ServiceOp},
+    WaferError,
 };
 
 #[cfg(not(feature = "wasm-component"))]
