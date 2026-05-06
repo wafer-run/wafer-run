@@ -720,6 +720,52 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_write_chunk: {e}")))?;
 
+    // __wafer_host_stream_attach(handle, payload_ptr, payload_len) -> i32
+    //
+    // Decodes a rmp-encoded (id: String, attachment: Attachment) tuple from
+    // guest memory and adds it to the caller StreamState's attachments map.
+    // Returns 0 on success, negative ErrorCode sentinel on error:
+    //   - NotFound: stream handle invalid
+    //   - FailedPrecondition: stream not in WritingRequest phase
+    //   - InvalidArgument: payload undecodable
+    //   - Internal: unrecoverable host-side error
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_attach",
+            |mut caller: Caller<WasmiHostState>,
+             handle: i64,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> Result<i32, WasmiError> {
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| WasmiError::new("guest has no exported memory".to_string()))?;
+                let mut buf = vec![0u8; payload_len as usize];
+                memory
+                    .read(&caller, payload_ptr as usize, &mut buf)
+                    .map_err(|e| WasmiError::new(format!("reading attach payload: {e}")))?;
+
+                let (id, att): (String, wafer_block::Attachment) =
+                    match wafer_block::codec::decode(&buf) {
+                        Ok(v) => v,
+                        Err(_) => return Ok(error_code_to_neg_i32(ErrorCode::InvalidArgument)),
+                    };
+
+                let stream_state = match caller.data_mut().streams.get_mut(handle as u64) {
+                    Some(s) => s,
+                    None => return Ok(error_code_to_neg_i32(ErrorCode::NotFound)),
+                };
+
+                match stream_state.attach(id, att) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Ok(error_code_to_neg_i32(ErrorCode::FailedPrecondition)),
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_attach: {e}")))?;
+
     // __wafer_host_stream_finish(handle) -> i32
     //
     // Traps. The resume loop dispatches `Context::call_block(target, msg,
