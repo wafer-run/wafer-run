@@ -104,6 +104,27 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
         )
         .context("Failed to define __wafer_host_stream_close stub")?;
 
+    // wafer::__wafer_host_stream_attach(handle, payload_ptr, payload_len) -> i32
+    // wafer::__wafer_host_lookup_attachment(id_ptr, id_len) -> i64
+    //
+    // Added by the per-call attachment ABI. Validator stubs return 0 (success
+    // and "no attachment" sentinel respectively); the validator never reaches
+    // a guest call path that observes either.
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_stream_attach",
+            |_: Caller<()>, _handle: i64, _payload_ptr: i32, _payload_len: i32| -> i32 { 0i32 },
+        )
+        .context("Failed to define __wafer_host_stream_attach stub")?;
+    linker
+        .func_wrap(
+            "wafer",
+            "__wafer_host_lookup_attachment",
+            |_: Caller<()>, _id_ptr: i32, _id_len: i32| -> i64 { 0i64 },
+        )
+        .context("Failed to define __wafer_host_lookup_attachment stub")?;
+
     // wasi_snapshot_preview1::fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
     linker
         .func_wrap(
