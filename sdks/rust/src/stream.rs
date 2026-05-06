@@ -11,8 +11,8 @@ use wafer_block::{ErrorCode, Message, WaferError};
 
 #[cfg(target_arch = "wasm32")]
 use crate::core_abi::{
-    __wafer_host_stream_close, __wafer_host_stream_finish, __wafer_host_stream_init,
-    __wafer_host_stream_read_chunk, __wafer_host_stream_take_error,
+    __wafer_host_stream_attach, __wafer_host_stream_close, __wafer_host_stream_finish,
+    __wafer_host_stream_init, __wafer_host_stream_read_chunk, __wafer_host_stream_take_error,
     __wafer_host_stream_write_chunk,
 };
 
@@ -91,6 +91,37 @@ impl CallStream {
                 let ordinal = (-r) as i32;
                 let code = error_code_from_ordinal(ordinal);
                 return Err(WaferError::new(code, "stream_write_chunk failed"));
+            }
+            Ok(())
+        }
+    }
+
+    /// Attach a named binary blob to this stream's outgoing call. Must be
+    /// called between `open` and `finish`.
+    pub fn attach(
+        &self,
+        id: impl Into<String>,
+        att: wafer_block::Attachment,
+    ) -> Result<(), WaferError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (id, att);
+            panic!("attach is only available in WASM blocks");
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let payload = wafer_block::codec::encode(&(id.into(), att))?;
+            let r = unsafe {
+                __wafer_host_stream_attach(
+                    self.handle,
+                    payload.as_ptr() as i32,
+                    payload.len() as i32,
+                )
+            };
+            if r < 0 {
+                let ordinal = (-r) as i32;
+                let code = error_code_from_ordinal(ordinal);
+                return Err(WaferError::new(code, "stream_attach failed"));
             }
             Ok(())
         }
@@ -242,7 +273,8 @@ impl Drop for ResponseStream {
 /// FailedPrecondition=9, Aborted=10, OutOfRange=11, Unimplemented=12,
 /// Internal=13, Unavailable=14, DataLoss=15, Unauthenticated=16
 /// ```
-pub fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
+#[allow(dead_code)]
+pub(crate) fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
     // Normalise: host always emits positive ordinals as absolute values.
     let abs = if ordinal < 0 { -ordinal } else { ordinal };
     match abs {

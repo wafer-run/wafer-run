@@ -24,10 +24,16 @@ use wafer_block::{
 };
 
 /// State machine phase. The legal transitions are
-/// `WritingRequest -> ReadingResponse -> Closed`. `Closed` is terminal.
+/// `WritingRequest -> Finishing -> ReadingResponse -> Closed`. `Closed` is
+/// terminal. `Finishing` is the brief window between `take_finish_request`
+/// (which drains the request body) and either `finish_with_stream` (success)
+/// or `record_error_and_close` (failure).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     WritingRequest,
+    /// Request data has been drained; awaiting `finish_with_stream` or
+    /// `record_error_and_close` from the resume loop.
+    Finishing,
     ReadingResponse,
     Closed,
 }
@@ -40,6 +46,9 @@ pub(crate) struct StreamState {
     msg: Option<Message>,
     /// Accumulated request body bytes from `write_chunk`.
     request_buffer: Vec<u8>,
+    /// Caller-attached named binary blobs. Drained into the callee's
+    /// `WasmiHostState::current_attachments` at dispatch time.
+    attachments: std::collections::BTreeMap<String, wafer_block::Attachment>,
     /// The response stream installed by `finish_with_stream`. `next_chunk`
     /// drives this.
     response_stream: Option<OutputStream>,
@@ -55,6 +64,7 @@ impl StreamState {
             target_block,
             msg: Some(msg),
             request_buffer: Vec::new(),
+            attachments: std::collections::BTreeMap::new(),
             response_stream: None,
             last_error: None,
             phase: Phase::WritingRequest,
@@ -77,6 +87,29 @@ impl StreamState {
         Ok(())
     }
 
+    /// Add an attachment to the outgoing call. Only valid in `WritingRequest`.
+    pub(crate) fn attach(
+        &mut self,
+        id: String,
+        att: wafer_block::Attachment,
+    ) -> Result<(), WaferError> {
+        if self.phase != Phase::WritingRequest {
+            return Err(precondition_err(
+                "attach called outside WritingRequest phase",
+            ));
+        }
+        self.attachments.insert(id, att);
+        Ok(())
+    }
+
+    /// Remove and return the accumulated attachments. Called by the resume
+    /// loop after `take_finish_request` to hand them to the callee.
+    pub(crate) fn take_attachments(
+        &mut self,
+    ) -> std::collections::BTreeMap<String, wafer_block::Attachment> {
+        std::mem::take(&mut self.attachments)
+    }
+
     /// Consume the request side of the state machine, returning the data the
     /// resume loop needs to dispatch to `Context::call_block`. Transitions to
     /// a "finishing" intermediate — the caller is expected to install the
@@ -94,6 +127,7 @@ impl StreamState {
             .take()
             .ok_or_else(|| precondition_err("finish: message already consumed"))?;
         let body = std::mem::take(&mut self.request_buffer);
+        self.phase = Phase::Finishing;
         Ok((self.target_block.clone(), msg, body))
     }
 
@@ -101,7 +135,7 @@ impl StreamState {
     /// transition to `ReadingResponse`. Mirrors the success path of `finish`.
     pub(crate) fn finish_with_stream(&mut self, stream: OutputStream) {
         debug_assert!(
-            self.phase == Phase::WritingRequest,
+            self.phase == Phase::Finishing,
             "finish_with_stream called in phase {:?}",
             self.phase,
         );
@@ -448,5 +482,37 @@ mod tests {
         assert_eq!(state.phase(), Phase::Closed);
         let took = state.take_error().expect("error should be present");
         assert_eq!(took.code, ErrorCode::PermissionDenied);
+    }
+
+    #[test]
+    fn stream_state_attaches_and_drains() {
+        use std::collections::BTreeMap;
+
+        use wafer_block::Attachment;
+        let mut state = StreamState::new("test/target".into(), msg());
+        let att = Attachment {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+            filename: None,
+        };
+        state.attach("call_1".into(), att.clone()).expect("attach");
+        let drained: BTreeMap<String, Attachment> = state.take_attachments();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained.get("call_1"), Some(&att));
+    }
+
+    #[test]
+    fn stream_state_attach_outside_writing_phase_errors() {
+        use wafer_block::Attachment;
+        let mut state = StreamState::new("test/target".into(), msg());
+        // Force into a non-writing phase by taking finish.
+        let _ = state.take_finish_request().expect("take_finish_request");
+        let att = Attachment {
+            mime: "x".into(),
+            bytes: vec![],
+            filename: None,
+        };
+        let r = state.attach("call_1".into(), att);
+        assert!(r.is_err(), "attach must fail outside WritingRequest");
     }
 }

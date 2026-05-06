@@ -18,6 +18,7 @@
 //! }
 //! ```
 
+pub mod attachment;
 #[cfg(target_arch = "wasm32")]
 pub mod clients;
 pub mod core_abi;
@@ -26,5 +27,6 @@ pub mod stream;
 
 // Re-export everything from wafer-block (types, traits, helpers, macros).
 // Re-export runtime functions and guest result types for block authors.
+pub use attachment::lookup_attachment;
 pub use core_abi::{is_cancelled, log, GuestResponse, GuestResult};
 pub use wafer_block::*;

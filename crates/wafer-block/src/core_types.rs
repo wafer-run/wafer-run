@@ -88,6 +88,22 @@ pub struct LifecycleEvent {
     pub data: Vec<u8>,
 }
 
+/// A named binary blob carried alongside a `call_block` invocation.
+///
+/// Attached by the caller via `Context::call_block_with_attachments` (or, on
+/// wasmi guests, the SDK's `RequestStream::attach`); read by the callee via
+/// `Context::lookup_attachment`. Lifetime is per-`call_block` invocation —
+/// attachments do not propagate beyond the immediate callee.
+///
+/// Encoded via `wafer_block::codec` (rmp-serde), so multi-MiB byte payloads
+/// cross the host↔guest boundary without JSON-array inflation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Attachment {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+    pub filename: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +137,27 @@ mod tests {
         };
         assert_eq!(m.kind, "POST");
         assert_eq!(m.meta.len(), 1);
+    }
+
+    #[test]
+    fn attachment_codec_roundtrip_no_inflation() {
+        use crate::codec;
+        let original = Attachment {
+            mime: "image/png".into(),
+            bytes: vec![0u8; 1024 * 1024],
+            filename: Some("cat.png".into()),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        // 1 MiB body + small framing for {mime, filename}. Allow 5% headroom —
+        // the load-bearing invariant: rmp does not array-encode Vec<u8>.
+        assert!(
+            encoded.len() < 1024 * 1024 + (1024 * 1024 / 20),
+            "encoded size {} exceeds 1.05 MiB — Attachment::bytes inflation regressed",
+            encoded.len()
+        );
+        let decoded: Attachment = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.mime, "image/png");
+        assert_eq!(decoded.bytes.len(), 1024 * 1024);
+        assert_eq!(decoded.filename.as_deref(), Some("cat.png"));
     }
 }

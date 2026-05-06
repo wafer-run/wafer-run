@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use wafer_block::{
+    core_types::Attachment,
     streams::{input::InputStream, output::OutputStream},
     Message,
 };
@@ -45,6 +46,20 @@ unsafe impl Sync for ContextWrapper {}
 impl Context for ContextWrapper {
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
         unsafe { &*self.0 }.call_block(block_name, msg, input).await
+    }
+    async fn call_block_with_attachments(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: InputStream,
+        attachments: BTreeMap<String, Attachment>,
+    ) -> OutputStream {
+        unsafe { &*self.0 }
+            .call_block_with_attachments(block_name, msg, input, attachments)
+            .await
+    }
+    fn lookup_attachment(&self, id: &str) -> Option<Attachment> {
+        unsafe { &*self.0 }.lookup_attachment(id)
     }
     fn is_cancelled(&self) -> bool {
         unsafe { &*self.0 }.is_cancelled()

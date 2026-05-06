@@ -362,6 +362,7 @@ impl Wafer {
             caller_id: None,       // top-level call, no caller
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
+            current_attachments: Arc::new(std::collections::BTreeMap::new()),
         }
     }
 
