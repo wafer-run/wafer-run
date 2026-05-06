@@ -153,6 +153,18 @@ extern "C" {
     /// Free the handle and any host-side state. Idempotent; safe to call
     /// from Drop on the SDK wrappers.
     pub(crate) fn __wafer_host_stream_close(handle: i64);
+
+    /// Attach an rmp-encoded (id, Attachment) tuple to an in-flight stream.
+    /// Returns 0 on success, negative ErrorCode otherwise.
+    pub(crate) fn __wafer_host_stream_attach(
+        handle: i64,
+        payload_ptr: i32,
+        payload_len: i32,
+    ) -> i32;
+
+    /// Look up an inbound attachment by id. Returns negative ErrorCode (NotFound)
+    /// if absent, else positive packed (ptr, len) of an rmp-encoded Attachment.
+    pub(crate) fn __wafer_host_lookup_attachment(id_ptr: i32, id_len: i32) -> i64;
 }
 
 // ---------------------------------------------------------------------------
