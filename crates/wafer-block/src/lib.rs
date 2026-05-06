@@ -15,7 +15,8 @@ pub mod wire;
 // Re-export the proc macro.
 // Re-export core types at crate root.
 pub use core_types::{
-    ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
+    Attachment, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry,
+    WaferError,
 };
 pub use meta::*;
 // Re-export runtime-specific types (needed by block authors for BlockInfo etc.)
