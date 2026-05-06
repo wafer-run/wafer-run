@@ -369,6 +369,13 @@ struct WasmiHostState {
     /// value (wasmi's `resumable.resume(..)` value IS the return value of
     /// the trapped host function — no phase-2 re-entry like call_block).
     pending_load_asset: Option<String>,
+    /// Per-call-frame inbound attachments. Populated by the runtime before
+    /// `__wafer_handle` is invoked; consulted by the
+    /// `__wafer_host_lookup_attachment` host import. `None` for top-level
+    /// calls (e.g. router-initiated requests) and intermediate states where
+    /// the slot has not yet been seeded.
+    pub(crate) current_attachments:
+        Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
 }
 
 impl wasmi::ResourceLimiter for WasmiHostState {
@@ -1091,6 +1098,7 @@ pub fn run_spike(
         pending_stream_read: None,
         pending_stream_take_error: None,
         pending_load_asset: None,
+        current_attachments: None,
     };
     let mut store = Store::new(&engine, host_state);
 
@@ -1149,6 +1157,7 @@ fn instantiate(
         pending_stream_read: None,
         pending_stream_take_error: None,
         pending_load_asset: None,
+        current_attachments: None,
     };
     let mut store = Store::new(engine, host_state);
 
