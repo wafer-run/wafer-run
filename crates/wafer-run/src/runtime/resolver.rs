@@ -741,6 +741,7 @@ fn log_widening_attempts(
     // Booleans: if config explicitly set `true` but effective is `false`, declared denied.
     for (label, over, eff) in [
         ("raw_sql", overrides.raw_sql, effective.raw_sql),
+        ("ddl", overrides.ddl, effective.ddl),
         ("crypto", overrides.crypto, effective.crypto),
         ("network", overrides.network, effective.network),
         ("config", overrides.config, effective.config),

@@ -194,6 +194,35 @@ dual_api! {
         Ok(resp.rows_affected)
     }
 
+    /// Execute a DDL statement (`CREATE TABLE`, `CREATE INDEX`, `DROP TABLE`, etc).
+    ///
+    /// DDL routes through the `__ddl__` WRAP resource, which is permissive: any
+    /// attributable caller can DDL (no admin required). This is intentional —
+    /// each block is expected to DDL its own (`{org}__{block}__*`) tables on
+    /// init via `migrations::apply` or equivalent, without needing the admin
+    /// block in the loop.
+    ///
+    /// Convention (NOT enforced by parsing SQL here): blocks only DDL their own
+    /// tables. Cross-block DDL through this entry point is a misuse caught by
+    /// code review and the `scripts/audit-wrap-grants.sh` audit script.
+    ///
+    /// Use `exec_raw` for raw DML/DDL that legitimately requires the admin
+    /// block (the SQL explorer, ad-hoc operator queries). `exec_raw` stays
+    /// admin-gated under WRAP.
+    pub fn ddl(ctx, statement: &str) -> Result<i64, WaferError> {
+        let req = ExecRawRequest { query: statement.to_string(), args: vec![] };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_EXEC_RAW,
+            &req,
+            Some("__ddl__"),
+            true,
+            Some("db")
+        )?;
+        let resp: ExecRawResponse = decode(&data)?;
+        Ok(resp.rows_affected)
+    }
+
     // --- Higher-level helpers ---
 
     pub fn get_by_field(ctx, collection: &str, field: &str, value: serde_json::Value) -> Result<Record, WaferError> {

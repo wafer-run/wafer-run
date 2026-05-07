@@ -36,6 +36,7 @@ struct CapabilitiesArgs {
     crypto: bool,
     network: bool,
     raw_sql: bool,
+    ddl: bool,
     config: bool,
     collections: Vec<String>,
     storage_folders: Vec<String>,
@@ -63,6 +64,7 @@ fn parse_capabilities(meta: &syn::MetaList) -> CapabilitiesArgs {
                     "crypto" => out.crypto = true,
                     "network" => out.network = true,
                     "raw_sql" => out.raw_sql = true,
+                    "ddl" => out.ddl = true,
                     "config" => out.config = true,
                     other => panic!("#[wafer_block]: unknown bool capability '{other}'"),
                 }
@@ -383,7 +385,7 @@ impl Parse for MetaList {
 /// applies its default). Providing an empty group sets an explicit
 /// zero-capabilities declaration.
 ///
-/// Boolean flags: `crypto`, `network`, `raw_sql`, `config`
+/// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `config`
 ///
 /// List fields: `collections = [...]`, `storage_folders = [...]`,
 /// `network_allow = [...]`, `config_keys = [...]`, `callable_blocks = [...]`
@@ -509,6 +511,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         let crypto = c.crypto;
         let network = c.network;
         let raw_sql = c.raw_sql;
+        let ddl = c.ddl;
         let config_cap = c.config;
         let collections = &c.collections;
         let storage_folders = &c.storage_folders;
@@ -523,6 +526,7 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
                 crypto: #crypto,
                 network: #network,
                 raw_sql: #raw_sql,
+                ddl: #ddl,
                 config: #config_cap,
                 collections: {
                     let mut s = ::std::collections::HashSet::new();
