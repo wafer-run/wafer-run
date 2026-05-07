@@ -51,6 +51,13 @@ pub struct BlockCapabilities {
     /// Can use query_raw/exec_raw.
     #[serde(default)]
     pub raw_sql: bool,
+    /// Can issue DDL via `db::ddl()` (CREATE TABLE / INDEX / DROP / etc).
+    /// Convention: blocks only DDL their own (`{org}__{block}__*`) tables; this
+    /// is enforced by code review + the WRAP-grant audit script, not by parsing
+    /// SQL. Default `false` to keep `none()` fully sandboxed; native blocks get
+    /// `true` via `unrestricted()`.
+    #[serde(default)]
+    pub ddl: bool,
     /// Allowed storage folders. "*" = all, empty = none.
     #[serde(default)]
     pub storage_folders: HashSet<String>,
@@ -87,6 +94,7 @@ impl BlockCapabilities {
                 s
             },
             raw_sql: true,
+            ddl: true,
             storage_folders: {
                 let mut s = HashSet::new();
                 s.insert("*".to_string());
@@ -111,6 +119,7 @@ impl BlockCapabilities {
         Self {
             collections: HashSet::new(),
             raw_sql: false,
+            ddl: false,
             storage_folders: HashSet::new(),
             crypto: false,
             network: false,
@@ -176,6 +185,7 @@ impl BlockCapabilities {
         Self {
             collections: intersect_wildcard_set(&self.collections, &other.collections),
             raw_sql: self.raw_sql && other.raw_sql,
+            ddl: self.ddl && other.ddl,
             storage_folders: intersect_wildcard_set(&self.storage_folders, &other.storage_folders),
             crypto: self.crypto && other.crypto,
             network: self.network && other.network,
@@ -230,6 +240,10 @@ impl BlockCapabilities {
                 Some(r) => self.raw_sql && r,
                 None => self.raw_sql,
             },
+            ddl: match o.ddl {
+                Some(d) => self.ddl && d,
+                None => self.ddl,
+            },
             storage_folders: match &o.storage_folders {
                 Some(s) => intersect_wildcard_set(&self.storage_folders, s),
                 None => self.storage_folders.clone(),
@@ -283,6 +297,8 @@ pub struct ConfigCapabilityOverrides {
     pub collections: Option<HashSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_sql: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddl: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_folders: Option<HashSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

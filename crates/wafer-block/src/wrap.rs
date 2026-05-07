@@ -36,17 +36,20 @@ pub fn resource_prefix(block_id: &str) -> String {
 ///
 /// For namespace-based resources (Db, Config, Crypto, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
-/// 2. `SOLOBASE_SHARED__*` → any block reads, admin-only writes
-/// 3. Own resource (`resource_owner(resource) == caller_id`) → Ok
-/// 4. Admin (`caller_id == admin_block`) → Ok
-/// 5. Grant match (grantee + resource pattern + write flag) → Ok
-/// 6. Unnamespaced (`resource_owner()` returns `None`) → Err
-/// 7. Otherwise → Err
+/// 2. `__ddl__` → any attributable caller (NOT admin-only). Convention is that
+///    blocks only DDL their own (`{org}__{block}__*`) tables; this is enforced
+///    by code review + the WRAP-grant audit script, not by parsing SQL here.
+/// 3. `SOLOBASE_SHARED__*` → any block reads, admin-only writes
+/// 4. Own resource (`resource_owner(resource) == caller_id`) → Ok
+/// 5. Admin (`caller_id == admin_block`) → Ok
+/// 6. Grant match (grantee + resource pattern + write flag) → Ok
+/// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
+/// 8. Otherwise → Err
 ///
 /// For non-namespace resources (Network, Storage):
-/// 4. Admin → Ok
-/// 5. Grant match → Ok
-/// 7. Otherwise → Err (default deny)
+/// 1. Admin → Ok
+/// 2. Grant match → Ok
+/// 3. Otherwise → Err (default deny)
 pub fn check_access(
     caller_id: Option<&str>,
     resource: &str,
@@ -72,6 +75,21 @@ pub fn check_access(
                     format!(
                         "WRAP: raw SQL access denied (caller: {caller_id:?}, admin: {admin_block})"
                     ),
+                )),
+            };
+        }
+
+        // Rule 1a: DDL is open to any attributable caller. Each block is expected
+        // to DDL only its own tables on init (`{org}__{block}__*`); cross-block
+        // DDL is a misuse caught by code review + the WRAP-grant audit script,
+        // not by parsing SQL here. Anonymous callers (no `caller_id`) are still
+        // denied — DDL needs an attributable owner.
+        if resource == "__ddl__" {
+            return match caller_id {
+                Some(_) => Ok(()),
+                None => Err(WaferError::new(
+                    ErrorCode::PERMISSION_DENIED,
+                    "WRAP: DDL requires an attributable caller (caller: None)".to_string(),
                 )),
             };
         }
@@ -259,6 +277,36 @@ mod tests {
     fn test_resource_prefix() {
         assert_eq!(resource_prefix("suppers-ai/auth"), "suppers_ai__auth__");
         assert_eq!(resource_prefix("wafer-run/web"), "wafer_run__web__");
+    }
+
+    #[test]
+    fn test_ddl_permissive_for_any_block() {
+        let grants = vec![];
+        let admin = "suppers-ai/admin";
+        // Non-admin block can DDL its own tables (write).
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "__ddl__",
+            true,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
+        // Another non-admin block likewise.
+        assert!(check_access(
+            Some("suppers-ai/files"),
+            "__ddl__",
+            true,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
+        // Admin too (sanity).
+        assert!(check_access(Some(admin), "__ddl__", true, None, &grants, admin).is_ok());
+        // Anonymous (no caller) is still denied — DDL needs an attributable caller.
+        assert!(check_access(None, "__ddl__", true, None, &grants, admin).is_err());
     }
 
     #[test]

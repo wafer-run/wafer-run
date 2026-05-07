@@ -27,6 +27,7 @@ mod fully_declared_block {
         capabilities(
             crypto,
             network,
+            ddl,
             collections = ["users", "sessions"],
             callable_blocks = ["wafer-run/crypto"],
             headers(
@@ -74,6 +75,7 @@ fn fully_declared_caps_present() {
     assert!(caps.crypto);
     assert!(caps.network);
     assert!(!caps.raw_sql);
+    assert!(caps.ddl);
     assert!(!caps.config);
     assert!(caps.collections.contains("users"));
     assert!(caps.collections.contains("sessions"));

@@ -182,6 +182,8 @@ impl RuntimeContext {
                         "db" => {
                             if wrap_resource == "__raw_sql__" {
                                 caps.raw_sql
+                            } else if wrap_resource == "__ddl__" {
+                                caps.ddl
                             } else {
                                 caps.allows_collection(wrap_resource)
                             }
