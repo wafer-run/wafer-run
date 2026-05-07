@@ -10,3 +10,6 @@ pub mod discovery;
 pub mod interfaces;
 pub mod mime;
 pub mod service_blocks;
+
+#[cfg(test)]
+pub mod test_support;

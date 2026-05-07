@@ -56,6 +56,13 @@ pub enum AuthError {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
+    /// One-shot lifecycle hook. Invoked by the framework `AuthBlock` on
+    /// `LifecycleType::Init`. Default implementation is a no-op; concrete
+    /// implementations override this to apply migrations, run bootstrap, etc.
+    async fn init(&self, _ctx: &dyn wafer_block::context::Context) -> Result<(), AuthError> {
+        Ok(())
+    }
+
     /// Extract credentials from incoming Message (Bearer or Cookie).
     /// Look up in sessions or personal_access_tokens; touch last_used_at.
     async fn require_user(&self, msg: &Message) -> Result<UserId, AuthError>;
