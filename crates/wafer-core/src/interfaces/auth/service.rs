@@ -63,6 +63,17 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
+    /// WRAP resource grants this auth block declares for other blocks.
+    ///
+    /// Default empty; concrete services override to declare grants for
+    /// consumer blocks (e.g. `suppers-ai/auth-ui`, `admin`, `userportal`).
+    /// The framework `AuthBlock::info()` embeds the result of this method
+    /// into `BlockInfo::grants` so the runtime registers the grants at
+    /// startup.
+    fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
+        Vec::new()
+    }
+
     /// Extract credentials from incoming Message (Bearer or Cookie).
     /// Look up in sessions or personal_access_tokens; touch last_used_at.
     async fn require_user(&self, msg: &Message) -> Result<UserId, AuthError>;

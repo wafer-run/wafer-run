@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod database;
@@ -67,6 +68,20 @@ macro_rules! svc {
     }};
 }
 
+/// Like `svc!`, but forwards a pre-built `Message` (cloned from the caller's
+/// incoming msg + mutated as needed) instead of constructing a fresh message
+/// from `(kind, data)`. Used by typed clients that must propagate request
+/// meta (auth headers, cookies, etc.) to the downstream service.
+macro_rules! svc_msg {
+    ($ctx:ident, $block:expr, $msg:expr, $resource:expr, $write:expr, $rt:expr) => {{
+        #[cfg(not(feature = "wasm-component"))]
+        let __r = call_service_with_msg($ctx, $block, $msg, $resource, $write, $rt).await;
+        #[cfg(feature = "wasm-component")]
+        let __r = call_service_with_msg($block, $msg, $resource, $write, $rt);
+        __r
+    }};
+}
+
 /// Call another `dual_api!` function with the right ctx/await for the active cfg.
 /// The first argument is the context identifier from `dual_api!`.
 macro_rules! svc_fn {
@@ -82,6 +97,7 @@ macro_rules! svc_fn {
 pub(crate) use dual_api;
 pub(crate) use svc;
 pub(crate) use svc_fn;
+pub(crate) use svc_msg;
 
 /// Call a block and return the raw response bytes (native async variant).
 /// Returns `Err(WaferError)` if the block returns an error.
@@ -169,6 +185,69 @@ pub(crate) async fn call_service_streaming(
     Ok(ctx
         .call_block(block, msg, InputStream::from_bytes(payload))
         .await)
+}
+
+/// Call a block, forwarding a pre-built `Message` (carrying request meta from
+/// the caller's incoming message — e.g. Authorization / Cookie headers, etc.)
+/// and return the raw response bytes.
+///
+/// Used by typed clients that must propagate caller-side request meta to a
+/// downstream service (e.g. `clients::auth::require_user`, which forwards the
+/// caller's `Message` so the auth service can read Bearer / Cookie headers
+/// from the original request). The caller is responsible for setting `kind`
+/// on the message; this function will (re)apply WRAP meta if `resource` is
+/// `Some` and ensure `META_REQ_ACTION` matches `msg.kind`.
+#[cfg(not(feature = "wasm-component"))]
+pub(crate) async fn call_service_with_msg(
+    ctx: &dyn Context,
+    block: &str,
+    mut msg: Message,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) -> Result<Vec<u8>, WaferError> {
+    msg.set_meta(META_REQ_ACTION, msg.kind.clone());
+    if let Some(res) = resource {
+        msg.set_meta(META_WRAP_RESOURCE, res);
+        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
+        if let Some(rt) = resource_type {
+            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
+        }
+    }
+    let out = ctx
+        .call_block(block, msg, InputStream::from_bytes(Vec::new()))
+        .await;
+    match out.collect_buffered().await {
+        Ok(buf) => Ok(buf.body),
+        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => Err(e),
+        Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
+            Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
+        }
+        Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
+            WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
+        ),
+        Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            "malformed output stream",
+        )),
+    }
+}
+
+/// WASM-component variant of [`call_service_with_msg`]. Currently
+/// unimplemented — same status as the other WASM-component entry points.
+#[cfg(feature = "wasm-component")]
+pub(crate) fn call_service_with_msg(
+    block: &str,
+    msg: Message,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) -> Result<Vec<u8>, WaferError> {
+    let _ = (block, msg, resource, is_write, resource_type);
+    Err(WaferError::new(
+        ErrorCode::UNIMPLEMENTED,
+        "wasm-component call_service_with_msg not yet implemented for streaming protocol",
+    ))
 }
 
 /// WASM-component variant of [`call_service_streaming`]. Currently
