@@ -37,6 +37,7 @@ impl Block for AuthBlock {
             "Identity, sessions, PATs, orgs — see auth-block-design spec",
         )
         .category(BlockCategory::Service)
+        .grants(self.service.grants())
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
@@ -164,6 +165,74 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "service.init should NOT be called for Start/Stop"
+        );
+    }
+
+    /// Stub service whose `grants()` returns one read-only ResourceGrant.
+    struct GrantsService {
+        grants: Vec<wafer_block::types::ResourceGrant>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl AuthService for GrantsService {
+        fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
+            self.grants.clone()
+        }
+        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+            Err(AuthError::Unauthorized)
+        }
+        async fn require_token(
+            &self,
+            _msg: &Message,
+            _scope: TokenScope,
+        ) -> Result<UserId, AuthError> {
+            Err(AuthError::Unauthorized)
+        }
+        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+            Err(AuthError::Unauthorized)
+        }
+        async fn verify_org_admin(
+            &self,
+            _user: UserId,
+            _provider: &str,
+            _org_ref: &str,
+        ) -> Result<bool, AuthError> {
+            Ok(false)
+        }
+        async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
+            Err(AuthError::NotFound)
+        }
+    }
+
+    #[test]
+    fn block_info_embeds_service_grants() {
+        let grant =
+            wafer_block::types::ResourceGrant::read("test/consumer", "suppers_ai__auth__sessions");
+        let svc = Arc::new(GrantsService {
+            grants: vec![grant],
+        });
+        let block = AuthBlock::new(svc);
+        let info = block.info();
+        assert_eq!(
+            info.grants.len(),
+            1,
+            "grants should round-trip from service"
+        );
+        assert_eq!(info.grants[0].grantee, "test/consumer");
+        assert_eq!(info.grants[0].resource, "suppers_ai__auth__sessions");
+        assert!(!info.grants[0].write);
+    }
+
+    #[test]
+    fn block_info_grants_default_empty() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let svc = Arc::new(InitCounterService { inits: counter });
+        let block = AuthBlock::new(svc);
+        let info = block.info();
+        assert!(
+            info.grants.is_empty(),
+            "default AuthService::grants should be empty"
         );
     }
 }
