@@ -112,6 +112,20 @@ pub struct DeleteWhereRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteWhereCountRequest {
+    pub collection: String,
+    #[serde(default)]
+    pub filters: Vec<FilterDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeWhereRequest {
+    pub collection: String,
+    #[serde(default)]
+    pub filters: Vec<FilterDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateWhereRequest {
     pub collection: String,
     #[serde(default)]
@@ -146,6 +160,16 @@ pub struct CountResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumResponse {
     pub sum: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteWhereCountResponse {
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeWhereResponse {
+    pub records: Vec<Record>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +367,56 @@ mod tests {
         assert_eq!(
             hex, "81ad726f77735f616666656374656400",
             "ExecRawResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_delete_where_count_request() {
+        let req = DeleteWhereCountRequest {
+            collection: String::new(),
+            filters: vec![],
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "82aa636f6c6c656374696f6ea0a766696c7465727390",
+            "DeleteWhereCountRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_take_where_request() {
+        let req = TakeWhereRequest {
+            collection: String::new(),
+            filters: vec![],
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "82aa636f6c6c656374696f6ea0a766696c7465727390",
+            "TakeWhereRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_delete_where_count_response() {
+        let r = DeleteWhereCountResponse { count: 0 };
+        let encoded = codec::encode(&r).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a5636f756e7400",
+            "DeleteWhereCountResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_take_where_response() {
+        let r = TakeWhereResponse { records: vec![] };
+        let encoded = codec::encode(&r).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a77265636f72647390",
+            "TakeWhereResponse schema changed — review consumer impact before updating this literal"
         );
     }
 }

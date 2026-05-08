@@ -344,6 +344,59 @@ impl PostgresDatabaseService {
         Ok(())
     }
 
+    async fn delete_where_count_async(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_exists_async(&table).await? {
+            return Ok(0);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        let result = q
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn take_where_async(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_exists_async(&table).await? {
+            return Ok(vec![]);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+
+        let (sql, sea_vals) = wafer_sql_utils::query::build_delete_where_returning(
+            &table,
+            filters,
+            Backend::Postgres,
+        );
+        let params = sea_values_to_json(sea_vals);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        let rows: Vec<PgRow> = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        rows.iter().map(row_to_record).collect()
+    }
+
     async fn update_where_async(
         &self,
         collection: &str,
@@ -649,6 +702,22 @@ impl DatabaseService for PostgresDatabaseService {
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
         self.delete_where_async(collection, filters).await
+    }
+
+    async fn delete_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        self.delete_where_count_async(collection, filters).await
+    }
+
+    async fn take_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        self.take_where_async(collection, filters).await
     }
 
     async fn update_where(
@@ -1078,4 +1147,44 @@ mod tests {
 
     // Filter/clause/order tests now covered by wafer-sql-utils::query::tests
     // Schema DDL tests now live in wafer-sql-utils::ddl::tests
+
+    #[test]
+    fn test_sea_query_delete_where_count_postgres() {
+        // Confirm the DELETE SQL produced has the right shape (no RETURNING).
+        // The affected-row count comes from execute()'s rows_affected(), not SQL.
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("active"),
+        }];
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+        let params = sea_values_to_json(sea_vals);
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_sea_query_delete_where_returning_postgres() {
+        let filters = vec![Filter {
+            field: "code".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("abc123"),
+        }];
+        let (sql, sea_vals) = wafer_sql_utils::query::build_delete_where_returning(
+            "codes",
+            &filters,
+            Backend::Postgres,
+        );
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("WHERE"));
+        assert!(
+            sql.contains("RETURNING"),
+            "should contain RETURNING clause: {sql}"
+        );
+        let params = sea_values_to_json(sea_vals);
+        assert_eq!(params.len(), 1);
+    }
 }

@@ -581,6 +581,69 @@ impl DatabaseService for SQLiteDatabaseService {
         Ok(())
     }
 
+    async fn delete_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
+            return Ok(0);
+        }
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let affected = db
+            .execute(&sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(affected as i64)
+    }
+
+    async fn take_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
+            return Ok(vec![]);
+        }
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_where_returning(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = db
+            .prepare(&sql)
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let records: Vec<Record> = stmt
+            .query_map(query_params.as_slice(), Self::row_to_record)
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?
+            .filter_map(|r| match r {
+                Ok(record) => Some(record),
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping row due to deserialization error");
+                    None
+                }
+            })
+            .collect();
+        Ok(records)
+    }
+
     async fn update_where(
         &self,
         collection: &str,
@@ -967,5 +1030,162 @@ mod tests {
         assert!(sql.contains("<"));
         let params = sea_to_sql_params(sea_vals);
         assert_eq!(params.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — delete_where_count + take_where (in-memory SQLite)
+    // -----------------------------------------------------------------------
+
+    fn make_test_svc() -> SQLiteDatabaseService {
+        SQLiteDatabaseService::open_in_memory().unwrap()
+    }
+
+    async fn seed_rows(
+        svc: &SQLiteDatabaseService,
+        collection: &str,
+        rows: Vec<serde_json::Value>,
+    ) {
+        // Ensure the table exists by creating one row and deleting it, or just
+        // create rows directly.
+        for row in rows {
+            let mut data = std::collections::HashMap::new();
+            if let serde_json::Value::Object(map) = row {
+                for (k, v) in map {
+                    data.insert(k, v);
+                }
+            }
+            svc.create(collection, data).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_where_count_returns_affected_row_count() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "items",
+            vec![
+                serde_json::json!({"name": "alpha", "status": "active"}),
+                serde_json::json!({"name": "beta", "status": "active"}),
+                serde_json::json!({"name": "gamma", "status": "inactive"}),
+            ],
+        )
+        .await;
+
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("active"),
+        }];
+
+        let count = svc.delete_where_count("items", &filters).await.unwrap();
+        assert_eq!(count, 2, "should have deleted exactly 2 active rows");
+
+        // Remaining row is the inactive one
+        let remaining = svc.count("items", &[]).await.unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_where_count_returns_zero_when_no_match() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "items",
+            vec![serde_json::json!({"name": "alpha", "status": "active"})],
+        )
+        .await;
+
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("nonexistent"),
+        }];
+
+        let count = svc.delete_where_count("items", &filters).await.unwrap();
+        assert_eq!(count, 0);
+
+        // Row still exists
+        let remaining = svc.count("items", &[]).await.unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_where_count_on_missing_table_returns_zero() {
+        let svc = make_test_svc();
+        let filters = vec![Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("active"),
+        }];
+        let count = svc
+            .delete_where_count("no_such_table", &filters)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn take_where_returns_deleted_rows() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "codes",
+            vec![
+                serde_json::json!({"code": "abc123", "used": false}),
+                serde_json::json!({"code": "xyz789", "used": false}),
+                serde_json::json!({"code": "def456", "used": true}),
+            ],
+        )
+        .await;
+
+        let filters = vec![Filter {
+            field: "used".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(false),
+        }];
+
+        let taken = svc.take_where("codes", &filters).await.unwrap();
+        assert_eq!(taken.len(), 2, "should have taken 2 unused codes");
+
+        // Verify the rows are actually deleted
+        let remaining = svc.count("codes", &[]).await.unwrap();
+        assert_eq!(remaining, 1, "only 1 used code should remain");
+    }
+
+    #[tokio::test]
+    async fn take_where_returns_empty_when_no_match() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "codes",
+            vec![serde_json::json!({"code": "abc123", "used": true})],
+        )
+        .await;
+
+        let filters = vec![Filter {
+            field: "used".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(false),
+        }];
+
+        let taken = svc.take_where("codes", &filters).await.unwrap();
+        assert!(taken.is_empty());
+
+        // Original row still present
+        let remaining = svc.count("codes", &[]).await.unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn take_where_on_missing_table_returns_empty() {
+        let svc = make_test_svc();
+        let filters = vec![Filter {
+            field: "code".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("abc"),
+        }];
+        let taken = svc.take_where("no_such_table", &filters).await.unwrap();
+        assert!(taken.is_empty());
     }
 }
