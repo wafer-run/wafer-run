@@ -50,6 +50,65 @@ pub fn build_sum(
     crate::render_select(query, backend)
 }
 
+/// Build a per-day count over a date window.
+///
+/// Produces (SQLite):
+/// ```sql
+/// SELECT date("created_at") AS day, COUNT(*) AS cnt
+/// FROM {table}
+/// WHERE {filters}
+/// GROUP BY date("created_at")
+/// ORDER BY day ASC
+/// ```
+///
+/// Use this for charts that bucket events by day. Filters typically
+/// include the date-window predicate (`date_field >= start AND
+/// date_field < end`); the helper does not synthesize the window itself
+/// so callers can layer extra predicates (e.g. `status = 'ERROR'`)
+/// without re-implementing it.
+pub fn build_daily_count(
+    table: &str,
+    date_field: &str,
+    filters: &[Filter],
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
+    use sea_query::SimpleExpr;
+
+    // The column reference is interpolated into the raw expression text via
+    // ANSI double-quoting (works for both SQLite and Postgres). `date_field`
+    // is always an internal constant from caller code — no user input — so
+    // we don't need parameterization here. Defensive guard rejects anything
+    // that isn't a plain identifier just in case.
+    assert!(
+        date_field
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "date_field must be a plain identifier; got {date_field:?}"
+    );
+    let date_expr_sql: String = match backend {
+        Backend::Sqlite => format!("date(\"{date_field}\")"),
+        Backend::Postgres => {
+            format!("to_char(CAST(\"{date_field}\" AS DATE), 'YYYY-MM-DD')")
+        }
+    };
+    let date_expr: SimpleExpr = Expr::cust(&date_expr_sql);
+
+    let mut query = Query::select();
+    query
+        .expr_as(date_expr.clone(), Alias::new("day"))
+        .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("cnt"))
+        .from(DynCol(table.into()));
+
+    if let Some(cond) = build_condition(filters) {
+        query.cond_where(cond);
+    }
+
+    query.add_group_by(vec![date_expr]);
+    query.order_by(Alias::new("day"), sea_query::Order::Asc);
+
+    crate::render_select(query, backend)
+}
+
 /// Build SELECT AVG({field}) FROM {table} WHERE {filters}.
 pub fn build_avg(
     table: &str,
@@ -193,6 +252,31 @@ mod tests {
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
         assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn test_build_daily_count_sqlite() {
+        let filters = vec![Filter {
+            field: "created_at".into(),
+            operator: FilterOp::GreaterEqual,
+            value: serde_json::json!("2026-04-01"),
+        }];
+        let (sql, vals) = build_daily_count("users", "created_at", &filters, Backend::Sqlite);
+        eprintln!("SQL: {sql}");
+        eprintln!("VALS: {vals:?}");
+        assert!(sql.contains("date("));
+        assert!(sql.contains("COUNT(*)"));
+        assert!(sql.contains("GROUP BY"));
+        assert!(sql.contains("ORDER BY"));
+        assert_eq!(vals.len(), 1);
+    }
+
+    #[test]
+    fn test_build_daily_count_postgres() {
+        let (sql, _vals) = build_daily_count("users", "created_at", &[], Backend::Postgres);
+        assert!(sql.contains("to_char"));
+        assert!(sql.contains("CAST"));
+        assert!(sql.contains("GROUP BY"));
     }
 
     #[test]
