@@ -60,12 +60,12 @@ async fn clone_arc_yields_owned_handle_callable_through_dyn() {
     // Construct a Context, take a `&dyn Context` borrow, then upgrade it to
     // an owning `Arc<dyn Context>`. The clone must be usable independently
     // of the original — exercise it through a trait method.
-    let ctx = PlainContext;
-    let dyn_ref: &dyn Context = &ctx;
-    let arc: Arc<dyn Context> = dyn_ref.clone_arc();
-
-    // Drop the original — the Arc must still work.
-    drop(ctx);
+    let arc: Arc<dyn Context> = {
+        let ctx = PlainContext;
+        let dyn_ref: &dyn Context = &ctx;
+        dyn_ref.clone_arc()
+        // `ctx` goes out of scope here; the Arc must still be usable below.
+    };
 
     let out = arc
         .call_block_buffered("any/block", Message::new("k"), b"")
