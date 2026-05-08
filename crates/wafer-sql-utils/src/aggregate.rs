@@ -74,15 +74,24 @@ pub fn build_daily_count(
 ) -> (String, Vec<sea_query::Value>) {
     use sea_query::SimpleExpr;
 
-    let date_expr: SimpleExpr = match backend {
-        Backend::Sqlite => {
-            Expr::cust_with_expr("date($1)", Expr::col(DynCol(date_field.into())))
+    // The column reference is interpolated into the raw expression text via
+    // ANSI double-quoting (works for both SQLite and Postgres). `date_field`
+    // is always an internal constant from caller code — no user input — so
+    // we don't need parameterization here. Defensive guard rejects anything
+    // that isn't a plain identifier just in case.
+    assert!(
+        date_field
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "date_field must be a plain identifier; got {date_field:?}"
+    );
+    let date_expr_sql: String = match backend {
+        Backend::Sqlite => format!("date(\"{date_field}\")"),
+        Backend::Postgres => {
+            format!("to_char(CAST(\"{date_field}\" AS DATE), 'YYYY-MM-DD')")
         }
-        Backend::Postgres => Expr::cust_with_expr(
-            "to_char(CAST($1 AS DATE), 'YYYY-MM-DD')",
-            Expr::col(DynCol(date_field.into())),
-        ),
     };
+    let date_expr: SimpleExpr = Expr::cust(&date_expr_sql);
 
     let mut query = Query::select();
     query
@@ -253,6 +262,8 @@ mod tests {
             value: serde_json::json!("2026-04-01"),
         }];
         let (sql, vals) = build_daily_count("users", "created_at", &filters, Backend::Sqlite);
+        eprintln!("SQL: {sql}");
+        eprintln!("VALS: {vals:?}");
         assert!(sql.contains("date("));
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
