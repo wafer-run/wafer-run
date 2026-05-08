@@ -52,6 +52,7 @@ mod tests {
     // Minimal mock context (same pattern as wasmi_block_test.rs).
     // -----------------------------------------------------------------------
 
+    #[derive(Clone)]
     struct MockContext;
 
     #[async_trait::async_trait]
@@ -75,6 +76,10 @@ mod tests {
 
         fn config_get(&self, _key: &str) -> Option<&str> {
             None
+        }
+
+        fn clone_arc(&self) -> std::sync::Arc<dyn wafer_run::context::Context> {
+            std::sync::Arc::new(self.clone())
         }
     }
 

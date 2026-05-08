@@ -79,4 +79,16 @@ impl Context for ContextWrapper {
     fn caller_id(&self) -> Option<&str> {
         unsafe { &*self.0 }.caller_id()
     }
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        // `ContextWrapper` is a thin pointer wrapper around a non-'static
+        // `&dyn Context` extended via the `ContextGuard`. Cloning it
+        // produces another wrapper aliasing the same pointer. The same
+        // lifetime contract as the rest of this module applies: the new
+        // Arc must not outlive the originating `ContextGuard`. WASM
+        // blocks that need an owning context handle past the lifecycle
+        // call must arrange that on the runtime side (the wasmi block
+        // dispatcher already drops the guard at end-of-call), not via
+        // this method.
+        Arc::new(ContextWrapper(self.0))
+    }
 }
