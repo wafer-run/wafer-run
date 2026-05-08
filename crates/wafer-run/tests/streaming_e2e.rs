@@ -233,6 +233,7 @@ async fn multi_chunk_individual_events() {
     assert!(matches!(events[3], StreamEvent::Complete { .. }));
 }
 
+#[derive(Clone)]
 struct MockCtx;
 
 #[async_trait]
@@ -245,6 +246,9 @@ impl Context for MockCtx {
     }
     fn config_get(&self, _: &str) -> Option<&str> {
         None
+    }
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        std::sync::Arc::new(self.clone())
     }
 }
 

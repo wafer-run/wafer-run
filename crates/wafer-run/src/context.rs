@@ -19,6 +19,11 @@ use crate::{block::Block, platform::Instant, types::*};
 ///
 /// Compiles on both native and wasm32 targets. Uses `web-time::Instant`
 /// for deadline tracking (zero-cost on native, Performance.now() on wasm32).
+///
+/// `Clone` is cheap — every field is either `Arc<...>`, `Option<...>`, a
+/// small `Copy` value, or a `String`. Cloning produces a new owning handle
+/// that points at the same shared snapshots; used by [`Context::clone_arc`].
+#[derive(Clone)]
 pub struct RuntimeContext {
     pub flow_id: String,
     pub node_id: String,
@@ -412,5 +417,9 @@ impl Context for RuntimeContext {
 
     fn caller_id(&self) -> Option<&str> {
         self.caller_id.as_deref()
+    }
+
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        Arc::new(self.clone())
     }
 }

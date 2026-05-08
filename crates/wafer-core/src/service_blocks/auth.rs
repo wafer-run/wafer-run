@@ -142,6 +142,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn noop_context_clone_arc_round_trips_through_dyn() {
+        // PR 5b sanity: take a `&dyn Context` from `noop_context()`, upgrade
+        // to an `Arc<dyn Context>` via `clone_arc`, and verify trait methods
+        // still dispatch through the cloned handle. Exercises the new
+        // object-safe `Context::clone_arc` shape end-to-end.
+        let ctx = crate::test_support::noop_context();
+        let dyn_ref: &dyn wafer_block::Context = &*ctx;
+        let arc = dyn_ref.clone_arc();
+        drop(ctx);
+        // Trait methods should still work through the cloned Arc.
+        assert!(!arc.is_cancelled());
+        assert!(arc.config_get("anything").is_none());
+        assert!(arc.registered_blocks().is_empty());
+    }
+
+    #[tokio::test]
     async fn non_init_lifecycle_does_not_invoke_service_init() {
         let counter = Arc::new(AtomicUsize::new(0));
         let svc = Arc::new(InitCounterService {

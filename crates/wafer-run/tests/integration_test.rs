@@ -1185,6 +1185,7 @@ fn test_wafer_error_meta() {
 // Test context helper (minimal Context implementation for router tests)
 // ===========================================================================
 
+#[derive(Clone)]
 struct TestContext;
 
 #[async_trait::async_trait]
@@ -1206,6 +1207,10 @@ impl Context for TestContext {
 
     fn config_get(&self, _key: &str) -> Option<&str> {
         None
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        std::sync::Arc::new(self.clone())
     }
 }
 

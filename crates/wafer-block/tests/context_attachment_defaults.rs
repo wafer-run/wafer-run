@@ -1,10 +1,11 @@
 //! Default Context impls for the attachment APIs: no-op semantics so that
 //! existing native code paths (tests, native runtime) compile and run unchanged.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use wafer_block::{streams::output::OutputStream, Attachment, Context, InputStream, Message};
 
+#[derive(Clone)]
 struct PlainContext;
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -23,6 +24,9 @@ impl Context for PlainContext {
     }
     fn config_get(&self, _key: &str) -> Option<&str> {
         None
+    }
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        Arc::new(self.clone())
     }
 }
 
@@ -49,4 +53,23 @@ async fn default_call_block_with_attachments_drops_attachments_and_calls_through
 fn default_lookup_attachment_returns_none() {
     let ctx = PlainContext;
     assert!(ctx.lookup_attachment("anything").is_none());
+}
+
+#[tokio::test]
+async fn clone_arc_yields_owned_handle_callable_through_dyn() {
+    // Construct a Context, take a `&dyn Context` borrow, then upgrade it to
+    // an owning `Arc<dyn Context>`. The clone must be usable independently
+    // of the original — exercise it through a trait method.
+    let ctx = PlainContext;
+    let dyn_ref: &dyn Context = &ctx;
+    let arc: Arc<dyn Context> = dyn_ref.clone_arc();
+
+    // Drop the original — the Arc must still work.
+    drop(ctx);
+
+    let out = arc
+        .call_block_buffered("any/block", Message::new("k"), b"")
+        .await
+        .expect("buffered ok");
+    assert_eq!(out.body, b"ok");
 }

@@ -15,6 +15,7 @@ use wafer_block::{
 /// reach back into the runtime (e.g. lifecycle hooks that only invoke service
 /// methods). Any unexpected runtime call surfaces as a loud panic rather than
 /// silently returning a stub value.
+#[derive(Clone)]
 struct NoopContext;
 
 #[async_trait::async_trait]
@@ -34,6 +35,10 @@ impl Context for NoopContext {
 
     fn config_get(&self, _key: &str) -> Option<&str> {
         None
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        std::sync::Arc::new(self.clone())
     }
 }
 

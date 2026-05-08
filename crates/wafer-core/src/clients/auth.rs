@@ -151,6 +151,7 @@ mod tests {
     /// wrapped `AuthBlock`. wafer-core has no full-runtime infrastructure;
     /// this tiny stub gives the typed-client tests a real round-trip
     /// without pulling in `wafer-run`.
+    #[derive(Clone)]
     struct SingleAuthBlockCtx {
         block: Arc<AuthBlock>,
     }
@@ -171,6 +172,9 @@ mod tests {
         }
         fn config_get(&self, _key: &str) -> Option<&str> {
             None
+        }
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
         }
     }
 

@@ -119,4 +119,11 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn caller_id(&self) -> Option<&str> {
         None
     }
+
+    /// Get an owned `Arc<dyn Context>` from a `&dyn Context`. Concrete
+    /// implementations clone their inner Arc-shaped state to produce a
+    /// new owning handle. Use this when long-lived service objects need
+    /// to retain a Context handle past the lifetime of a borrow (e.g.
+    /// AuthServiceImpl populating a OnceLock from its `init` method).
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context>;
 }
