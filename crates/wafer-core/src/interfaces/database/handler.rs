@@ -175,6 +175,28 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
+        ServiceOp::DATABASE_DELETE_WHERE_COUNT => {
+            let req = decode_or_err!(
+                body,
+                wire::DeleteWhereCountRequest,
+                "database.delete_where_count"
+            );
+            let filters = convert_filters(req.filters);
+            match service.delete_where_count(&req.collection, &filters).await {
+                Ok(count) => to_output(&wire::DeleteWhereCountResponse { count }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_TAKE_WHERE => {
+            let req = decode_or_err!(body, wire::TakeWhereRequest, "database.take_where");
+            let filters = convert_filters(req.filters);
+            match service.take_where(&req.collection, &filters).await {
+                Ok(records) => to_output(&wire::TakeWhereResponse {
+                    records: records.into_iter().map(service_record_to_wire).collect(),
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
         ServiceOp::DATABASE_UPDATE_WHERE => {
             let req = decode_or_err!(body, wire::UpdateWhereRequest, "database.update_where");
             let filters = convert_filters(req.filters);

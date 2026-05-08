@@ -191,6 +191,27 @@ pub fn build_delete_where(
     crate::render_delete(query, backend)
 }
 
+/// Build DELETE FROM {table} WHERE {filters} RETURNING *.
+///
+/// Sqlite 3.35+ and PostgreSQL both support this form. The caller is
+/// responsible for ensuring the backend version requirement is met.
+pub fn build_delete_where_returning(
+    table: &str,
+    filters: &[Filter],
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
+    let mut query = Query::delete();
+    query.from_table(DynCol(table.into()));
+
+    if let Some(cond) = build_condition(filters) {
+        query.cond_where(cond);
+    }
+
+    query.returning_all();
+
+    crate::render_delete(query, backend)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +295,42 @@ mod tests {
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
         assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn test_build_delete_where_returning_sqlite() {
+        let filters = vec![eq_filter("code_hash", serde_json::json!("abc123"))];
+        let (sql, values) = build_delete_where_returning("cli_codes", &filters, Backend::Sqlite);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("WHERE"));
+        assert!(
+            sql.contains("RETURNING"),
+            "should contain RETURNING clause: {sql}"
+        );
+        assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn test_build_delete_where_returning_postgres() {
+        let filters = vec![eq_filter("code_hash", serde_json::json!("abc123"))];
+        let (sql, values) = build_delete_where_returning("cli_codes", &filters, Backend::Postgres);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("WHERE"));
+        assert!(
+            sql.contains("RETURNING"),
+            "should contain RETURNING clause: {sql}"
+        );
+        assert!(sql.contains("$1"));
+        assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn test_build_delete_where_returning_no_filters() {
+        // No filters — should delete all rows and return them
+        let (sql, values) = build_delete_where_returning("items", &[], Backend::Sqlite);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(!sql.contains("WHERE"));
+        assert!(sql.contains("RETURNING"));
+        assert!(values.is_empty());
     }
 }

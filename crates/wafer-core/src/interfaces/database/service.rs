@@ -100,6 +100,51 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
+    /// Bulk-delete all records matching filters and return the number of deleted rows.
+    ///
+    /// Default impl: count then delete. Small TOCTOU window — concurrent inserts
+    /// matching the filters may be deleted without being counted, or vice versa.
+    /// Native sqlite/postgres impls override with a single DELETE statement that
+    /// returns the affected-row count atomically.
+    async fn delete_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        let n = self.count(collection, filters).await?;
+        self.delete_where(collection, filters).await?;
+        Ok(n)
+    }
+
+    /// Atomically select and delete all records matching filters, returning the
+    /// deleted rows.
+    ///
+    /// Default impl: list then delete-by-id. Not atomic — concurrent writes to
+    /// matching rows may race between the list and the deletes. Native
+    /// sqlite/postgres impls override with `DELETE … WHERE … RETURNING *` (one
+    /// statement, atomic).
+    async fn take_where(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let listed = self
+            .list(
+                collection,
+                &ListOptions {
+                    filters: filters.to_vec(),
+                    limit: 10_000,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let ids: Vec<_> = listed.records.iter().map(|r| r.id.clone()).collect();
+        for id in &ids {
+            self.delete(collection, id).await?;
+        }
+        Ok(listed.records)
+    }
+
     /// Bulk-update all records matching filters in a single query.
     async fn update_where(
         &self,

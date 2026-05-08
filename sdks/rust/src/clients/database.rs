@@ -11,9 +11,10 @@
 use wafer_block::{
     codec,
     wire::database::{
-        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereRequest,
-        ExecRawRequest, ExecRawResponse, GetRequest, ListRequest, QueryRawRequest, Record,
-        RecordList, SumRequest, SumResponse, UpdateRequest, UpdateWhereRequest,
+        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
+        DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse, GetRequest,
+        ListRequest, QueryRawRequest, Record, RecordList, SumRequest, SumResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
     },
     ServiceOp, WaferError,
 };
@@ -154,4 +155,38 @@ pub fn update_where(request: &UpdateWhereRequest) -> Result<(), WaferError> {
     let req_bytes = codec::encode(request)?;
     let mut response_stream = open_buffered(BLOCK, ServiceOp::DATABASE_UPDATE_WHERE, &req_bytes)?;
     consume_ack(&mut response_stream)
+}
+
+/// Buffered: delete all records matching the filters and return the number of
+/// deleted rows.
+pub fn delete_where_count(
+    request: &DeleteWhereCountRequest,
+) -> Result<DeleteWhereCountResponse, WaferError> {
+    let req_bytes = codec::encode(request)?;
+    let mut response_stream =
+        open_buffered(BLOCK, ServiceOp::DATABASE_DELETE_WHERE_COUNT, &req_bytes)?;
+    let body = collect_single_frame(&mut response_stream, "database DELETE_WHERE_COUNT")?;
+    codec::decode(&body).map_err(|e| {
+        WaferError::new(
+            e.code,
+            format!(
+                "decoding database DELETE_WHERE_COUNT response: {}",
+                e.message
+            ),
+        )
+    })
+}
+
+/// Buffered: atomically select and delete all records matching the filters,
+/// returning the deleted rows.
+pub fn take_where(request: &TakeWhereRequest) -> Result<TakeWhereResponse, WaferError> {
+    let req_bytes = codec::encode(request)?;
+    let mut response_stream = open_buffered(BLOCK, ServiceOp::DATABASE_TAKE_WHERE, &req_bytes)?;
+    let body = collect_single_frame(&mut response_stream, "database TAKE_WHERE")?;
+    codec::decode(&body).map_err(|e| {
+        WaferError::new(
+            e.code,
+            format!("decoding database TAKE_WHERE response: {}", e.message),
+        )
+    })
 }

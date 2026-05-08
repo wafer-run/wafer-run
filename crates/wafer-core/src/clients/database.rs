@@ -8,10 +8,11 @@ pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
-        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereRequest,
-        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, GetRequest, ListRequest,
-        QueryRawRequest, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, UpdateRequest,
-        UpdateWhereRequest,
+        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
+        DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
+        FilterDef as WireFilterDef, GetRequest, ListRequest, QueryRawRequest,
+        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
+        TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
     },
     WaferError,
 };
@@ -351,6 +352,42 @@ dual_api! {
             Some("db")
         )?;
         Ok(())
+    }
+
+    /// Delete all records matching the filters and return the number of deleted rows.
+    pub fn delete_by_filters_count(ctx, collection: &str, filters: Vec<Filter>) -> Result<i64, WaferError> {
+        let req = DeleteWhereCountRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&filters),
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_DELETE_WHERE_COUNT,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: DeleteWhereCountResponse = decode(&data)?;
+        Ok(resp.count)
+    }
+
+    /// Atomically select and delete all records matching the filters, returning the deleted rows.
+    pub fn take_by_filters(ctx, collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, WaferError> {
+        let req = TakeWhereRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&filters),
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_TAKE_WHERE,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: TakeWhereResponse = decode(&data)?;
+        Ok(resp.records)
     }
 
     pub fn update_by_filters(
