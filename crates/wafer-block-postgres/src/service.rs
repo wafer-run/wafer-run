@@ -144,7 +144,11 @@ impl PostgresDatabaseService {
         // Auto-create table if it doesn't exist
         self.ensure_table_async(&table, &data).await?;
 
-        let columns: Vec<String> = data.keys().cloned().collect();
+        // Sorted-key iteration so the generated INSERT is stable across
+        // process starts. HashMap order is randomized by RandomState; without
+        // sorting, every restart produces a fresh prepared statement.
+        let mut columns: Vec<String> = data.keys().cloned().collect();
+        columns.sort();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
         let values: Vec<&serde_json::Value> = columns.iter().map(|k| &data[k]).collect();
 
@@ -193,7 +197,9 @@ impl PostgresDatabaseService {
         // Ensure any new columns exist
         self.ensure_columns_from_data(&table, &data).await?;
 
-        let keys: Vec<String> = data.keys().cloned().collect();
+        // Sorted-key iteration — see `create_async` above for the rationale.
+        let mut keys: Vec<String> = data.keys().cloned().collect();
+        keys.sort();
         let set_clauses: Vec<String> = keys
             .iter()
             .enumerate()
@@ -419,7 +425,10 @@ impl PostgresDatabaseService {
         self.ensure_columns_from_data(&table, &data).await?;
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        // Sort by key so the generated SET clause is stable across runs —
+        // see `create_async()` above for the rationale.
+        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
             &table,
             &data_pairs,

@@ -346,7 +346,12 @@ impl DatabaseService for SQLiteDatabaseService {
         // Auto-create table if it doesn't exist
         ensure_table(&db, &table, &data);
 
-        let columns: Vec<&String> = data.keys().collect();
+        // Sorted-key iteration so the generated INSERT is stable across
+        // process starts. HashMap order is randomized by RandomState, which
+        // would otherwise produce N permutations of the same INSERT — each
+        // a distinct cached prepared statement.
+        let mut columns: Vec<&String> = data.keys().collect();
+        columns.sort();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
         let values: Vec<SqlValue> = columns
             .iter()
@@ -407,13 +412,18 @@ impl DatabaseService for SQLiteDatabaseService {
                 );
             }
 
-            let set_clauses: Vec<String> = data
-                .keys()
+            // Sorted-key iteration so the generated SET clause is stable —
+            // see `create()` above for the rationale.
+            let mut keys: Vec<&String> = data.keys().collect();
+            keys.sort();
+            let set_clauses: Vec<String> = keys
+                .iter()
                 .enumerate()
                 .map(|(i, k)| format!("{} = ?{}", sanitize_ident(k), i + 1))
                 .collect();
 
-            let mut values: Vec<SqlValue> = data.values().map(json_to_sql_value).collect();
+            let mut values: Vec<SqlValue> =
+                keys.iter().map(|k| json_to_sql_value(&data[*k])).collect();
             values.push(SqlValue::Text(id.to_string()));
 
             let sql = format!(
@@ -667,7 +677,11 @@ impl DatabaseService for SQLiteDatabaseService {
             );
         }
 
-        let data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        // Sort by key so the generated SET clause is stable across runs —
+        // see `create()` above for the rationale (HashMap iteration order
+        // would otherwise produce a fresh prepared statement per run).
+        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
             &table,
             &data_pairs,
