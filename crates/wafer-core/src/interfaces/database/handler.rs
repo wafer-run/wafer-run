@@ -104,6 +104,7 @@ pub async fn handle_message(
                 sort: convert_sort(req.sort),
                 limit: req.limit,
                 offset: req.offset,
+                skip_count: false,
             };
             match service.list(&req.collection, &opts).await {
                 Ok(list) => to_output(service_record_list_to_wire(list)),

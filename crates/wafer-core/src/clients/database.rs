@@ -89,7 +89,7 @@ dual_api! {
             sort: to_wire_sort(&opts.sort),
             limit: opts.limit,
             offset: opts.offset,
-            skip_count: false,
+            skip_count: opts.skip_count,
         };
         let data = svc!(
             ctx, BLOCK,
@@ -294,6 +294,7 @@ dual_api! {
                 sort,
                 limit: page_size,
                 offset: (page - 1).saturating_mul(page_size),
+                skip_count: false,
             }
         ))
     }

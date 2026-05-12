@@ -223,6 +223,11 @@ pub struct ListOptions {
     pub sort: Vec<SortField>,
     pub limit: i64,
     pub offset: i64,
+    /// When `true`, backends MUST skip the `SELECT COUNT(*)` query and
+    /// return `RecordList.total_count = records.len() as i64`. Wrapper
+    /// helpers `list_all` and `list_sorted` set this; bare `list` does
+    /// not. See `wire::database::ListRequest::skip_count`.
+    pub skip_count: bool,
 }
 
 /// Filter represents a single filter condition.

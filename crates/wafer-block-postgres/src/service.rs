@@ -927,6 +927,7 @@ mod tests {
             sort: vec![],
             limit: 0,
             offset: 0,
+            skip_count: false,
         };
         let (sql, sea_vals) =
             wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
@@ -953,6 +954,7 @@ mod tests {
             ],
             limit: 10,
             offset: 20,
+            skip_count: false,
         };
         let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
         assert!(sql.contains("ORDER BY"));

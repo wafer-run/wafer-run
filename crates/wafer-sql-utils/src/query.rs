@@ -234,6 +234,7 @@ mod tests {
             }],
             limit: 10,
             offset: 0,
+            skip_count: false,
         };
         let (sql, values) = build_select("users", &opts, Backend::Sqlite);
         assert!(sql.contains("SELECT"));
@@ -251,6 +252,7 @@ mod tests {
             sort: vec![],
             limit: 0,
             offset: 0,
+            skip_count: false,
         };
         let (sql, values) = build_select("users", &opts, Backend::Postgres);
         assert!(sql.contains("$1"));
