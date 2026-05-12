@@ -67,13 +67,13 @@ pub enum ChatRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChatContent {
     Text(String),
     Parts(Vec<ContentPart>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ContentPart {
     Text(String),
     ImageUrl { url: String, detail: Option<String> },
