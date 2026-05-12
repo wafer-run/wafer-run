@@ -253,17 +253,25 @@ impl DatabaseService for SQLiteDatabaseService {
         // Ensure filter/sort columns exist (add them if missing)
         ensure_columns_for_query(&db, collection, &opts.filters, &opts.sort);
 
-        // Count total
-        let (count_sql, count_sea_vals) =
-            wafer_sql_utils::aggregate::build_count(collection, &opts.filters, Backend::Sqlite);
-        let count_params = sea_to_sql_params(count_sea_vals);
-        let count_refs: Vec<&dyn rusqlite::types::ToSql> = count_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let total_count: i64 = db
-            .query_row(&count_sql, count_refs.as_slice(), |row| row.get(0))
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        // Count total — skipped when opts.skip_count is set (the caller has
+        // signalled they only care about the records and will not read
+        // total_count as the full collection size). We then synthesize
+        // total_count from records.len() below.
+        let total_count: Option<i64> = if opts.skip_count {
+            None
+        } else {
+            let (count_sql, count_sea_vals) =
+                wafer_sql_utils::aggregate::build_count(collection, &opts.filters, Backend::Sqlite);
+            let count_params = sea_to_sql_params(count_sea_vals);
+            let count_refs: Vec<&dyn rusqlite::types::ToSql> = count_params
+                .iter()
+                .map(|v| v as &dyn rusqlite::types::ToSql)
+                .collect();
+            Some(
+                db.query_row(&count_sql, count_refs.as_slice(), |row| row.get(0))
+                    .map_err(|e| DatabaseError::Internal(e.to_string()))?,
+            )
+        };
 
         // Query records
         let (sql, sea_vals) =
@@ -296,6 +304,7 @@ impl DatabaseService for SQLiteDatabaseService {
             1
         };
 
+        let total_count = total_count.unwrap_or(records.len() as i64);
         Ok(RecordList {
             records,
             total_count,
@@ -1203,5 +1212,42 @@ mod tests {
         }];
         let taken = svc.take_where("no_such_table", &filters).await.unwrap();
         assert!(taken.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_skip_count_returns_records_len_as_total_count() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "rows",
+            vec![
+                serde_json::json!({"name": "a"}),
+                serde_json::json!({"name": "b"}),
+                serde_json::json!({"name": "c"}),
+                serde_json::json!({"name": "d"}),
+                serde_json::json!({"name": "e"}),
+            ],
+        )
+        .await;
+
+        // With skip_count: true — total_count is records.len(), not full count.
+        let opts_skip = ListOptions {
+            limit: 2,
+            skip_count: true,
+            ..Default::default()
+        };
+        let result = svc.list("rows", &opts_skip).await.unwrap();
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.total_count, 2);
+
+        // With skip_count: false — total_count is the full collection size.
+        let opts_count = ListOptions {
+            limit: 2,
+            skip_count: false,
+            ..Default::default()
+        };
+        let result = svc.list("rows", &opts_count).await.unwrap();
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.total_count, 5);
     }
 }
