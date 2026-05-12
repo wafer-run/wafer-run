@@ -271,4 +271,56 @@ mod tests {
         let decoded: ModelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, info);
     }
+
+    /// Minimal impl that only overrides the required trait methods, to
+    /// exercise the default impls for load_model / unload_model / claims_backend.
+    struct MinimalImage;
+
+    #[async_trait::async_trait]
+    impl ImageService for MinimalImage {
+        async fn generate(
+            &self,
+            _req: ImageRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ImageResponse, ImageError> {
+            Ok(ImageResponse { images: vec![] })
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ImageError> {
+            Ok(vec![])
+        }
+
+        async fn status(
+            &self,
+            _backend_id: &str,
+            _model_id: &str,
+        ) -> Result<ModelStatus, ImageError> {
+            Ok(ModelStatus::ready())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_load_model_returns_not_supported() {
+        use futures::StreamExt;
+        let svc = MinimalImage;
+        let mut stream = svc.load_model("x", "y", CancellationToken::new());
+        let first = stream.next().await.unwrap();
+        assert!(matches!(first, Err(ImageError::NotSupported)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_unload_model_returns_not_supported() {
+        let svc = MinimalImage;
+        assert!(matches!(
+            svc.unload_model("x", "y").await,
+            Err(ImageError::NotSupported)
+        ));
+    }
+
+    #[test]
+    fn default_claims_backend_returns_false() {
+        let svc = MinimalImage;
+        assert!(!svc.claims_backend("anything"));
+    }
 }
