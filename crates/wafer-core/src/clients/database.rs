@@ -281,6 +281,33 @@ dual_api! {
         Ok(result.records)
     }
 
+    /// List records matching `filters` in the order specified by `sort`.
+    ///
+    /// Hard-capped at 10,000 records. Skips the backend `COUNT` query — use
+    /// `paginated_list` if you need `total_count` for pagination UI.
+    ///
+    /// Use this when the caller needs `ORDER BY` semantics but does not need
+    /// pagination — most "show the N most recent X" or "list all X by name"
+    /// queries fit. For unsorted bulk reads, prefer `list_all`.
+    pub fn list_sorted(
+        ctx,
+        collection: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortField>,
+    ) -> Result<Vec<Record>, WaferError> {
+        let result = svc_fn!(ctx, list(
+            collection,
+            &ListOptions {
+                filters,
+                sort,
+                limit: 10_000,
+                skip_count: true,
+                ..Default::default()
+            }
+        ))?;
+        Ok(result.records)
+    }
+
     pub fn paginated_list(
         ctx,
         collection: &str,
