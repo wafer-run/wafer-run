@@ -265,12 +265,16 @@ dual_api! {
     ///
     /// Intended for small, bounded collections (roles, permissions, legal docs).
     /// Hard-capped at 10,000 records — use paginated `list()` for larger collections.
+    ///
+    /// Sets `skip_count: true` on the underlying `ListOptions` so the
+    /// backend avoids the `SELECT COUNT(*)` round-trip.
     pub fn list_all(ctx, collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, WaferError> {
         let result = svc_fn!(ctx, list(
             collection,
             &ListOptions {
                 filters,
                 limit: 10_000,
+                skip_count: true,
                 ..Default::default()
             }
         ))?;
