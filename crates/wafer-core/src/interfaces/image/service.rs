@@ -56,11 +56,26 @@ pub struct ImageResponse {
     pub images: Vec<GeneratedImage>,
 }
 
+impl ImageResponse {
+    pub fn new(images: Vec<GeneratedImage>) -> Self {
+        Self { images }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GeneratedImage {
     pub bytes: Vec<u8>,
     pub mime_type: String,
+}
+
+impl GeneratedImage {
+    pub fn new(bytes: Vec<u8>, mime_type: impl Into<String>) -> Self {
+        Self {
+            bytes,
+            mime_type: mime_type.into(),
+        }
+    }
 }
 
 // ---------- Model management ----------
@@ -142,6 +157,11 @@ impl ModelInfo {
             display_name: display_name.into(),
             capabilities: ModelCapabilities::default(),
         }
+    }
+
+    pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -243,6 +263,30 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: ImageResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn image_response_new_and_generated_image_new() {
+        let img = GeneratedImage::new(b"\x89PNG\r\n\x1a\n".to_vec(), "image/png");
+        assert_eq!(img.bytes.len(), 8);
+        assert_eq!(img.mime_type, "image/png");
+
+        let resp = ImageResponse::new(vec![img.clone()]);
+        assert_eq!(resp.images, vec![img]);
+    }
+
+    #[test]
+    fn model_info_with_capabilities_chaining() {
+        let mut caps = ModelCapabilities::default();
+        caps.max_width = Some(512);
+        caps.supports_negative_prompt = true;
+
+        let info = ModelInfo::new("transformers-image", "Xenova/sd-turbo", "SD-Turbo")
+            .with_capabilities(caps);
+
+        assert_eq!(info.capabilities.max_width, Some(512));
+        assert!(info.capabilities.supports_negative_prompt);
+        assert_eq!(info.model_id, "Xenova/sd-turbo");
     }
 
     #[test]
