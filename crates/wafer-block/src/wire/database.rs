@@ -54,6 +54,13 @@ pub struct ListRequest {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// When `true`, backends skip the `SELECT COUNT(*)` query and return
+    /// `RecordList.total_count = records.len() as i64` (count of records
+    /// returned this call, not total matching in the collection). Used by
+    /// `wafer-core::clients::database::{list_all, list_sorted}`. Paginated
+    /// UIs should leave this `false` and read `total_count` normally.
+    #[serde(default)]
+    pub skip_count: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +220,7 @@ mod tests {
             }],
             limit: 50,
             offset: 100,
+            skip_count: false,
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListRequest = codec::decode(&encoded).expect("decode");
@@ -222,6 +230,7 @@ mod tests {
         assert_eq!(decoded.filters.len(), 1);
         assert_eq!(decoded.sort.len(), 1);
         assert!(decoded.sort[0].desc);
+        assert!(!decoded.skip_count);
     }
 
     #[test]
@@ -309,13 +318,32 @@ mod tests {
             sort: vec![],
             limit: 0,
             offset: 0,
+            skip_count: false,
         };
         let encoded = codec::encode(&req).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex, "85aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400",
+            hex, "86aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400aa736b69705f636f756e74c2",
             "ListRequest schema changed — review consumer impact before updating this literal"
         );
+    }
+
+    /// Forward-compat: an old encoder that omits `skip_count` must still
+    /// decode into the new `ListRequest`, defaulting `skip_count` to `false`.
+    /// The legacy hex below is the pre-skip_count `ListRequest` encoding
+    /// (captured before this field was added).
+    #[test]
+    fn list_request_decodes_with_missing_skip_count() {
+        let legacy_hex =
+            "85aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400";
+        let bytes: Vec<u8> = (0..legacy_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&legacy_hex[i..i + 2], 16).unwrap())
+            .collect();
+        let decoded: ListRequest = codec::decode(&bytes).expect("decode legacy");
+        assert!(!decoded.skip_count);
+        assert_eq!(decoded.collection, "");
+        assert_eq!(decoded.limit, 0);
     }
 
     #[test]

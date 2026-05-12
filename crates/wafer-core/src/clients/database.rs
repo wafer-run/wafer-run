@@ -89,6 +89,7 @@ dual_api! {
             sort: to_wire_sort(&opts.sort),
             limit: opts.limit,
             offset: opts.offset,
+            skip_count: opts.skip_count,
         };
         let data = svc!(
             ctx, BLOCK,
@@ -264,12 +265,43 @@ dual_api! {
     ///
     /// Intended for small, bounded collections (roles, permissions, legal docs).
     /// Hard-capped at 10,000 records — use paginated `list()` for larger collections.
+    ///
+    /// Sets `skip_count: true` on the underlying `ListOptions` so the
+    /// backend avoids the `SELECT COUNT(*)` round-trip.
     pub fn list_all(ctx, collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, WaferError> {
         let result = svc_fn!(ctx, list(
             collection,
             &ListOptions {
                 filters,
                 limit: 10_000,
+                skip_count: true,
+                ..Default::default()
+            }
+        ))?;
+        Ok(result.records)
+    }
+
+    /// List records matching `filters` in the order specified by `sort`.
+    ///
+    /// Hard-capped at 10,000 records. Skips the backend `COUNT` query — use
+    /// `paginated_list` if you need `total_count` for pagination UI.
+    ///
+    /// Use this when the caller needs `ORDER BY` semantics but does not need
+    /// pagination — most "show the N most recent X" or "list all X by name"
+    /// queries fit. For unsorted bulk reads, prefer `list_all`.
+    pub fn list_sorted(
+        ctx,
+        collection: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortField>,
+    ) -> Result<Vec<Record>, WaferError> {
+        let result = svc_fn!(ctx, list(
+            collection,
+            &ListOptions {
+                filters,
+                sort,
+                limit: 10_000,
+                skip_count: true,
                 ..Default::default()
             }
         ))?;
@@ -293,6 +325,7 @@ dual_api! {
                 sort,
                 limit: page_size,
                 offset: (page - 1).saturating_mul(page_size),
+                skip_count: false,
             }
         ))
     }

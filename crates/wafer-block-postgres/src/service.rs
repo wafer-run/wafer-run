@@ -65,18 +65,27 @@ impl PostgresDatabaseService {
         self.ensure_columns_for_query(&table, &opts.filters, &opts.sort)
             .await?;
 
-        // Count total
-        let (count_sql, count_sea_vals) =
-            wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Backend::Postgres);
-        let count_params = sea_values_to_json(count_sea_vals);
-        let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-        for p in &count_params {
-            count_q = bind_json_value(count_q, p);
-        }
-        let total_count: i64 = count_q
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        // Count total — skipped when opts.skip_count is set (the caller has
+        // signalled they only care about the records and will not read
+        // total_count as the full collection size). We then synthesize
+        // total_count from records.len() below.
+        let total_count: Option<i64> = if opts.skip_count {
+            None
+        } else {
+            let (count_sql, count_sea_vals) =
+                wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Backend::Postgres);
+            let count_params = sea_values_to_json(count_sea_vals);
+            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            for p in &count_params {
+                count_q = bind_json_value(count_q, p);
+            }
+            Some(
+                count_q
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| DatabaseError::Internal(e.to_string()))?,
+            )
+        };
 
         // Query records
         let (sql, sea_vals) = wafer_sql_utils::query::build_select(&table, opts, Backend::Postgres);
@@ -101,6 +110,7 @@ impl PostgresDatabaseService {
             1
         };
 
+        let total_count = total_count.unwrap_or(records.len() as i64);
         Ok(RecordList {
             records,
             total_count,
@@ -927,6 +937,7 @@ mod tests {
             sort: vec![],
             limit: 0,
             offset: 0,
+            skip_count: false,
         };
         let (sql, sea_vals) =
             wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
@@ -953,6 +964,7 @@ mod tests {
             ],
             limit: 10,
             offset: 20,
+            skip_count: false,
         };
         let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
         assert!(sql.contains("ORDER BY"));
