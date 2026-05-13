@@ -20,8 +20,9 @@ pub use wafer_block::wire::vector::{
 use wafer_block::{
     common::ServiceOp,
     wire::vector::{
-        CountRequest, CountResponse, CreateIndexRequest, DeleteIndexRequest, DeleteRequest,
-        EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, UpsertRequest,
+        CountRequest, CountResponse, CountTokensRequest, CountTokensResponse, CreateIndexRequest,
+        DeleteIndexRequest, DeleteRequest, EmbedRequest, EmbedResponse, QueryRequest,
+        QueryResponse, UpsertRequest,
     },
     WaferError,
 };
@@ -150,5 +151,28 @@ dual_api! {
         )?;
         let resp: EmbedResponse = decode(&data)?;
         Ok((resp.model, resp.dimensions, resp.vectors))
+    }
+
+    /// Count the tokens an embedding block's tokenizer would produce for `text`.
+    ///
+    /// Used by ingest pipelines to size chunks by real BPE tokens rather than
+    /// whitespace approximation. Cheap to call across the block boundary —
+    /// the embedding block runs only the tokenizer, no model inference.
+    pub fn count_tokens(
+        ctx,
+        embedding_block: &str,
+        text: String,
+    ) -> Result<u64, WaferError> {
+        let req = CountTokensRequest { text };
+        let data = svc!(
+            ctx, embedding_block,
+            ServiceOp::EMBEDDING_COUNT_TOKENS,
+            &req,
+            None::<&str>,
+            false,
+            None::<&str>
+        )?;
+        let resp: CountTokensResponse = decode(&data)?;
+        Ok(resp.tokens)
     }
 }

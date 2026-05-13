@@ -129,6 +129,16 @@ pub struct EmbedResponse {
     pub vectors: Vec<Vec<f32>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountTokensRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountTokensResponse {
+    pub tokens: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +368,48 @@ mod tests {
         assert_eq!(
             hex, "83a56d6f64656ca0aa64696d656e73696f6e7300a7766563746f727390",
             "EmbedResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn count_tokens_request_round_trips() {
+        let original = CountTokensRequest {
+            text: "hello world".into(),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: CountTokensRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.text, "hello world");
+    }
+
+    #[test]
+    fn count_tokens_response_round_trips() {
+        let original = CountTokensResponse { tokens: 42 };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: CountTokensResponse = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.tokens, 42);
+    }
+
+    #[test]
+    fn schema_lock_count_tokens_request() {
+        let req = CountTokensRequest {
+            text: String::new(),
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a474657874a0",
+            "CountTokensRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_count_tokens_response() {
+        let resp = CountTokensResponse { tokens: 0 };
+        let encoded = codec::encode(&resp).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a6746f6b656e7300",
+            "CountTokensResponse schema changed — review consumer impact before updating this literal"
         );
     }
 }

@@ -186,6 +186,12 @@ pub async fn handle_embedding_message(
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
+        ServiceOp::EMBEDDING_COUNT_TOKENS => {
+            let req = decode_or_err!(body, wire::CountTokensRequest, "embedding.count_tokens");
+            to_output(&wire::CountTokensResponse {
+                tokens: service.count_tokens(&req.text) as u64,
+            })
+        }
         other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown embedding operation: {other}"),
