@@ -103,6 +103,19 @@ pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn model(&self) -> &str;
     fn dimensions(&self) -> u32;
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>>;
+
+    /// Count the number of model-native tokens in `text`.
+    ///
+    /// Used by the vector block's chunker to size chunks accurately for
+    /// multilingual content where whitespace-word count diverges from BPE
+    /// token count (CJK, heavy punctuation, agglutinative languages).
+    ///
+    /// Default impl returns the whitespace-word count — a usable proxy for
+    /// English prose at bge-m3 chunk granularity. Implementations backed by
+    /// a real tokenizer should override.
+    fn count_tokens(&self, text: &str) -> usize {
+        text.split_whitespace().count()
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +157,27 @@ mod tests {
         let json = r#"{"name":"i","model":"m","dimensions":1,"metric":"cosine"}"#;
         let cfg: VectorIndexConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.keyword_search);
+    }
+
+    #[test]
+    fn default_count_tokens_is_whitespace_split() {
+        struct Mock;
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl EmbeddingService for Mock {
+            fn model(&self) -> &str {
+                "mock"
+            }
+            fn dimensions(&self) -> u32 {
+                0
+            }
+            async fn embed(&self, _texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+                Ok(Vec::new())
+            }
+        }
+        let m = Mock;
+        assert_eq!(m.count_tokens(""), 0);
+        assert_eq!(m.count_tokens("hello world"), 2);
+        assert_eq!(m.count_tokens("  spaced   out  text  "), 3);
     }
 }
