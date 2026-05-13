@@ -57,6 +57,7 @@ impl ServiceOp {
     pub const VECTOR_DELETE: &str = "vector.delete";
     pub const VECTOR_COUNT: &str = "vector.count";
     pub const EMBEDDING_EMBED: &str = "embedding.embed";
+    pub const EMBEDDING_COUNT_TOKENS: &str = "embedding.count_tokens";
     pub const LLM_CHAT: &str = "llm.chat";
     pub const LLM_LIST_MODELS: &str = "llm.list_models";
     pub const LLM_STATUS: &str = "llm.status";

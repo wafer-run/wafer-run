@@ -43,7 +43,7 @@ impl Block for VectorBlock {
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let body = input.collect_to_bytes().await;
         match msg.kind.as_str() {
-            ServiceOp::EMBEDDING_EMBED => {
+            ServiceOp::EMBEDDING_EMBED | ServiceOp::EMBEDDING_COUNT_TOKENS => {
                 handler::handle_embedding_message(self.embedding.as_ref(), &msg, &body).await
             }
             _ => handler::handle_message(self.vector.as_ref(), &msg, &body).await,
