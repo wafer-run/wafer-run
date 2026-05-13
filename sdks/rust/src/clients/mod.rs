@@ -7,6 +7,7 @@ mod common;
 pub mod config;
 pub mod crypto;
 pub mod database;
+pub mod image;
 pub mod llm;
 pub mod logger;
 pub mod network;
