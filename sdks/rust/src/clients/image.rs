@@ -7,13 +7,16 @@
 //! don't observe load progress; they call `generate` directly and the
 //! backend either has the model ready or surfaces a `BackendError`.
 
-use wafer_block::{
-    codec,
-    wire::image::{
-        ImageRequest, ImageResponse, ModelInfo, ModelStatus, StatusRequest, UnloadModelRequest,
-    },
-    Message, ServiceOp, WaferError,
+/// Re-export the wire types so callers can `use
+/// wafer_sdk::clients::image::{ImageRequest, ...}` for both request
+/// payloads and decoded responses. Mirrors `wafer_core::clients::image`'s
+/// native API surface so skill-block code reads the same as native-block
+/// code.
+pub use wafer_block::wire::image::{
+    GeneratedImage, ImageParams, ImageRequest, ImageResponse, ModelCapabilities, ModelInfo,
+    ModelState, ModelStatus, StatusRequest, UnloadModelRequest,
 };
+use wafer_block::{codec, Message, ServiceOp, WaferError};
 
 use super::common::{collect_single_frame, consume_ack, open_buffered};
 use crate::stream::CallStream;
