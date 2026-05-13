@@ -76,7 +76,28 @@ pub fn build_select(
 }
 
 /// Build SELECT {columns} FROM {table} with filters, sort, limit, offset.
-/// Also accepts an optional sea-query Cond for complex conditions (OR groups, etc.).
+///
+/// `extra_condition` is a sea-query `Cond` that is AND-ed with the
+/// `opts.filters` clause. Use it for conditions that don't fit the flat
+/// AND-of-filters model — for example, an OR group:
+///
+/// ```ignore
+/// use sea_query::{Cond, Expr};
+/// use wafer_sql_utils::{ident::DynCol, query, Backend};
+/// use wafer_core::interfaces::database::service::ListOptions;
+///
+/// let or_group = Cond::any()
+///     .add(Expr::col(DynCol("email".into())).like("%alice%".to_string()))
+///     .add(Expr::col(DynCol("id".into())).like("%alice%".to_string()));
+///
+/// let (sql, vals) = query::build_select_columns(
+///     "users",
+///     &["id", "email"],
+///     &ListOptions::default(),
+///     Some(or_group),
+///     Backend::Sqlite,
+/// );
+/// ```
 pub fn build_select_columns(
     table: &str,
     columns: &[&str],
