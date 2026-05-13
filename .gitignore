@@ -31,3 +31,6 @@ Thumbs.db
 # Env
 .env
 .env.local
+
+# Fastembed downloaded model weights (regenerated on demand)
+crates/wafer-block-fastembed/data/
