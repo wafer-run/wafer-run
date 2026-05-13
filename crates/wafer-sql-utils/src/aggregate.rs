@@ -1,4 +1,4 @@
-use sea_query::{Alias, Asterisk, Expr, Func, Query};
+use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
 use wafer_core::interfaces::database::service::{Filter, SortField};
 
 use crate::{
@@ -147,11 +147,55 @@ pub struct AggregateColumn {
     /// Aggregate function to apply.
     pub func: AggFunc,
     /// Field to aggregate. None means * (for COUNT(*)).
+    ///
+    /// Ignored when [`inner_expr`](Self::inner_expr) is set.
     pub field: Option<String>,
     /// Output alias for this column.
     pub alias: String,
     /// Optional CAST type (e.g. "INTEGER" for CAST(AVG(...) AS INTEGER)).
     pub cast_as: Option<String>,
+    /// Pre-built sea-query expression used as the aggregate's inner
+    /// argument. When set, takes precedence over [`field`](Self::field)
+    /// and lets callers express patterns the field/Asterisk shape can't —
+    /// most commonly `SUM(CASE WHEN ... THEN ... ELSE ... END)` for
+    /// conditional counts.
+    ///
+    /// Default-constructed via [`AggregateColumn::case_when_sum`] for
+    /// the common "count rows matching predicate" pattern; see that
+    /// constructor for an example.
+    pub inner_expr: Option<SimpleExpr>,
+}
+
+impl AggregateColumn {
+    /// Convenience constructor for `SUM(CASE WHEN <predicate> THEN 1 ELSE 0 END) AS <alias>`,
+    /// a portable way to "count rows matching a predicate" inside a
+    /// grouped query (no FILTER-clause support needed).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use sea_query::Expr;
+    /// use wafer_sql_utils::{aggregate::AggregateColumn, ident::DynCol};
+    ///
+    /// // SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+    /// let errors = AggregateColumn::case_when_sum(
+    ///     "errors",
+    ///     Expr::col(DynCol("status_code".into())).gte(400),
+    /// );
+    /// ```
+    pub fn case_when_sum(alias: impl Into<String>, when: SimpleExpr) -> Self {
+        let case: SimpleExpr = sea_query::CaseStatement::new()
+            .case(when, SimpleExpr::Value(1i64.into()))
+            .finally(SimpleExpr::Value(0i64.into()))
+            .into();
+        Self {
+            func: AggFunc::Sum,
+            field: None,
+            alias: alias.into(),
+            cast_as: None,
+            inner_expr: Some(case),
+        }
+    }
 }
 
 /// Configuration for a grouped aggregate query.
@@ -189,17 +233,20 @@ pub fn build_grouped_query(
 
     // Aggregate columns
     for agg in &cfg.aggregates {
-        let field_expr = match &agg.field {
-            Some(f) => Expr::col(DynCol(f.clone())),
-            None => Expr::col(Asterisk),
+        // `inner_expr`, when set, wins over the `field`/`Asterisk` shape so
+        // callers can express SUM(CASE WHEN ...), COUNT(DISTINCT ...), etc.
+        let inner: SimpleExpr = match (&agg.inner_expr, &agg.field) {
+            (Some(expr), _) => expr.clone(),
+            (None, Some(f)) => Expr::col(DynCol(f.clone())).into(),
+            (None, None) => Expr::col(Asterisk).into(),
         };
 
-        let agg_expr = match agg.func {
-            AggFunc::Count => Func::count(field_expr).into(),
-            AggFunc::Sum => Func::sum(field_expr).into(),
-            AggFunc::Avg => Func::avg(field_expr).into(),
-            AggFunc::Max => Func::max(field_expr).into(),
-            AggFunc::Min => Func::min(field_expr).into(),
+        let agg_expr: SimpleExpr = match agg.func {
+            AggFunc::Count => Func::count(inner).into(),
+            AggFunc::Sum => Func::sum(inner).into(),
+            AggFunc::Avg => Func::avg(inner).into(),
+            AggFunc::Max => Func::max(inner).into(),
+            AggFunc::Min => Func::min(inner).into(),
         };
 
         let final_expr: sea_query::SimpleExpr = if let Some(ref cast_type) = agg.cast_as {
@@ -290,12 +337,14 @@ mod tests {
                     field: None,
                     alias: "cnt".into(),
                     cast_as: None,
+                    inner_expr: None,
                 },
                 AggregateColumn {
                     func: AggFunc::Avg,
                     field: Some("duration_ms".into()),
                     alias: "avg_ms".into(),
                     cast_as: Some("INTEGER".into()),
+                    inner_expr: None,
                 },
             ],
             filters: vec![],
@@ -311,5 +360,43 @@ mod tests {
         assert!(sql.contains("GROUP BY"));
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn grouped_query_supports_case_when_sum() {
+        use sea_query::Expr;
+        let cfg = GroupedQueryConfig {
+            table: "request_logs".into(),
+            select_columns: vec!["method".into(), "path".into()],
+            aggregates: vec![
+                AggregateColumn {
+                    func: AggFunc::Count,
+                    field: None,
+                    alias: "cnt".into(),
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumn::case_when_sum(
+                    "errors",
+                    Expr::col(DynCol("status_code".into())).gte(400),
+                ),
+            ],
+            filters: vec![],
+            group_by: vec!["method".into(), "path".into()],
+            order_by: vec![SortField {
+                field: "cnt".into(),
+                desc: true,
+            }],
+            limit: Some(50),
+        };
+        let (sql, _values) = build_grouped_query(cfg, Backend::Sqlite);
+        // Both plain aggregate and CASE-WHEN aggregate render.
+        assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");
+        assert!(
+            sql.contains("SUM(") && sql.contains("CASE WHEN"),
+            "missing conditional SUM in: {sql}"
+        );
+        assert!(sql.contains("\"errors\""), "missing errors alias in: {sql}");
+        assert!(sql.contains("GROUP BY"));
     }
 }
