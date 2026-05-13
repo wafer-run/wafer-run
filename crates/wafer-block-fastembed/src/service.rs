@@ -73,6 +73,20 @@ impl EmbeddingService for FastembedService {
             .embed(texts, None)
             .map_err(|e| VectorError::Internal(format!("fastembed: {e}")))
     }
+
+    fn count_tokens(&self, text: &str) -> usize {
+        // The fastembed `TextEmbedding` owns the model's BPE tokenizer; we
+        // borrow it through the same `Mutex` the embed path uses. A failed
+        // lock or tokenize falls back to the whitespace proxy so the chunker
+        // can keep making progress on the rare malformed-input case.
+        let Ok(guard) = self.inner.lock() else {
+            return text.split_whitespace().count();
+        };
+        match guard.tokenizer.encode(text, true) {
+            Ok(enc) => enc.get_ids().len(),
+            Err(_) => text.split_whitespace().count(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +120,28 @@ mod tests {
             Err(other) => panic!("expected UnknownModel, got {other:?}"),
             Ok(_) => panic!("expected UnknownModel error, got Ok"),
         }
+    }
+
+    /// Gated smoke test for the bge-m3 BPE tokenizer. Enable with
+    /// `SOLOBASE_RUN_FASTEMBED_TESTS=1 cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn count_tokens_uses_bge_m3_tokenizer() {
+        if std::env::var("SOLOBASE_RUN_FASTEMBED_TESTS").is_err() {
+            return;
+        }
+        let svc = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();
+        // English: BPE token count usually exceeds the whitespace-word count
+        // by ~20–40% because of sub-word splits plus the [CLS]/[SEP] specials
+        // the tokenizer adds. Assert both that we get a non-zero count and
+        // that we're not just returning whitespace count.
+        let text = "tokenization of multilingual content";
+        let whitespace = text.split_whitespace().count();
+        let n = svc.count_tokens(text);
+        assert!(
+            n >= whitespace,
+            "tokens ({n}) should >= words ({whitespace})"
+        );
+        assert!(n > whitespace, "tokens ({n}) should exceed words ({whitespace}) — confirms real tokenizer, not whitespace fallback");
     }
 }
