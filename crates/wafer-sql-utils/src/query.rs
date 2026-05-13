@@ -63,11 +63,30 @@ pub fn build_select(
     opts: &ListOptions,
     backend: Backend,
 ) -> (String, Vec<sea_query::Value>) {
+    build_select_with_condition(table, opts, None, backend)
+}
+
+/// Build SELECT * FROM {table} with filters, sort, limit, offset, plus an
+/// optional extra sea-query `Cond` AND-ed with the filters clause.
+///
+/// Use this when you need a complex WHERE — most commonly an OR group —
+/// alongside the flat AND-of-filters list, without giving up `SELECT *`.
+/// See [`build_select_columns`] for the projection variant and an OR-group
+/// example.
+pub fn build_select_with_condition(
+    table: &str,
+    opts: &ListOptions,
+    extra_condition: Option<Cond>,
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
     let mut query = Query::select();
     query.column(Asterisk).from(DynCol(table.into()));
 
     if let Some(cond) = build_condition(&opts.filters) {
         query.cond_where(cond);
+    }
+    if let Some(extra) = extra_condition {
+        query.cond_where(extra);
     }
     apply_order(&mut query, &opts.sort);
     apply_pagination(&mut query, opts.limit, opts.offset);
@@ -355,5 +374,42 @@ mod tests {
         assert!(!sql.contains("WHERE"));
         assert!(sql.contains("RETURNING"));
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn build_select_with_condition_appends_or_group() {
+        let or_group = Cond::any()
+            .add(Expr::col(DynCol("email".into())).like("%alice%".to_string()))
+            .add(Expr::col(DynCol("id".into())).like("%alice%".to_string()));
+
+        let (sql, values) = build_select_with_condition(
+            "users",
+            &ListOptions {
+                filters: vec![Filter {
+                    field: "deleted_at".into(),
+                    operator: FilterOp::IsNull,
+                    value: serde_json::Value::Null,
+                }],
+                sort: vec![SortField {
+                    field: "created_at".into(),
+                    desc: true,
+                }],
+                limit: 20,
+                offset: 0,
+                ..Default::default()
+            },
+            Some(or_group),
+            Backend::Sqlite,
+        );
+
+        assert!(sql.starts_with("SELECT * FROM \"users\""), "got: {sql}");
+        assert!(sql.contains("IS NULL"));
+        assert!(sql.contains(" OR "), "expected OR in clause, got: {sql}");
+        assert!(sql.contains("LIKE"));
+        assert!(sql.contains("ORDER BY"));
+        assert!(sql.contains("LIMIT"));
+        // At least the two LIKE bindings (sea-query may also parameterize
+        // LIMIT / OFFSET depending on backend — we don't pin that here).
+        assert!(values.len() >= 2, "expected ≥2 bindings, got {values:?}");
     }
 }
