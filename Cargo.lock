@@ -6000,6 +6000,7 @@ name = "wafer-block-cors"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tracing",
  "wafer-block",
  "wafer-run",

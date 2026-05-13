@@ -9,6 +9,7 @@ description = "WAFER block: CORS preflight handler and header injection"
 wafer-block = { path = "../wafer-block" }
 wafer-run = { path = "../wafer-run", default-features = false }
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
