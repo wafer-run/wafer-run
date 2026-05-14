@@ -201,6 +201,38 @@ pub fn build_update_where(
     crate::render_update(query, backend)
 }
 
+/// Build UPDATE {table} SET {col} = {col} + {delta} WHERE {filters}.
+///
+/// Generates a single-statement atomic increment of a numeric column, so
+/// concurrent writers don't race on a read-modify-write of `col`. `delta`
+/// is signed — pass a negative value to decrement. `delta = 0` is allowed
+/// and produces a no-op UPDATE (callers should normally filter that out,
+/// but we don't enforce it here so this stays a pure SQL builder).
+///
+/// Used by share-link / view-counter / quota-style counters where the new
+/// value must be derived from the row's current value rather than supplied
+/// by the caller. See `build_update_where` when the new value is a literal.
+pub fn build_increment_field_where(
+    table: &str,
+    col: &str,
+    delta: i64,
+    filters: &[Filter],
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
+    let mut query = Query::update();
+    query.table(DynCol(table.into()));
+
+    let col_dyn = DynCol(col.into());
+    let increment_expr: SimpleExpr = Expr::col(col_dyn.clone()).add(delta);
+    query.value(col_dyn, increment_expr);
+
+    if let Some(cond) = build_condition(filters) {
+        query.cond_where(cond);
+    }
+
+    crate::render_update(query, backend)
+}
+
 /// Build DELETE FROM {table} WHERE id = {id}.
 pub fn build_delete_by_id(
     table: &str,
@@ -374,6 +406,82 @@ mod tests {
         assert!(!sql.contains("WHERE"));
         assert!(sql.contains("RETURNING"));
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_build_increment_field_where_sqlite() {
+        let filters = vec![eq_filter("id", serde_json::json!("share-abc"))];
+        let (sql, values) =
+            build_increment_field_where("shares", "access_count", 1, &filters, Backend::Sqlite);
+        // SET col = col + ? — the delta is parameter-bound, the column
+        // expression is `col + bind` (not `col = bind` — that would clobber).
+        assert!(
+            sql.contains("UPDATE \"shares\" SET \"access_count\" = \"access_count\" + ?"),
+            "expected atomic increment, got: {sql}"
+        );
+        assert!(sql.contains("WHERE"));
+        // Two bindings: delta (1) + filter value.
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn test_build_increment_field_where_postgres() {
+        let filters = vec![eq_filter("id", serde_json::json!("share-abc"))];
+        let (sql, values) =
+            build_increment_field_where("shares", "access_count", 1, &filters, Backend::Postgres);
+        // Postgres backend renders numbered placeholders.
+        assert!(
+            sql.contains("UPDATE \"shares\" SET \"access_count\" = \"access_count\" + $1"),
+            "expected atomic increment with pg placeholder, got: {sql}"
+        );
+        assert!(sql.contains("$2"), "expected second pg placeholder: {sql}");
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn test_build_increment_field_where_multi_filter() {
+        let filters = vec![
+            eq_filter("org_id", serde_json::json!("o1")),
+            eq_filter("share_token", serde_json::json!("tok")),
+        ];
+        let (sql, values) =
+            build_increment_field_where("shares", "access_count", 1, &filters, Backend::Sqlite);
+        assert!(sql.contains("SET \"access_count\" = \"access_count\" + ?"));
+        // Two AND-ed filter conditions, both parameterized.
+        assert!(sql.contains(" AND "), "expected AND in WHERE: {sql}");
+        // delta + two filter values = three bindings.
+        assert_eq!(values.len(), 3);
+    }
+
+    #[test]
+    fn test_build_increment_field_where_negative_delta() {
+        // Signed delta — decrement is just a negative i64. The delta is
+        // bound (not inlined) so the SQL text doesn't distinguish sign;
+        // it's the binding value that carries it.
+        let filters = vec![eq_filter("id", serde_json::json!("q1"))];
+        let (sql, values) = build_increment_field_where(
+            "quota_buckets",
+            "remaining",
+            -5,
+            &filters,
+            Backend::Sqlite,
+        );
+        assert!(
+            sql.contains("\"remaining\" = \"remaining\" + ?"),
+            "expected atomic add expression, got: {sql}"
+        );
+        // First binding is the delta; verify it's the negative we passed.
+        assert_eq!(values[0], sea_query::Value::BigInt(Some(-5)));
+    }
+
+    #[test]
+    fn test_build_increment_field_where_zero_delta_passthrough() {
+        // We accept delta=0 as a no-op UPDATE — callers can filter if they
+        // want, but the builder doesn't reject.
+        let filters = vec![eq_filter("id", serde_json::json!("x"))];
+        let (sql, values) = build_increment_field_where("t", "c", 0, &filters, Backend::Sqlite);
+        assert!(sql.contains("SET \"c\" = \"c\" + ?"), "got: {sql}");
+        assert_eq!(values[0], sea_query::Value::BigInt(Some(0)));
     }
 
     #[test]
