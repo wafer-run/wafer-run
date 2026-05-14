@@ -282,6 +282,72 @@ impl ChatChunk {
             usage: None,
         }
     }
+
+    /// A chunk announcing the start of a tool call.
+    pub fn tool_call_start(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallStart {
+                id: id.into(),
+                name: name.into(),
+            },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A chunk carrying an incremental tool-call arguments delta.
+    pub fn tool_call_arguments(id: impl Into<String>, arguments_delta: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallArguments {
+                id: id.into(),
+                arguments_delta: arguments_delta.into(),
+            },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A chunk announcing the end of a tool call.
+    pub fn tool_call_complete(id: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallComplete { id: id.into() },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A meta-only chunk carrying just a usage update.
+    pub fn usage(usage: TokenUsage) -> Self {
+        Self {
+            delta: ChunkDelta::Empty,
+            finish_reason: None,
+            usage: Some(usage),
+        }
+    }
+}
+
+impl TokenUsage {
+    /// Construct with input + output token counts. cached/reasoning default to None.
+    pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        }
+    }
+
+    /// Set the cached-tokens field.
+    pub fn with_cached(mut self, cached: u32) -> Self {
+        self.cached_tokens = Some(cached);
+        self
+    }
+
+    /// Set the reasoning-tokens field.
+    pub fn with_reasoning(mut self, reasoning: u32) -> Self {
+        self.reasoning_tokens = Some(reasoning);
+        self
+    }
 }
 
 // ---------- Model management ----------
@@ -389,6 +455,16 @@ impl ModelStatus {
     pub fn unloaded() -> Self {
         Self {
             state: ModelState::Unloaded,
+            progress: None,
+        }
+    }
+
+    /// An errored status carrying the failure message. Progress is cleared.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            state: ModelState::Error {
+                message: message.into(),
+            },
             progress: None,
         }
     }
@@ -654,5 +730,43 @@ mod tests {
     fn default_claims_backend_returns_false() {
         let svc = MinimalLlm;
         assert!(!svc.claims_backend("anything"));
+    }
+
+    #[test]
+    fn chat_chunk_tool_call_constructors_build_expected_variants() {
+        let start = ChatChunk::tool_call_start("call_1", "search");
+        assert!(matches!(
+            start.delta,
+            ChunkDelta::ToolCallStart { ref id, ref name } if id == "call_1" && name == "search"
+        ));
+        assert!(start.finish_reason.is_none());
+
+        let args = ChatChunk::tool_call_arguments("call_1", "{\"q\":");
+        assert!(matches!(
+            args.delta,
+            ChunkDelta::ToolCallArguments { ref id, ref arguments_delta }
+                if id == "call_1" && arguments_delta == "{\"q\":"
+        ));
+
+        let done = ChatChunk::tool_call_complete("call_1");
+        assert!(matches!(done.delta, ChunkDelta::ToolCallComplete { ref id } if id == "call_1"));
+
+        let usage = ChatChunk::usage(TokenUsage::new(10, 20));
+        assert_eq!(usage.delta, ChunkDelta::Empty);
+        assert_eq!(usage.usage.as_ref().map(|u| u.input_tokens), Some(10));
+        assert_eq!(usage.usage.as_ref().map(|u| u.output_tokens), Some(20));
+    }
+
+    #[test]
+    fn token_usage_new_builder_sets_required_fields_and_defaults() {
+        let u = TokenUsage::new(7, 11);
+        assert_eq!(u.input_tokens, 7);
+        assert_eq!(u.output_tokens, 11);
+        assert!(u.cached_tokens.is_none());
+        assert!(u.reasoning_tokens.is_none());
+
+        let u2 = TokenUsage::new(1, 2).with_cached(3).with_reasoning(4);
+        assert_eq!(u2.cached_tokens, Some(3));
+        assert_eq!(u2.reasoning_tokens, Some(4));
     }
 }

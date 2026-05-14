@@ -143,6 +143,16 @@ impl ModelStatus {
             progress: None,
         }
     }
+
+    /// An errored status carrying the failure message. Progress is cleared.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            state: ModelState::Error {
+                message: message.into(),
+            },
+            progress: None,
+        }
+    }
 }
 
 impl ModelInfo {
