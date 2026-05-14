@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input,
+    parse2,
     punctuated::Punctuated,
     Expr, ExprArray, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
 };
@@ -48,17 +49,21 @@ struct CapabilitiesArgs {
     headers_masked: Vec<String>,
 }
 
-fn parse_capabilities(meta: &syn::MetaList) -> CapabilitiesArgs {
+fn parse_capabilities(meta: &syn::MetaList) -> syn::Result<CapabilitiesArgs> {
     let mut out = CapabilitiesArgs::default();
-    let nested: Punctuated<syn::Meta, Token![,]> = meta
-        .parse_args_with(Punctuated::parse_terminated)
-        .expect("#[wafer_block]: failed to parse capabilities(...)");
+    let nested: Punctuated<syn::Meta, Token![,]> =
+        meta.parse_args_with(Punctuated::parse_terminated)?;
     for item in nested {
         match item {
             syn::Meta::Path(p) => {
                 let ident = p
                     .get_ident()
-                    .expect("expected identifier in capabilities(...)")
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            p.span(),
+                            "#[wafer_block]: expected identifier in capabilities(...)",
+                        )
+                    })?
                     .to_string();
                 match ident.as_str() {
                     "crypto" => out.crypto = true,
@@ -66,89 +71,117 @@ fn parse_capabilities(meta: &syn::MetaList) -> CapabilitiesArgs {
                     "raw_sql" => out.raw_sql = true,
                     "ddl" => out.ddl = true,
                     "config" => out.config = true,
-                    other => panic!("#[wafer_block]: unknown bool capability '{other}'"),
+                    other => {
+                        return Err(syn::Error::new(
+                            p.span(),
+                            format!("#[wafer_block]: unknown bool capability '{other}'"),
+                        ));
+                    }
                 }
             }
             syn::Meta::NameValue(nv) => {
                 let ident = nv
                     .path
                     .get_ident()
-                    .expect("expected identifier in capabilities(...)")
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            nv.path.span(),
+                            "#[wafer_block]: expected identifier in capabilities(...)",
+                        )
+                    })?
                     .to_string();
-                let list = parse_string_list(&nv.value);
+                let list = parse_string_list(&nv.value)?;
                 match ident.as_str() {
                     "collections" => out.collections = list,
                     "storage_folders" => out.storage_folders = list,
                     "network_allow" => out.network_allow = list,
                     "config_keys" => out.config_keys = list,
                     "callable_blocks" => out.callable_blocks = list,
-                    other => panic!("#[wafer_block]: unknown list capability '{other}'"),
+                    other => {
+                        return Err(syn::Error::new(
+                            nv.path.span(),
+                            format!("#[wafer_block]: unknown list capability '{other}'"),
+                        ));
+                    }
                 }
             }
             syn::Meta::List(inner) if inner.path.is_ident("headers") => {
-                parse_headers_nested(&inner, &mut out);
+                parse_headers_nested(&inner, &mut out)?;
             }
             other => {
-                use quote::ToTokens;
-                panic!(
-                    "#[wafer_block]: unexpected token in capabilities(...): {}",
-                    other.to_token_stream()
-                );
+                return Err(syn::Error::new(
+                    other.span(),
+                    "#[wafer_block]: unexpected token in capabilities(...)",
+                ));
             }
         }
     }
-    out
+    Ok(out)
 }
 
-fn parse_headers_nested(inner: &syn::MetaList, out: &mut CapabilitiesArgs) {
-    let nested: Punctuated<syn::Meta, Token![,]> = inner
-        .parse_args_with(Punctuated::parse_terminated)
-        .expect("#[wafer_block]: failed to parse headers(...)");
+fn parse_headers_nested(inner: &syn::MetaList, out: &mut CapabilitiesArgs) -> syn::Result<()> {
+    let nested: Punctuated<syn::Meta, Token![,]> =
+        inner.parse_args_with(Punctuated::parse_terminated)?;
     for item in nested {
-        if let syn::Meta::NameValue(nv) = item {
-            let ident = nv
-                .path
-                .get_ident()
-                .expect("expected ident in headers(...)")
-                .to_string();
-            let list = parse_string_list(&nv.value);
-            match ident.as_str() {
-                "readable" => out.headers_readable = list,
-                "writable" => out.headers_writable = list,
-                "masked" => out.headers_masked = list,
-                other => panic!("#[wafer_block]: unknown headers field '{other}'"),
+        match item {
+            syn::Meta::NameValue(nv) => {
+                let ident = nv
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            nv.path.span(),
+                            "#[wafer_block]: expected ident in headers(...)",
+                        )
+                    })?
+                    .to_string();
+                let list = parse_string_list(&nv.value)?;
+                match ident.as_str() {
+                    "readable" => out.headers_readable = list,
+                    "writable" => out.headers_writable = list,
+                    "masked" => out.headers_masked = list,
+                    other => {
+                        return Err(syn::Error::new(
+                            nv.path.span(),
+                            format!("#[wafer_block]: unknown headers field '{other}'"),
+                        ));
+                    }
+                }
             }
-        } else {
-            panic!("#[wafer_block]: headers(...) only supports name = [...] pairs");
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "#[wafer_block]: headers(...) only supports name = [...] pairs",
+                ));
+            }
         }
     }
+    Ok(())
 }
 
-fn parse_string_list(expr: &syn::Expr) -> Vec<String> {
-    if let syn::Expr::Array(arr) = expr {
-        arr.elems
-            .iter()
-            .map(|e| match e {
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) => s.value(),
-                other => {
-                    use quote::ToTokens;
-                    panic!(
-                        "#[wafer_block]: expected string literal, got: {}",
-                        other.to_token_stream()
-                    );
-                }
-            })
-            .collect()
-    } else {
-        use quote::ToTokens;
-        panic!(
-            "#[wafer_block]: expected array expression `[...]`, got: {}",
-            expr.to_token_stream()
-        );
-    }
+fn parse_string_list(expr: &syn::Expr) -> syn::Result<Vec<String>> {
+    let arr = match expr {
+        syn::Expr::Array(arr) => arr,
+        other => {
+            return Err(syn::Error::new(
+                other.span(),
+                "#[wafer_block]: expected array expression `[...]`",
+            ));
+        }
+    };
+    arr.elems
+        .iter()
+        .map(|e| match e {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) => Ok(s.value()),
+            other => Err(syn::Error::new(
+                other.span(),
+                "#[wafer_block]: expected string literal in array",
+            )),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -224,10 +257,9 @@ struct SkillArgs {
 }
 
 /// Parse a `skill(description = "...", parameters = "...")` MetaList.
-fn parse_skill(meta: &syn::MetaList) -> SkillArgs {
-    let nested: Punctuated<syn::Meta, Token![,]> = meta
-        .parse_args_with(Punctuated::parse_terminated)
-        .expect("#[wafer_block]: failed to parse skill(...)");
+fn parse_skill(meta: &syn::MetaList) -> syn::Result<SkillArgs> {
+    let nested: Punctuated<syn::Meta, Token![,]> =
+        meta.parse_args_with(Punctuated::parse_terminated)?;
     let mut description = None::<String>;
     let mut parameters = None::<String>;
     for item in nested {
@@ -236,40 +268,59 @@ fn parse_skill(meta: &syn::MetaList) -> SkillArgs {
                 let key = nv
                     .path
                     .get_ident()
-                    .expect("expected identifier in skill(...)")
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            nv.path.span(),
+                            "#[wafer_block]: expected identifier in skill(...)",
+                        )
+                    })?
                     .to_string();
-                let val = if let Expr::Lit(ExprLit {
-                    lit: Lit::Str(s), ..
-                }) = &nv.value
-                {
-                    s.value()
-                } else {
-                    use quote::ToTokens;
-                    panic!(
-                        "#[wafer_block]: skill({key}) value must be a string literal, got: {}",
-                        nv.value.to_token_stream()
-                    )
+                let val = match &nv.value {
+                    Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) => s.value(),
+                    other => {
+                        return Err(syn::Error::new(
+                            other.span(),
+                            format!("#[wafer_block]: skill({key}) value must be a string literal"),
+                        ));
+                    }
                 };
                 match key.as_str() {
                     "description" => description = Some(val),
                     "parameters" => parameters = Some(val),
-                    other => panic!("#[wafer_block]: unknown skill attribute '{other}'"),
+                    other => {
+                        return Err(syn::Error::new(
+                            nv.path.span(),
+                            format!("#[wafer_block]: unknown skill attribute '{other}'"),
+                        ));
+                    }
                 }
             }
             other => {
-                use quote::ToTokens;
-                panic!(
-                    "#[wafer_block]: unexpected token in skill(...): {}",
-                    other.to_token_stream()
-                );
+                return Err(syn::Error::new(
+                    other.span(),
+                    "#[wafer_block]: unexpected token in skill(...)",
+                ));
             }
         }
     }
-    SkillArgs {
-        description: description
-            .expect("#[wafer_block]: skill(...) requires description = \"...\""),
-        parameters: parameters.expect("#[wafer_block]: skill(...) requires parameters = \"...\""),
-    }
+    let description = description.ok_or_else(|| {
+        syn::Error::new(
+            meta.span(),
+            "#[wafer_block]: skill(...) requires description = \"...\"",
+        )
+    })?;
+    let parameters = parameters.ok_or_else(|| {
+        syn::Error::new(
+            meta.span(),
+            "#[wafer_block]: skill(...) requires parameters = \"...\"",
+        )
+    })?;
+    Ok(SkillArgs {
+        description,
+        parameters,
+    })
 }
 
 /// Parsed attribute: flat key=value pairs, optional capabilities group, and
@@ -285,18 +336,16 @@ struct ParsedAttr {
 ///
 /// Strategy: scan the token stream for `capabilities` / `skill`, peel them off
 /// into their respective `syn::MetaList`s, forward everything else to `FlatArgs`.
-fn parse_attr(attr: TokenStream) -> ParsedAttr {
-    // We perform a two-step parse:
-    //   1. Convert to a proc_macro2 TokenStream and scan Meta items.
-    //   2. Re-collect the non-capabilities/non-skill items for flat parsing.
-
+fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
     use proc_macro2::TokenStream as Ts2;
     use quote::ToTokens;
 
     let ts2: Ts2 = attr.into();
-    let metas: Punctuated<syn::Meta, Token![,]> = syn::parse2::<MetaList>(ts2)
-        .map(|m| m.0)
-        .unwrap_or_default();
+    let metas: Punctuated<syn::Meta, Token![,]> = if ts2.is_empty() {
+        Punctuated::new()
+    } else {
+        parse2::<MetaList>(ts2)?.0
+    };
 
     let mut caps: Option<CapabilitiesArgs> = None;
     let mut skill: Option<SkillArgs> = None;
@@ -305,10 +354,10 @@ fn parse_attr(attr: TokenStream) -> ParsedAttr {
     for meta in &metas {
         match meta {
             syn::Meta::List(ml) if ml.path.is_ident("capabilities") => {
-                caps = Some(parse_capabilities(ml));
+                caps = Some(parse_capabilities(ml)?);
             }
             syn::Meta::List(ml) if ml.path.is_ident("skill") => {
-                skill = Some(parse_skill(ml));
+                skill = Some(parse_skill(ml)?);
             }
             other => {
                 flat_tokens.push(other.to_token_stream());
@@ -316,11 +365,10 @@ fn parse_attr(attr: TokenStream) -> ParsedAttr {
         }
     }
 
-    // Reassemble flat tokens into a comma-separated TokenStream for FlatArgs.
     let flat_ts: Ts2 = if flat_tokens.is_empty() {
         Ts2::new()
     } else {
-        let joined = flat_tokens
+        flat_tokens
             .iter()
             .enumerate()
             .map(|(i, t)| {
@@ -330,18 +378,16 @@ fn parse_attr(attr: TokenStream) -> ParsedAttr {
                     quote! { #t }
                 }
             })
-            .collect::<Ts2>();
-        joined
+            .collect::<Ts2>()
     };
 
-    let flat: FlatArgs = syn::parse2(flat_ts)
-        .unwrap_or_else(|e| panic!("#[wafer_block]: failed to parse flat attributes: {e}"));
+    let flat: FlatArgs = parse2(flat_ts)?;
 
-    ParsedAttr {
+    Ok(ParsedAttr {
         flat,
         capabilities: caps,
         skill,
-    }
+    })
 }
 
 /// Helper wrapper so we can use syn::parse2 with a Punctuated return.
@@ -419,26 +465,37 @@ impl Parse for MetaList {
 /// ```
 #[proc_macro_attribute]
 pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let parsed = parse_attr(attr);
+    match wafer_block_impl(attr, item) {
+        Ok(ts) => ts,
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Real implementation; `wafer_block` is a thin wrapper that funnels errors
+/// through `syn::Error::to_compile_error` so attribute typos surface as
+/// spanned compile errors rather than proc-macro panics.
+fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
+    let parsed = parse_attr(attr)?;
     let args = &parsed.flat;
     let capabilities_args = parsed.capabilities;
     let skill_args = parsed.skill;
 
-    let input = parse_macro_input!(item as ItemImpl);
+    let input = syn::parse::<ItemImpl>(item)?;
+    let impl_span = input.span();
 
     // Required attributes
     let name = args
         .get_str("name")
-        .expect("#[wafer_block]: `name` is required");
+        .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `name` is required"))?;
     let version = args
         .get_str("version")
-        .expect("#[wafer_block]: `version` is required");
+        .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `version` is required"))?;
     let interface = args
         .get_str("interface")
-        .expect("#[wafer_block]: `interface` is required");
+        .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `interface` is required"))?;
     let summary = args
         .get_str("summary")
-        .expect("#[wafer_block]: `summary` is required");
+        .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `summary` is required"))?;
 
     // Optional attributes
     let instance_mode_str = args
@@ -465,14 +522,20 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    let handle_fn = handle_fn.expect("#[wafer_block]: `handle` method is required");
+    let handle_fn = handle_fn
+        .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `handle` method is required"))?;
 
     let instance_mode_tokens = match instance_mode_str.as_str() {
         "per-node" => quote! { wafer_block::InstanceMode::PerNode },
         "singleton" => quote! { wafer_block::InstanceMode::Singleton },
         "per-flow" => quote! { wafer_block::InstanceMode::PerFlow },
         "per-execution" => quote! { wafer_block::InstanceMode::PerExecution },
-        other => panic!("#[wafer_block]: unknown instance_mode '{other}'"),
+        other => {
+            return Err(syn::Error::new(
+                impl_span,
+                format!("#[wafer_block]: unknown instance_mode '{other}'"),
+            ));
+        }
     };
 
     let handle_sig = &handle_fn.sig;
@@ -656,5 +719,5 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
         ::wafer_run::register_static_block!(#name, #struct_ty);
     };
 
-    expanded.into()
+    Ok(expanded.into())
 }
