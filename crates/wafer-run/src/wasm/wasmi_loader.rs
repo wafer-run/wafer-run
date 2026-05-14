@@ -1045,16 +1045,36 @@ fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, RuntimeError>
         .map_err(|e| RuntimeError::Wasm(format!("linking args_get stub: {e}")))?;
 
     // clock_time_get(id, precision, time_ptr) -> errno
-    // TinyGo WASM runtime imports this for time.Now() etc.
-    // We return 0 nanoseconds — blocks should not rely on wall-clock time.
+    // WASI clock IDs (we only differentiate REALTIME vs. anything-else):
+    //   0 = CLOCK_REALTIME      → wall clock, ns since UNIX epoch
+    //   1 = CLOCK_MONOTONIC     → ns since an arbitrary fixed point
+    //   2 = CLOCK_PROCESS_CPUTIME_ID
+    //   3 = CLOCK_THREAD_CPUTIME_ID
+    // We use `web_time` so this works both natively and when the runtime is
+    // itself compiled to WASM and embedded in a browser (solobase-web): on
+    // wasm32 the call delegates to `Date.now()` / `Performance.now()`.
     linker
         .func_wrap(
             "wasi_snapshot_preview1",
             "clock_time_get",
-            |mut caller: Caller<WasmiHostState>, _id: i32, _precision: i64, time_ptr: i32| -> i32 {
-                // Write 0u64 (nanoseconds) at time_ptr.
+            |mut caller: Caller<WasmiHostState>, id: i32, _precision: i64, time_ptr: i32| -> i32 {
+                let nanos: u64 = if id == 0 {
+                    web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0)
+                } else {
+                    // For monotonic/CPU-time IDs, fall back to an Instant-based
+                    // counter relative to the runtime's own start. This is the
+                    // best we can do without process boot-time, and it is
+                    // monotonic — sufficient for chrono's elapsed-time paths.
+                    static START: std::sync::OnceLock<web_time::Instant> =
+                        std::sync::OnceLock::new();
+                    let start = START.get_or_init(web_time::Instant::now);
+                    web_time::Instant::now().duration_since(*start).as_nanos() as u64
+                };
                 if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, time_ptr as usize, &0u64.to_le_bytes());
+                    let _ = memory.write(&mut caller, time_ptr as usize, &nanos.to_le_bytes());
                 }
                 0
             },
