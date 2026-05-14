@@ -220,22 +220,53 @@ fn grant_matches_grantee(grantee: &str, caller: &str) -> bool {
     grantee == "*" || grantee == caller
 }
 
-/// Glob-style pattern matching for grant resource patterns.
+/// Pattern matching for grant resource patterns.
 ///
-/// Supports multiple `*` wildcards:
-/// - `*` alone matches everything
-/// - `https://api.stripe.com/*` matches any path under that domain
-/// - `https://*.example.com/*` matches any subdomain + path
-/// - `wafer-run/web/public/*` matches any key under that storage path
-/// - No wildcard = exact match
+/// Two modes:
+/// 1. URL patterns (pattern starts with `http://` or `https://`) — parsed
+///    with the `url` crate and matched structurally: scheme + host + path.
+///    Subdomain wildcards (`*.example.com`) match exactly one label.
+/// 2. Non-URL patterns (storage paths, namespaces) — substring glob with
+///    `*` wildcards, used for things like `wafer-run/web/*` or
+///    `suppers_ai__auth__*`.
+///
+/// The URL branch closes the substring-glob bypass (SEC-007): patterns
+/// like `https://*.example.com/*` no longer match attacker-controlled
+/// strings like `https://example.com.attacker.com/...`.
+///
+/// Supported URL patterns:
+/// - `https://api.stripe.com/*` — any path under exact host
+/// - `https://*.example.com/*` — single-level subdomain wildcard
+/// - `https://**.example.com/*` — multi-level subdomain wildcard
+/// - `https://example.com/v1/items` — exact match (no wildcard)
+///
+/// Returns `false` for malformed URL patterns (cannot match anything).
 fn grant_matches_resource(pattern: &str, resource: &str) -> bool {
     if pattern == "*" {
         return true;
     }
 
+    // URL-shaped patterns get structured matching.
+    if is_url_pattern(pattern) {
+        return url_pattern_matches(pattern, resource);
+    }
+
+    // Non-URL patterns: substring glob (storage paths, namespace prefixes, etc).
+    glob_matches(pattern, resource)
+}
+
+fn is_url_pattern(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Substring-glob matcher for non-URL patterns (storage paths, namespaces).
+///
+/// `*` is a wildcard. First segment must anchor to the start. If the
+/// pattern doesn't end in `*`, the resource must also end at the final
+/// segment.
+fn glob_matches(pattern: &str, resource: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
-        // No wildcard — exact match
         return resource == pattern;
     }
 
@@ -246,7 +277,6 @@ fn grant_matches_resource(pattern: &str, resource: &str) -> bool {
         }
         if let Some(found) = resource[pos..].find(part) {
             if i == 0 && found != 0 {
-                // First segment must match at start
                 return false;
             }
             pos += found + part.len();
@@ -255,12 +285,111 @@ fn grant_matches_resource(pattern: &str, resource: &str) -> bool {
         }
     }
 
-    // If pattern doesn't end with *, resource must end at pos
     if !pattern.ends_with('*') {
         return pos == resource.len();
     }
-
     true
+}
+
+/// Structured URL pattern matcher.
+///
+/// - Scheme: exact match (case-insensitive — `url` crate normalizes).
+/// - Host:
+///   - `**.example.com` — matches `example.com` and any depth of subdomains
+///   - `*.example.com`  — matches exactly one extra label (`a.example.com`,
+///     not `a.b.example.com`, not `example.com`)
+///   - `example.com`    — exact match
+///   - `*`              — matches any host
+/// - Path: prefix match if pattern ends with `/*`; otherwise exact.
+///
+/// The `url` crate parses both sides, which means `example.com.evil.com`
+/// becomes a literal host (it's not interpreted as a subdomain of
+/// `example.com`) — that's exactly what closes the SEC-007 bypass.
+fn url_pattern_matches(pattern: &str, resource: &str) -> bool {
+    // Replace `*` with a placeholder that's valid in both host labels and
+    // URL paths so the pattern parses cleanly. `url::Url` lowercases hosts,
+    // so the sentinel must be lowercase as well to survive the round-trip.
+    const STAR_SENTINEL: &str = "wafer-star-placeholder";
+
+    let prepared_pattern = pattern.replace('*', STAR_SENTINEL);
+    let parsed_pattern = match url::Url::parse(&prepared_pattern) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    let parsed_resource = match url::Url::parse(resource) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    // Scheme: exact.
+    if parsed_pattern.scheme() != parsed_resource.scheme() {
+        return false;
+    }
+
+    // Host: extract the original (un-sentinel-ed) host pattern.
+    let pattern_host = parsed_pattern
+        .host_str()
+        .map(|h| h.replace(STAR_SENTINEL, "*"));
+    let resource_host = parsed_resource.host_str();
+    if !host_matches(pattern_host.as_deref(), resource_host) {
+        return false;
+    }
+
+    // Path: extract the original path with `*` restored.
+    let pattern_path = parsed_pattern.path().replace(STAR_SENTINEL, "*");
+    let resource_path = parsed_resource.path();
+    path_matches(&pattern_path, resource_path)
+}
+
+fn host_matches(pattern: Option<&str>, resource: Option<&str>) -> bool {
+    match (pattern, resource) {
+        (Some(p), Some(r)) => host_pattern_matches(p, r),
+        (None, None) => true,
+        // One has a host, the other doesn't — no match.
+        _ => false,
+    }
+}
+
+fn host_pattern_matches(pattern: &str, host: &str) -> bool {
+    // url::Url lowercases hosts; lowercase pattern for symmetry.
+    let pattern = pattern.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+
+    if pattern == "*" {
+        return true;
+    }
+
+    // Multi-level: `**.example.com` matches `example.com` and any subdomain
+    // depth.
+    if let Some(suffix) = pattern.strip_prefix("**.") {
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+
+    // Single-level: `*.example.com` matches exactly one extra label.
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        let Some(rest) = host.strip_suffix(&format!(".{suffix}")) else {
+            return false;
+        };
+        // `rest` is the matched wildcard label — must be non-empty and
+        // contain no `.` (single level only).
+        return !rest.is_empty() && !rest.contains('.');
+    }
+
+    pattern == host
+}
+
+fn path_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        // `/*` matches the prefix followed by `/` and anything else,
+        // OR the prefix exactly (so `/api/*` matches `/api` too if you
+        // consider the trailing slash implied). Be strict: require the
+        // `/` separator.
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if pattern == "*" {
+        return true;
+    }
+    pattern == path
 }
 
 #[cfg(test)]
@@ -563,6 +692,71 @@ mod tests {
         assert!(!grant_matches_resource(
             "https://*.example.com/*",
             "http://api.example.com/v1"
+        ));
+
+        // SEC-007 regression: substring-glob bypasses must be blocked.
+        // Attacker-controlled hostnames that *contain* the pattern host
+        // (suffix or prefix) must NOT match.
+        assert!(
+            !grant_matches_resource(
+                "https://*.example.com/*",
+                "https://example.com.evil.com/bar"
+            ),
+            "example.com.evil.com must not match *.example.com"
+        );
+        assert!(
+            !grant_matches_resource(
+                "https://*.example.com/*",
+                "https://evil.example.com.attacker.com/bar"
+            ),
+            "evil.example.com.attacker.com must not match *.example.com (cited SEC-007 attack)"
+        );
+
+        // Single-level subdomain wildcard must NOT match multi-level
+        // subdomains. (Multi-level uses `**`.)
+        assert!(
+            !grant_matches_resource("https://*.example.com/*", "https://foo.bar.example.com/x"),
+            "*.example.com must NOT match deeply-nested subdomains"
+        );
+
+        // Multi-level subdomain wildcard via `**.example.com`.
+        assert!(grant_matches_resource(
+            "https://**.example.com/*",
+            "https://foo.bar.example.com/x"
+        ));
+        assert!(grant_matches_resource(
+            "https://**.example.com/*",
+            "https://example.com/x"
+        ));
+        assert!(!grant_matches_resource(
+            "https://**.example.com/*",
+            "https://example.com.evil.com/x"
+        ));
+
+        // Plain prefix patterns still work (no wildcard in host).
+        assert!(grant_matches_resource(
+            "https://api.example.com/*",
+            "https://api.example.com/v1/items"
+        ));
+        assert!(!grant_matches_resource(
+            "https://api.example.com/*",
+            "https://other.example.com/v1/items"
+        ));
+
+        // Exact URL match (no trailing wildcard).
+        assert!(grant_matches_resource(
+            "https://api.example.com/v1",
+            "https://api.example.com/v1"
+        ));
+        assert!(!grant_matches_resource(
+            "https://api.example.com/v1",
+            "https://api.example.com/v2"
+        ));
+
+        // Invalid URL pattern → no match.
+        assert!(!grant_matches_resource(
+            "https://[bad-pattern",
+            "https://anything.example.com/"
         ));
 
         // Storage path patterns
