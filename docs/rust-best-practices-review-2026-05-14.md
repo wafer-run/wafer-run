@@ -135,47 +135,59 @@ stack trace.
 
 ---
 
-## P3 — Documentation hygiene
+## P3 — Documentation hygiene (deferred)
 
 - No library crate sets `#![deny(missing_docs)]` or even `#![warn(missing_docs)]`.
   Crate-level doc comments exist on most (`wafer-block`, `wafer-core`,
   `wafer-run`) but `wafer-flow/src/lib.rs` and `wafer-sql-utils/src/lib.rs` have
-  none. Adding `#![warn(missing_docs)]` at least to `wafer-block`, `wafer-core`,
-  `wafer-run`, `wafer-flow`, and `wafer-sql-utils` would flag the public API
-  gaps without breaking the build.
+  none. Adding the lint at `warn` would not break CI on its own — but the
+  workspace runs clippy with `-D warnings`, which upgrades every missing-doc
+  emission to an error. Adding `#![warn(missing_docs)]` to the five library
+  crates therefore needs to be paired with a wave of doc additions across the
+  public API surface; that's a substantially larger task and out of scope for
+  this review's follow-ups. Leaving as a future PR.
 - Two un-tracked TODOs (handbook says every TODO links an issue):
   - `crates/wafer-core/src/clients/mod.rs:151` — "implement WASM sync call_block …"
   - `crates/wafer-cli/src/commands/publish.rs:37` — "stream via reqwest::Body::wrap_stream …"
 
----
-
-## P3 — Lint suppressions: prefer `#[expect]` over `#[allow]`
-
-19 `#[allow(...)]` sites, 0 `#[expect(...)]` sites. Handbook (ch. 2): `#[expect]`
-becomes a warning when the lint *no longer fires*, which prevents stale
-suppressions from drifting. On Rust 1.81+ (which the workspace uses), every new
-suppression should be `#[expect(lint, reason = "…")]`.
+  Linkage deferred — needs issue numbers from the project tracker.
 
 ---
 
-## P3 — Cloning in `registry_loader`
+## P3 — Lint suppressions: prefer `#[expect]` over `#[allow]` (FIXED)
 
-`crates/wafer-run/src/registry_loader.rs` has ~30 `.clone()` calls on
-`pkg.name` / `pkg.version` / `pkg.source` / `wasm_path` / `wt_path` across the
-resolve path. These are all `String` / `PathBuf` clones in a function that
-resolves the same package metadata once at startup, so the absolute cost is
-small, but the pattern is what `clippy::redundant_clone` is trying to catch and
-the lint is already set to `warn` workspace-wide (it just isn't firing because
-the clones aren't *strictly* redundant per the lint's analysis).
+Originally 19 `#[allow(...)]` sites with 0 `#[expect(...)]`. After the hygiene
+commit on `chore/clippy-clean`, 17 sites converted to
+`#[expect(lint, reason = "…")]`. Two sites stay on `#[allow(...)]` (with the
+same reason annotation) because the lint state depends on which target is
+being compiled — `#[expect]` would be unfulfilled under `cargo clippy
+--all-targets`:
 
-Two cheap wins:
+- `sdks/rust/src/stream.rs` — `error_code_from_ordinal` (dead in lib, used in tests)
+- `wafer-cli/src/wafer_toml.rs` — `WaferToml::remove_dependency` (same pattern)
 
-- Borrow `pkg` for the duration of resolution and only clone into the final
-  `RegisteredPackage` struct.
-- Switch the package-name interning to `Arc<str>` so re-use across the loader
-  is free.
+Two `#[allow(dead_code)]` sites were dropped entirely because the code is
+actually reachable under `--all-targets`:
 
-Not urgent. Worth a single follow-up PR.
+- `wafer-cli/src/detect.rs` — `detect_language`
+- `wafer-cli/src/manifest.rs` — `Manifest::load`
+
+---
+
+## P3 — Cloning in `registry_loader` (re-assessed: no fix needed)
+
+The original finding overcounted. A re-read of
+`crates/wafer-run/src/registry_loader.rs` shows the `.clone()` calls on
+`pkg.name` / `pkg.version` / `wasm_path` / `wt_path` are almost entirely in
+error-construction paths — building owned-`String` `LockLoaderError` variants.
+Errors are cold by definition; clones there are correct.
+
+The one happy-path clone is `self.register_block(pkg.name.clone(), …)` in
+`load_lockfile_parsed`, which feeds an owned name to `register_block`. That's
+a one-clone-per-block-at-startup cost — not measurable.
+
+`redundant_clone` (workspace-warn) and the SSA analysis behind it already
+agree: no clone is dropping its target without using it. Closing this item.
 
 ---
 
@@ -199,20 +211,30 @@ Not urgent. Worth a single follow-up PR.
 
 ---
 
-## Suggested order of work
+## Suggested order of work — status
 
-1. **Fix the 6 clippy errors** (1 default-features + 5 `--all-features`). One
-   PR, mechanical edits. Add the `--all-features` invocation to CI in the same PR.
-2. **Replace `std::sync::RwLock` with `parking_lot::RwLock`** in
-   `wafer-block-inspector`. Three-line change, removes three `.unwrap()` calls.
-3. **Decide on the FFI/NAPI sync-bridge rule**: either (a) rewrite both
-   bindings to expose async APIs natively and delete every production
-   `block_on`, or (b) carve out a documented exception in `CLAUDE.md` scoped
-   to "sync FFI boundary crates only". The current state contradicts the
-   written rule.
-4. **Proc-macro `panic!` → `syn::Error`** in `wafer-block-macro`. Mechanical
-   but touches every attribute branch; do it as one PR.
-5. **Doc & lint-hygiene pass**: add `#![warn(missing_docs)]` to the five library
-   crates, convert existing `#[allow]` sites to `#[expect]` with reasons, link
-   the two stray TODOs to issues.
-6. **`registry_loader` clone audit** — last, lowest impact.
+1. ✅ **Fix the 6 clippy errors** — landed on `chore/clippy-clean` as the P0
+   commit. `cargo clippy --workspace --all-targets --locked -- -D warnings`
+   exits 0. `--all-features` deliberately not pursued (architecturally invalid
+   — see P0 section).
+2. ✅ **Replace `std::sync::RwLock` with `parking_lot::RwLock`** in
+   `wafer-block-inspector`. Done — three `.unwrap()` calls removed.
+3. ✅ **Sync-bridge rule (option a)** — rewrote both bindings:
+   - `wafer-run-node` — all `#[napi]` methods are now `async fn` returning JS
+     `Promise<T>`; `block_on` calls eliminated.
+   - `wafer-ffi` — async ops (resolve/start/stop/run) are callback-based;
+     `block_on` replaced with `rt.spawn`. Go bindings updated to wrap the
+     callback C ABI back into a synchronous Go API surface via `cgo.Handle` +
+     channels. Both `wafer.h` copies (Rust crate + Go module) updated in lockstep.
+4. ✅ **Proc-macro `panic!` → `syn::Error`** in `wafer-block-macro`. Done —
+   ~22 attribute-time panic sites routed through `syn::Result` and emitted via
+   `to_compile_error()`. Block authors now get spanned diagnostics.
+5. ◐ **Doc & lint-hygiene pass** — partially done:
+   - ✅ Lint-suppression hygiene: 17 `#[allow]` → `#[expect]` with reasons; 2
+     `#[allow]` dropped; 2 stay on `#[allow]` because `#[expect]` would be
+     unfulfilled under `--all-targets`.
+   - ❌ `#![warn(missing_docs)]` — deferred (incompatible with workspace
+     `-D warnings` without a wider doc-coverage pass).
+   - ❌ TODO issue linkage — deferred (needs tracker IDs).
+6. ✖ **`registry_loader` clone audit** — closed without code change. Original
+   finding overcounted; the clones are appropriate (see re-assessment above).
