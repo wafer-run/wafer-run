@@ -139,6 +139,11 @@ pub enum AggFunc {
     Avg,
     Max,
     Min,
+    /// `COALESCE(col, default)` — not a true aggregate, but a null-replacement
+    /// wrapper that callers can fold into the aggregate-builder pipeline so
+    /// they don't have to post-process null values in Rust. The JSON literal
+    /// is rendered as the second argument to `COALESCE`.
+    Coalesce(serde_json::Value),
 }
 
 /// A single aggregate column in a grouped query.
@@ -241,12 +246,17 @@ pub fn build_grouped_query(
             (None, None) => Expr::col(Asterisk).into(),
         };
 
-        let agg_expr: SimpleExpr = match agg.func {
+        let agg_expr: SimpleExpr = match &agg.func {
             AggFunc::Count => Func::count(inner).into(),
             AggFunc::Sum => Func::sum(inner).into(),
             AggFunc::Avg => Func::avg(inner).into(),
             AggFunc::Max => Func::max(inner).into(),
             AggFunc::Min => Func::min(inner).into(),
+            AggFunc::Coalesce(default) => Func::coalesce([
+                inner,
+                Expr::val(crate::value::json_to_sea_value(default)).into(),
+            ])
+            .into(),
         };
 
         let final_expr: sea_query::SimpleExpr = if let Some(ref cast_type) = agg.cast_as {
@@ -360,6 +370,37 @@ mod tests {
         assert!(sql.contains("GROUP BY"));
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn agg_func_coalesce_renders_sql() {
+        let cfg = GroupedQueryConfig {
+            table: "items".into(),
+            select_columns: vec![],
+            aggregates: vec![AggregateColumn {
+                func: AggFunc::Coalesce(serde_json::json!(0)),
+                field: Some("price".into()),
+                alias: "price_or_zero".into(),
+                cast_as: None,
+                inner_expr: None,
+            }],
+            filters: vec![],
+            group_by: vec!["category".into()],
+            order_by: vec![],
+            limit: None,
+        };
+        let (sql, _params) = build_grouped_query(cfg, Backend::Sqlite);
+        eprintln!("SQL: {sql}");
+        assert!(
+            sql.to_uppercase().contains("COALESCE"),
+            "expected COALESCE in: {sql}"
+        );
+        assert!(sql.contains("price"), "missing price column in: {sql}");
+        // Accept either parameterised (`?`) or inlined (`0`) literal.
+        assert!(
+            sql.contains('0') || sql.contains('?'),
+            "expected literal or placeholder in: {sql}"
+        );
     }
 
     #[test]
