@@ -34,7 +34,7 @@ pub fn resource_prefix(block_id: &str) -> String {
 
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
-/// For namespace-based resources (Db, Config, Crypto, or untyped):
+/// For namespace-based resources (Db, Config, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
 /// 2. `__ddl__` → any attributable caller (NOT admin-only). Convention is that
 ///    blocks only DDL their own (`{org}__{block}__*`) tables; this is enforced
@@ -46,7 +46,7 @@ pub fn resource_prefix(block_id: &str) -> String {
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
-/// For non-namespace resources (Network, Storage):
+/// For non-namespace resources (Network, Storage, Crypto):
 /// 1. Admin → Ok
 /// 2. Grant match → Ok
 /// 3. Otherwise → Err (default deny)
@@ -58,11 +58,14 @@ pub fn check_access(
     grants: &[ResourceGrant],
     admin_block: &str,
 ) -> Result<(), WaferError> {
-    // Namespace-based rules only apply to Db, Config, Crypto, or untyped resources.
-    // Network and Storage resources use URLs/paths, not the {org}__{block}__{name} convention.
+    // Namespace-based rules only apply to Db, Config, or untyped resources.
+    // Network, Storage, and Crypto resources use URLs / file-paths /
+    // operation-names, not the {org}__{block}__{name} convention.
     let namespace_based = !matches!(
         resource_type,
-        Some(crate::types::ResourceType::Network) | Some(crate::types::ResourceType::Storage)
+        Some(crate::types::ResourceType::Network)
+            | Some(crate::types::ResourceType::Storage)
+            | Some(crate::types::ResourceType::Crypto)
     );
 
     if namespace_based {
@@ -95,6 +98,11 @@ pub fn check_access(
         }
 
         // Rule 2: SOLOBASE_SHARED__ resources
+        //
+        // Writes: admin only.
+        // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
+        // callers (None) are denied — shared config may carry secrets and
+        // there is no reason an unauthenticated context should read them.
         let lower = resource.to_lowercase();
         if lower.starts_with("solobase_shared__") {
             if is_write {
@@ -108,7 +116,15 @@ pub fn check_access(
                     )),
                 };
             }
-            return Ok(());
+            return match caller_id {
+                Some(_) => Ok(()),
+                None => Err(WaferError::new(
+                    ErrorCode::PERMISSION_DENIED,
+                    format!(
+                        "WRAP: SOLOBASE_SHARED__ read denied for anonymous caller (resource: {resource})"
+                    ),
+                )),
+            };
         }
 
         // Rule 3: own resource
@@ -348,7 +364,7 @@ mod tests {
     fn test_shared_resources() {
         let grants = vec![];
         let admin = "suppers-ai/admin";
-        // Any block can read shared
+        // Any *attributable* block can read shared
         assert!(check_access(
             Some("suppers-ai/auth"),
             "SOLOBASE_SHARED__APP_NAME",
@@ -358,6 +374,18 @@ mod tests {
             admin
         )
         .is_ok());
+        // Anonymous (no caller_id) cannot read shared — shared config may
+        // contain secrets and there's no reason an unauthenticated context
+        // should access it.
+        assert!(check_access(
+            None,
+            "SOLOBASE_SHARED__APP_NAME",
+            false,
+            None,
+            &grants,
+            admin
+        )
+        .is_err());
         // Only admin can write shared
         assert!(check_access(
             Some("suppers-ai/auth"),
@@ -668,6 +696,76 @@ mod tests {
         assert!(check_access(
             Some("suppers-ai/auth"),
             "auth_users",
+            false,
+            None, // untyped / Db
+            &grants,
+            admin
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_crypto_resource_type() {
+        let admin = "suppers-ai/admin";
+        let crypto = Some(&ResourceType::Crypto);
+
+        // No grants → denied (default deny for crypto, like network/storage)
+        assert!(check_access(Some("suppers-ai/auth"), "sign", false, crypto, &[], admin).is_err());
+
+        // Wildcard grant for all blocks on all crypto ops → allowed
+        let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Crypto)];
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "sign",
+            false,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_ok());
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "random_bytes",
+            false,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_ok());
+
+        // Operation-specific grant: only random_bytes, not sign
+        let grants = vec![
+            ResourceGrant::read("suppers-ai/auth", "random_bytes").typed(ResourceType::Crypto)
+        ];
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "random_bytes",
+            false,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_ok());
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "sign",
+            false,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_err());
+
+        // Admin always allowed
+        assert!(check_access(Some(admin), "sign", false, crypto, &[], admin).is_ok());
+
+        // Crypto grant doesn't satisfy a Db request — the typed match fails
+        // and there's no namespace fallback for an unnamespaced resource like
+        // "sign" / "random_bytes".
+        let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Crypto)];
+        assert!(check_access(
+            Some("suppers-ai/auth"),
+            "sign",
             false,
             None, // untyped / Db
             &grants,

@@ -25,7 +25,21 @@ pub fn is_blocked_url(raw: &str) -> bool {
     }
 }
 
-fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
+/// Check whether a resolved IP address is private/loopback/link-local and
+/// should be blocked by SSRF defense. Defends against DNS rebinding by being
+/// callable on the IPs returned by a DNS resolver, not just URL hosts.
+/// See SEC-019.
+pub fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        std::net::IpAddr::V6(v6) => is_blocked_ipv6(v6),
+    }
+}
+
+/// Check whether an IPv4 address is private/loopback/link-local/etc and
+/// should be blocked by SSRF defense. Exposed so DNS resolvers can validate
+/// resolved IPs (defends against DNS rebinding — see SEC-019).
+pub fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
     // 0.0.0.0/8 (current host)
     if o[0] == 0 {
@@ -54,7 +68,10 @@ fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
     false
 }
 
-fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
+/// Check whether an IPv6 address is loopback/private/link-local/etc and
+/// should be blocked by SSRF defense. Exposed so DNS resolvers can validate
+/// resolved IPs (defends against DNS rebinding — see SEC-019).
+pub fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
     let segments = ip.segments();
 
     // ::1 (loopback)

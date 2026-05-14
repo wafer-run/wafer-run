@@ -118,13 +118,19 @@ impl Wafer {
             .map(crate::config::parse_config_map)
             .unwrap_or_default();
 
-        let mut ctx = self.make_context(block_name, "root", block_config, cancelled, None);
+        // `node_id` is what the runtime uses to attribute WRAP access on
+        // anything this block does on its own behalf (config/db/etc reads).
+        // Using a literal `"root"` sentinel here meant every top-level
+        // request appeared to come from a non-block caller — false denials.
+        // Use the resolved block name instead. `flow_id` is empty (no flow
+        // in scope at the top level).
+        let mut ctx = self.make_context("", resolved, block_config, cancelled, None);
         ctx.caller_requires = caller_requires;
 
         // Observability
         let obs_ctx = ObservabilityContext {
             flow_id: String::new(),
-            node_path: "root".to_string(),
+            node_path: resolved.to_string(),
             block_name: block_name.to_string(),
             trace_id: msg.get_meta("trace_id").to_string(),
             message: Some(msg.clone()),

@@ -29,10 +29,15 @@ impl ContextGuard {
 
 impl Drop for ContextGuard {
     fn drop(&mut self) {
-        debug_assert_eq!(
+        // Runtime assertion (not `debug_assert`) — the underlying
+        // `ContextWrapper` extends a non-`'static` `&dyn Context` via
+        // `transmute`. If any cloned `Arc` outlives the guard it dereferences
+        // freed memory. Cheap counter check; failing closed in release builds
+        // is the right call.
+        assert_eq!(
             Arc::strong_count(&self.wrapper),
             1,
-            "BUG: ContextGuard dropped while cloned Arcs still exist"
+            "BUG: ContextGuard dropped while cloned Arcs still exist — use-after-free hazard",
         );
     }
 }
@@ -80,15 +85,21 @@ impl Context for ContextWrapper {
         unsafe { &*self.0 }.caller_id()
     }
     fn clone_arc(&self) -> Arc<dyn Context> {
-        // `ContextWrapper` is a thin pointer wrapper around a non-'static
-        // `&dyn Context` extended via the `ContextGuard`. Cloning it
-        // produces another wrapper aliasing the same pointer. The same
-        // lifetime contract as the rest of this module applies: the new
-        // Arc must not outlive the originating `ContextGuard`. WASM
-        // blocks that need an owning context handle past the lifecycle
-        // call must arrange that on the runtime side (the wasmi block
-        // dispatcher already drops the guard at end-of-call), not via
-        // this method.
-        Arc::new(ContextWrapper(self.0))
+        // `ContextWrapper` extends a non-'static `&dyn Context` via
+        // `transmute` and only stays valid for the lifetime of the
+        // owning `ContextGuard`. A clone produced here would alias the
+        // raw pointer without participating in `ContextGuard`'s strong-
+        // count assertion, so it could outlive the borrowed context
+        // and dereference freed memory.
+        //
+        // No host code in this crate calls `clone_arc` on the wasmi
+        // ContextWrapper path. We panic rather than silently hand back
+        // an Arc that bypasses the guard invariant — easier to catch
+        // misuse than to chase a use-after-free.
+        panic!(
+            "Context::clone_arc called on wasmi ContextWrapper — \
+             the underlying context is borrowed and cannot be cloned \
+             into an owning Arc",
+        );
     }
 }

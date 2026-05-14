@@ -4,7 +4,7 @@ use wafer_block::{
     block::Block,
     context::Context,
     streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
+    types::{BlockInfo, ConfigVar},
     BlockRegistry, RuntimeError, *,
 };
 
@@ -32,6 +32,15 @@ impl Block for NetworkBlock {
             "Outbound HTTP requests",
         )
         .category(BlockCategory::Service)
+        .config_keys(vec![ConfigVar::new(
+            "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES",
+            "Maximum response body size in bytes accepted by the HTTP \
+             network service. Responses exceeding this limit are rejected \
+             with an error rather than buffered. Defaults to 50 MiB \
+             (52428800) when unset.",
+            "52428800",
+        )
+        .name("Max Response Body Bytes")])
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {

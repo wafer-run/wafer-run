@@ -13,7 +13,21 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true, features = ["net"] }
+futures = { workspace = true }
+
+[features]
+default = []
+# SSRF escape hatch. When enabled at build time, requests to private,
+# loopback, and link-local addresses are permitted. Intended for local
+# development and integration tests; must NOT be enabled in production
+# builds. Replaces the prior `ALLOW_PRIVATE_NETWORK` env var (SEC-018) so
+# the bypass cannot be flipped on a live deploy.
+allow-private-network = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 
 [lints]
 workspace = true
