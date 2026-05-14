@@ -4,7 +4,16 @@ use std::{
 };
 
 use super::Wafer;
-use crate::{error::RuntimeError, types::*};
+use crate::{block::BlockInfo, error::RuntimeError, types::*};
+
+/// Collect `BlockInfo`s into a Vec sorted by their stable `name`, so consumers
+/// (admin pages, snapshot consumers) see deterministic order regardless of the
+/// underlying HashMap's SipHash randomisation.
+pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<BlockInfo> {
+    let mut v: Vec<_> = iter.into_iter().collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
 
 impl Wafer {
     /// Initialize the runtime without calling `bind()` on blocks.
@@ -14,8 +23,10 @@ impl Wafer {
         // Rebuild the all_blocks map so contexts can see all resolved blocks
         self.rebuild_all_blocks();
 
-        // Snapshot introspection data for contexts
-        self.blocks_snapshot = Arc::new(self.blocks.values().map(|b| b.info()).collect());
+        // Snapshot introspection data for contexts.
+        // Sort by stable block name so consumers see deterministic order
+        // independent of HashMap's SipHash randomisation.
+        self.blocks_snapshot = Arc::new(sorted_snapshot(self.blocks.values().map(|b| b.info())));
         self.flow_infos_snapshot = Arc::new(self.flows_info());
         self.flow_defs_snapshot = Arc::new(self.flow_defs());
         self.interface_specs_snapshot = Arc::new(self.interface_specs.values().cloned().collect());
@@ -208,5 +219,22 @@ impl Wafer {
                 tracing::error!(block = %name, error = %e, "block stop lifecycle failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sorted_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn sorted_snapshot_orders_by_name() {
+        let infos = vec![
+            BlockInfo::new("zeta", "0.1.0", "test@v1", "z"),
+            BlockInfo::new("alpha", "0.1.0", "test@v1", "a"),
+            BlockInfo::new("mu", "0.1.0", "test@v1", "m"),
+        ];
+        let out = sorted_snapshot(infos);
+        let names: Vec<&str> = out.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }
 }

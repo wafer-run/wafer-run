@@ -304,10 +304,11 @@ impl Wafer {
     /// generate discovery documents (e.g., OpenAPI, A2A agent.json) without
     /// having to maintain a duplicate registry.
     ///
-    /// Order is unspecified. The returned list is a snapshot — later
-    /// registrations are not reflected.
+    /// Sorted by block `name` for deterministic order across processes
+    /// (independent of HashMap's SipHash randomisation). The returned list
+    /// is a snapshot — later registrations are not reflected.
     pub fn block_infos(&self) -> Vec<crate::block::BlockInfo> {
-        self.blocks.values().map(|b| b.info()).collect()
+        lifecycle::sorted_snapshot(self.blocks.values().map(|b| b.info()))
     }
 
     /// Return the currently registered asset loader. Defaults to
