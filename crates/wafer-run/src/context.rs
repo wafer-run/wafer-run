@@ -235,9 +235,24 @@ impl RuntimeContext {
         // target block's declared interface. Skipped for action-agnostic
         // interfaces (empty action map) and for interfaces the runtime does
         // not recognize (warn-once, then proceed).
+        //
+        // Two callers populate the action field, in two different places:
+        //   - HTTP listener: maps `POST` → `req.action` meta = `"create"` etc.
+        //     `kind` carries the composite `"METHOD:/path"` for routing.
+        //   - SDK clients (`wafer_sdk::clients::*`): set `kind` to the service
+        //     op (e.g. `"network.do"`); the meta entry is not populated.
+        // Prefer the meta value (semantic action) when present; fall back to
+        // `kind` (the SDK op name). This keeps a single validation lookup that
+        // works for both call-paths without forcing the SDK to duplicate kind
+        // into meta on every call.
         let info = block.info();
         {
-            let action = msg.action();
+            let action_meta = msg.action();
+            let action = if !action_meta.is_empty() {
+                action_meta
+            } else {
+                msg.kind.as_str()
+            };
             match crate::runtime::validation::check_action_interface(
                 &info.name,
                 &info.interface,
