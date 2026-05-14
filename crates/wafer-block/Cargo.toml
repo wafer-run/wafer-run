@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+url = { workspace = true }
 wafer-flow = { workspace = true }
 wafer-block-macro = { path = "../wafer-block-macro" }
 schemars = { version = "1", optional = true }
