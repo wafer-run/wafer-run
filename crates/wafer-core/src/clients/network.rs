@@ -17,11 +17,9 @@ use wafer_block::streams::output::OutputStream;
 /// Re-exported from `wafer_block::wire::network::Response` so the native
 /// client and the SDK share one wire-format type.
 pub use wafer_block::wire::network::Response as NetworkResponse;
-use wafer_block::{
-    common::{ErrorCode, ServiceOp},
-    wire::network::{Request, ResponseHeader},
-    WaferError,
-};
+#[cfg(not(feature = "wasm-component"))]
+use wafer_block::{common::ErrorCode, wire::network::ResponseHeader};
+use wafer_block::{common::ServiceOp, wire::network::Request, WaferError};
 
 #[cfg(not(feature = "wasm-component"))]
 use super::{buffered_header_and_body, call_service_streaming, read_header_frame};

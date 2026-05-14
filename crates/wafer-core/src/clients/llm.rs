@@ -33,11 +33,9 @@ pub use wafer_block::wire::llm::{
     ModelState, ModelStatus, ResponseFormat, StatusRequest, TokenUsage, ToolCall, ToolDefinition,
     UnloadModelRequest,
 };
-use wafer_block::{
-    codec,
-    common::{ErrorCode, ServiceOp},
-    WaferError,
-};
+#[cfg(not(feature = "wasm-component"))]
+use wafer_block::{codec, common::ErrorCode};
+use wafer_block::{common::ServiceOp, WaferError};
 
 #[cfg(not(feature = "wasm-component"))]
 use super::call_service_streaming;

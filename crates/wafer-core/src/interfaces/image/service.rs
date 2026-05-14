@@ -277,9 +277,11 @@ mod tests {
 
     #[test]
     fn model_info_with_capabilities_chaining() {
-        let mut caps = ModelCapabilities::default();
-        caps.max_width = Some(512);
-        caps.supports_negative_prompt = true;
+        let caps = ModelCapabilities {
+            max_width: Some(512),
+            supports_negative_prompt: true,
+            ..Default::default()
+        };
 
         let info = ModelInfo::new("transformers-image", "Xenova/sd-turbo", "SD-Turbo")
             .with_capabilities(caps);
