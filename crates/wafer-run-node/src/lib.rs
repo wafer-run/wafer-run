@@ -1,12 +1,14 @@
 //! wafer-run-node — Node.js native addon for the WAFER runtime via napi-rs.
 //!
-//! This calls wafer-run directly (no C FFI hop) for maximum efficiency.
-//! All complex data crosses the boundary as JSON strings.
+//! All runtime methods are async; napi-rs emits them as `Promise`-returning JS
+//! methods. There is no `block_on` bridge — the JS event loop drives tokio.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use tokio::sync::RwLock;
 use wafer_run::{Message, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
@@ -15,22 +17,31 @@ use wafer_run::{Message, Wafer, WasmiBlock};
 /// ```js
 /// const { WaferRuntime } = require('wafer-run');
 /// const w = new WaferRuntime();
-/// w.register('my-block', './block.wasm');
-/// w.register('main', './main-flow.json');
-/// w.resolve();
-/// w.start();
-/// const result = JSON.parse(w.run('main', JSON.stringify({ kind: 'test', data: '', meta: {} })));
+/// await w.register('my-block', './block.wasm');
+/// await w.register('main', './main-flow.json');
+/// await w.resolve();
+/// await w.start();
+/// const result = JSON.parse(await w.run('main', JSON.stringify({ kind: 'test', data: '', meta: {} })));
+/// await w.stop();
 /// ```
 #[napi]
 pub struct WaferRuntime {
-    inner: Wafer,
-    /// Tokio runtime for bridging async calls at the NAPI boundary.
-    rt: tokio::runtime::Runtime,
+    inner: Arc<RwLock<Wafer>>,
+    started: Arc<AtomicBool>,
 }
 
 impl Drop for WaferRuntime {
     fn drop(&mut self) {
-        self.rt.block_on(self.inner.stop());
+        if self.started.swap(false, Ordering::Relaxed) {
+            // Block lifecycle(Stop) handlers won't run — they need a tokio
+            // runtime, and Drop is sync. Calling `await w.stop()` before
+            // letting the runtime go out of scope is the user's responsibility.
+            eprintln!(
+                "wafer-run: WaferRuntime dropped without stop() — \
+                 block shutdown lifecycles will not run; \
+                 always `await runtime.stop()` before disposing the runtime"
+            );
+        }
     }
 }
 
@@ -39,11 +50,12 @@ impl WaferRuntime {
     /// Create a new WAFER runtime instance.
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::from_reason(format!("failed to create tokio runtime: {e}")))?;
         let inner = Wafer::new()
             .map_err(|e| Error::from_reason(format!("failed to initialise Wafer runtime: {e}")))?;
-        Ok(Self { inner, rt })
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+            started: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     /// Register a block or flow definition from a file path.
@@ -51,17 +63,18 @@ impl WaferRuntime {
     /// If `path` ends with `.wasm`, registers a WASM block with the given name.
     /// Otherwise, reads the file as a JSON flow definition.
     #[napi]
-    pub fn register(&mut self, name: String, path: String) -> Result<()> {
+    pub async fn register(&self, name: String, path: String) -> Result<()> {
+        let mut inner = self.inner.write().await;
         if path.ends_with(".wasm") {
             let block = WasmiBlock::load(&path)
                 .map_err(|e| Error::from_reason(format!("failed to load WASM block: {e}")))?;
-            self.inner
+            inner
                 .register_block(&name, Arc::new(block))
                 .map_err(|e| Error::from_reason(e.to_string()))?;
         } else {
             let json = std::fs::read_to_string(&path)
                 .map_err(|e| Error::from_reason(format!("failed to read file: {e}")))?;
-            self.inner
+            inner
                 .add_flow_json(&json)
                 .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {e}")))?;
         }
@@ -70,9 +83,12 @@ impl WaferRuntime {
 
     /// Resolve all block references in registered flows.
     #[napi]
-    pub fn resolve(&mut self) -> Result<()> {
-        self.rt
-            .block_on(self.inner.resolve())
+    pub async fn resolve(&self) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .resolve()
+            .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
@@ -81,16 +97,26 @@ impl WaferRuntime {
     /// Uses `start_without_bind()` because the Node.js dev server has its
     /// own HTTP handling — blocks that spawn listeners are not needed here.
     #[napi]
-    pub fn start(&mut self) -> Result<()> {
-        self.rt
-            .block_on(self.inner.start_without_bind())
-            .map_err(|e| Error::from_reason(e.to_string()))
+    pub async fn start(&self) -> Result<()> {
+        self.inner
+            .write()
+            .await
+            .start_without_bind()
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        self.started.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Stop the runtime and shut down all block instances.
+    ///
+    /// Must be awaited before the runtime is garbage-collected so that block
+    /// `lifecycle(Stop)` handlers can release resources (DB connections, file
+    /// handles, etc.). Drop will log a warning if this method was not called.
     #[napi]
-    pub fn stop(&mut self) {
-        self.rt.block_on(self.inner.stop());
+    pub async fn stop(&self) {
+        self.inner.write().await.stop().await;
+        self.started.store(false, Ordering::Relaxed);
     }
 
     /// Run a flow with the given message (body-less).
@@ -98,82 +124,83 @@ impl WaferRuntime {
     /// Takes the flow ID and a JSON message string. Returns a JSON result string:
     /// `{"action":"respond|drop|error|continue","body":"...","meta":{...}}`
     #[napi]
-    pub fn run(&self, flow_id: String, message_json: String) -> Result<String> {
+    pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
         let msg: Message = serde_json::from_str(&message_json)
             .map_err(|e| Error::from_reason(format!("invalid Message JSON: {e}")))?;
 
         let input = wafer_run::InputStream::empty();
-        let output = self.rt.block_on(self.inner.run(&flow_id, msg, input));
+        let output = {
+            let inner = self.inner.read().await;
+            inner.run(&flow_id, msg, input).await
+        };
 
-        // Collect the streaming output to a buffered JSON response.
-        let json = self.rt.block_on(async {
-            match output.collect_buffered().await {
-                Ok(buf) => {
-                    let body_str = String::from_utf8(buf.body).unwrap_or_default();
-                    let meta_obj: serde_json::Value = buf
-                        .meta
-                        .iter()
-                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
-                        .collect::<serde_json::Map<_, _>>()
-                        .into();
-                    serde_json::json!({
-                        "action": "respond",
-                        "body": body_str,
-                        "meta": meta_obj,
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Error(err)) => {
-                    serde_json::json!({
-                        "action": "error",
-                        "error": {
-                            "code": format!("{:?}", err.code),
-                            "message": err.message,
-                        }
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
-                    serde_json::json!({ "action": "drop" }).to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
-                    serde_json::json!({
-                        "action": "continue",
-                        "message": serde_json::to_value(&msg).unwrap_or_default(),
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => {
-                    serde_json::json!({
-                        "action": "error",
-                        "error": { "code": "Internal", "message": "stream ended without terminal event" }
-                    })
-                    .to_string()
-                }
+        let json = match output.collect_buffered().await {
+            Ok(buf) => {
+                let body_str = String::from_utf8(buf.body).unwrap_or_default();
+                let meta_obj: serde_json::Value = buf
+                    .meta
+                    .iter()
+                    .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                serde_json::json!({
+                    "action": "respond",
+                    "body": body_str,
+                    "meta": meta_obj,
+                })
+                .to_string()
             }
-        });
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(err)) => {
+                serde_json::json!({
+                    "action": "error",
+                    "error": {
+                        "code": format!("{:?}", err.code),
+                        "message": err.message,
+                    }
+                })
+                .to_string()
+            }
+            Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
+                serde_json::json!({ "action": "drop" }).to_string()
+            }
+            Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
+                serde_json::json!({
+                    "action": "continue",
+                    "message": serde_json::to_value(&msg).unwrap_or_default(),
+                })
+                .to_string()
+            }
+            Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => {
+                serde_json::json!({
+                    "action": "error",
+                    "error": { "code": "Internal", "message": "stream ended without terminal event" }
+                })
+                .to_string()
+            }
+        };
 
         Ok(json)
     }
 
     /// Get info about all registered flows as a JSON array.
     #[napi]
-    pub fn flows_info(&self) -> Result<String> {
-        let info = self.inner.flows_info();
+    pub async fn flows_info(&self) -> Result<String> {
+        let info = self.inner.read().await.flows_info();
         serde_json::to_string(&info)
             .map_err(|e| Error::from_reason(format!("failed to serialize flows info: {e}")))
     }
 
     /// Check whether a block type is registered.
     #[napi]
-    pub fn has_block(&self, type_name: String) -> bool {
-        self.inner.has_block(&type_name)
+    pub async fn has_block(&self, type_name: String) -> bool {
+        self.inner.read().await.has_block(&type_name)
     }
 }
 
 /// Validate a WaferFlow JSON definition.
 ///
 /// Returns `null` on success, or a string describing validation errors.
+/// CPU-only; stays sync.
 #[napi]
 pub fn validate_waferflow(json: String) -> Result<Option<String>> {
     let flow = match wafer_flow::parse(&json) {
