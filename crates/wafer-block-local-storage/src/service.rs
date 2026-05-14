@@ -1,10 +1,46 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use chrono::Utc;
 use wafer_core::interfaces::storage::service::*;
+
+/// Lexically normalize an absolute path: resolve `.` and `..` components
+/// without consulting the filesystem.
+///
+/// Returns `None` if `..` would escape above the path root (e.g. trying to
+/// pop a component off `/`). The result preserves the path's existence-
+/// agnostic semantics — used by [`LocalStorageService::validate_path`] for
+/// inputs that haven't been written yet.
+fn normalize_lexical(path: &Path) -> Option<PathBuf> {
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {
+                // Skip `.`
+            }
+            Component::ParentDir => {
+                // Pop the last *normal* component. If the last entry is the
+                // root, popping would escape above the filesystem root —
+                // treat as traversal.
+                match out.last() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    Some(Component::RootDir) | Some(Component::Prefix(_)) | None => {
+                        return None;
+                    }
+                    // ParentDir / CurDir can't appear in `out` because we
+                    // never push them.
+                    Some(_) => return None,
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Some(out.iter().map(|c| c.as_os_str()).collect())
+}
 
 /// Local filesystem implementation of StorageService.
 pub struct LocalStorageService {
@@ -28,35 +64,40 @@ impl LocalStorageService {
     }
 
     /// Validate that a resolved path stays within the storage root.
-    /// Prevents path traversal attacks via `../` in folder or key names.
+    ///
+    /// Prevents path traversal attacks via `../` in folder or key names by
+    /// normalizing the path components *lexically* (without touching the
+    /// filesystem) and then comparing against the canonicalized root.
+    ///
+    /// Lexical normalization is critical: `path.canonicalize()` only works
+    /// when the path exists, so for `put`/`create` operations we have to
+    /// resolve `.` / `..` components ourselves — falling back to "just use
+    /// the raw path" (as the previous implementation did when no parent
+    /// existed) would bypass traversal checks entirely (SEC-024).
     fn validate_path(&self, path: &Path) -> Result<PathBuf, StorageError> {
         // Canonicalize the root (always exists after `new`)
         let canon_root = self.root.canonicalize().map_err(|e| {
             StorageError::Internal(format!("canonicalize root {:?}: {}", self.root, e))
         })?;
-        // For paths that don't exist yet (put/create), resolve the parent first
-        let canon_path = if path.exists() {
-            path.canonicalize()
-        } else if let Some(parent) = path.parent() {
-            if parent.exists() {
-                parent
-                    .canonicalize()
-                    .map(|p| p.join(path.file_name().unwrap_or_default()))
-            } else {
-                // Parent doesn't exist — will be created by put; just normalize
-                Ok(path.to_path_buf())
-            }
-        } else {
-            Ok(path.to_path_buf())
-        }
-        .map_err(|e| StorageError::Internal(format!("canonicalize {path:?}: {e}")))?;
 
-        if !canon_path.starts_with(&canon_root) {
+        // Resolve `path` to an absolute, lexically-normalized form.
+        // Start from canon_root if the input is relative.
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            canon_root.join(path)
+        };
+
+        let normalized = normalize_lexical(&absolute).ok_or_else(|| {
+            StorageError::Internal("path traversal: resolved path escapes storage root".to_string())
+        })?;
+
+        if !normalized.starts_with(&canon_root) {
             return Err(StorageError::Internal(
                 "path traversal: resolved path escapes storage root".to_string(),
             ));
         }
-        Ok(canon_path)
+        Ok(normalized)
     }
 
     fn guess_content_type(key: &str) -> String {
@@ -254,5 +295,84 @@ impl LocalStorageService {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_resolves_curdir_and_parentdir() {
+        let p = Path::new("/root/a/./b/../c");
+        assert_eq!(normalize_lexical(p), Some(PathBuf::from("/root/a/c")));
+    }
+
+    #[test]
+    fn normalize_rejects_escape_above_root() {
+        // `..` past the filesystem root must be rejected.
+        assert_eq!(normalize_lexical(Path::new("/../etc")), None);
+        assert_eq!(normalize_lexical(Path::new("/a/../../etc")), None);
+    }
+
+    #[test]
+    fn normalize_no_op_on_clean_path() {
+        let p = Path::new("/root/storage/folder/key");
+        assert_eq!(
+            normalize_lexical(p),
+            Some(PathBuf::from("/root/storage/folder/key"))
+        );
+    }
+
+    /// Regression for the SEC-024 bug: `validate_path` used to fall through
+    /// to "just return the raw path" when the parent didn't exist, so a
+    /// traversal payload would pass undetected. The helper must reject
+    /// even when nothing on the filesystem has been created yet.
+    #[test]
+    fn validate_path_rejects_traversal_when_parent_missing() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        // `<root>/folder/../../etc/passwd` — neither `folder` nor the
+        // resolved parent exists. Must still be rejected.
+        let evil = svc
+            .root
+            .join("folder")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        let err = svc.validate_path(&evil).expect_err("must reject traversal");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_path_accepts_path_inside_root_even_when_missing() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        // Inside root, just hasn't been created yet — should pass.
+        let inside = svc.root.join("new_folder").join("new_key");
+        let ok = svc.validate_path(&inside).expect("should accept");
+        assert!(ok.starts_with(svc.root.canonicalize().unwrap()));
+    }
+
+    // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
+    fn tempdir() -> PathBuf {
+        let base = std::env::temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let dir = base.join(format!("wafer-local-storage-test-{pid}-{nonce}"));
+        fs::create_dir_all(&dir).expect("create tempdir");
+        dir
     }
 }
