@@ -21,6 +21,7 @@ const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'
 /// which guarantees:
 /// * `default-src` never widens past the baseline (no `*`),
 /// * `script-src` never gains `'unsafe-eval'`,
+///
 /// regardless of what the operator puts in `cfg.csp`. See `merge_csp`.
 pub struct SecurityHeadersBlock {
     csp: RwLock<String>,
