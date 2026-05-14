@@ -714,7 +714,9 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = ddl::build_create_table(table, Backend::Sqlite);
+        let sql = ddl::build_create_table(table, Backend::Sqlite).map_err(|e| {
+            DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
+        })?;
         db.execute_batch(&sql)
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
 
