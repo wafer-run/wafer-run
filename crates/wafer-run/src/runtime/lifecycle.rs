@@ -35,12 +35,14 @@ impl Wafer {
         for block in self.blocks.values() {
             let info = block.info();
             for grant in &info.grants {
-                // Network/Storage typed grants use URLs/paths, not namespaced
-                // resources — skip ownership validation for these.
+                // Network/Storage/Crypto typed grants use URLs / file-paths /
+                // operation-names, not namespaced resources — skip ownership
+                // validation for these.
                 if matches!(
                     grant.resource_type,
                     Some(wafer_block::types::ResourceType::Network)
                         | Some(wafer_block::types::ResourceType::Storage)
+                        | Some(wafer_block::types::ResourceType::Crypto)
                 ) {
                     all_grants.push(grant.clone());
                     continue;
