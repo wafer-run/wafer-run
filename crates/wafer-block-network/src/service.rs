@@ -36,25 +36,36 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 struct SsrfFilteringResolver;
 
 impl Resolve for SsrfFilteringResolver {
+    // The intermediate `Vec` collect is intentional: we need the resolved
+    // addresses materialised so the cfg-gated filter below (which is
+    // compiled out under `allow-private-network`) can inspect them, and so
+    // reqwest gets an owned `Box<dyn Iterator + Send>` rather than the
+    // borrowing iterator returned by `tokio::net::lookup_host`.
+    #[allow(clippy::needless_collect)]
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         Box::pin(async move {
             // Port `0` here — reqwest replaces it with the URL-derived port
             // (see `reqwest::dns::resolve::DynResolver::http_resolve`).
-            let lookup = tokio::net::lookup_host((host.as_str(), 0)).await;
-            let addrs: Vec<SocketAddr> = lookup
+            //
+            // Collect into a `Vec` so we can both inspect the resolved
+            // addresses (for the SSRF filter below) and hand reqwest an
+            // owned `Iterator + Send` (the trait object cannot be backed
+            // by the borrowing iterator `lookup_host` returns).
+            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
                 .collect();
 
             #[cfg(feature = "allow-private-network")]
             {
-                let iter: Addrs = Box::new(addrs.into_iter());
+                let iter: Addrs = Box::new(resolved.into_iter());
                 return Ok(iter);
             }
 
             #[cfg(not(feature = "allow-private-network"))]
             {
-                let filtered: Vec<SocketAddr> = addrs
+                let filtered: Vec<SocketAddr> = resolved
                     .into_iter()
                     .filter(|s| !wafer_run::security::is_blocked_ip(s.ip()))
                     .collect();
