@@ -1,9 +1,12 @@
-use std::sync::RwLock;
-
+use parking_lot::RwLock;
 use wafer_block::*;
 
 /// Access control policy for the inspector.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Authenticated variant reserved for future config path; \
+              other variants are constructed from config"
+)]
 enum AccessPolicy {
     /// Require `auth.user_id` to be set (default).
     Authenticated,
@@ -72,7 +75,7 @@ impl Block for InspectorBlock {
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Access control
         {
-            let policy = self.policy.read().unwrap();
+            let policy = self.policy.read();
             match &*policy {
                 AccessPolicy::Anonymous => {}
                 AccessPolicy::Authenticated => {
@@ -218,7 +221,7 @@ impl Block for InspectorBlock {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
                 {
-                    *self.policy.write().unwrap() = AccessPolicy::Anonymous;
+                    *self.policy.write() = AccessPolicy::Anonymous;
                     tracing::warn!(
                         "inspector: anonymous access enabled — do not use in production"
                     );
@@ -231,7 +234,7 @@ impl Block for InspectorBlock {
                         .collect();
                     if !role_list.is_empty() {
                         tracing::info!("inspector: access restricted to roles: {:?}", role_list);
-                        *self.policy.write().unwrap() = AccessPolicy::Roles(role_list);
+                        *self.policy.write() = AccessPolicy::Roles(role_list);
                     }
                 }
             }

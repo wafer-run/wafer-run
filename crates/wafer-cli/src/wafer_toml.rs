@@ -80,7 +80,12 @@ impl WaferToml {
     ///
     /// Not yet wired to a CLI command; kept as the symmetric counterpart
     /// to [`Self::insert_or_replace_dependency`] for future `wafer remove`.
-    #[allow(dead_code)]
+    // `dead_code` rather than `expect`: tests exercise this, so the lint
+    // fires only under the bin build; `#[expect]` would be unfulfilled.
+    #[allow(
+        dead_code,
+        reason = "symmetric counterpart for future `wafer remove` command"
+    )]
     pub fn remove_dependency(&mut self, name: &str) -> bool {
         let Some(table) = self
             .doc

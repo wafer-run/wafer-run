@@ -53,7 +53,7 @@ impl CacheRoot {
         Self { root }
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "kept for future cache-introspection commands")]
     pub fn root(&self) -> &Path {
         &self.root
     }

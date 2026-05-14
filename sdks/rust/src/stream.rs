@@ -27,7 +27,10 @@ use crate::core_abi::{
 /// `finish` was never called (e.g. due to an early return or panic).
 pub struct CallStream {
     // Used only on wasm32 via unsafe host-import calls.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "consumed by host imports under cfg(target_arch = \"wasm32\")"
+    )]
     handle: i64,
     /// Set to `true` after a successful `finish`, so `Drop` does not
     /// double-close (ownership transfers to `ResponseStream`).
@@ -181,7 +184,10 @@ impl Drop for CallStream {
 /// host handle automatically, so the caller need not call any explicit close.
 pub struct ResponseStream {
     // Used only on wasm32 via unsafe host-import calls.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "consumed by host imports under cfg(target_arch = \"wasm32\")"
+    )]
     handle: i64,
     closed: bool,
 }
@@ -273,7 +279,12 @@ impl Drop for ResponseStream {
 /// FailedPrecondition=9, Aborted=10, OutOfRange=11, Unimplemented=12,
 /// Internal=13, Unavailable=14, DataLoss=15, Unauthenticated=16
 /// ```
-#[allow(dead_code)]
+// `dead_code` rather than `expect`: only the lib build sees this as unused;
+// tests do call it, so `#[expect]` would be unfulfilled under `--all-targets`.
+#[allow(
+    dead_code,
+    reason = "called only by tests + host-import shims under cfg(target_arch = \"wasm32\")"
+)]
 pub(crate) fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
     // Normalise: host always emits positive ordinals as absolute values.
     let abs = if ordinal < 0 { -ordinal } else { ordinal };

@@ -82,9 +82,8 @@ fn run_case(
     let throughput_mib_s = (total as f64) / (1024.0 * 1024.0) / elapsed.as_secs_f64();
     eprintln!(
         "[spike] {label:24} N={n_chunks:>4} size={chunk_size:>7} bytes  \
-         total={total:>10}  elapsed={:?}  per_chunk={per_chunk_us:>8.3} µs  \
+         total={total:>10}  elapsed={elapsed:?}  per_chunk={per_chunk_us:>8.3} µs  \
          throughput={throughput_mib_s:>8.1} MiB/s",
-        elapsed
     );
 
     if bound_dispatch {

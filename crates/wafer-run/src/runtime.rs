@@ -87,7 +87,10 @@ pub fn parse_unversioned_block(name: &str) -> Option<RemoteBlockRef> {
 #[cfg(feature = "wasm")]
 #[derive(serde::Deserialize)]
 pub(crate) struct RegistryManifest {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "deserialized for round-trip fidelity; cross-checked elsewhere"
+    )]
     pub(crate) name: String,
     pub(crate) latest: String,
     pub(crate) versions: HashMap<String, VersionEntry>,

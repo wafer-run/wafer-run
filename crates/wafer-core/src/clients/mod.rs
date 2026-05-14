@@ -12,15 +12,14 @@ pub mod vector;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
 #[cfg(not(feature = "wasm-component"))]
+use wafer_block::meta::{
+    META_REQ_ACTION, META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE,
+};
+#[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::input::InputStream;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
-use wafer_block::{
-    codec,
-    common::ErrorCode,
-    meta::{META_REQ_ACTION, META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
-    Message, WaferError,
-};
+use wafer_block::{codec, common::ErrorCode, Message, WaferError};
 
 // ---------------------------------------------------------------------------
 // Macros for generating cfg-gated native-async / wasm-sync function pairs.
@@ -248,25 +247,6 @@ pub(crate) fn call_service_with_msg(
     Err(WaferError::new(
         ErrorCode::UNIMPLEMENTED,
         "wasm-component call_service_with_msg not yet implemented for streaming protocol",
-    ))
-}
-
-/// WASM-component variant of [`call_service_streaming`]. Currently
-/// unimplemented — the WASM-component path will be redesigned alongside the
-/// streaming protocol.
-#[cfg(feature = "wasm-component")]
-pub(crate) fn call_service_streaming(
-    block: &str,
-    kind: &str,
-    data: &impl serde::Serialize,
-    resource: Option<&str>,
-    is_write: bool,
-    resource_type: Option<&str>,
-) -> Result<(), WaferError> {
-    let _ = (block, kind, data, resource, is_write, resource_type);
-    Err(WaferError::new(
-        ErrorCode::UNIMPLEMENTED,
-        "wasm-component call_service_streaming not yet implemented for streaming protocol",
     ))
 }
 

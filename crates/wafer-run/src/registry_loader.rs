@@ -102,7 +102,10 @@ pub(crate) struct Lockfile {
 pub(crate) struct LockfilePackage {
     pub(crate) name: String,
     pub(crate) version: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "verified during cache resolution; not consumed by this struct's own callers"
+    )]
     pub(crate) sha256: String,
     pub(crate) source: String,
 }
