@@ -36,15 +36,17 @@ impl Wafer {
         for block in self.blocks.values() {
             let info = block.info();
             for grant in &info.grants {
-                // Network/Storage typed grants use URLs/paths, not namespaced
-                // resources — skip the ownership check, but require the
-                // declaring block to be the admin block. Without this, any
-                // block could grant `*` Network/Storage access to all blocks
-                // and bypass default-deny on those resource types.
+                // Network/Storage/Crypto typed grants use URLs / file-paths /
+                // operation-names, not namespaced resources — skip ownership
+                // validation, but require the declaring block to be the admin
+                // block. Without this, any block could grant `*` Network /
+                // Storage / Crypto access to all blocks and bypass default-deny
+                // on those resource types.
                 if matches!(
                     grant.resource_type,
                     Some(wafer_block::types::ResourceType::Network)
                         | Some(wafer_block::types::ResourceType::Storage)
+                        | Some(wafer_block::types::ResourceType::Crypto)
                 ) {
                     if info.name == admin_block {
                         all_grants.push(grant.clone());

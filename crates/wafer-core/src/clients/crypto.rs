@@ -22,7 +22,7 @@ const BLOCK: &str = "wafer-run/crypto";
 dual_api! {
     pub fn hash(ctx, password: &str) -> Result<String, WaferError> {
         let req = HashRequest { password: password.to_string() };
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &req, None, false, Some("crypto"))?;
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &req, Some("hash"), false, Some("crypto"))?;
         let resp: HashResponse = decode(&data)?;
         Ok(resp.hash)
     }
@@ -33,7 +33,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::CRYPTO_COMPARE_HASH,
             &req,
-            None,
+            Some("compare_hash"),
             false,
             Some("crypto")
         )?;
@@ -55,7 +55,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::CRYPTO_SIGN,
             &req,
-            None,
+            Some("sign"),
             false,
             Some("crypto")
         )?;
@@ -65,14 +65,14 @@ dual_api! {
 
     pub fn verify(ctx, token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
         let req = VerifyRequest { token: token.to_string() };
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, None, false, Some("crypto"))?;
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, Some("verify"), false, Some("crypto"))?;
         let resp: VerifyResponse = decode(&data)?;
         Ok(resp.claims)
     }
 
     pub fn random_bytes(ctx, n: usize) -> Result<Vec<u8>, WaferError> {
         let req = RandomBytesRequest { n };
-        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &req, None, false, Some("crypto"))?;
+        let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &req, Some("random_bytes"), false, Some("crypto"))?;
         let resp: RandomBytesResponse = decode(&data)?;
         Ok(resp.bytes)
     }

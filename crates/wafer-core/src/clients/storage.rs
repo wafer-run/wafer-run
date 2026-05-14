@@ -46,7 +46,8 @@ dual_api! {
             data: data.to_vec(),
             content_type: content_type.to_string(),
         };
-        svc!(ctx, BLOCK, ServiceOp::STORAGE_PUT, &req, None::<&str>, true, Some("storage"))?;
+        let resource = format!("{folder}/{key}");
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_PUT, &req, Some(resource.as_str()), true, Some("storage"))?;
         Ok(())
     }
 
@@ -55,7 +56,8 @@ dual_api! {
             folder: folder.to_string(),
             key: key.to_string(),
         };
-        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE, &req, None::<&str>, true, Some("storage"))?;
+        let resource = format!("{folder}/{key}");
+        svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE, &req, Some(resource.as_str()), true, Some("storage"))?;
         Ok(())
     }
 
@@ -70,7 +72,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::STORAGE_LIST,
             &req,
-            None::<&str>,
+            Some(folder),
             false,
             Some("storage")
         )?;
@@ -124,12 +126,13 @@ pub async fn get(
         folder: folder.to_string(),
         key: key.to_string(),
     };
+    let resource = format!("{folder}/{key}");
     let out = call_service_streaming(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_GET,
         &req,
-        None::<&str>,
+        Some(resource.as_str()),
         false,
         Some("storage"),
     )
@@ -167,12 +170,13 @@ pub async fn get_stream(
         folder: folder.to_string(),
         key: key.to_string(),
     };
+    let resource = format!("{folder}/{key}");
     let mut out = call_service_streaming(
         ctx,
         BLOCK,
         ServiceOp::STORAGE_GET,
         &req,
-        None::<&str>,
+        Some(resource.as_str()),
         false,
         Some("storage"),
     )
