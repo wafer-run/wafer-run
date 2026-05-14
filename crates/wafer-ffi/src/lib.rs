@@ -3,31 +3,66 @@
 //! Design:
 //! - Rust owns all memory; callers hold an opaque `*mut WaferRuntime` pointer.
 //! - All complex data crosses the FFI boundary as JSON C strings.
-#![allow(clippy::missing_safety_doc)]
-//! - Caller must free returned strings via `wafer_free_string()`.
-//! - Functions that can fail return NULL on success, or a JSON error string.
+//! - Operations that perform async work (`wafer_resolve`, `wafer_start`,
+//!   `wafer_stop`, `wafer_run`) are callback-based: they return immediately
+//!   after spawning the work onto an internal tokio runtime, and invoke the
+//!   supplied `wafer_done_cb` when the work completes. The result pointer
+//!   passed to the callback is owned by Rust and freed after the callback
+//!   returns — callers must copy any data they need before returning.
+//! - Synchronous ops (`wafer_new`, `wafer_free`, `wafer_register`,
+//!   `wafer_flows_info`, `wafer_has_block`) return immediately with a result;
+//!   strings they return must be freed via `wafer_free_string`.
+//! - Functions that can fail signal failure via the callback's non-NULL
+//!   result (lifecycle ops) or a JSON error in the returned string
+//!   (synchronous ops).
 //! - Panics are caught at every FFI boundary.
+#![allow(clippy::missing_safety_doc)]
 
-use std::{
-    ffi::{CStr, CString},
-    os::raw::{c_char, c_int},
-};
+use std::ffi::{c_void, CStr, CString};
+use std::os::raw::{c_char, c_int};
+use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use wafer_run::{Message, Wafer, WasmiBlock};
+
+/// Callback invoked when an async FFI op completes.
+///
+/// - For lifecycle ops (`wafer_resolve`/`wafer_start`/`wafer_stop`): `result`
+///   is NULL on success, or a JSON error string on failure.
+/// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
+///   the form `{"action":"respond|drop|error|continue", ...}`.
+///
+/// The `result` pointer is owned by the FFI layer and freed after the
+/// callback returns; callers must copy what they need before returning.
+/// `user_data` is opaque to the FFI layer and passed through unchanged.
+///
+/// The callback may be invoked from any thread owned by the FFI's internal
+/// tokio runtime; consumers are responsible for thread-safety inside the
+/// callback.
+pub type WaferDoneCb = unsafe extern "C" fn(result: *const c_char, user_data: *mut c_void);
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
-    inner: Wafer,
-    /// Tokio runtime for bridging async calls at the FFI boundary.
+    inner: Arc<RwLock<Wafer>>,
+    /// Tokio runtime that drives spawned async work. Not used to block_on
+    /// anything; futures are `spawn`'d and signal completion via the caller's
+    /// `WaferDoneCb`.
     rt: tokio::runtime::Runtime,
 }
+
+/// `*mut c_void` is not `Send` by default. We need to move the opaque
+/// `user_data` pointer into spawned futures, so wrap it in a newtype with a
+/// hand-rolled `Send` impl. The pointer is opaque to Rust — its lifetime and
+/// thread-safety are the C caller's responsibility.
+struct UserData(*mut c_void);
+unsafe impl Send for UserData {}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Convert a Rust string into a heap-allocated C string (caller must free via
-/// `wafer_free_string`).  Returns a null pointer if the string contains
+/// `wafer_free_string`). Returns a null pointer if the string contains
 /// interior NUL bytes (should never happen with JSON).
 fn to_c_string(s: &str) -> *mut c_char {
     match CString::new(s) {
@@ -36,7 +71,14 @@ fn to_c_string(s: &str) -> *mut c_char {
     }
 }
 
-/// Build a JSON error string: `{"error":"<msg>"}`.
+/// Build a JSON error CString: `{"error":"<msg>"}`.
+fn error_cstring(msg: &str) -> CString {
+    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+    CString::new(format!(r#"{{"error":"{escaped}"}}"#))
+        .unwrap_or_else(|_| CString::new(r#"{"error":"unprintable"}"#).unwrap())
+}
+
+/// Build a JSON error string allocated for caller-free: `{"error":"<msg>"}`.
 fn error_json(msg: &str) -> *mut c_char {
     let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
     let json = format!(r#"{{"error":"{escaped}"}}"#);
@@ -48,8 +90,6 @@ async fn output_to_json(output: wafer_run::OutputStream) -> String {
     use wafer_block::streams::output::TerminalNotResponse;
     match output.collect_buffered().await {
         Ok(buf) => {
-            // Return body as base64-encoded string for FFI safety, or raw JSON if it parses.
-            // For simplicity, return body as a JSON value alongside meta.
             let body_str = String::from_utf8(buf.body).unwrap_or_default();
             let meta_obj: serde_json::Value = buf
                 .meta
@@ -86,16 +126,7 @@ async fn output_to_json(output: wafer_run::OutputStream) -> String {
     }
 }
 
-/// Safely dereference a `*mut WaferRuntime`.
-/// Returns `None` (and a null-safe no-op) when the pointer is null.
-unsafe fn deref_mut<'a>(ptr: *mut WaferRuntime) -> Option<&'a mut WaferRuntime> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(&mut *ptr)
-    }
-}
-
+/// Safely dereference a `*mut WaferRuntime` to `&WaferRuntime`.
 unsafe fn deref_ref<'a>(ptr: *mut WaferRuntime) -> Option<&'a WaferRuntime> {
     if ptr.is_null() {
         None
@@ -113,6 +144,20 @@ unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     }
 }
 
+/// Invoke a `WaferDoneCb` with a possibly-null result. The CString backing the
+/// pointer is dropped after the callback returns. Takes `UserData` (rather
+/// than the raw `*mut c_void`) so async blocks can pass the wrapper through
+/// without ever exposing the non-`Send` pointer as a local.
+unsafe fn invoke_done(cb: WaferDoneCb, result: Option<CString>, ud: UserData) {
+    let ptr = result
+        .as_ref()
+        .map(|c| c.as_ptr())
+        .unwrap_or(std::ptr::null());
+    cb(ptr, ud.0);
+    // `result` dropped here — after the callback has consumed the pointer.
+    drop(result);
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -123,13 +168,21 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     let result = std::panic::catch_unwind(|| {
         let rt = tokio::runtime::Runtime::new().ok()?;
         let inner = Wafer::new().ok()?;
-        let wr = WaferRuntime { inner, rt };
+        let wr = WaferRuntime {
+            inner: Arc::new(RwLock::new(inner)),
+            rt,
+        };
         Some(Box::into_raw(Box::new(wr)))
     });
     result.ok().flatten().unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a WAFER runtime instance.
+///
+/// The caller must first call `wafer_stop` and wait for its callback to fire
+/// before calling `wafer_free`; otherwise block `lifecycle(Stop)` handlers
+/// will not run. After `wafer_free`, the tokio runtime is dropped, which
+/// waits for any in-flight spawned tasks to complete.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
     if !w.is_null() {
@@ -139,56 +192,126 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
     }
 }
 
-/// Resolve all block references in registered flows.
-/// Returns NULL on success, or a JSON error string on failure.
+/// Resolve all block references in registered flows (async).
+///
+/// Returns immediately; invokes `cb` when resolution completes. On success
+/// the callback's `result` is NULL; on failure it is a JSON error string.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_resolve(w: *mut WaferRuntime) -> *mut c_char {
+pub unsafe extern "C" fn wafer_resolve(
+    w: *mut WaferRuntime,
+    cb: WaferDoneCb,
+    user_data: *mut c_void,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_mut(w) else {
-            return error_json("null runtime pointer");
+        let Some(runtime) = deref_ref(w) else {
+            invoke_done(
+                cb,
+                Some(error_cstring("null runtime pointer")),
+                UserData(user_data),
+            );
+            return;
         };
-        match rt.rt.block_on(rt.inner.resolve()) {
-            Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e.to_string()),
-        }
+        let inner = runtime.inner.clone();
+        let ud = UserData(user_data);
+        runtime.rt.spawn(async move {
+            let result = inner.write().await.resolve().await;
+            let err = match result {
+                Ok(()) => None,
+                Err(e) => Some(error_cstring(&e.to_string())),
+            };
+            invoke_done(cb, err, ud);
+        });
     }));
-    result.unwrap_or_else(|_| error_json("panic in wafer_resolve"))
+    if result.is_err() {
+        invoke_done(
+            cb,
+            Some(error_cstring("panic in wafer_resolve")),
+            UserData(user_data),
+        );
+    }
 }
 
-/// Start the runtime (without spawning block listeners).
-/// Returns NULL on success, or a JSON error string on failure.
+/// Start the runtime without spawning block listeners (async).
+///
+/// Returns immediately; invokes `cb` when start completes. On success the
+/// callback's `result` is NULL; on failure it is a JSON error string.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_start(w: *mut WaferRuntime) -> *mut c_char {
+pub unsafe extern "C" fn wafer_start(
+    w: *mut WaferRuntime,
+    cb: WaferDoneCb,
+    user_data: *mut c_void,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_mut(w) else {
-            return error_json("null runtime pointer");
+        let Some(runtime) = deref_ref(w) else {
+            invoke_done(
+                cb,
+                Some(error_cstring("null runtime pointer")),
+                UserData(user_data),
+            );
+            return;
         };
-        match rt.rt.block_on(rt.inner.start_without_bind()) {
-            Ok(()) => std::ptr::null_mut(),
-            Err(e) => error_json(&e.to_string()),
-        }
+        let inner = runtime.inner.clone();
+        let ud = UserData(user_data);
+        runtime.rt.spawn(async move {
+            let result = inner.write().await.start_without_bind().await;
+            let err = match result {
+                Ok(()) => None,
+                Err(e) => Some(error_cstring(&e.to_string())),
+            };
+            invoke_done(cb, err, ud);
+        });
     }));
-    result.unwrap_or_else(|_| error_json("panic in wafer_start"))
+    if result.is_err() {
+        invoke_done(
+            cb,
+            Some(error_cstring("panic in wafer_start")),
+            UserData(user_data),
+        );
+    }
 }
 
-/// Stop the runtime.
+/// Stop the runtime and shut down all block instances (async).
+///
+/// Returns immediately; invokes `cb` (with NULL result) when shutdown
+/// completes. Must be called before `wafer_free` for block `lifecycle(Stop)`
+/// handlers to run.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Some(rt) = deref_mut(w) {
-            rt.rt.block_on(rt.inner.stop());
-        }
+pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime, cb: WaferDoneCb, user_data: *mut c_void) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(runtime) = deref_ref(w) else {
+            invoke_done(
+                cb,
+                Some(error_cstring("null runtime pointer")),
+                UserData(user_data),
+            );
+            return;
+        };
+        let inner = runtime.inner.clone();
+        let ud = UserData(user_data);
+        runtime.rt.spawn(async move {
+            inner.write().await.stop().await;
+            invoke_done(cb, None, ud);
+        });
     }));
+    if result.is_err() {
+        invoke_done(
+            cb,
+            Some(error_cstring("panic in wafer_stop")),
+            UserData(user_data),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Registration
+// Registration (synchronous — no async work)
 // ---------------------------------------------------------------------------
 
 /// Register a block or flow definition from a file path.
+///
 /// If `path` ends with `.wasm`, registers a WASM block with the given name.
-/// Otherwise, reads the file as a JSON flow definition.
-/// Returns NULL on success, or a JSON error string on failure.
+/// Otherwise, reads the file as a JSON flow definition. Returns NULL on
+/// success, or a JSON error string on failure. Caller must free the returned
+/// string with `wafer_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_register(
     w: *mut WaferRuntime,
@@ -196,7 +319,7 @@ pub unsafe extern "C" fn wafer_register(
     path: *const c_char,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_mut(w) else {
+        let Some(runtime) = deref_ref(w) else {
             return error_json("null runtime pointer");
         };
         let Some(name_str) = c_str_to_str(name) else {
@@ -206,22 +329,21 @@ pub unsafe extern "C" fn wafer_register(
             return error_json("invalid path");
         };
 
+        // register_block / add_flow_json are sync — block_on isn't needed.
+        // We acquire the write lock blockingly because we're guaranteed to be
+        // on the C caller's thread (no tokio context expected).
+        let mut inner = runtime.inner.blocking_write();
         if path_str.ends_with(".wasm") {
             match WasmiBlock::load(path_str) {
-                Ok(block) => {
-                    match rt
-                        .inner
-                        .register_block(name_str, std::sync::Arc::new(block))
-                    {
-                        Ok(()) => std::ptr::null_mut(),
-                        Err(e) => error_json(&e.to_string()),
-                    }
-                }
+                Ok(block) => match inner.register_block(name_str, Arc::new(block)) {
+                    Ok(()) => std::ptr::null_mut(),
+                    Err(e) => error_json(&e.to_string()),
+                },
                 Err(e) => error_json(&e.to_string()),
             }
         } else {
             match std::fs::read_to_string(path_str) {
-                Ok(json) => match rt.inner.add_flow_json(&json) {
+                Ok(json) => match inner.add_flow_json(&json) {
                     Ok(()) => std::ptr::null_mut(),
                     Err(e) => error_json(&format!("invalid WaferFlow JSON: {e}")),
                 },
@@ -233,86 +355,120 @@ pub unsafe extern "C" fn wafer_register(
 }
 
 // ---------------------------------------------------------------------------
-// Execution
+// Execution (async)
 // ---------------------------------------------------------------------------
 
-/// Run a flow with the given message (body-less).
-/// Returns a JSON result string (always non-NULL).
+/// Run a flow with the given message (body-less). Async.
+///
+/// Returns immediately; invokes `cb` with the JSON result string when the
+/// flow finishes. `cb`'s `result` is always non-NULL — a JSON object of the
+/// form `{"action":"respond|drop|error|continue", ...}`.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
     w: *mut WaferRuntime,
     flow_id: *const c_char,
     message_json: *const c_char,
-) -> *mut c_char {
+    cb: WaferDoneCb,
+    user_data: *mut c_void,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_mut(w) else {
-            return to_c_string(
-                r#"{"action":"error","error":{"code":"Internal","message":"null runtime pointer"}}"#,
+        let internal_err = |code: &str, msg: &str| {
+            CString::new(format!(
+                r#"{{"action":"error","error":{{"code":"{}","message":"{}"}}}}"#,
+                code,
+                msg.replace('"', "\\\"")
+            ))
+            .unwrap_or_else(|_| CString::new("{}").unwrap())
+        };
+
+        let Some(runtime) = deref_ref(w) else {
+            invoke_done(
+                cb,
+                Some(internal_err("Internal", "null runtime pointer")),
+                UserData(user_data),
             );
+            return;
         };
         let Some(fid) = c_str_to_str(flow_id) else {
-            return to_c_string(
-                r#"{"action":"error","error":{"code":"Internal","message":"invalid flow_id"}}"#,
+            invoke_done(
+                cb,
+                Some(internal_err("Internal", "invalid flow_id")),
+                UserData(user_data),
             );
+            return;
         };
         let Some(msg_str) = c_str_to_str(message_json) else {
-            return to_c_string(
-                r#"{"action":"error","error":{"code":"Internal","message":"invalid message_json"}}"#,
+            invoke_done(
+                cb,
+                Some(internal_err("Internal", "invalid message_json")),
+                UserData(user_data),
             );
+            return;
         };
 
         let msg: Message = match serde_json::from_str(msg_str) {
             Ok(m) => m,
             Err(e) => {
-                let json = format!(
-                    r#"{{"action":"error","error":{{"code":"InvalidArgument","message":"invalid Message JSON: {}"}}}}"#,
-                    e.to_string().replace('"', "\\\"")
+                invoke_done(
+                    cb,
+                    Some(internal_err(
+                        "InvalidArgument",
+                        &format!("invalid Message JSON: {e}"),
+                    )),
+                    UserData(user_data),
                 );
-                return to_c_string(&json);
+                return;
             }
         };
 
-        let input = wafer_run::InputStream::empty();
-        let output = rt.rt.block_on(rt.inner.run(fid, msg, input));
-        let json = rt.rt.block_on(output_to_json(output));
-        to_c_string(&json)
+        let inner = runtime.inner.clone();
+        let flow_id = fid.to_owned();
+        let ud = UserData(user_data);
+        runtime.rt.spawn(async move {
+            let input = wafer_run::InputStream::empty();
+            let output = inner.read().await.run(&flow_id, msg, input).await;
+            let json = output_to_json(output).await;
+            let cs = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
+            invoke_done(cb, Some(cs), ud);
+        });
     }));
-    result.unwrap_or_else(|_| {
-        to_c_string(
-            r#"{"action":"error","error":{"code":"Internal","message":"panic in wafer_run"}}"#,
-        )
-    })
+    if result.is_err() {
+        invoke_done(
+            cb,
+            Some(error_cstring("panic in wafer_run")),
+            UserData(user_data),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Introspection
+// Introspection (synchronous — read-only, no async work)
 // ---------------------------------------------------------------------------
 
 /// Get info about all registered flows as a JSON array.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_ref(w) else {
+        let Some(runtime) = deref_ref(w) else {
             return to_c_string("[]");
         };
-        let info = rt.inner.flows_info();
+        let info = runtime.inner.blocking_read().flows_info();
         to_c_string(&serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string()))
     }));
     result.unwrap_or_else(|_| to_c_string("[]"))
 }
 
-/// Check whether a block type is registered.
-/// Returns 1 if registered, 0 if not.
+/// Check whether a block type is registered. Returns 1 if registered, 0 if not.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const c_char) -> c_int {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(rt) = deref_ref(w) else {
+        let Some(runtime) = deref_ref(w) else {
             return 0;
         };
         let Some(name) = c_str_to_str(type_name) else {
             return 0;
         };
-        if rt.inner.has_block(name) {
+        if runtime.inner.blocking_read().has_block(name) {
             1
         } else {
             0
@@ -325,7 +481,9 @@ pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const
 // Memory
 // ---------------------------------------------------------------------------
 
-/// Free a string previously returned by any wafer_* function.
+/// Free a string previously returned by a synchronous `wafer_*` function.
+/// Async callbacks receive Rust-owned strings that are freed automatically
+/// when the callback returns — do not pass them to this function.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
     if !s.is_null() {
