@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    meta::META_WRAP_RESOURCE,
     streams::output::OutputStream,
     wire::crypto as wire,
     *,
@@ -11,6 +12,21 @@ use wafer_block::{
 
 use super::service::{CryptoError, CryptoService};
 use crate::interfaces::handler_util::{decode_or_err, to_output};
+
+/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
+/// crypto operation about to run. If the meta is absent the runtime skipped
+/// WRAP — accept; client wrappers always set this post-SEC-015.
+fn check_op(msg: &Message, expected: &str) -> Result<(), WaferError> {
+    let supplied = msg.get_meta(META_WRAP_RESOURCE);
+    if supplied.is_empty() || supplied == expected {
+        Ok(())
+    } else {
+        Err(WaferError::new(
+            ErrorCode::PERMISSION_DENIED,
+            format!("WRAP: wrap.resource meta '{supplied}' does not match crypto op '{expected}'"),
+        ))
+    }
+}
 
 // --- Helpers ---
 
@@ -39,6 +55,9 @@ pub fn handle_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::CRYPTO_HASH => {
+            if let Err(e) = check_op(msg, "hash") {
+                return OutputStream::error(e);
+            }
             let req = decode_or_err!(body, wire::HashRequest, "crypto.hash");
             match service.hash(&req.password) {
                 Ok(hash) => to_output(&wire::HashResponse { hash }),
@@ -46,6 +65,9 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_COMPARE_HASH => {
+            if let Err(e) = check_op(msg, "compare_hash") {
+                return OutputStream::error(e);
+            }
             let req = decode_or_err!(body, wire::CompareHashRequest, "crypto.compare_hash");
             match service.compare_hash(&req.password, &req.hash) {
                 Ok(()) => to_output(&wire::CompareHashResponse { matches: true }),
@@ -56,6 +78,9 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_SIGN => {
+            if let Err(e) = check_op(msg, "sign") {
+                return OutputStream::error(e);
+            }
             let req = decode_or_err!(body, wire::SignRequest, "crypto.sign");
             let expiry = Duration::from_secs(req.expiry_secs);
             let result = match caller_id {
@@ -68,6 +93,9 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_VERIFY => {
+            if let Err(e) = check_op(msg, "verify") {
+                return OutputStream::error(e);
+            }
             let req = decode_or_err!(body, wire::VerifyRequest, "crypto.verify");
             let result = match caller_id {
                 Some(id) => service.verify_for(id, &req.token),
@@ -79,6 +107,9 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_RANDOM_BYTES => {
+            if let Err(e) = check_op(msg, "random_bytes") {
+                return OutputStream::error(e);
+            }
             let req = decode_or_err!(body, wire::RandomBytesRequest, "crypto.random_bytes");
             const MAX_RANDOM_BYTES: usize = 1_048_576;
             if req.n > MAX_RANDOM_BYTES {
