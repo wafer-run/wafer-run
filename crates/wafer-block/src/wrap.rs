@@ -312,13 +312,11 @@ fn url_pattern_matches(pattern: &str, resource: &str) -> bool {
     const STAR_SENTINEL: &str = "wafer-star-placeholder";
 
     let prepared_pattern = pattern.replace('*', STAR_SENTINEL);
-    let parsed_pattern = match url::Url::parse(&prepared_pattern) {
-        Ok(u) => u,
-        Err(_) => return false,
+    let Ok(parsed_pattern) = url::Url::parse(&prepared_pattern) else {
+        return false;
     };
-    let parsed_resource = match url::Url::parse(resource) {
-        Ok(u) => u,
-        Err(_) => return false,
+    let Ok(parsed_resource) = url::Url::parse(resource) else {
+        return false;
     };
 
     // Scheme: exact.
