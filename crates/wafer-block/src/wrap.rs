@@ -98,6 +98,11 @@ pub fn check_access(
         }
 
         // Rule 2: SOLOBASE_SHARED__ resources
+        //
+        // Writes: admin only.
+        // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
+        // callers (None) are denied — shared config may carry secrets and
+        // there is no reason an unauthenticated context should read them.
         let lower = resource.to_lowercase();
         if lower.starts_with("solobase_shared__") {
             if is_write {
@@ -111,7 +116,15 @@ pub fn check_access(
                     )),
                 };
             }
-            return Ok(());
+            return match caller_id {
+                Some(_) => Ok(()),
+                None => Err(WaferError::new(
+                    ErrorCode::PERMISSION_DENIED,
+                    format!(
+                        "WRAP: SOLOBASE_SHARED__ read denied for anonymous caller (resource: {resource})"
+                    ),
+                )),
+            };
         }
 
         // Rule 3: own resource
@@ -351,7 +364,7 @@ mod tests {
     fn test_shared_resources() {
         let grants = vec![];
         let admin = "suppers-ai/admin";
-        // Any block can read shared
+        // Any *attributable* block can read shared
         assert!(check_access(
             Some("suppers-ai/auth"),
             "SOLOBASE_SHARED__APP_NAME",
@@ -361,6 +374,18 @@ mod tests {
             admin
         )
         .is_ok());
+        // Anonymous (no caller_id) cannot read shared — shared config may
+        // contain secrets and there's no reason an unauthenticated context
+        // should access it.
+        assert!(check_access(
+            None,
+            "SOLOBASE_SHARED__APP_NAME",
+            false,
+            None,
+            &grants,
+            admin
+        )
+        .is_err());
         // Only admin can write shared
         assert!(check_access(
             Some("suppers-ai/auth"),

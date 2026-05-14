@@ -18,28 +18,39 @@ use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 // --- Helpers ---
 
-fn parse_filter_op(op: &str) -> FilterOp {
+/// Parse a wire-format filter operator string into the typed [`FilterOp`].
+///
+/// Returns `Err` for unknown operators so the handler can surface
+/// `INVALID_ARGUMENT` to the caller rather than silently coercing unknown
+/// operators to `Equal` (which would change semantics of every malformed
+/// query into a `WHERE field = value` match — see SEC-021).
+fn parse_filter_op(op: &str) -> Result<FilterOp, WaferError> {
     match op {
-        "eq" | "=" | "equal" => FilterOp::Equal,
-        "neq" | "!=" | "not_equal" => FilterOp::NotEqual,
-        "gt" | ">" | "greater_than" => FilterOp::GreaterThan,
-        "gte" | ">=" | "greater_equal" => FilterOp::GreaterEqual,
-        "lt" | "<" | "less_than" => FilterOp::LessThan,
-        "lte" | "<=" | "less_equal" => FilterOp::LessEqual,
-        "like" => FilterOp::Like,
-        "in" => FilterOp::In,
-        "is_null" => FilterOp::IsNull,
-        "is_not_null" => FilterOp::IsNotNull,
-        _ => FilterOp::Equal,
+        "eq" | "=" | "equal" => Ok(FilterOp::Equal),
+        "neq" | "!=" | "not_equal" => Ok(FilterOp::NotEqual),
+        "gt" | ">" | "greater_than" => Ok(FilterOp::GreaterThan),
+        "gte" | ">=" | "greater_equal" => Ok(FilterOp::GreaterEqual),
+        "lt" | "<" | "less_than" => Ok(FilterOp::LessThan),
+        "lte" | "<=" | "less_equal" => Ok(FilterOp::LessEqual),
+        "like" => Ok(FilterOp::Like),
+        "in" => Ok(FilterOp::In),
+        "is_null" => Ok(FilterOp::IsNull),
+        "is_not_null" => Ok(FilterOp::IsNotNull),
+        other => Err(WaferError::new(
+            ErrorCode::INVALID_ARGUMENT,
+            format!("unknown filter operator: {other:?}"),
+        )),
     }
 }
 
-fn convert_filters(defs: Vec<wire::FilterDef>) -> Vec<Filter> {
+fn convert_filters(defs: Vec<wire::FilterDef>) -> Result<Vec<Filter>, WaferError> {
     defs.into_iter()
-        .map(|f| Filter {
-            field: f.field,
-            operator: parse_filter_op(&f.operator),
-            value: f.value,
+        .map(|f| {
+            Ok(Filter {
+                field: f.field,
+                operator: parse_filter_op(&f.operator)?,
+                value: f.value,
+            })
         })
         .collect()
 }
@@ -99,8 +110,12 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_LIST => {
             let req = decode_or_err!(body, wire::ListRequest, "database.list");
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             let opts = ListOptions {
-                filters: convert_filters(req.filters),
+                filters,
                 sort: convert_sort(req.sort),
                 limit: req.limit,
                 offset: req.offset,
@@ -134,7 +149,10 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_COUNT => {
             let req = decode_or_err!(body, wire::CountRequest, "database.count");
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service.count(&req.collection, &filters).await {
                 Ok(count) => to_output(&wire::CountResponse { count }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -153,7 +171,10 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_SUM => {
             let req = decode_or_err!(body, wire::SumRequest, "database.sum");
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service.sum(&req.collection, &req.field, &filters).await {
                 Ok(sum) => to_output(&wire::SumResponse { sum }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -170,7 +191,10 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_DELETE_WHERE => {
             let req = decode_or_err!(body, wire::DeleteWhereRequest, "database.delete_where");
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service.delete_where(&req.collection, &filters).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -182,7 +206,10 @@ pub async fn handle_message(
                 wire::DeleteWhereCountRequest,
                 "database.delete_where_count"
             );
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service.delete_where_count(&req.collection, &filters).await {
                 Ok(count) => to_output(&wire::DeleteWhereCountResponse { count }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -190,7 +217,10 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_TAKE_WHERE => {
             let req = decode_or_err!(body, wire::TakeWhereRequest, "database.take_where");
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service.take_where(&req.collection, &filters).await {
                 Ok(records) => to_output(&wire::TakeWhereResponse {
                     records: records.into_iter().map(service_record_to_wire).collect(),
@@ -200,7 +230,10 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_UPDATE_WHERE => {
             let req = decode_or_err!(body, wire::UpdateWhereRequest, "database.update_where");
-            let filters = convert_filters(req.filters);
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
             match service
                 .update_where(&req.collection, &filters, req.data)
                 .await
@@ -233,4 +266,51 @@ pub async fn handle_lifecycle(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_filter_op_known_ops() {
+        assert!(matches!(parse_filter_op("eq"), Ok(FilterOp::Equal)));
+        assert!(matches!(parse_filter_op("="), Ok(FilterOp::Equal)));
+        assert!(matches!(parse_filter_op("neq"), Ok(FilterOp::NotEqual)));
+        assert!(matches!(parse_filter_op("like"), Ok(FilterOp::Like)));
+        assert!(matches!(parse_filter_op("is_null"), Ok(FilterOp::IsNull)));
+    }
+
+    #[test]
+    fn parse_filter_op_rejects_unknown() {
+        let err = parse_filter_op("bogus").expect_err("unknown op must be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert!(
+            err.message.contains("unknown filter operator"),
+            "message: {}",
+            err.message
+        );
+
+        // Empty string also rejected (was previously coerced to Equal).
+        let err = parse_filter_op("").expect_err("empty op must be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn convert_filters_rejects_bad_op() {
+        let defs = vec![
+            wire::FilterDef {
+                field: "id".into(),
+                operator: "eq".into(),
+                value: serde_json::json!(1),
+            },
+            wire::FilterDef {
+                field: "name".into(),
+                operator: "nope".into(),
+                value: serde_json::json!("x"),
+            },
+        ];
+        let err = convert_filters(defs).expect_err("bad op should fail conversion");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+    }
 }

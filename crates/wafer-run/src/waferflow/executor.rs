@@ -113,20 +113,33 @@ pub async fn execute(
             }
         }
 
+        // --- Resolve the block name first (alias → target) so the
+        //     RuntimeContext carries the *block* identity, not the flow's
+        //     step id. WRAP keys access decisions off `node_id` and the
+        //     resource owner is `{org}/{block}`; passing `step.id` here
+        //     would attribute all WRAP calls to the (arbitrary) step name
+        //     and cause false denials. ---
+        let block_name = wafer
+            .aliases
+            .get(&step.block)
+            .cloned()
+            .unwrap_or_else(|| step.block.clone());
+
         // --- Build RuntimeContext with step config ---
         let step_config = step
             .config
             .as_ref()
             .map(parse_config_map)
             .unwrap_or_default();
-        let ctx = wafer.make_context(&flow.id, &step.id, step_config, cancelled.clone(), deadline);
+        let ctx = wafer.make_context(
+            &flow.id,
+            &block_name,
+            step_config,
+            cancelled.clone(),
+            deadline,
+        );
 
         // --- Look up block ---
-        let block_name = wafer
-            .aliases
-            .get(&step.block)
-            .cloned()
-            .unwrap_or_else(|| step.block.clone());
         let block = match wafer
             .all_blocks
             .get(&block_name)

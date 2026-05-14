@@ -32,19 +32,33 @@ impl Wafer {
     pub(crate) fn collect_wrap_grants(&mut self) {
         // Preserve DB-loaded grants added before start()
         let mut all_grants = (*self.wrap_grants).clone();
+        let admin_block: &str = &self.wrap_admin_block;
         for block in self.blocks.values() {
             let info = block.info();
             for grant in &info.grants {
                 // Network/Storage/Crypto typed grants use URLs / file-paths /
                 // operation-names, not namespaced resources — skip ownership
-                // validation for these.
+                // validation, but require the declaring block to be the admin
+                // block. Without this, any block could grant `*` Network /
+                // Storage / Crypto access to all blocks and bypass default-deny
+                // on those resource types.
                 if matches!(
                     grant.resource_type,
                     Some(wafer_block::types::ResourceType::Network)
                         | Some(wafer_block::types::ResourceType::Storage)
                         | Some(wafer_block::types::ResourceType::Crypto)
                 ) {
-                    all_grants.push(grant.clone());
+                    if info.name == admin_block {
+                        all_grants.push(grant.clone());
+                    } else {
+                        tracing::error!(
+                            block = %info.name,
+                            resource = %grant.resource,
+                            resource_type = ?grant.resource_type,
+                            admin = %admin_block,
+                            "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
+                        );
+                    }
                     continue;
                 }
 

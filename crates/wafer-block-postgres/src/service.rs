@@ -461,7 +461,9 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn schema_ensure_table_async(&self, table: &Table) -> Result<(), DatabaseError> {
-        let sql = ddl::build_create_table(table, Backend::Postgres);
+        let sql = ddl::build_create_table(table, Backend::Postgres).map_err(|e| {
+            DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
+        })?;
         sqlx::query(&sql)
             .execute(&self.pool)
             .await

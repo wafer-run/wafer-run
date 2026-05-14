@@ -9,6 +9,25 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Validate a foreign-key referential action against an allowlist.
+///
+/// Returns the canonical uppercase form (`"CASCADE"`, `"SET NULL"`, etc.) so
+/// it can be spliced directly into DDL. Unknown values are rejected — we do
+/// NOT pass them through `sanitize_ident`, which strips spaces and would turn
+/// `"SET NULL"` into `"SETNULL"` (silently breaking the constraint).
+fn validate_fk_action(action: &str) -> Result<&'static str, String> {
+    match action.trim().to_ascii_uppercase().as_str() {
+        "CASCADE" => Ok("CASCADE"),
+        "SET NULL" => Ok("SET NULL"),
+        "SET DEFAULT" => Ok("SET DEFAULT"),
+        "NO ACTION" => Ok("NO ACTION"),
+        "RESTRICT" => Ok("RESTRICT"),
+        other => Err(format!(
+            "invalid foreign-key referential action: {other:?} (allowed: CASCADE, SET NULL, SET DEFAULT, NO ACTION, RESTRICT)"
+        )),
+    }
+}
+
 fn data_type_to_sql(dt: DataType, backend: Backend) -> &'static str {
     match backend {
         Backend::Sqlite => match dt {
@@ -93,7 +112,10 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
 }
 
 /// Generate a CREATE TABLE IF NOT EXISTS statement from a schema Table definition.
-pub fn build_create_table(table: &Table, backend: Backend) -> String {
+///
+/// Returns `Err` if any column's foreign-key referential action is outside the
+/// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT).
+pub fn build_create_table(table: &Table, backend: Backend) -> Result<String, String> {
     let qtable = quote_ident(&table.name);
     let mut sql = format!("CREATE TABLE IF NOT EXISTS {qtable} (\n");
 
@@ -133,17 +155,17 @@ pub fn build_create_table(table: &Table, backend: Backend) -> String {
             sql.push(')');
             if !refs.on_delete.is_empty() {
                 sql.push_str(" ON DELETE ");
-                sql.push_str(&sanitize_ident(&refs.on_delete));
+                sql.push_str(validate_fk_action(&refs.on_delete)?);
             }
             if !refs.on_update.is_empty() {
                 sql.push_str(" ON UPDATE ");
-                sql.push_str(&sanitize_ident(&refs.on_update));
+                sql.push_str(validate_fk_action(&refs.on_update)?);
             }
         }
     }
 
     sql.push_str("\n)");
-    sql
+    Ok(sql)
 }
 
 /// Generate a CREATE INDEX IF NOT EXISTS statement.
@@ -215,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_create_table_sqlite() {
-        let sql = build_create_table(&test_table(), Backend::Sqlite);
+        let sql = build_create_table(&test_table(), Backend::Sqlite).expect("valid");
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(sql.contains("\"id\" TEXT PRIMARY KEY"));
         assert!(sql.contains("\"name\" TEXT NOT NULL"));
@@ -225,12 +247,65 @@ mod tests {
 
     #[test]
     fn test_create_table_postgres() {
-        let sql = build_create_table(&test_table(), Backend::Postgres);
+        let sql = build_create_table(&test_table(), Backend::Postgres).expect("valid");
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(sql.contains("\"id\" TEXT PRIMARY KEY"));
         assert!(sql.contains("\"name\" TEXT NOT NULL"));
         assert!(sql.contains("\"created_at\" TIMESTAMPTZ"));
         assert!(sql.contains("NOW()"));
+    }
+
+    fn fk_table(on_delete: &str, on_update: &str) -> Table {
+        use wafer_core::interfaces::database::service::Reference;
+
+        let mut author_col = col_string("author_id");
+        author_col.references = Some(Reference {
+            table: "users".into(),
+            column: "id".into(),
+            on_delete: on_delete.into(),
+            on_update: on_update.into(),
+        });
+
+        Table {
+            name: "posts".into(),
+            columns: vec![pk("id"), author_col],
+            indexes: vec![],
+            primary_key: vec![],
+            unique_keys: vec![],
+        }
+    }
+
+    #[test]
+    fn test_fk_action_set_null_survives() {
+        let sql =
+            build_create_table(&fk_table("SET NULL", "CASCADE"), Backend::Sqlite).expect("valid");
+        assert!(
+            sql.contains("ON DELETE SET NULL"),
+            "expected `ON DELETE SET NULL` in: {sql}"
+        );
+        assert!(
+            sql.contains("ON UPDATE CASCADE"),
+            "expected `ON UPDATE CASCADE` in: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_fk_action_case_insensitive() {
+        let sql =
+            build_create_table(&fk_table("set null", "no action"), Backend::Sqlite).expect("valid");
+        // Output should be canonical uppercase regardless of input case.
+        assert!(sql.contains("ON DELETE SET NULL"));
+        assert!(sql.contains("ON UPDATE NO ACTION"));
+    }
+
+    #[test]
+    fn test_fk_action_rejects_unknown() {
+        let err = build_create_table(&fk_table("DROP TABLE", ""), Backend::Sqlite)
+            .expect_err("unknown FK action should be rejected");
+        assert!(
+            err.contains("invalid foreign-key referential action"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
