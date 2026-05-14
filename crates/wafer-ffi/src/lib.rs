@@ -18,9 +18,11 @@
 //! - Panics are caught at every FFI boundary.
 #![allow(clippy::missing_safety_doc)]
 
-use std::ffi::{c_void, CStr, CString};
-use std::os::raw::{c_char, c_int};
-use std::sync::Arc;
+use std::{
+    ffi::{c_void, CStr, CString},
+    os::raw::{c_char, c_int},
+    sync::Arc,
+};
 
 use tokio::sync::RwLock;
 use wafer_run::{Message, Wafer, WasmiBlock};

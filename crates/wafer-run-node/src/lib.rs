@@ -3,8 +3,10 @@
 //! All runtime methods are async; napi-rs emits them as `Promise`-returning JS
 //! methods. There is no `block_on` bridge — the JS event loop drives tokio.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;

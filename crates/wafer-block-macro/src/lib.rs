@@ -1,10 +1,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::spanned::Spanned;
 use syn::{
     parse::{Parse, ParseStream},
     parse2,
     punctuated::Punctuated,
+    spanned::Spanned,
     Expr, ExprArray, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
 };
 
