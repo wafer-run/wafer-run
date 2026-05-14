@@ -1,3 +1,28 @@
+//! `wafer-run/ip-rate-limit` — per-IP rate-limiting middleware block.
+//!
+//! ## Status: native-only
+//!
+//! This block uses `parking_lot::Mutex<HashMap<…>>` + `std::time::Instant` and
+//! is therefore **only suitable for single-instance native deployments**.
+//! State is per-process and `Instant` semantics on `wasm32-unknown-unknown`
+//! (Cloudflare Workers) are non-monotonic, so cross-instance counts would not
+//! be coherent.
+//!
+//! It is intentionally never wired into wasm32 / Cloudflare Workers builds:
+//!
+//! - The only consumer is the [`wafer-flow-http-server`] flow, which is gated
+//!   behind `wafer-site`'s `target-native` feature; the `target-cloudflare`
+//!   build does not pull it in.
+//! - Cloudflare Workers production paths (`solobase` on `wafer.run`) use
+//!   solobase-core's own `UserRateLimiter`, which is D1-backed via
+//!   `wafer-sql-utils::upsert::build_rate_limit_upsert`.
+//!
+//! If a durable, cross-instance rate-limit primitive is ever needed at this
+//! layer, follow the solobase `UserRateLimiter` pattern (D1 upsert under
+//! `cfg(target_arch = "wasm32")`) rather than extending this in-memory block.
+//!
+//! [`wafer-flow-http-server`]: ../wafer_flow_http_server/index.html
+
 use std::{
     collections::HashMap,
     sync::Arc,
