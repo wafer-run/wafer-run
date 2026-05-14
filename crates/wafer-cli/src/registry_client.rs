@@ -38,13 +38,13 @@ pub struct SearchResponse {
     pub packages: Vec<PackageSummary>,
     // Accepted but currently unused by the CLI. Present so downstream
     // pagination work doesn't need to re-shape the struct.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "pagination fields reserved for future CLI paging")]
     pub total: i64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "pagination fields reserved for future CLI paging")]
     pub query: String,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "pagination fields reserved for future CLI paging")]
     pub page: i64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "pagination fields reserved for future CLI paging")]
     pub page_size: i64,
 }
 

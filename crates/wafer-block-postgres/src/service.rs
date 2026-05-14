@@ -1124,7 +1124,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::approx_constant)]
+    #[expect(
+        clippy::approx_constant,
+        reason = "test literal happens to look like PI; not an approximation"
+    )]
     fn test_pg_type_for_json_value() {
         assert_eq!(pg_type_for_json_value(&serde_json::Value::Null), "TEXT");
         assert_eq!(

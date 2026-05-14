@@ -41,7 +41,10 @@ impl Resolve for SsrfFilteringResolver {
     // compiled out under `allow-private-network`) can inspect them, and so
     // reqwest gets an owned `Box<dyn Iterator + Send>` rather than the
     // borrowing iterator returned by `tokio::net::lookup_host`.
-    #[allow(clippy::needless_collect)]
+    #[expect(
+        clippy::needless_collect,
+        reason = "Vec is reused: SSRF filter inspects + reqwest takes owned Iterator+Send"
+    )]
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         Box::pin(async move {

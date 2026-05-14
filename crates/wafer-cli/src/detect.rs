@@ -22,7 +22,6 @@ impl Lang {
 
 /// Detect the language of an existing block project in `dir` by inspecting
 /// well-known files.
-#[allow(dead_code)]
 ///
 /// Detection order:
 ///   1. `Cargo.toml`  → Rust

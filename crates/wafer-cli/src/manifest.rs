@@ -27,7 +27,6 @@ pub struct Manifest {
 
 impl Manifest {
     /// Read and validate the manifest.json in `dir`.
-    #[allow(dead_code)]
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let path = dir.join("manifest.json");
         let contents = std::fs::read_to_string(&path)

@@ -21,7 +21,10 @@ use wafer_block::{
 
 /// Captured fields from a single `call_block` invocation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fields surfaced only via #[derive(Debug)] in test failure output"
+)]
 struct Captured {
     block: String,
     kind: String,

@@ -2,7 +2,11 @@ use parking_lot::RwLock;
 use wafer_block::*;
 
 /// Access control policy for the inspector.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "Authenticated variant reserved for future config path; \
+              other variants are constructed from config"
+)]
 enum AccessPolicy {
     /// Require `auth.user_id` to be set (default).
     Authenticated,

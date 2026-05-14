@@ -37,7 +37,7 @@ pub struct InstallOutcome {
     pub org: String,
     pub block: String,
     pub version: String,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "captured for future verification logging")]
     pub sha256: String,
     pub from_cache: bool,
 }

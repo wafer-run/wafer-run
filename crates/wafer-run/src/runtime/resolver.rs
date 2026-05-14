@@ -38,7 +38,10 @@ impl Wafer {
 
     /// Expand declarative `config_map` and `config_defaults` from WaferFlow definitions.
     pub(crate) fn expand_declarative_flow_configs(&mut self) {
-        #[allow(clippy::type_complexity)]
+        #[expect(
+            clippy::type_complexity,
+            reason = "tuple mirrors the accumulated shape of the eligible iterator; no useful alias"
+        )]
         let eligible: Vec<(
             String,
             HashMap<String, wafer_flow::ConfigMapEntry>,
