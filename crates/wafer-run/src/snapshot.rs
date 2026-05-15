@@ -2,19 +2,11 @@
 //! captured at `lifecycle::start` and shared with every [`RuntimeContext`]
 //! created thereafter.
 //!
-//! **Status: not yet integrated.** This module defines the target struct
-//! shape. Wiring it through `Wafer` and `RuntimeContext` (replacing the
-//! five separate snapshot `Arc<…>` fields each holds) is a substantial
-//! refactor — ~30 internal call sites in `wafer-run` plus the
-//! `Context::registered_blocks` / `::flow_defs` / etc. trait method
-//! bodies. Tracked as a follow-up to the 2026-05-14 wafer-run refactor
-//! spec (Pass 5).
-//!
-//! When integrated, cloning a context will drop from five `Arc::clone`s
-//! to one, and any future snapshot field will only need to be added in
-//! one place instead of the current six (Wafer's struct, Wafer's
-//! lifecycle assignment, Wafer's make_context call, RuntimeContext's
-//! struct, RuntimeContext::clone_arc, and the trait accessor).
+//! Cloning a context Arc-clones this one bundle rather than five separate
+//! snapshot `Arc<…>` fields. Adding a new piece of post-startup metadata
+//! is a one-place change here instead of touching `Wafer`, the lifecycle
+//! assignment, `make_context`, `RuntimeContext`, `clone_arc`, and the
+//! trait accessor.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -22,9 +14,11 @@ use wafer_block::InterfaceSpec;
 
 use crate::block::BlockInfo;
 
-/// Immutable bundle of post-startup metadata. Construct via
-/// [`StartupSnapshot::build`] (called from `lifecycle::start`).
-#[derive(Default)]
+/// Immutable bundle of post-startup metadata. Populated in two phases:
+/// `block_configs` is captured in [`crate::runtime::Wafer::resolve`]
+/// (before the working `block_configs` map is drained into the Init
+/// lifecycle), then the rest is assembled in `start_without_bind`.
+#[derive(Default, Clone)]
 pub struct StartupSnapshot {
     pub blocks: Vec<BlockInfo>,
     pub flow_infos: Vec<wafer_flow::FlowInfo>,

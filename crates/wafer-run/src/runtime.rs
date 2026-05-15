@@ -154,14 +154,11 @@ pub struct Wafer {
     /// All registered blocks + aliases, shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
-    /// Snapshot of registered block info (populated at start time).
-    pub(crate) blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
-    /// Snapshot of flow info (populated at start time).
-    pub(crate) flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
-    /// Snapshot of flow definitions (populated at start time).
-    pub(crate) flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
-    /// Snapshot of expanded block configs (populated at start time, for inspector).
-    pub(crate) block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
+    /// Single immutable bundle of post-startup metadata shared with every
+    /// [`RuntimeContext`]. Populated in two phases: `block_configs` is
+    /// captured during `resolve()` before the working map is drained;
+    /// the rest is filled in at the end of `start_without_bind`.
+    pub(crate) snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
     pub(crate) aliases: Arc<HashMap<String, String>>,
@@ -174,8 +171,6 @@ pub struct Wafer {
     pub(crate) registrars: HashMap<String, RegistrarFn>,
     /// Registered interface specifications.
     pub(crate) interface_specs: HashMap<String, wafer_block::InterfaceSpec>,
-    /// Snapshot of interface specs (populated at start time).
-    pub(crate) interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
     /// Block names that have already produced an "unknown interface" warning.
     /// Process-local; used by the call_block interface-action validator to
     /// emit the warning at most once per block.
@@ -233,15 +228,11 @@ impl Wafer {
             config_expanders: HashMap::new(),
             registrars: HashMap::new(),
             hooks: ObservabilityBus::new(),
-            blocks_snapshot: Arc::new(Vec::new()),
-            flow_infos_snapshot: Arc::new(Vec::new()),
-            flow_defs_snapshot: Arc::new(Vec::new()),
-            block_configs_snapshot: Arc::new(HashMap::new()),
+            snapshot: crate::snapshot::StartupSnapshot::empty(),
             interface_specs: wafer_block::interfaces::all()
                 .into_iter()
                 .map(|s| (s.name.clone(), s))
                 .collect(),
-            interface_specs_snapshot: Arc::new(Vec::new()),
             warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
             wrap_grants: Arc::new(Vec::new()),
             wrap_admin_block: Arc::new(String::new()),
@@ -355,11 +346,7 @@ impl Wafer {
             all_blocks: self.all_blocks_arc(),
             call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
-            registered_blocks_snapshot: self.blocks_snapshot.clone(),
-            flow_infos_snapshot: self.flow_infos_snapshot.clone(),
-            flow_defs_snapshot: self.flow_defs_snapshot.clone(),
-            block_configs_snapshot: self.block_configs_snapshot.clone(),
-            interface_specs_snapshot: self.interface_specs_snapshot.clone(),
+            snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.aliases.clone(),
             caller_requires: None, // unrestricted by default
