@@ -79,6 +79,8 @@ axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 hyper = "1"
+form_urlencoded = "1"
+percent-encoding = "2"
 
 # SQLite
 rusqlite = { version = "0.32", features = ["bundled"] }

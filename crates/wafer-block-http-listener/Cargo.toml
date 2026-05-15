@@ -9,6 +9,7 @@ description = "WAFER block: HTTP transport — listens for HTTP requests and con
 wafer-run = { path = "../wafer-run", default-features = false }
 wafer-block = { path = "../wafer-block" }
 axum = { workspace = true }
+form_urlencoded = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }

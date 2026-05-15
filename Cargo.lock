@@ -6043,6 +6043,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "form_urlencoded",
  "parking_lot",
  "serde_json",
  "tokio",
@@ -6057,6 +6058,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "parking_lot",
+ "percent-encoding",
  "serde_json",
  "tracing",
  "wafer-block",

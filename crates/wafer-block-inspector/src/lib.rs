@@ -168,7 +168,9 @@ impl Block for InspectorBlock {
 
         // /blocks/{name} — single block info
         if let Some(block_name) = extract_segment_after(&path, "/blocks/") {
-            let decoded = url_decode(&block_name);
+            let decoded = percent_encoding::percent_decode_str(&block_name)
+                .decode_utf8_lossy()
+                .into_owned();
             let blocks = ctx.registered_blocks();
             if let Some(info) = blocks.into_iter().find(|b| b.name == decoded) {
                 let json = serde_json::to_vec(&info).unwrap_or_default();
@@ -183,7 +185,9 @@ impl Block for InspectorBlock {
 
         // /flows/{id} — single flow def
         if let Some(flow_id) = extract_segment_after(&path, "/flows/") {
-            let decoded = url_decode(&flow_id);
+            let decoded = percent_encoding::percent_decode_str(&flow_id)
+                .decode_utf8_lossy()
+                .into_owned();
             let defs = ctx.flow_defs();
             if let Some(def) = defs.into_iter().find(|c| c.id == decoded) {
                 let json = serde_json::to_vec(&def).unwrap_or_default();
@@ -260,32 +264,6 @@ fn extract_segment_after(path: &str, needle: &str) -> Option<String> {
         return None;
     }
     Some(segment.to_string())
-}
-
-/// Minimal percent-decoding for block/flow names (handles %2F -> /).
-/// Correctly handles multi-byte UTF-8 sequences.
-fn url_decode(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().unwrap_or(b'0');
-            let lo = chars.next().unwrap_or(b'0');
-            bytes.push(hex_val(hi) * 16 + hex_val(lo));
-        } else {
-            bytes.push(b);
-        }
-    }
-    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
-}
-
-fn hex_val(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => 0,
-    }
 }
 
 wafer_run::register_static_block!("wafer-run/inspector", InspectorBlock);
