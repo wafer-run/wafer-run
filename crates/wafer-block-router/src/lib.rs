@@ -107,6 +107,13 @@ impl Block for RouterBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![ConfigVar::new(
+            "routes",
+            "JSON array of route entries; each entry is dispatched to a \
+             handler block matched by method and path pattern.",
+            "[]",
+        )
+        .name("Routes")])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {

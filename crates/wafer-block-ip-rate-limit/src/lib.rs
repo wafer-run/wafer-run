@@ -30,7 +30,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use wafer_run::*;
+use wafer_run::{types::ConfigVar, *};
 
 /// Source of monotonic time for rate-limit windowing. Injected for tests.
 pub trait Clock: Send + Sync {
@@ -92,11 +92,39 @@ impl Block for RateLimitBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "max_requests",
+                "Maximum requests per IP within the window before \
+                 returning ResourceExhausted.",
+                "60",
+            )
+            .name("Max Requests"),
+            ConfigVar::new(
+                "window_seconds",
+                "Sliding window length in seconds for the per-IP \
+                 request count.",
+                "60",
+            )
+            .name("Window (seconds)"),
+        ])
+        .config_keys(vec![ConfigVar::new(
+            "WAFER_RUN__IP_RATE_LIMIT__DISABLE",
+            "When set to \"1\", the rate limiter is bypassed entirely. \
+             Intended for test fixtures; do not set in production.",
+            "",
+        )
+        .name("Disable rate limit")
+        .optional()])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Allow disabling via env var (useful for tests)
-        if std::env::var("RATE_LIMIT_IP").ok().as_deref() == Some("0") {
+        if std::env::var("WAFER_RUN__IP_RATE_LIMIT__DISABLE")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
             return OutputStream::continue_with(msg);
         }
 
@@ -239,7 +267,7 @@ mod rate_limit_tests {
 
     use super::*;
 
-    /// Serializes all env-var-sensitive tests to prevent RATE_LIMIT_IP leaking
+    /// Serializes all env-var-sensitive tests to prevent WAFER_RUN__IP_RATE_LIMIT__DISABLE leaking
     /// between tests running concurrently in the same process.
     /// Uses tokio::sync::Mutex so the lock can be held across `.await` points.
     fn env_mutex() -> &'static tokio::sync::Mutex<()> {
@@ -296,7 +324,7 @@ mod rate_limit_tests {
     #[tokio::test]
     async fn under_limit_continues_with_remaining_meta() {
         let _guard = env_mutex().lock().await;
-        std::env::remove_var("RATE_LIMIT_IP");
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),
@@ -325,7 +353,7 @@ mod rate_limit_tests {
     #[tokio::test]
     async fn over_limit_denies_with_retry_after() {
         let _guard = env_mutex().lock().await;
-        std::env::remove_var("RATE_LIMIT_IP");
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),
@@ -375,7 +403,7 @@ mod rate_limit_tests {
     #[tokio::test]
     async fn window_reset_restores_budget() {
         let _guard = env_mutex().lock().await;
-        std::env::remove_var("RATE_LIMIT_IP");
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),
@@ -428,7 +456,7 @@ mod rate_limit_tests {
     #[tokio::test]
     async fn disable_via_env_skips_entirely() {
         let _guard = env_mutex().lock().await;
-        std::env::set_var("RATE_LIMIT_IP", "0");
+        std::env::set_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE", "1");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),
@@ -449,18 +477,18 @@ mod rate_limit_tests {
             {
                 Err(TerminalNotResponse::Continue(_)) => {}
                 other => {
-                    std::env::remove_var("RATE_LIMIT_IP");
+                    std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
                     panic!("expected Continue (env disabled), got {other:?}");
                 }
             }
         }
-        std::env::remove_var("RATE_LIMIT_IP");
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
     }
 
     #[tokio::test]
     async fn distinct_ips_have_separate_buckets() {
         let _guard = env_mutex().lock().await;
-        std::env::remove_var("RATE_LIMIT_IP");
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),

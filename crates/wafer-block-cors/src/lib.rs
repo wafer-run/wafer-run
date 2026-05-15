@@ -68,6 +68,29 @@ impl Block for CorsBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "allowed_origins",
+                "Comma-separated list of origins permitted to make \
+                 cross-origin requests, or \"*\" for any origin.",
+                "*",
+            )
+            .name("Allowed Origins"),
+            ConfigVar::new(
+                "allowed_methods",
+                "Comma-separated list of HTTP methods returned in \
+                 Access-Control-Allow-Methods.",
+                "GET,POST,PUT,DELETE,OPTIONS",
+            )
+            .name("Allowed Methods"),
+            ConfigVar::new(
+                "allowed_headers",
+                "Comma-separated list of request headers returned in \
+                 Access-Control-Allow-Headers.",
+                "Content-Type,Authorization",
+            )
+            .name("Allowed Headers"),
+        ])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

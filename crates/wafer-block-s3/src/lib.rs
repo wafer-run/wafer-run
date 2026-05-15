@@ -11,10 +11,19 @@ use service::S3StorageService;
 use wafer_block::*;
 use wafer_core::interfaces::storage::service::StorageService;
 
+const ENDPOINT_ENV: &str = "WAFER_RUN__S3__ENDPOINT";
+const REGION_ENV: &str = "WAFER_RUN__S3__REGION";
+const DEFAULT_REGION: &str = "us-east-1";
+const DEFAULT_BUCKET: &str = "solobase";
+
 /// The S3-compatible storage block.
 ///
-/// Initialized during `lifecycle(Init)` from config (reads `STORAGE_BUCKET`,
-/// `STORAGE_PREFIX`, `STORAGE_ENDPOINT`, `STORAGE_REGION` env vars or config keys).
+/// Initialized during `lifecycle(Init)`. Two config namespaces:
+/// - Per-flow JSON (declared in `BlockInfo::flow_config`): `bucket`, `prefix`.
+///   Each S3 block instance can serve a different bucket / prefix per flow.
+/// - Process env (declared in `BlockInfo::config_keys`):
+///   `WAFER_RUN__S3__ENDPOINT`, `WAFER_RUN__S3__REGION`.
+///   These are typically uniform across flows in a single wafer-run process.
 pub struct S3StorageBlock {
     service: OnceLock<Arc<dyn StorageService>>,
 }
@@ -44,6 +53,34 @@ impl Block for S3StorageBlock {
             "S3-compatible storage block",
         )
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "bucket",
+                "S3 bucket name this block reads from and writes to.",
+                DEFAULT_BUCKET,
+            )
+            .name("Bucket"),
+            ConfigVar::new(
+                "prefix",
+                "Optional key prefix applied to every object stored or fetched.",
+                "",
+            )
+            .name("Prefix"),
+        ])
+        .config_keys(vec![
+            ConfigVar::new(
+                ENDPOINT_ENV,
+                "S3-compatible endpoint URL (e.g., MinIO). Empty for AWS.",
+                "",
+            )
+            .name("Endpoint"),
+            ConfigVar::new(
+                REGION_ENV,
+                "AWS region used when talking to a non-AWS S3 endpoint.",
+                DEFAULT_REGION,
+            )
+            .name("Region"),
+        ])
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
@@ -64,18 +101,16 @@ impl Block for S3StorageBlock {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
             let config = wafer_block::BlockConfig::from_event(&event);
 
-            let bucket = config
-                .env_or("STORAGE_BUCKET", "bucket")
-                .unwrap_or_else(|| "solobase".to_string());
-            let prefix = config
-                .env_or("STORAGE_PREFIX", "prefix")
-                .unwrap_or_default();
-            let endpoint = config
-                .env_or("STORAGE_ENDPOINT", "endpoint")
-                .unwrap_or_default();
-            let region = config
-                .env_or("STORAGE_REGION", "region")
-                .unwrap_or_else(|| "us-east-1".to_string());
+            // Per-flow JSON (snake_case).
+            let bucket = match config.str("bucket") {
+                "" => DEFAULT_BUCKET.to_string(),
+                s => s.to_string(),
+            };
+            let prefix = config.str("prefix").to_string();
+
+            // Process env (SCREAMING_SNAKE).
+            let endpoint = std::env::var(ENDPOINT_ENV).unwrap_or_default();
+            let region = std::env::var(REGION_ENV).unwrap_or_else(|_| DEFAULT_REGION.to_string());
 
             let svc = if endpoint.is_empty() {
                 S3StorageService::new(&bucket, &prefix).await

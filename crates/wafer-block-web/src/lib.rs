@@ -245,6 +245,47 @@ impl Block for WebBlock {
         .instance_mode(InstanceMode::Singleton)
         .requires(vec!["wafer-run/storage".into()])
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "web_root",
+                "Storage folder under which static files are served.",
+                "public",
+            )
+            .name("Web Root"),
+            ConfigVar::new(
+                "web_prefix",
+                "Optional URL path prefix that must precede every served \
+                 file (stripped before the storage lookup).",
+                "",
+            )
+            .name("URL Prefix"),
+            ConfigVar::new(
+                "web_spa",
+                "When true, requests for non-existent files fall back to \
+                 the index file instead of 404 (single-page-app mode).",
+                "false",
+            )
+            .name("SPA Mode"),
+            ConfigVar::new(
+                "web_index",
+                "File served at the prefix root and as the SPA fallback.",
+                "index.html",
+            )
+            .name("Index File"),
+            ConfigVar::new(
+                "cache_max_age",
+                "Cache-Control max-age (seconds) for unhashed assets.",
+                "3600",
+            )
+            .name("Cache Max Age"),
+            ConfigVar::new(
+                "immutable_max_age",
+                "Cache-Control max-age (seconds) for content-hashed assets, \
+                 which also receive the `immutable` directive.",
+                "31536000",
+            )
+            .name("Immutable Max Age"),
+        ])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

@@ -198,10 +198,26 @@ pub struct BlockInfo {
     /// tables exist when the block is registered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collections: Vec<CollectionSchema>,
-    /// Configuration variables declared by this block.
-    /// Each block should only declare variables with its own `{ORG}__{BLOCK}__` prefix.
+    /// Process env-var-style config variables declared by this block.
+    /// **Keys must be SCREAMING_SNAKE with the block's `{ORG}__{BLOCK}__`
+    /// prefix** (e.g., `WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`). Read by
+    /// blocks via `std::env::var(KEY)`.
+    ///
+    /// For per-flow-step JSON config (snake_case keys read via
+    /// `BlockConfig::from_event` or `ctx.config_get`), use
+    /// [`Self::flow_config`] instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_keys: Vec<ConfigVar>,
+    /// Per-flow-step JSON config keys this block reads via
+    /// `BlockConfig::from_event` or `ctx.config_get`. **Keys must be
+    /// snake_case identifiers** (e.g., `listen`, `allowed_origins`).
+    ///
+    /// This is distinct from [`Self::config_keys`], which declares
+    /// process env-var-style keys (SCREAMING_SNAKE, `{ORG}__{BLOCK}__`
+    /// prefix). A workspace validator asserts the two slots don't
+    /// overlap and that each entry obeys its slot's naming convention.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_config: Vec<ConfigVar>,
     /// WRAP resource access grants declared by this block.
     /// Blocks can only grant access to resources they own (enforced at startup).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -284,6 +300,7 @@ impl BlockInfo {
             requires: Vec::new(),
             collections: Vec::new(),
             config_keys: Vec::new(),
+            flow_config: Vec::new(),
             grants: Vec::new(),
             category: BlockCategory::default(),
             runtime: BlockRuntime::default(),
@@ -311,6 +328,13 @@ impl BlockInfo {
 
     pub fn collections(mut self, collections: Vec<CollectionSchema>) -> Self {
         self.collections = collections;
+        self
+    }
+
+    /// Set the per-flow-step JSON config keys this block reads. See the
+    /// field doc on [`Self::flow_config`].
+    pub fn flow_config(mut self, flow_config: Vec<ConfigVar>) -> Self {
+        self.flow_config = flow_config;
         self
     }
 

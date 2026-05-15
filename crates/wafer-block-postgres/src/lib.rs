@@ -20,10 +20,13 @@ use wafer_run::{
     types::*,
 };
 
+const DATABASE_URL_ENV: &str = "WAFER_RUN__POSTGRES__DATABASE_URL";
+
 /// The PostgreSQL database block.
 ///
-/// Initialized during `lifecycle(Init)` from config (reads `DATABASE_URL`
-/// env var or `url` config key). Connection is established asynchronously.
+/// Initialized during `lifecycle(Init)`. Reads its connection URL from the
+/// `WAFER_RUN__POSTGRES__DATABASE_URL` env var — a wafer-run process
+/// typically points at one database, so this lives in `config_keys`.
 pub struct PostgresDatabaseBlock {
     service: OnceLock<Arc<dyn DatabaseService>>,
     tables: OnceLock<Vec<Table>>,
@@ -55,6 +58,13 @@ impl Block for PostgresDatabaseBlock {
             "PostgreSQL database block",
         )
         .category(BlockCategory::Infrastructure)
+        .config_keys(vec![ConfigVar::new(
+            DATABASE_URL_ENV,
+            "PostgreSQL connection URL (postgres://user:pass@host:port/db). \
+             Required.",
+            "",
+        )
+        .name("Database URL")])
     }
 
     async fn handle(
@@ -97,10 +107,10 @@ impl Block for PostgresDatabaseBlock {
             };
             self.tables.set(tables).ok();
 
-            let url = config.env_or("DATABASE_URL", "url").ok_or_else(|| {
+            let url = std::env::var(DATABASE_URL_ENV).map_err(|_| {
                 WaferError::new(
                     "config",
-                    "wafer-run/postgres: requires DATABASE_URL env var or url config",
+                    format!("wafer-run/postgres: {DATABASE_URL_ENV} must be set"),
                 )
             })?;
 

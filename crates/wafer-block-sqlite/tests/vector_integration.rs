@@ -1,7 +1,7 @@
 //! Integration: SqliteVecService + FastembedService roundtrip.
 //!
 //! Uses MiniLM (120 MB download on first run). Gate with
-//! `SOLOBASE_RUN_FASTEMBED_TESTS=1` to enable.
+//! `WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS=1` to enable.
 
 #![cfg(feature = "vectors")]
 
@@ -14,7 +14,7 @@ use wafer_core::interfaces::vector::{
 #[tokio::test]
 #[ignore]
 async fn ingest_then_query_returns_ranked_matches() {
-    if std::env::var("SOLOBASE_RUN_FASTEMBED_TESTS").is_err() {
+    if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
         return;
     }
     use wafer_block_fastembed::FastembedService;

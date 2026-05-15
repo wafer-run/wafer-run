@@ -295,6 +295,21 @@ impl Block for HttpListenerBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "listen",
+                "Socket address the listener binds to (host:port).",
+                "0.0.0.0:8080",
+            )
+            .name("Listen Address"),
+            ConfigVar::new(
+                "dispatch_target",
+                "Default dispatch target (flow id or block name) when no \
+                 explicit router upstream resolves the request.",
+                "",
+            )
+            .name("Dispatch Target"),
+        ])
     }
 
     async fn handle(
