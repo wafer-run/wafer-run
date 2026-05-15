@@ -1,12 +1,42 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, RwLock},
+    time::Instant,
+};
 
 use parking_lot::Mutex;
+use wafer_block::ConfigVar;
 use wafer_run::*;
+
+/// Default routes for the stats / monitoring endpoints. Overridable via
+/// the `stats_path` / `monitoring_path` flow_config keys (per request)
+/// or via the block-level config JSON passed to `lifecycle(Init)`.
+const DEFAULT_STATS_PATH: &str = "/_stats";
+const DEFAULT_MONITORING_PATH: &str = "/_monitoring";
 
 /// MonitoringBlock tracks request metrics and provides a stats endpoint.
 pub struct MonitoringBlock {
     start_time: Instant,
     stats: Mutex<MonitoringStats>,
+    /// Init-cached endpoint paths. `handle()` prefers per-request
+    /// `ctx.config_get` and falls back to these.
+    paths: RwLock<EndpointPaths>,
+}
+
+#[derive(Clone)]
+struct EndpointPaths {
+    stats: String,
+    monitoring: String,
+}
+
+impl Default for EndpointPaths {
+    fn default() -> Self {
+        Self {
+            stats: DEFAULT_STATS_PATH.into(),
+            monitoring: DEFAULT_MONITORING_PATH.into(),
+        }
+    }
 }
 
 struct MonitoringStats {
@@ -49,7 +79,52 @@ impl MonitoringBlock {
                 status_counts: HashMap::new(),
                 path_counts: HashMap::new(),
             }),
+            paths: RwLock::new(EndpointPaths::default()),
         }
+    }
+
+    /// Resolve `(stats_path, monitoring_path)` from the per-request
+    /// context (preferred) or the Init-cached defaults.
+    fn resolved_paths(&self, ctx: &dyn Context) -> (String, String) {
+        let cached = self
+            .paths
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| EndpointPaths::default());
+        let stats = ctx
+            .config_get("stats_path")
+            .map(|s| s.to_string())
+            .unwrap_or(cached.stats);
+        let monitoring = ctx
+            .config_get("monitoring_path")
+            .map(|s| s.to_string())
+            .unwrap_or(cached.monitoring);
+        (stats, monitoring)
+    }
+}
+
+/// Returns true when `addr` parses as a loopback IP — 127.0.0.0/8
+/// (IPv4), `::1` (IPv6), or an IPv4-mapped IPv6 like `::ffff:127.0.0.1`.
+///
+/// Dual-stack listening sockets routinely deliver IPv4 loopback
+/// connections as `::ffff:127.x.y.z`, so the mapped-IPv6 case must be
+/// unwrapped before [`Ipv4Addr::is_loopback`] sees it — `IpAddr::is_loopback`
+/// alone says `false` for those.
+///
+/// Falsy for empty / unparseable strings — callers handle the empty case
+/// separately where it's meaningful (e.g. internal non-HTTP callers
+/// don't populate `req.client.ip`).
+fn is_loopback_addr(addr: &str) -> bool {
+    match addr.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => {
+            v6.is_loopback()
+                || v6
+                    .to_ipv4_mapped()
+                    .map(|v4| v4.is_loopback())
+                    .unwrap_or(false)
+        }
+        Err(_) => false,
     }
 }
 
@@ -65,19 +140,37 @@ impl Block for MonitoringBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![
+            ConfigVar::new(
+                "stats_path",
+                "URL path that serves the JSON stats blob \
+                 (uptime / counts). Loopback-only.",
+                DEFAULT_STATS_PATH,
+            )
+            .name("Stats Path"),
+            ConfigVar::new(
+                "monitoring_path",
+                "Alias path for the stats endpoint. Same access \
+                 rules, same response shape.",
+                DEFAULT_MONITORING_PATH,
+            )
+            .name("Monitoring Path"),
+        ])
     }
 
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+    async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
+        let (stats_path, monitoring_path) = self.resolved_paths(ctx);
 
         // Stats endpoint — only accessible from loopback addresses.
         // Use an auth middleware in front if broader access control is needed.
-        if path == "/_stats" || path == "/_monitoring" {
-            let remote = msg.remote_addr().to_string();
-            let is_local = remote.is_empty()
-                || remote == "127.0.0.1"
-                || remote == "::1"
-                || remote.starts_with("127.");
+        if path == stats_path || path == monitoring_path {
+            let remote = msg.remote_addr();
+            // Treat an empty `req.client.ip` as trusted (internal / non-HTTP
+            // callers don't populate the meta key). Everything else must
+            // parse as an actual loopback IP — `127.foo`-style spoofing
+            // doesn't survive `IpAddr::parse`.
+            let is_local = remote.is_empty() || is_loopback_addr(remote);
             if !is_local {
                 return OutputStream::error(WaferError {
                     code: ErrorCode::PermissionDenied,
@@ -85,16 +178,22 @@ impl Block for MonitoringBlock {
                     meta: vec![],
                 });
             }
-            let stats = self.stats.lock();
+            // Snapshot the stats fields under the lock, drop the lock,
+            // then serialise. Holding `parking_lot::Mutex` across a
+            // potentially-long `serde_json::to_vec` blocks every other
+            // request that touches the counters.
             let uptime = self.start_time.elapsed().as_secs();
-            let body = serde_json::to_vec(&serde_json::json!({
-                "uptime_seconds": uptime,
-                "total_requests": stats.total_requests,
-                "error_count": stats.error_count,
-                "status_counts": stats.status_counts,
-                "top_paths": stats.path_counts,
-            }))
-            .unwrap_or_default();
+            let payload = {
+                let stats = self.stats.lock();
+                serde_json::json!({
+                    "uptime_seconds": uptime,
+                    "total_requests": stats.total_requests,
+                    "error_count": stats.error_count,
+                    "status_counts": stats.status_counts,
+                    "top_paths": stats.path_counts,
+                })
+            };
+            let body = serde_json::to_vec(&payload).unwrap_or_default();
             return OutputStream::respond(body);
         }
 
@@ -114,12 +213,69 @@ impl Block for MonitoringBlock {
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if let LifecycleType::Init = event.event_type {
+            if !event.data.is_empty() {
+                if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
+                    if let Ok(mut guard) = self.paths.write() {
+                        if let Some(v) = cfg.get("stats_path").and_then(|v| v.as_str()) {
+                            if !v.is_empty() {
+                                guard.stats = v.to_string();
+                            }
+                        }
+                        if let Some(v) = cfg.get("monitoring_path").and_then(|v| v.as_str()) {
+                            if !v.is_empty() {
+                                guard.monitoring = v.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
 
 pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/monitoring", Arc::new(MonitoringBlock::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_ipv4_accepted() {
+        assert!(is_loopback_addr("127.0.0.1"));
+        // RFC 1122: every 127.0.0.0/8 address is loopback.
+        assert!(is_loopback_addr("127.255.255.255"));
+        assert!(is_loopback_addr("127.0.1.2"));
+    }
+
+    #[test]
+    fn loopback_ipv6_accepted() {
+        assert!(is_loopback_addr("::1"));
+        // IPv4-mapped IPv6 loopback.
+        assert!(is_loopback_addr("::ffff:127.0.0.1"));
+    }
+
+    #[test]
+    fn non_loopback_rejected() {
+        assert!(!is_loopback_addr("10.0.0.1"));
+        assert!(!is_loopback_addr("192.168.1.1"));
+        assert!(!is_loopback_addr("128.0.0.1"));
+        assert!(!is_loopback_addr("0.0.0.0"));
+        assert!(!is_loopback_addr("2001:db8::1"));
+    }
+
+    #[test]
+    fn spoof_attempts_rejected() {
+        // The old `starts_with("127.")` check admitted these. `IpAddr::parse` doesn't.
+        assert!(!is_loopback_addr("127.foo"));
+        assert!(!is_loopback_addr("127.0.0.1.evil.com"));
+        assert!(!is_loopback_addr("127."));
+        assert!(!is_loopback_addr(""));
+        assert!(!is_loopback_addr("not-an-ip"));
+    }
 }

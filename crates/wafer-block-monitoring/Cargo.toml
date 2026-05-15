@@ -6,6 +6,7 @@ license.workspace = true
 description = "WAFER block: request metrics and monitoring"
 
 [dependencies]
+wafer-block = { path = "../wafer-block" }
 wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
