@@ -100,21 +100,15 @@ fn apply_response_meta(
         let k = entry.key.as_str();
         let v = &entry.value;
         match k {
-            k if k == META_RESP_STATUS || k == "http.status" => continue,
-            k if k.starts_with(META_RESP_COOKIE_PREFIX)
-                || k.starts_with("http.resp.set-cookie.") =>
-            {
+            k if k == META_RESP_STATUS => continue,
+            k if k.starts_with(META_RESP_COOKIE_PREFIX) => {
                 builder = builder.header("Set-Cookie", v);
             }
             k if k.starts_with(META_RESP_HEADER_PREFIX) => {
                 let header_name = &k[META_RESP_HEADER_PREFIX.len()..];
                 builder = builder.header(header_name, v);
             }
-            k if k.starts_with("http.resp.header.") => {
-                let header_name = &k[17..];
-                builder = builder.header(header_name, v);
-            }
-            k if k == META_RESP_CONTENT_TYPE || k == "Content-Type" => {
+            k if k == META_RESP_CONTENT_TYPE => {
                 builder = builder.header("Content-Type", v);
             }
             _ => {}
@@ -153,11 +147,6 @@ fn get_status_code(meta: &[MetaEntry], default_code: u16) -> u16 {
             return n;
         }
     }
-    if let Some(code) = MetaAccess::get(meta, "http.status") {
-        if let Ok(n) = code.parse::<u16>() {
-            return n;
-        }
-    }
     default_code
 }
 
@@ -189,8 +178,7 @@ pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Respo
             builder = apply_response_meta(builder, &buf.meta);
 
             // Set default content-type if not set
-            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE)
-                || MetaAccess::contains_key(&buf.meta, "Content-Type");
+            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
