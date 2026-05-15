@@ -220,8 +220,10 @@ impl Wafer {
             }
         }
 
-        // Snapshot expanded configs for inspector before draining
-        self.block_configs_snapshot = Arc::new(self.block_configs.clone());
+        // Stash the expanded configs in the startup snapshot before draining
+        // them into the Init lifecycle. `start_without_bind` finalises the
+        // rest of the snapshot once `resolve()` returns.
+        Arc::make_mut(&mut self.snapshot).block_configs = self.block_configs.clone();
 
         let configs: Vec<(String, serde_json::Value)> = self.block_configs.drain().collect();
 

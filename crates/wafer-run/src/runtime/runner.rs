@@ -112,9 +112,10 @@ impl Wafer {
         // first, then fall back to the original. `add_block_config` is keyed
         // by registration name (which may be either the alias or the target).
         let block_config = self
-            .block_configs_snapshot
+            .snapshot
+            .block_configs
             .get(resolved)
-            .or_else(|| self.block_configs_snapshot.get(block_name))
+            .or_else(|| self.snapshot.block_configs.get(block_name))
             .map(crate::config::parse_config_map)
             .unwrap_or_default();
 

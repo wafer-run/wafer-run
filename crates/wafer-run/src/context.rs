@@ -36,16 +36,9 @@ pub struct RuntimeContext {
     pub call_depth: Arc<std::sync::atomic::AtomicU32>,
     /// Maximum call depth (default: 16).
     pub max_call_depth: u32,
-    /// Snapshot of registered block info (populated at start time).
-    pub registered_blocks_snapshot: Arc<Vec<crate::block::BlockInfo>>,
-    /// Snapshot of flow info (populated at start time).
-    pub flow_infos_snapshot: Arc<Vec<wafer_flow::FlowInfo>>,
-    /// Snapshot of flow definitions (populated at start time).
-    pub flow_defs_snapshot: Arc<Vec<wafer_flow::WaferFlow>>,
-    /// Snapshot of expanded block configs (populated at start time).
-    pub block_configs_snapshot: Arc<HashMap<String, serde_json::Value>>,
-    /// Snapshot of interface specifications.
-    pub interface_specs_snapshot: Arc<Vec<wafer_block::InterfaceSpec>>,
+    /// Immutable bundle of post-startup metadata: registered blocks,
+    /// flow infos/defs, expanded block configs, interface specs.
+    pub snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Warn-once tracking for unknown interfaces. Shared Arc with the Wafer.
     pub warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
@@ -257,7 +250,7 @@ impl RuntimeContext {
                 &info.name,
                 &info.interface,
                 action,
-                &self.interface_specs_snapshot,
+                &self.snapshot.interface_specs,
             ) {
                 crate::runtime::validation::ActionCheck::Valid => {}
                 crate::runtime::validation::ActionCheck::Invalid { message } => {
@@ -314,11 +307,7 @@ impl RuntimeContext {
             all_blocks: self.all_blocks.clone(),
             call_depth: self.call_depth.clone(),
             max_call_depth: self.max_call_depth,
-            registered_blocks_snapshot: self.registered_blocks_snapshot.clone(),
-            flow_infos_snapshot: self.flow_infos_snapshot.clone(),
-            flow_defs_snapshot: self.flow_defs_snapshot.clone(),
-            block_configs_snapshot: self.block_configs_snapshot.clone(),
-            interface_specs_snapshot: self.interface_specs_snapshot.clone(),
+            snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.aliases.clone(),
             caller_requires: called_requires,
@@ -411,23 +400,23 @@ impl Context for RuntimeContext {
     }
 
     fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
-        (*self.registered_blocks_snapshot).clone()
+        self.snapshot.blocks.clone()
     }
 
     fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
-        (*self.flow_infos_snapshot).clone()
+        self.snapshot.flow_infos.clone()
     }
 
     fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
-        (*self.flow_defs_snapshot).clone()
+        self.snapshot.flow_defs.clone()
     }
 
     fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        (*self.block_configs_snapshot).clone()
+        self.snapshot.block_configs.clone()
     }
 
     fn interface_specs(&self) -> Vec<wafer_block::InterfaceSpec> {
-        (*self.interface_specs_snapshot).clone()
+        self.snapshot.interface_specs.clone()
     }
 
     fn caller_id(&self) -> Option<&str> {

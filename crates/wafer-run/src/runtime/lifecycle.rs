@@ -18,18 +18,27 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
 impl Wafer {
     /// Initialize the runtime without calling `bind()` on blocks.
     pub async fn start_without_bind(&mut self) -> Result<(), RuntimeError> {
+        // `resolve()` captures `block_configs` into the snapshot before the
+        // working map is drained for the Init lifecycle; the rest is filled
+        // in below. Until this point `self.snapshot` is the empty placeholder
+        // installed by `Wafer::empty()`.
         self.resolve().await?;
 
         // Rebuild the all_blocks map so contexts can see all resolved blocks
         self.rebuild_all_blocks();
 
-        // Snapshot introspection data for contexts.
-        // Sort by stable block name so consumers see deterministic order
+        // Take the partial snapshot left by `resolve()` (carrying
+        // `block_configs`) and finalise it with the remaining fields. Sort
+        // blocks by stable name so consumers see deterministic order
         // independent of HashMap's SipHash randomisation.
-        self.blocks_snapshot = Arc::new(sorted_snapshot(self.blocks.values().map(|b| b.info())));
-        self.flow_infos_snapshot = Arc::new(self.flows_info());
-        self.flow_defs_snapshot = Arc::new(self.flow_defs());
-        self.interface_specs_snapshot = Arc::new(self.interface_specs.values().cloned().collect());
+        let block_configs = std::mem::take(&mut Arc::make_mut(&mut self.snapshot).block_configs);
+        self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
+            blocks: sorted_snapshot(self.blocks.values().map(|b| b.info())),
+            flow_infos: self.flows_info(),
+            flow_defs: self.flow_defs(),
+            block_configs,
+            interface_specs: self.interface_specs.values().cloned().collect(),
+        });
 
         Ok(())
     }
