@@ -92,9 +92,16 @@ impl Resolve for SsrfFilteringResolver {
 // ---------------------------------------------------------------------------
 
 /// Async reqwest-based network service for outbound HTTP calls.
-/// The client is lazily initialized on first use.
+///
+/// The client is lazily initialised on first use. If
+/// `reqwest::Client::builder().build()` fails (e.g. the platform TLS
+/// stack can't be configured) the error is cached and returned to
+/// every caller — the old code silently fell back to
+/// `reqwest::Client::new()`, which has no SSRF resolver, no timeout,
+/// and no redirect policy, so a TLS build failure quietly disabled
+/// the security middleware.
 pub struct HttpNetworkService {
-    client: std::sync::OnceLock<reqwest::Client>,
+    client: std::sync::OnceLock<Result<reqwest::Client, String>>,
 }
 
 impl HttpNetworkService {
@@ -102,6 +109,25 @@ impl HttpNetworkService {
         Self {
             client: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Borrow the shared reqwest client, building it on first call. A
+    /// build failure is cached so subsequent requests fail fast with
+    /// the same error instead of retrying the broken configuration.
+    fn client(&self) -> Result<&reqwest::Client, NetworkError> {
+        self.client
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .dns_resolver(Arc::new(SsrfFilteringResolver))
+                    .build()
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|s| {
+                NetworkError::RequestError(format!("HTTP client initialisation failed: {s}"))
+            })
     }
 }
 
@@ -144,14 +170,7 @@ impl NetworkService for HttpNetworkService {
             .parse::<reqwest::Method>()
             .map_err(|e| NetworkError::RequestError(format!("invalid method: {e}")))?;
 
-        let client = self.client.get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .dns_resolver(Arc::new(SsrfFilteringResolver))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
-        });
+        let client = self.client()?;
         let mut builder = client.request(method, &req.url);
 
         for (key, value) in &req.headers {
@@ -273,6 +292,19 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// `client()` caches the built client across calls — two requests on
+    /// the same service must observe the same `&reqwest::Client`. This
+    /// is the contract that lets the OnceLock-of-Result pattern keep
+    /// the hot path branch-free after the first successful init.
+    #[test]
+    fn client_is_cached_across_calls() {
+        let svc = HttpNetworkService::new();
+        let first = svc.client().expect("first build succeeds");
+        let second = svc.client().expect("second call returns cached client");
+        // Same shared instance — the closure ran exactly once.
+        assert!(std::ptr::eq(first, second));
     }
 
     /// SEC-020: response cap reads from env, with the documented default.
