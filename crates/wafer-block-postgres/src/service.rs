@@ -32,16 +32,17 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn get_async(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let table = sanitize_ident(collection);
-        let sql = format!("SELECT * FROM {table} WHERE id = $1");
-        let row: PgRow = sqlx::query(&sql)
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => DatabaseError::NotFound,
-                _ => DatabaseError::Internal(e.to_string()),
-            })?;
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        let row: PgRow = q.fetch_one(&self.pool).await.map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFound,
+            _ => DatabaseError::Internal(e.to_string()),
+        })?;
         row_to_record(&row)
     }
 
@@ -244,10 +245,14 @@ impl PostgresDatabaseService {
     }
 
     async fn delete_async(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        let sql = format!("DELETE FROM {table} WHERE id = $1");
-        let result = sqlx::query(&sql)
-            .bind(id)
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Postgres);
+        let params = sea_values_to_json(sea_vals);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        let result = q
             .execute(&self.pool)
             .await
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;

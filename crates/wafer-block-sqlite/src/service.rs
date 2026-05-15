@@ -222,9 +222,14 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let table = sanitize_ident(collection);
-        let sql = format!("SELECT * FROM {table} WHERE id = ?1");
-        db.query_row(&sql, [id], Self::row_to_record)
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        db.query_row(&sql, query_params.as_slice(), Self::row_to_record)
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
                 _ => DatabaseError::Internal(e.to_string()),
@@ -465,10 +470,15 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let table = sanitize_ident(collection);
-        let sql = format!("DELETE FROM {table} WHERE id = ?1");
+        let (sql, sea_vals) =
+            wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Sqlite);
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
         let rows = db
-            .execute(&sql, [id])
+            .execute(&sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         if rows == 0 {
             return Err(DatabaseError::NotFound);
