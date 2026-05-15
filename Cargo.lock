@@ -6043,7 +6043,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "hyper 1.9.0",
  "parking_lot",
  "serde_json",
  "tokio",
