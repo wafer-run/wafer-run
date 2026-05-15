@@ -6,11 +6,11 @@ use wafer_block::*;
 /// (`"retrieve"`) and HTTP methods (`"GET"`).
 fn normalize_action(s: &str) -> String {
     match s.to_uppercase().as_str() {
-        "GET" | "HEAD" => "retrieve".to_string(),
-        "POST" => "create".to_string(),
-        "PUT" | "PATCH" => "update".to_string(),
-        "DELETE" => "delete".to_string(),
-        "OPTIONS" => "execute".to_string(),
+        "GET" | "HEAD" => RequestAction::RETRIEVE.to_string(),
+        "POST" => RequestAction::CREATE.to_string(),
+        "PUT" | "PATCH" => RequestAction::UPDATE.to_string(),
+        "DELETE" => RequestAction::DELETE.to_string(),
+        "OPTIONS" => RequestAction::EXECUTE.to_string(),
         _ => s.to_lowercase(),
     }
 }
