@@ -129,10 +129,4 @@ impl BlockSlot {
             }
         }
     }
-
-    /// Returns `true` if a successful `lifecycle(Init)` result is cached.
-    #[cfg(test)]
-    pub async fn is_initialized(&self) -> bool {
-        matches!(*self.state.lock().await, Some(CachedOutcome::Ok(_)))
-    }
 }

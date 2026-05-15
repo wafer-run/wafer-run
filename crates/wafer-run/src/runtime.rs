@@ -17,7 +17,6 @@ pub mod lifecycle;
 pub mod registry;
 pub mod resolver;
 pub mod runner;
-#[cfg(feature = "wasm")]
 pub mod slot;
 pub mod validation;
 
