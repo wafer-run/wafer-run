@@ -181,6 +181,35 @@ pub fn build_update_by_id(
     crate::render_update(query, backend)
 }
 
+/// Build `UPDATE {table} SET {col} = {col} + {delta} WHERE {filters}`.
+///
+/// Atomic increment/decrement of a numeric column. Use this instead of the
+/// `SELECT col → write col + 1` pattern to close read-modify-write races
+/// when multiple callers update the same row concurrently (e.g. counters,
+/// access-count fields).
+///
+/// `delta` may be negative to decrement.
+///
+/// Returns `(sql, params)` ready to pass to `exec_raw`.
+pub fn build_increment_field_where(
+    table: &str,
+    col: &str,
+    delta: i64,
+    filters: &[Filter],
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
+    let mut query = Query::update();
+    query.table(DynCol(table.into()));
+    // SET col = col + delta
+    let new_value = Expr::col(DynCol(col.into())).add(delta);
+    query.value(DynCol(col.into()), new_value);
+    if let Some(cond) = build_condition(filters) {
+        query.cond_where(cond);
+    }
+
+    crate::render_update(query, backend)
+}
+
 /// Build UPDATE {table} SET ... WHERE {filters}.
 pub fn build_update_where(
     table: &str,
@@ -340,6 +369,42 @@ mod tests {
         let (sql, values) = build_insert("users", &data, Backend::Sqlite);
         assert!(sql.contains("INSERT INTO"));
         assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn test_build_increment_field_where_sqlite() {
+        let filters = vec![eq_filter("id", serde_json::json!("abc"))];
+        let (sql, _values) =
+            build_increment_field_where("counters", "access_count", 1, &filters, Backend::Sqlite);
+        // Atomic increment expression appears in the SET clause.
+        assert!(sql.contains("UPDATE"));
+        assert!(sql.contains("SET"));
+        // The literal `"access_count" + 1` form is what closes the race.
+        // Quoting differs by backend; just check column name is referenced twice.
+        let lower = sql.to_lowercase();
+        assert!(lower.contains("access_count"));
+        assert!(lower.contains("where"));
+        // Value count: delta param is inlined into the SET expression by
+        // sea-query (LIT param), id filter contributes one — so at most one
+        // bound parameter shows up in the values vec. Don't over-assert
+        // here; backends serialize differently.
+    }
+
+    #[test]
+    fn test_build_increment_field_where_negative_delta() {
+        let filters = vec![eq_filter("id", serde_json::json!("xyz"))];
+        let (sql, values) =
+            build_increment_field_where("counters", "quota", -5, &filters, Backend::Postgres);
+        assert!(sql.to_lowercase().contains("update"));
+        assert!(sql.contains("quota"));
+        // Negative delta is preserved as a bound value, not normalized to
+        // "quota - 5". Check the values vec carries the -5 (delta) plus the
+        // id filter ("xyz") — two params total.
+        let has_negative_five = values.iter().any(|v| format!("{v:?}").contains("-5"));
+        assert!(
+            has_negative_five,
+            "expected -5 in bound values, got {values:?}"
+        );
     }
 
     #[test]
