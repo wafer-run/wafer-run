@@ -405,9 +405,7 @@ impl Wafer {
                 }
             }
             #[cfg(not(feature = "wasm"))]
-            return Err(RuntimeError::BlockNotFound {
-                name: block_name.clone(),
-            });
+            return Err(RuntimeError::BlockNotFound { name: block_name });
         }
 
         // Rebuild snapshot so any Phase-3-resolved blocks are visible.

@@ -53,6 +53,11 @@ pub(crate) enum LockLoaderError {
         reason: String,
     },
 
+    // Constructed only when the wasmi feature is enabled (WasmiBlock::load_from_bytes).
+    // Without the feature, the wasm-load path is compiled out and this variant is
+    // dead — mirrors the WasmiFeatureDisabled variant below which is dead with the
+    // feature on.
+    #[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
     #[error("{name}@{version}: wasm load failed: {source}")]
     WasmLoadFailed {
         name: String,
@@ -114,11 +119,16 @@ pub(crate) struct LockfilePackage {
 // wafer.toml schema (only the bits we need for name cross-check)
 // ---------------------------------------------------------------------------
 
+// Both structs are only deserialized inside validate_cache, which is gated on
+// the wasmi feature for non-test builds. Tests reference validate_cache
+// directly so they keep these types alive in test builds.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
 #[derive(Deserialize, Debug)]
 struct WaferTomlForValidation {
     package: WaferPackage,
 }
 
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
 #[derive(Deserialize, Debug)]
 struct WaferPackage {
     org: String,
@@ -169,6 +179,10 @@ pub(crate) fn validate_source(pkg: &LockfilePackage) -> Result<(), LockLoaderErr
     }
 }
 
+// Only called from validate_cache (wasmi-gated in non-test builds). Tests reach
+// it transitively, so the function stays compiled and merely marks as dead in
+// the no-wasmi lib build.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
 pub(crate) fn split_name(pkg: &LockfilePackage) -> Result<(String, String), LockLoaderError> {
     let (org, block) = pkg
         .name
@@ -190,6 +204,8 @@ pub(crate) fn split_name(pkg: &LockfilePackage) -> Result<(String, String), Lock
     Ok((org.to_string(), block.to_string()))
 }
 
+// Only used by validate_cache; same wasmi-gating story as split_name above.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
 pub(crate) fn locate_single_wasm(
     dir: &Path,
     pkg: &LockfilePackage,
@@ -230,6 +246,11 @@ pub(crate) fn locate_single_wasm(
     }
 }
 
+// Only called from load_lockfile_parsed inside #[cfg(feature = "wasmi")] in
+// non-test builds. Test module references it unconditionally, so it stays
+// compiled — but the lib build with the feature off needs to suppress the
+// dead-code lint.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
 pub(crate) fn validate_cache(
     cache_root: &Path,
     pkg: &LockfilePackage,
@@ -322,7 +343,16 @@ impl Wafer {
         self.load_lockfile_parsed(&lf, cache_root)
     }
 
-    #[cfg_attr(not(feature = "wasmi"), allow(unused_variables))]
+    // Without the wasmi feature the for-loop body unconditionally returns on
+    // the first iteration (line 343 `return Err`); clippy correctly flags it
+    // as `never_loop`, and `count` is never mutated since `count += 1` only
+    // lives inside the wasmi-gated arm. Silencing both lints + the unused
+    // `cache_root` param under this feature config keeps the two branches
+    // structurally parallel without splitting the function in two.
+    #[cfg_attr(
+        not(feature = "wasmi"),
+        allow(unused_variables, unused_mut, clippy::never_loop)
+    )]
     fn load_lockfile_parsed(
         &mut self,
         lf: &Lockfile,
