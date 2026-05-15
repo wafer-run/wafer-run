@@ -24,6 +24,7 @@ pub mod router;
 pub mod runtime;
 pub mod schema;
 pub mod security;
+pub mod snapshot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod static_registration;
 pub mod types;
