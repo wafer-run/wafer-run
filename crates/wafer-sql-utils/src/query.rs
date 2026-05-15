@@ -163,6 +163,24 @@ pub fn build_insert(
     crate::render_insert(query, backend)
 }
 
+/// Build SELECT * FROM {table} WHERE id = {id}.
+///
+/// Caller-facing replacement for the `format!("SELECT * FROM {table}
+/// WHERE id = ?1")` pattern. The placeholder syntax (`?1` for SQLite,
+/// `$1` for Postgres) is selected from `backend`.
+pub fn build_select_by_id(
+    table: &str,
+    id: &str,
+    backend: Backend,
+) -> (String, Vec<sea_query::Value>) {
+    let mut query = Query::select();
+    query
+        .column(Asterisk)
+        .from(DynCol(table.into()))
+        .and_where(Expr::col(DynCol("id".into())).eq(id));
+    crate::render_select(query, backend)
+}
+
 /// Build UPDATE {table} SET ... WHERE id = {id}.
 pub fn build_update_by_id(
     table: &str,
