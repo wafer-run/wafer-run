@@ -6120,6 +6120,7 @@ dependencies = [
  "async-trait",
  "parking_lot",
  "serde_json",
+ "wafer-block",
  "wafer-run",
 ]
 
