@@ -96,7 +96,17 @@ fn jwt_verify(
         let header_bytes = b64url_decode(header_b64)?;
         let header: serde_json::Value = serde_json::from_slice(&header_bytes)
             .map_err(|e| CryptoError::VerifyError(format!("header decode: {e}")))?;
-        let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("");
+        // A missing or non-string `alg` field is a malformed JWT — reject
+        // explicitly rather than letting `unwrap_or("")` produce a generic
+        // "unsupported algorithm: " message that elides whether the field
+        // was absent vs. present-but-wrong.
+        let alg = header
+            .get("alg")
+            .ok_or_else(|| CryptoError::VerifyError("missing `alg` field in JWT header".into()))?
+            .as_str()
+            .ok_or_else(|| {
+                CryptoError::VerifyError("`alg` field in JWT header is not a string".into())
+            })?;
         if alg != "HS256" {
             return Err(CryptoError::VerifyError(format!(
                 "unsupported algorithm: {alg}"
@@ -138,7 +148,12 @@ impl Argon2JwtCryptoService {
         let hk = Hkdf::<Sha256>::new(None, self.jwt_secret.as_bytes());
         let info = format!("wafer-jwt|{block_id}");
         let mut okm = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut okm).expect("HKDF expand");
+        // `Hkdf::expand` only fails when the requested output exceeds
+        // `255 * HashLen` bytes (8160 for SHA-256). Our `okm` is fixed at
+        // 32 bytes, so this branch is unreachable. The `expect` documents
+        // the invariant rather than handling an actual failure mode.
+        hk.expand(info.as_bytes(), &mut okm)
+            .expect("32-byte HKDF-SHA256 output is well within the 8160-byte max");
         // Encode as hex for use as JWT secret string
         okm.iter().map(|b| format!("{b:02x}")).collect()
     }
@@ -172,7 +187,14 @@ impl CryptoService for Argon2JwtCryptoService {
         expiry: Duration,
     ) -> Result<String, CryptoError> {
         let now = chrono::Utc::now();
-        let exp = now + chrono::Duration::from_std(expiry).unwrap_or(chrono::Duration::hours(1));
+        // `chrono::Duration::from_std` fails only when the std `Duration`
+        // overflows i64 milliseconds (~292 million years). The old code
+        // silently capped to 1 hour on overflow — surface the error
+        // instead, so a misconfigured expiry doesn't produce a token
+        // with a much shorter lifetime than the caller asked for.
+        let chrono_expiry = chrono::Duration::from_std(expiry)
+            .map_err(|e| CryptoError::SignError(format!("expiry out of range: {e}")))?;
+        let exp = now + chrono_expiry;
 
         let mut payload = claims;
         payload.insert("iat".to_string(), serde_json::json!(now.timestamp()));
@@ -291,5 +313,75 @@ mod tests {
         let key1 = svc.derive_block_key("suppers-ai/auth");
         let key2 = svc.derive_block_key("suppers-ai/auth");
         assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn sign_rejects_unrepresentable_expiry() {
+        let svc = test_service();
+        // std::Duration::MAX is well over the i64-milliseconds range
+        // chrono can represent — must surface as a SignError, not
+        // silently cap to 1 hour.
+        let err = svc
+            .sign(test_claims(), Duration::MAX)
+            .expect_err("MAX expiry should error");
+        match err {
+            CryptoError::SignError(msg) => assert!(
+                msg.contains("expiry out of range"),
+                "expected expiry-range error, got: {msg}"
+            ),
+            other => panic!("expected SignError, got: {other:?}"),
+        }
+    }
+
+    /// Crafts a JWT header with a missing `alg` field, signed correctly
+    /// otherwise, and confirms verification rejects it with a specific
+    /// "missing `alg`" error rather than the generic "unsupported
+    /// algorithm: " message the old `unwrap_or("")` path produced.
+    #[test]
+    fn verify_rejects_jwt_with_missing_alg() {
+        use base64ct::{Base64UrlUnpadded, Encoding};
+        let secret = b"master-secret-for-testing";
+        let header_json = r#"{"typ":"JWT"}"#; // no `alg`
+        let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+        let payload_b64 = Base64UrlUnpadded::encode_string(br#"{"sub":"u1"}"#);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_sha256(secret, signing_input.as_bytes());
+        let sig_b64 = Base64UrlUnpadded::encode_string(&sig);
+        let token = format!("{signing_input}.{sig_b64}");
+
+        let err = jwt_verify(&token, secret).expect_err("missing alg must fail");
+        match err {
+            CryptoError::VerifyError(msg) => {
+                assert!(
+                    msg.contains("missing `alg`"),
+                    "expected missing-alg error, got: {msg}"
+                );
+            }
+            other => panic!("expected VerifyError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_jwt_with_non_string_alg() {
+        use base64ct::{Base64UrlUnpadded, Encoding};
+        let secret = b"master-secret-for-testing";
+        let header_json = r#"{"alg":42,"typ":"JWT"}"#; // alg is a number
+        let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
+        let payload_b64 = Base64UrlUnpadded::encode_string(br#"{"sub":"u1"}"#);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_sha256(secret, signing_input.as_bytes());
+        let sig_b64 = Base64UrlUnpadded::encode_string(&sig);
+        let token = format!("{signing_input}.{sig_b64}");
+
+        let err = jwt_verify(&token, secret).expect_err("non-string alg must fail");
+        match err {
+            CryptoError::VerifyError(msg) => {
+                assert!(
+                    msg.contains("not a string"),
+                    "expected non-string-alg error, got: {msg}"
+                );
+            }
+            other => panic!("expected VerifyError, got: {other:?}"),
+        }
     }
 }
