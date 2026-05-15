@@ -12,6 +12,7 @@ use crate::{
     types::*,
 };
 
+pub mod config_source;
 pub mod lifecycle;
 pub mod registry;
 pub mod resolver;
