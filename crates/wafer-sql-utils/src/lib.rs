@@ -6,6 +6,7 @@ pub mod introspect;
 pub mod query;
 pub mod upsert;
 pub mod value;
+pub mod vector;
 
 /// Re-export sea_query::Value so consumers can reference the param type
 /// without adding sea-query as a direct dependency.

@@ -11,7 +11,7 @@ use wafer_core::interfaces::vector::{
         VectorMatch, VectorService,
     },
 };
-use wafer_sql_utils::ident::sanitize_ident;
+use wafer_sql_utils::vector::VectorIndexSchema;
 
 use crate::ensure_vec_loaded;
 
@@ -34,29 +34,25 @@ impl SqliteVecService {
         Ok(Self::new(Connection::open_in_memory()?))
     }
 
-    fn table_name(index: &str, suffix: &str) -> String {
-        let ident = sanitize_ident(index);
-        format!("{ident}_{suffix}")
-    }
-
-    fn index_exists(conn: &Connection, index: &str) -> Result<bool, VectorError> {
-        let vec_tbl = Self::table_name(index, "vec");
+    fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                params![vec_tbl],
+                params![&schema.vec_table],
                 |row| row.get(0),
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(exists)
     }
 
-    fn has_keyword_search(conn: &Connection, index: &str) -> Result<bool, VectorError> {
-        let fts_tbl = Self::table_name(index, "fts");
+    fn has_keyword_search(
+        conn: &Connection,
+        schema: &VectorIndexSchema,
+    ) -> Result<bool, VectorError> {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                params![fts_tbl],
+                params![&schema.fts_table],
                 |row| row.get(0),
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
@@ -69,33 +65,20 @@ impl VectorService for SqliteVecService {
     async fn create_index(&self, config: VectorIndexConfig) -> Result<(), VectorError> {
         let conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if Self::index_exists(&conn, &config.name)? {
+        let schema = VectorIndexSchema::new(&config.name);
+        if Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexAlreadyExists(config.name));
         }
-        let vec_tbl = Self::table_name(&config.name, "vec");
-        let meta_tbl = Self::table_name(&config.name, "meta");
-        let dims = config.dimensions;
         // All 3 metric variants are accepted — sqlite-vec is distance-agnostic at storage;
         // it operates as cosine distance in SQL queries regardless of the stored metric tag.
         let _ = match config.metric {
             DistanceMetric::Cosine | DistanceMetric::Euclidean | DistanceMetric::DotProduct => (),
         };
-        conn.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE {vec_tbl} USING vec0(embedding float[{dims}]);
-             CREATE TABLE {meta_tbl}(
-                id TEXT PRIMARY KEY,
-                rowid INTEGER NOT NULL,
-                metadata TEXT,
-                text TEXT
-             );"
-        ))
-        .map_err(|e| VectorError::Internal(e.to_string()))?;
-        if config.keyword_search {
-            let fts_tbl = Self::table_name(&config.name, "fts");
-            conn.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE {fts_tbl} USING fts5(id UNINDEXED, text);"
-            ))
+        conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
+        if config.keyword_search {
+            conn.execute_batch(&schema.build_create_fts())
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         Ok(())
     }
@@ -103,12 +86,12 @@ impl VectorService for SqliteVecService {
     async fn delete_index(&self, name: &str) -> Result<(), VectorError> {
         let conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if !Self::index_exists(&conn, name)? {
+        let schema = VectorIndexSchema::new(name);
+        if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(name.to_string()));
         }
-        for suffix in ["vec", "fts", "meta"] {
-            let tbl = Self::table_name(name, suffix);
-            conn.execute(&format!("DROP TABLE IF EXISTS {tbl};"), [])
+        for stmt in schema.build_drop_all() {
+            conn.execute(&stmt, [])
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         Ok(())
@@ -120,18 +103,24 @@ impl VectorService for SqliteVecService {
         }
         let mut conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if !Self::index_exists(&conn, index)? {
+        let schema = VectorIndexSchema::new(index);
+        if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let has_kw = Self::has_keyword_search(&conn, index)?;
+        let has_kw = Self::has_keyword_search(&conn, &schema)?;
         for e in &entries {
             if has_kw && e.text.is_none() {
                 return Err(VectorError::TextRequired);
             }
         }
-        let vec_tbl = Self::table_name(index, "vec");
-        let meta_tbl = Self::table_name(index, "meta");
-        let fts_tbl = Self::table_name(index, "fts");
+
+        let select_rowid_sql = schema.build_select_rowid_by_id();
+        let delete_vec_sql = schema.build_delete_vec_by_rowid();
+        let insert_meta_sql = schema.build_insert_meta_autoinc();
+        let insert_vec_sql = schema.build_insert_vec();
+        let update_meta_sql = schema.build_update_meta();
+        let delete_fts_sql = schema.build_delete_fts_by_id();
+        let insert_fts_sql = schema.build_insert_fts();
 
         let tx = conn
             .transaction()
@@ -146,65 +135,42 @@ impl VectorService for SqliteVecService {
 
             // Find existing rowid (re-upsert path) or create a new one.
             let rowid: Option<i64> = tx
-                .query_row(
-                    &format!("SELECT rowid FROM {meta_tbl} WHERE id = ?1"),
-                    params![&e.id],
-                    |r| r.get(0),
-                )
+                .query_row(&select_rowid_sql, params![&e.id], |r| r.get(0))
                 .ok();
             let rowid = match rowid {
                 Some(rid) => {
-                    tx.execute(
-                        &format!("DELETE FROM {vec_tbl} WHERE rowid = ?1"),
-                        params![rid],
-                    )
-                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    tx.execute(&delete_vec_sql, params![rid])
+                        .map_err(|err| VectorError::Internal(err.to_string()))?;
                     rid
                 }
                 None => {
                     tx.execute(
-                        &format!(
-                            "INSERT INTO {meta_tbl}(id, rowid, metadata, text) \
-                             VALUES (?1, (SELECT COALESCE(MAX(rowid), 0) + 1 FROM {meta_tbl}), ?2, ?3)"
-                        ),
+                        &insert_meta_sql,
                         params![&e.id, meta_json, e.text.clone().unwrap_or_default()],
                     )
                     .map_err(|err| VectorError::Internal(err.to_string()))?;
-                    tx.query_row(
-                        &format!("SELECT rowid FROM {meta_tbl} WHERE id = ?1"),
-                        params![&e.id],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .map_err(|err| VectorError::Internal(err.to_string()))?
+                    tx.query_row(&select_rowid_sql, params![&e.id], |r| r.get::<_, i64>(0))
+                        .map_err(|err| VectorError::Internal(err.to_string()))?
                 }
             };
 
             let vec_bytes: Vec<u8> = e.vector.iter().flat_map(|f| f.to_le_bytes()).collect();
-            tx.execute(
-                &format!("INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?1, ?2)"),
-                params![rowid, vec_bytes],
-            )
-            .map_err(|err| VectorError::Internal(err.to_string()))?;
+            tx.execute(&insert_vec_sql, params![rowid, vec_bytes])
+                .map_err(|err| VectorError::Internal(err.to_string()))?;
 
             // Update meta (metadata + text may have changed on re-upsert)
             tx.execute(
-                &format!("UPDATE {meta_tbl} SET metadata = ?1, text = ?2 WHERE id = ?3"),
+                &update_meta_sql,
                 params![meta_json, e.text.clone().unwrap_or_default(), &e.id],
             )
             .map_err(|err| VectorError::Internal(err.to_string()))?;
 
             if has_kw {
                 let text = e.text.unwrap_or_default();
-                tx.execute(
-                    &format!("DELETE FROM {fts_tbl} WHERE id = ?1"),
-                    params![&e.id],
-                )
-                .map_err(|err| VectorError::Internal(err.to_string()))?;
-                tx.execute(
-                    &format!("INSERT INTO {fts_tbl}(id, text) VALUES (?1, ?2)"),
-                    params![&e.id, text],
-                )
-                .map_err(|err| VectorError::Internal(err.to_string()))?;
+                tx.execute(&delete_fts_sql, params![&e.id])
+                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                tx.execute(&insert_fts_sql, params![&e.id, text])
+                    .map_err(|err| VectorError::Internal(err.to_string()))?;
             }
         }
 
@@ -224,10 +190,11 @@ impl VectorService for SqliteVecService {
     ) -> Result<Vec<VectorMatch>, VectorError> {
         let conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if !Self::index_exists(&conn, index)? {
+        let schema = VectorIndexSchema::new(index);
+        if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let has_kw = Self::has_keyword_search(&conn, index)?;
+        let has_kw = Self::has_keyword_search(&conn, &schema)?;
         match mode {
             SearchMode::Keyword | SearchMode::Hybrid if !has_kw => {
                 return Err(VectorError::KeywordSearchNotEnabled);
@@ -237,9 +204,6 @@ impl VectorService for SqliteVecService {
             }
             _ => {}
         }
-        let vec_tbl = Self::table_name(index, "vec");
-        let meta_tbl = Self::table_name(index, "meta");
-        let fts_tbl = Self::table_name(index, "fts");
 
         let candidate_limit = match mode {
             SearchMode::Vector => top_k,
@@ -253,13 +217,7 @@ impl VectorService for SqliteVecService {
                 // vec0 knn requires LIMIT (or `k = ?`) in the same SELECT that has the MATCH
                 // clause, so run the knn as a subquery and join against meta outside.
                 let mut stmt = conn
-                    .prepare(&format!(
-                        "SELECT m.id, v.distance FROM (\
-                             SELECT rowid, distance FROM {vec_tbl} \
-                             WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2\
-                         ) v JOIN {meta_tbl} m ON m.rowid = v.rowid \
-                         ORDER BY v.distance"
-                    ))
+                    .prepare(&schema.build_vec_knn_select())
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
                 let rows = stmt
                     .query_map(params![vec_bytes, candidate_limit as i64], |row| {
@@ -277,11 +235,7 @@ impl VectorService for SqliteVecService {
             if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
                 let q = keyword_query.as_deref().unwrap();
                 let mut stmt = conn
-                    .prepare(&format!(
-                        "SELECT id, bm25({fts_tbl}) AS score \
-                         FROM {fts_tbl} WHERE {fts_tbl} MATCH ?1 \
-                         ORDER BY score LIMIT ?2"
-                    ))
+                    .prepare(&schema.build_fts_bm25_select())
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
                 let rows = stmt
                     .query_map(params![q, candidate_limit as i64], |row| {
@@ -310,12 +264,8 @@ impl VectorService for SqliteVecService {
         }
 
         // Metadata lookup
-        let placeholders: Vec<&str> = (0..ids_top.len()).map(|_| "?").collect();
-        let in_clause = placeholders.join(",");
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT id, metadata FROM {meta_tbl} WHERE id IN ({in_clause})"
-            ))
+            .prepare(&schema.build_select_metadata_in(ids_top.len()))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(ids_top.iter()), |row| {
@@ -370,25 +320,19 @@ impl VectorService for SqliteVecService {
         }
         let mut conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if !Self::index_exists(&conn, index)? {
+        let schema = VectorIndexSchema::new(index);
+        if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let has_kw = Self::has_keyword_search(&conn, index)?;
-        let vec_tbl = Self::table_name(index, "vec");
-        let meta_tbl = Self::table_name(index, "meta");
-        let fts_tbl = Self::table_name(index, "fts");
+        let has_kw = Self::has_keyword_search(&conn, &schema)?;
 
         let tx = conn
             .transaction()
             .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let placeholders: Vec<&str> = (0..ids.len()).map(|_| "?").collect();
-        let in_clause = placeholders.join(",");
 
         // Gather rowids first so we can delete from _vec by rowid.
         let mut stmt = tx
-            .prepare(&format!(
-                "SELECT rowid FROM {meta_tbl} WHERE id IN ({in_clause})"
-            ))
+            .prepare(&schema.build_select_rowid_in(ids.len()))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         let rowids: Vec<i64> = stmt
             .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
@@ -399,21 +343,19 @@ impl VectorService for SqliteVecService {
             .collect();
         drop(stmt);
 
+        let delete_vec_sql = schema.build_delete_vec_by_rowid();
         for rid in rowids {
-            tx.execute(
-                &format!("DELETE FROM {vec_tbl} WHERE rowid = ?1"),
-                params![rid],
-            )
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            tx.execute(&delete_vec_sql, params![rid])
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         tx.execute(
-            &format!("DELETE FROM {meta_tbl} WHERE id IN ({in_clause})"),
+            &schema.build_delete_meta_in(ids.len()),
             rusqlite::params_from_iter(ids.iter()),
         )
         .map_err(|e| VectorError::Internal(e.to_string()))?;
         if has_kw {
             tx.execute(
-                &format!("DELETE FROM {fts_tbl} WHERE id IN ({in_clause})"),
+                &schema.build_delete_fts_in(ids.len()),
                 rusqlite::params_from_iter(ids.iter()),
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
@@ -426,14 +368,12 @@ impl VectorService for SqliteVecService {
     async fn count(&self, index: &str) -> Result<u64, VectorError> {
         let conn = self.db.lock().unwrap();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        if !Self::index_exists(&conn, index)? {
+        let schema = VectorIndexSchema::new(index);
+        if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let meta_tbl = Self::table_name(index, "meta");
         let n: i64 = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {meta_tbl}"), [], |r| {
-                r.get(0)
-            })
+            .query_row(&schema.build_count_meta(), [], |r| r.get(0))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(n as u64)
     }
