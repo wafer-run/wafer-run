@@ -666,8 +666,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_info() -> i64 {
+            // FFI boundary: serialization failures cannot panic across the
+            // WASM trap-vs-trap boundary cleanly, so on failure we return
+            // a zero (ptr, len) packet. The host decodes that as "no info
+            // available" rather than receiving a wasm trap.
             let info = <#struct_ty>::block_info();
-            let bytes = serde_json::to_vec(&info).expect("failed to serialize BlockInfo");
+            let bytes = match serde_json::to_vec(&info) {
+                Ok(b) => b,
+                Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            };
             let ptr = bytes.as_ptr() as u32;
             let len = bytes.len() as u32;
             ::std::mem::forget(bytes);
@@ -682,10 +689,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             };
             // The host sends a 2-element JSON tuple: [Message, Vec<u8>]
             let (msg, body): (wafer_block::Message, ::std::vec::Vec<u8>) =
-                serde_json::from_slice(msg_bytes)
-                    .expect("failed to deserialize (Message, body) tuple");
+                match serde_json::from_slice(msg_bytes) {
+                    Ok(parsed) => parsed,
+                    Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+                };
             let result: wafer_sdk::core_abi::GuestResult = <#struct_ty>::handle(msg, body);
-            let result_bytes = serde_json::to_vec(&result).expect("failed to serialize GuestResult");
+            let result_bytes = match serde_json::to_vec(&result) {
+                Ok(b) => b,
+                Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            };
             let ptr = result_bytes.as_ptr() as u32;
             let len = result_bytes.len() as u32;
             ::std::mem::forget(result_bytes);
@@ -698,10 +710,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             let evt_bytes = unsafe {
                 ::std::slice::from_raw_parts(evt_ptr as *const u8, evt_len as usize)
             };
-            let event: wafer_block::LifecycleEvent = serde_json::from_slice(evt_bytes)
-                .expect("failed to deserialize LifecycleEvent");
+            let event: wafer_block::LifecycleEvent = match serde_json::from_slice(evt_bytes) {
+                Ok(e) => e,
+                Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            };
             let result = <#struct_ty>::lifecycle(event);
-            let result_bytes = serde_json::to_vec(&result).expect("failed to serialize lifecycle result");
+            let result_bytes = match serde_json::to_vec(&result) {
+                Ok(b) => b,
+                Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            };
             let ptr = result_bytes.as_ptr() as u32;
             let len = result_bytes.len() as u32;
             ::std::mem::forget(result_bytes);

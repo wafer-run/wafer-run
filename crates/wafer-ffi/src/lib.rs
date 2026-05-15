@@ -74,16 +74,22 @@ fn to_c_string(s: &str) -> *mut c_char {
 }
 
 /// Build a JSON error CString: `{"error":"<msg>"}`.
+///
+/// Uses `serde_json::to_string` for escaping so values containing
+/// backslashes, embedded quotes, control characters, or non-ASCII
+/// bytes are emitted as valid JSON. The previous hand-rolled escape
+/// only handled `\\` and `"` and would emit invalid JSON for any
+/// input containing a literal `\n` or `\t`.
 fn error_cstring(msg: &str) -> CString {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    CString::new(format!(r#"{{"error":"{escaped}"}}"#))
-        .unwrap_or_else(|_| CString::new(r#"{"error":"unprintable"}"#).unwrap())
+    let json = serde_json::to_string(&serde_json::json!({ "error": msg }))
+        .unwrap_or_else(|_| String::from(r#"{"error":"unprintable"}"#));
+    CString::new(json).unwrap_or_else(|_| CString::new(r#"{"error":"unprintable"}"#).unwrap())
 }
 
 /// Build a JSON error string allocated for caller-free: `{"error":"<msg>"}`.
 fn error_json(msg: &str) -> *mut c_char {
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let json = format!(r#"{{"error":"{escaped}"}}"#);
+    let json = serde_json::to_string(&serde_json::json!({ "error": msg }))
+        .unwrap_or_else(|_| String::from(r#"{"error":"unprintable"}"#));
     to_c_string(&json)
 }
 
@@ -164,9 +170,29 @@ unsafe fn invoke_done(cb: WaferDoneCb, result: Option<CString>, ud: UserData) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+/// Install a once-only panic hook that logs panics via tracing before
+/// the surrounding `catch_unwind` rolls them up into a JSON error
+/// string. Without this, the caller only sees the panic message — the
+/// originating file:line:backtrace is lost. Idempotent; safe to call
+/// from any FFI entry point.
+fn install_panic_logger_once() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // tracing might not be initialized in every embedding; the
+            // default hook's stderr output is the failsafe.
+            tracing::error!(panic = %info, "wafer-ffi: panic crossing FFI boundary");
+            default(info);
+        }));
+    });
+}
+
 /// Create a new WAFER runtime instance.
 #[no_mangle]
 pub extern "C" fn wafer_new() -> *mut WaferRuntime {
+    install_panic_logger_once();
     let result = std::panic::catch_unwind(|| {
         let rt = tokio::runtime::Runtime::new().ok()?;
         let inner = Wafer::new().ok()?;
