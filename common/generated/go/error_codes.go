@@ -2,40 +2,41 @@
 
 package common
 
-// gRPC-style error codes for WAFER.
+// gRPC-style error codes for WAFER. Wire values are PascalCase to
+// match the Rust ErrorCode enum's Serde default.
 const (
 	// Success
-	ErrorCodeOk = "ok"
+	ErrorCodeOk = "Ok"
 	// Operation was cancelled
-	ErrorCodeCancelled = "cancelled"
+	ErrorCodeCancelled = "Cancelled"
 	// Unknown error
-	ErrorCodeUnknown = "unknown"
+	ErrorCodeUnknown = "Unknown"
 	// Invalid argument provided
-	ErrorCodeInvalidArgument = "invalid_argument"
+	ErrorCodeInvalidArgument = "InvalidArgument"
 	// Deadline expired before operation completed
-	ErrorCodeDeadlineExceeded = "deadline_exceeded"
+	ErrorCodeDeadlineExceeded = "DeadlineExceeded"
 	// Requested entity not found
-	ErrorCodeNotFound = "not_found"
+	ErrorCodeNotFound = "NotFound"
 	// Entity already exists
-	ErrorCodeAlreadyExists = "already_exists"
+	ErrorCodeAlreadyExists = "AlreadyExists"
 	// Permission denied
-	ErrorCodePermissionDenied = "permission_denied"
+	ErrorCodePermissionDenied = "PermissionDenied"
 	// Resource exhausted
-	ErrorCodeResourceExhausted = "resource_exhausted"
+	ErrorCodeResourceExhausted = "ResourceExhausted"
 	// Operation rejected due to failed precondition
-	ErrorCodeFailedPrecondition = "failed_precondition"
+	ErrorCodeFailedPrecondition = "FailedPrecondition"
 	// Operation aborted
-	ErrorCodeAborted = "aborted"
+	ErrorCodeAborted = "Aborted"
 	// Value out of valid range
-	ErrorCodeOutOfRange = "out_of_range"
+	ErrorCodeOutOfRange = "OutOfRange"
 	// Operation not implemented
-	ErrorCodeUnimplemented = "unimplemented"
+	ErrorCodeUnimplemented = "Unimplemented"
 	// Internal error
-	ErrorCodeInternal = "internal"
+	ErrorCodeInternal = "Internal"
 	// Service unavailable
-	ErrorCodeUnavailable = "unavailable"
+	ErrorCodeUnavailable = "Unavailable"
 	// Unrecoverable data loss
-	ErrorCodeDataLoss = "data_loss"
+	ErrorCodeDataLoss = "DataLoss"
 	// Request not authenticated
-	ErrorCodeUnauthenticated = "unauthenticated"
+	ErrorCodeUnauthenticated = "Unauthenticated"
 )
