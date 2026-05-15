@@ -1,3 +1,15 @@
+// The constants below are hand-mirrored from common/generated/typescript/
+// meta-keys.ts. The generated file exposes a `MetaKey` object whose key
+// shape (REQUEST_ACTION etc.) differs from the META_REQ_ACTION convention
+// these constants use, so a straight re-export isn't possible without
+// renaming the public TS API. Reconciling the two shapes is tracked as a
+// follow-up to the 2026-05-15 flow-config-api spec.
+//
+// Until then, if you change a value here, also update
+// common/definitions/meta_keys.toml and re-run
+// `python3 common/codegen/generate.py`, or you'll silently drift from
+// the Rust + Go SDKs.
+
 // Request meta keys (set by bridge, read by blocks).
 export const META_REQ_ACTION = 'req.action';
 export const META_REQ_RESOURCE = 'req.resource';
