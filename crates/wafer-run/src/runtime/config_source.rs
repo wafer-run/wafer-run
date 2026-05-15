@@ -7,7 +7,6 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
 use thiserror::Error;
 use wafer_block::ConfigVar;
 
@@ -25,6 +24,9 @@ pub struct EnvBlockConfig {
 }
 
 impl EnvBlockConfig {
+    /// Construct from a `HashMap`. Intended for `ConfigSource` implementors;
+    /// block code reads values via [`EnvBlockConfig::get`] after the runtime
+    /// hands them an `EnvBlockConfig` from `load_for_block`.
     pub fn new(inner: HashMap<String, String>) -> Self {
         Self { inner }
     }
@@ -35,10 +37,6 @@ impl EnvBlockConfig {
 
     pub fn into_inner(self) -> HashMap<String, String> {
         self.inner
-    }
-
-    pub fn as_map(&self) -> &HashMap<String, String> {
-        &self.inner
     }
 }
 
@@ -89,14 +87,12 @@ pub trait ConfigSource: Send + Sync + 'static {
 /// D1 / env implementations land in PR 2.
 #[derive(Debug, Clone, Default)]
 pub struct StaticConfigSource {
-    data: Arc<HashMap<String, String>>,
+    data: HashMap<String, String>,
 }
 
 impl StaticConfigSource {
     pub fn new(data: HashMap<String, String>) -> Self {
-        Self {
-            data: Arc::new(data),
-        }
+        Self { data }
     }
 }
 

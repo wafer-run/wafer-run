@@ -84,3 +84,16 @@ async fn ignores_keys_not_declared_by_block() {
     assert_eq!(cfg.get("SUPPERS_AI__AUTH__JWT_SECRET"), Some("secret"));
     assert_eq!(cfg.get("SUPPERS_AI__OTHER__KEY"), None);
 }
+
+#[tokio::test]
+async fn optional_key_no_default_absent_returns_none() {
+    let src = StaticConfigSource::new(HashMap::new());
+    let declared = vec![key("SUPPERS_AI__AUTH__OPTIONAL_TOKEN", "", false)];
+
+    let cfg = src
+        .load_for_block("suppers-ai/auth", &declared)
+        .await
+        .expect("optional missing key with empty default must succeed");
+
+    assert_eq!(cfg.get("SUPPERS_AI__AUTH__OPTIONAL_TOKEN"), None);
+}
