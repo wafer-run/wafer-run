@@ -48,7 +48,10 @@ impl Block for ReadonlyGuardBlock {
         }
 
         let action = msg.action().to_string();
-        if action == "create" || action == "update" || action == "delete" {
+        if action == RequestAction::CREATE
+            || action == RequestAction::UPDATE
+            || action == RequestAction::DELETE
+        {
             return OutputStream::error(WaferError {
                 code: ErrorCode::PermissionDenied,
                 message: "This instance is in read-only mode. Write operations are not allowed."
@@ -130,29 +133,29 @@ mod tests {
     #[tokio::test]
     async fn readonly_off_write_actions_allowed() {
         let wafer = build_wafer(Some(json!({"readonly": "false"}))).await;
-        expect_allowed(&wafer, "create").await;
-        expect_allowed(&wafer, "update").await;
-        expect_allowed(&wafer, "delete").await;
+        expect_allowed(&wafer, RequestAction::CREATE).await;
+        expect_allowed(&wafer, RequestAction::UPDATE).await;
+        expect_allowed(&wafer, RequestAction::DELETE).await;
     }
 
     #[tokio::test]
     async fn readonly_on_write_actions_all_deny() {
         let wafer = build_wafer(Some(json!({"readonly": "true"}))).await;
-        expect_denied(&wafer, "create").await;
-        expect_denied(&wafer, "update").await;
-        expect_denied(&wafer, "delete").await;
+        expect_denied(&wafer, RequestAction::CREATE).await;
+        expect_denied(&wafer, RequestAction::UPDATE).await;
+        expect_denied(&wafer, RequestAction::DELETE).await;
     }
 
     #[tokio::test]
     async fn readonly_on_read_actions_allowed() {
         let wafer = build_wafer(Some(json!({"readonly": "true"}))).await;
-        expect_allowed(&wafer, "retrieve").await;
+        expect_allowed(&wafer, RequestAction::RETRIEVE).await;
         expect_allowed(&wafer, "list").await;
     }
 
     #[tokio::test]
     async fn readonly_default_off_allows_writes() {
         let wafer = build_wafer(None).await;
-        expect_allowed(&wafer, "create").await;
+        expect_allowed(&wafer, RequestAction::CREATE).await;
     }
 }

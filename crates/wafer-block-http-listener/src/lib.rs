@@ -20,11 +20,11 @@ use wafer_run::{
 
 fn http_method_to_action(method: &Method) -> &'static str {
     match *method {
-        Method::GET | Method::HEAD => "retrieve",
-        Method::POST => "create",
-        Method::PUT | Method::PATCH => "update",
-        Method::DELETE => "delete",
-        _ => "execute",
+        Method::GET | Method::HEAD => RequestAction::RETRIEVE,
+        Method::POST => RequestAction::CREATE,
+        Method::PUT | Method::PATCH => RequestAction::UPDATE,
+        Method::DELETE => RequestAction::DELETE,
+        _ => RequestAction::EXECUTE,
     }
 }
 
