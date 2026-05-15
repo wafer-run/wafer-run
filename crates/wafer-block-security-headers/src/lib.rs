@@ -53,6 +53,13 @@ impl Block for SecurityHeadersBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![ConfigVar::new(
+            "csp",
+            "Operator-supplied Content-Security-Policy directives, merged \
+             on top of the block's restrictive baseline (see merge_csp).",
+            "",
+        )
+        .name("CSP")])
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

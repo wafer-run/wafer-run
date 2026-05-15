@@ -9,7 +9,7 @@ use wafer_core::interfaces::vector::{
 /// Native ONNX-based [`EmbeddingService`] backed by fastembed-rs.
 ///
 /// Model weights are downloaded on first use and cached under the directory
-/// given by `SOLOBASE_FASTEMBED_CACHE_DIR` (default: `data/models`).
+/// given by `WAFER_RUN__FASTEMBED__CACHE_DIR` (default: `data/models`).
 pub struct FastembedService {
     model_id: String,
     dimensions: u32,
@@ -32,7 +32,7 @@ impl FastembedService {
             }
             other => return Err(VectorError::UnknownModel(other.to_string())),
         };
-        let cache_dir = std::env::var("SOLOBASE_FASTEMBED_CACHE_DIR")
+        let cache_dir = std::env::var("WAFER_RUN__FASTEMBED__CACHE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("data/models"));
         let embedding =
@@ -96,11 +96,11 @@ mod tests {
     use super::*;
 
     /// Gated smoke test — first run downloads ~120 MB. Enable with
-    /// `SOLOBASE_RUN_FASTEMBED_TESTS=1 cargo test -- --ignored`.
+    /// `WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS=1 cargo test -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn embed_paraphrase_minilm_smoke() {
-        if std::env::var("SOLOBASE_RUN_FASTEMBED_TESTS").is_err() {
+        if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
             return;
         }
         let svc = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();
@@ -123,11 +123,11 @@ mod tests {
     }
 
     /// Gated smoke test for the bge-m3 BPE tokenizer. Enable with
-    /// `SOLOBASE_RUN_FASTEMBED_TESTS=1 cargo test -- --ignored`.
+    /// `WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS=1 cargo test -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn count_tokens_uses_bge_m3_tokenizer() {
-        if std::env::var("SOLOBASE_RUN_FASTEMBED_TESTS").is_err() {
+        if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
             return;
         }
         let svc = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();

@@ -29,6 +29,12 @@ impl Block for ReadonlyGuardBlock {
         )
         .instance_mode(InstanceMode::Singleton)
         .category(BlockCategory::Infrastructure)
+        .flow_config(vec![ConfigVar::new(
+            "readonly",
+            "When true, the guard rejects create/update/delete actions.",
+            "false",
+        )
+        .name("Read-only")])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

@@ -33,23 +33,6 @@ impl BlockConfig {
         self.inner.as_ref().and_then(|c| c.get(key))
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    pub fn env_or(&self, env_var: &str, key: &str) -> Option<String> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Ok(val) = std::env::var(env_var) {
-                if !val.is_empty() {
-                    return Some(val);
-                }
-            }
-        }
-        self.inner
-            .as_ref()
-            .and_then(|c| c.get(key))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    }
-
     pub fn dispatch_target(&self) -> Option<DispatchTarget> {
         DispatchTarget::from_config(self.inner.as_ref())
     }
