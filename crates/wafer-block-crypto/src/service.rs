@@ -7,6 +7,13 @@ pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 // Argon2 + JWT concrete implementation
 // ---------------------------------------------------------------------------
 
+/// Minimum JWT secret length in bytes. HS256 derives from HMAC-SHA256,
+/// for which RFC 2104 §3 recommends a key at least as long as the hash
+/// output (32 bytes for SHA-256). Shorter keys are accepted by HMAC
+/// itself but offer less than the algorithm's nominal 256-bit security
+/// and are typically rejected by mature JWT libraries.
+pub const MIN_JWT_SECRET_LEN: usize = 32;
+
 /// Argon2 + JWT crypto service.
 ///
 /// Password hashing uses argon2id with default parameters.
@@ -17,8 +24,21 @@ pub struct Argon2JwtCryptoService {
 }
 
 impl Argon2JwtCryptoService {
-    pub fn new(jwt_secret: String) -> Self {
-        Self { jwt_secret }
+    /// Build a service from a JWT signing secret.
+    ///
+    /// Fails when the secret is shorter than [`MIN_JWT_SECRET_LEN`] bytes
+    /// — a weak secret here defeats the security of every token signed
+    /// by the runtime, so this is a fail-fast at construction rather
+    /// than an issue surfaced per-request.
+    pub fn new(jwt_secret: String) -> Result<Self, CryptoError> {
+        if jwt_secret.len() < MIN_JWT_SECRET_LEN {
+            return Err(CryptoError::Other(format!(
+                "JWT secret must be at least {MIN_JWT_SECRET_LEN} bytes (HS256 requires \
+                 ≥ HMAC-SHA256 output length per RFC 2104); got {}",
+                jwt_secret.len()
+            )));
+        }
+        Ok(Self { jwt_secret })
     }
 }
 
@@ -213,8 +233,12 @@ impl CryptoService for Argon2JwtCryptoService {
         claims: HashMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError> {
+        // `derive_block_key` always returns a 64-char hex string (32-byte
+        // HKDF output), so `Self::new` here can never trip the
+        // MIN_JWT_SECRET_LEN check — but route it through anyway so
+        // there's only one construction path.
         let derived = self.derive_block_key(block_id);
-        let temp = Self::new(derived);
+        let temp = Self::new(derived)?;
         temp.sign(claims, expiry)
     }
 
@@ -224,7 +248,7 @@ impl CryptoService for Argon2JwtCryptoService {
         token: &str,
     ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
         let derived = self.derive_block_key(block_id);
-        let temp = Self::new(derived);
+        let temp = Self::new(derived)?;
         temp.verify(token)
     }
 
@@ -240,8 +264,12 @@ impl CryptoService for Argon2JwtCryptoService {
 mod tests {
     use super::*;
 
+    /// 64-char test secret — long enough to satisfy `MIN_JWT_SECRET_LEN`
+    /// without leaning on a real secret format.
+    const TEST_SECRET: &str = "test-secret-padded-to-32-bytes-or-more-for-validation-aaaaaaaaaa";
+
     fn test_service() -> Argon2JwtCryptoService {
-        Argon2JwtCryptoService::new("master-secret-for-testing".to_string())
+        Argon2JwtCryptoService::new(TEST_SECRET.to_string()).expect("test secret is long enough")
     }
 
     fn test_claims() -> HashMap<String, serde_json::Value> {
@@ -340,7 +368,7 @@ mod tests {
     #[test]
     fn verify_rejects_jwt_with_missing_alg() {
         use base64ct::{Base64UrlUnpadded, Encoding};
-        let secret = b"master-secret-for-testing";
+        let secret = TEST_SECRET.as_bytes();
         let header_json = r#"{"typ":"JWT"}"#; // no `alg`
         let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
         let payload_b64 = Base64UrlUnpadded::encode_string(br#"{"sub":"u1"}"#);
@@ -364,7 +392,7 @@ mod tests {
     #[test]
     fn verify_rejects_jwt_with_non_string_alg() {
         use base64ct::{Base64UrlUnpadded, Encoding};
-        let secret = b"master-secret-for-testing";
+        let secret = TEST_SECRET.as_bytes();
         let header_json = r#"{"alg":42,"typ":"JWT"}"#; // alg is a number
         let header_b64 = Base64UrlUnpadded::encode_string(header_json.as_bytes());
         let payload_b64 = Base64UrlUnpadded::encode_string(br#"{"sub":"u1"}"#);
@@ -382,6 +410,35 @@ mod tests {
                 );
             }
             other => panic!("expected VerifyError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_short_secret() {
+        // 31 bytes — one byte short of MIN_JWT_SECRET_LEN (32).
+        let short = "a".repeat(MIN_JWT_SECRET_LEN - 1);
+        match Argon2JwtCryptoService::new(short) {
+            Ok(_) => panic!("short secret must error"),
+            Err(CryptoError::Other(msg)) => assert!(
+                msg.contains("at least 32 bytes"),
+                "expected length error, got: {msg}"
+            ),
+            Err(other) => panic!("expected CryptoError::Other, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_accepts_exactly_min_length_secret() {
+        let exact = "a".repeat(MIN_JWT_SECRET_LEN);
+        assert!(Argon2JwtCryptoService::new(exact).is_ok());
+    }
+
+    #[test]
+    fn new_rejects_empty_secret() {
+        match Argon2JwtCryptoService::new(String::new()) {
+            Ok(_) => panic!("empty secret must error"),
+            Err(CryptoError::Other(_)) => {}
+            Err(other) => panic!("expected CryptoError::Other, got: {other:?}"),
         }
     }
 }
