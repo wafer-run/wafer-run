@@ -103,6 +103,8 @@ pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};
 pub use router::Router;
 pub use runtime::config_source::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource};
+#[cfg(feature = "wasm")]
+pub use runtime::slot::{BlockSlot, InitError, InitializedState};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::RuntimeHandle;
 pub use runtime::Wafer;
