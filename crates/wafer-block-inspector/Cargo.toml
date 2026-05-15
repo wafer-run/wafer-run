@@ -10,6 +10,7 @@ wafer-block = { path = "../wafer-block" }
 wafer-run = { path = "../wafer-run", default-features = false }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

@@ -77,38 +77,18 @@ pub fn http_to_message(
         }
     }
 
-    // Copy URL query params to meta
+    // Copy URL query params to meta. form_urlencoded handles both `+` → space
+    // and `%XX` decoding.
     if !raw_query.is_empty() {
-        for pair in raw_query.split('&') {
-            let mut parts = pair.splitn(2, '=');
-            if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
-                let decoded_val = urlencoding_decode(val);
-                msg.set_meta(format!("http.query.{key}"), decoded_val.clone());
-                msg.set_meta(format!("{META_REQ_QUERY_PREFIX}{key}"), decoded_val);
-            }
+        for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
+            let key = key.into_owned();
+            let value = value.into_owned();
+            msg.set_meta(format!("http.query.{key}"), value.clone());
+            msg.set_meta(format!("{META_REQ_QUERY_PREFIX}{key}"), value);
         }
     }
 
     msg
-}
-
-fn urlencoding_decode(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'+' {
-            bytes.push(b' ');
-        } else if b == b'%' {
-            let h1 = chars.next().and_then(|c| (c as char).to_digit(16));
-            let h2 = chars.next().and_then(|c| (c as char).to_digit(16));
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                bytes.push((h1 * 16 + h2) as u8);
-            }
-        } else {
-            bytes.push(b);
-        }
-    }
-    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
 fn apply_response_meta(
@@ -454,3 +434,46 @@ impl Block for HttpListenerBlock {
 // ---------------------------------------------------------------------------
 
 wafer_run::register_static_block!("wafer-run/http-listener", HttpListenerBlock);
+
+#[cfg(test)]
+mod url_decode_tests {
+    /// Pins the wire-equivalent semantics of the (now-removed)
+    /// hand-rolled urlencoding_decode against the upstream
+    /// form_urlencoded::parse. If a future refactor changes how
+    /// query params are decoded, these tests should fail.
+    fn decode_via_form_urlencoded(raw_query: &str) -> Vec<(String, String)> {
+        form_urlencoded::parse(raw_query.as_bytes())
+            .into_owned()
+            .collect()
+    }
+
+    #[test]
+    fn plus_decodes_to_space() {
+        let out = decode_via_form_urlencoded("q=hello+world");
+        assert_eq!(out, vec![("q".into(), "hello world".into())]);
+    }
+
+    #[test]
+    fn percent_xx_decodes() {
+        let out = decode_via_form_urlencoded("q=hello%20world");
+        assert_eq!(out, vec![("q".into(), "hello world".into())]);
+    }
+
+    #[test]
+    fn invalid_percent_sequence_does_not_panic() {
+        let _ = decode_via_form_urlencoded("q=hello%ZZworld");
+    }
+
+    #[test]
+    fn multiple_pairs_round_trip() {
+        let out = decode_via_form_urlencoded("a=1&b=hello+world&c=%2Fpath");
+        assert_eq!(
+            out,
+            vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "hello world".into()),
+                ("c".into(), "/path".into()),
+            ]
+        );
+    }
+}
