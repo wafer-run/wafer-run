@@ -58,6 +58,11 @@ pub struct RuntimeContext {
     /// by `lookup_attachment`. Empty for top-level calls and for `call_block`
     /// (without attachments).
     pub current_attachments: Arc<BTreeMap<String, Attachment>>,
+    /// Per-top-level-dispatch init breadcrumbs for cycle detection.
+    /// Fresh stack at each `Wafer::run`; nested dispatches inherit via clone
+    /// of the inner `Arc<Mutex<Vec<String>>>`, so all frames share state.
+    /// Used by `Wafer::init_block` to surface `InitError::Cycle`.
+    pub(crate) init_breadcrumbs: crate::runtime::init_stack::InitStack,
 }
 
 // --- Output helpers (used by RuntimeContext impl) ---
@@ -315,6 +320,7 @@ impl RuntimeContext {
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: sub_attachments,
+            init_breadcrumbs: self.init_breadcrumbs.clone(),
         };
 
         // Dispatch. For wasmi callees with attachments, route through

@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub mod config_source;
+pub mod init_stack;
 pub mod lifecycle;
 pub mod registry;
 pub mod resolver;
@@ -356,6 +357,7 @@ impl Wafer {
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
+            init_breadcrumbs: crate::runtime::init_stack::InitStack::new(),
         }
     }
 
