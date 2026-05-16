@@ -11,7 +11,7 @@ use std::sync::{
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::RwLock;
-use wafer_run::{Message, Wafer, WasmiBlock};
+use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
 ///
@@ -52,7 +52,7 @@ impl WaferRuntime {
     /// Create a new WAFER runtime instance.
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
-        let inner = Wafer::new()
+        let inner = Wafer::new(Arc::new(StaticConfigSource::default()))
             .map_err(|e| Error::from_reason(format!("failed to initialise Wafer runtime: {e}")))?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),

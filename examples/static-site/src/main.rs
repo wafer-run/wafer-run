@@ -5,13 +5,15 @@
 //! Run with: cargo run
 //! Test with: curl -v http://localhost:8080/
 
+use std::sync::Arc;
+
 use wafer_run::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new()?;
+    let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
     // --- Register blocks ---
     wafer_flow_http_server::register(

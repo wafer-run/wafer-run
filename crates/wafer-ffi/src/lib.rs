@@ -25,7 +25,7 @@ use std::{
 };
 
 use tokio::sync::RwLock;
-use wafer_run::{Message, Wafer, WasmiBlock};
+use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 
 /// Callback invoked when an async FFI op completes.
 ///
@@ -195,7 +195,7 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     install_panic_logger_once();
     let result = std::panic::catch_unwind(|| {
         let rt = tokio::runtime::Runtime::new().ok()?;
-        let inner = Wafer::new().ok()?;
+        let inner = Wafer::new(Arc::new(StaticConfigSource::default())).ok()?;
         let wr = WaferRuntime {
             inner: Arc::new(RwLock::new(inner)),
             rt,
