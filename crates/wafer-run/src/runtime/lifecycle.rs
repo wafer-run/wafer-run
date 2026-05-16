@@ -117,9 +117,17 @@ impl Wafer {
     ///
     /// Finalizes runtime configuration via [`Wafer::seal`] (composite config
     /// expansion, `uses` contributions, capability resolution, snapshot
-    /// finalization), then dispatches `lifecycle(Start)` on every registered
-    /// block. Block `Init` is **not** dispatched here — each block is
-    /// initialized lazily on first dispatch via [`Wafer::init_block`].
+    /// finalization), then eagerly dispatches `lifecycle(Init)` on every
+    /// registered block before dispatching `lifecycle(Start)` and calling
+    /// `bind()`. This is the eager native entry-point: blocks like
+    /// `wafer-run/http-listener` read configuration in `Init` and use it in
+    /// `bind()` (e.g. the TCP listen address), so `start()` must guarantee
+    /// every block is fully initialized before `bind()` runs.
+    ///
+    /// Lazy init semantics still apply to the dispatch paths
+    /// ([`Wafer::run_block`], `call_block`) and to consumers that call
+    /// [`Wafer::seal`] directly (e.g. Cloudflare Workers, which never call
+    /// `start()` / `bind()`).
     ///
     /// Use [`Wafer::validate_all_block_configs`] before `start()` for
     /// proactive health checks; broken-config blocks otherwise surface as
@@ -139,6 +147,31 @@ impl Wafer {
             "wafer runtime starting"
         );
         self.seal().await?;
+
+        // Eager Init pass: every registered block runs `lifecycle(Init)`
+        // before the Start dispatch and `bind()`. Required because some
+        // blocks (notably `wafer-run/http-listener`) read their config in
+        // Init and consume the resulting state inside `bind()`. Lazy
+        // semantics for `run_block` / dispatch_call are preserved — only
+        // the eager `start()` path pre-runs Init.
+        //
+        // Init failures are logged and tolerated (same pattern as the
+        // Start dispatch below): a failed Init can be retried by a
+        // later dispatch, and tolerating it keeps boot resilient when one
+        // misconfigured block would otherwise wedge the whole runtime.
+        {
+            let block_names: Vec<String> = self.blocks.keys().cloned().collect();
+            for name in &block_names {
+                let stack = crate::runtime::init_stack::InitStack::new();
+                if let Err(e) = self.init_block_with_stack(name, &stack).await {
+                    tracing::error!(
+                        block = %name,
+                        error = %e,
+                        "block init lifecycle failed during start()",
+                    );
+                }
+            }
+        }
 
         for (name, block) in &self.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
