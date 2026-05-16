@@ -5,8 +5,9 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
-use async_trait::async_trait;
 use std::collections::HashMap;
+
+use async_trait::async_trait;
 use thiserror::Error;
 use wafer_block::ConfigVar;
 

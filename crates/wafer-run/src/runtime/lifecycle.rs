@@ -153,6 +153,7 @@ impl Wafer {
                 HashMap::new(),
                 Arc::new(AtomicBool::new(false)),
                 None,
+                crate::runtime::init_stack::InitStack::new(),
             );
             if let Err(e) = block
                 .lifecycle(
@@ -189,6 +190,7 @@ impl Wafer {
                 HashMap::new(),
                 Arc::new(AtomicBool::new(false)),
                 None,
+                crate::runtime::init_stack::InitStack::new(),
             );
             if let Err(e) = block
                 .lifecycle(
@@ -213,6 +215,7 @@ impl Wafer {
             HashMap::new(),
             Arc::new(AtomicBool::new(false)),
             None,
+            crate::runtime::init_stack::InitStack::new(),
         );
         for (name, block) in &self.blocks {
             if let Err(e) = block

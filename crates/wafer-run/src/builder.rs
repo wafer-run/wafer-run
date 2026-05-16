@@ -17,13 +17,14 @@
 //! which is also gated. Explicit `.lockfile(path)` still compiles on every
 //! target and errors loudly when the path can't be read.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use wafer_block::error::RuntimeError;
 
-use crate::runtime::config_source::{ConfigSource, StaticConfigSource};
-use crate::runtime::Wafer;
+use crate::runtime::{
+    config_source::{ConfigSource, StaticConfigSource},
+    Wafer,
+};
 
 /// How `WaferBuilder` should locate `wafer.lock`.
 #[derive(Debug, Clone)]

@@ -256,6 +256,7 @@ impl Wafer {
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
+                    crate::runtime::init_stack::InitStack::new(),
                 );
 
                 let config_data = serde_json::to_vec(config).map_err(|e| {
@@ -289,6 +290,7 @@ impl Wafer {
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
+                    crate::runtime::init_stack::InitStack::new(),
                 );
 
                 let config_data = serde_json::to_vec(config).map_err(|e| {
@@ -328,6 +330,7 @@ impl Wafer {
                     HashMap::new(),
                     Arc::new(AtomicBool::new(false)),
                     None,
+                    crate::runtime::init_stack::InitStack::new(),
                 );
                 block
                     .lifecycle(
@@ -383,6 +386,7 @@ impl Wafer {
                             HashMap::new(),
                             Arc::new(AtomicBool::new(false)),
                             None,
+                            crate::runtime::init_stack::InitStack::new(),
                         );
                         block
                             .lifecycle(

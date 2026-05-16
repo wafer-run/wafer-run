@@ -3,6 +3,7 @@
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
 use std::collections::HashMap;
+
 use wafer_block::ConfigVar;
 use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource};
 

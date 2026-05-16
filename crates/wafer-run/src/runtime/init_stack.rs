@@ -12,6 +12,7 @@
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §3, §4
 
 use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Default)]

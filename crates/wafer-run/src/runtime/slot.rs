@@ -23,8 +23,8 @@
 //!   invoking `get_or_init`; if one somehow reaches the slot, it is returned
 //!   but not stored.
 
-use std::future::Future;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
+
 use thiserror::Error;
 use tokio::sync::Mutex;
 

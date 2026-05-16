@@ -346,6 +346,12 @@ impl Wafer {
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
+    ///
+    /// `init_breadcrumbs` is the per-dispatch init cycle-detection stack.
+    /// Top-level callers (HTTP listener, lifecycle, flow executor) pass
+    /// `InitStack::new()`. Nested callers (the `init_block_with_stack`
+    /// pipeline) pass the inherited stack so transitive `init_block`
+    /// calls participate in the same frame.
     pub(crate) fn make_context(
         &self,
         flow_id: impl Into<String>,
@@ -353,6 +359,7 @@ impl Wafer {
         config: HashMap<String, String>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
+        init_breadcrumbs: crate::runtime::init_stack::InitStack,
     ) -> RuntimeContext {
         RuntimeContext {
             flow_id: flow_id.into(),
@@ -371,7 +378,7 @@ impl Wafer {
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
-            init_breadcrumbs: crate::runtime::init_stack::InitStack::new(),
+            init_breadcrumbs,
         }
     }
 
@@ -397,8 +404,20 @@ impl Wafer {
     }
 
     /// Same as [`Wafer::init_block`] but uses the caller's init-stack for
-    /// cycle detection. Called from `RuntimeContext`-aware dispatch paths
-    /// (wired into `Wafer::run` in a follow-up task).
+    /// cycle detection. Called from the top-level dispatch paths
+    /// (`Wafer::run_block`, the flow executor) so init runs at most once per
+    /// block per slot, with cycle detection across nested init.
+    ///
+    /// NOT wired into [`RuntimeContext::dispatch_call`] (block-to-block
+    /// `call_block`) in this task: that path doesn't carry a `Wafer`
+    /// reference, so threading through `slots` + `config_source` would
+    /// require enlarging `RuntimeContext`. Block-to-block transitive init
+    /// is rare in practice — callers reaching another block via
+    /// `call_block` are typically themselves inside a top-level dispatch
+    /// that already ran init on the entry block. The remaining gap is
+    /// transitive init of a callee that wasn't reached during the entry
+    /// init chain; that block's first call_block will hit `block.handle`
+    /// without an init guarantee. Tracking: PR1 follow-up.
     pub(crate) async fn init_block_with_stack(
         &self,
         name: &str,
@@ -411,11 +430,19 @@ impl Wafer {
             .get(name)
             .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
             .clone();
+        // Defensive slot allocation: `register_block_inner` pairs every
+        // registration with a slot, but the (deprecated) resolver paths in
+        // `runtime/resolver.rs` insert directly into `self.blocks` without
+        // populating `self.slots`. Until Task 1.11 deletes those paths,
+        // allocate a fresh slot on miss. Concurrent first-callers for a
+        // resolver-inserted block won't share the same slot (minor gap), but
+        // that's acceptable as a bridge — resolver-inserted blocks are not
+        // hot dispatch targets.
         let slot = self
             .slots
             .get(name)
-            .expect("slot must exist for any registered block")
-            .clone();
+            .cloned()
+            .unwrap_or_else(|| Arc::new(crate::runtime::slot::BlockSlot::new()));
 
         // Push onto the dispatch-scoped init stack before locking the slot.
         // If a parent frame already has this block on the stack, we hit a
@@ -427,18 +454,17 @@ impl Wafer {
             .await
             .map_err(|path| InitError::Cycle { path })?;
 
-        // Build the lifecycle(Init) context outside the closure. The stack we
-        // were just handed is inherited into the context so any `init_block`
-        // call made transitively by this block participates in the same
-        // cycle-detection frame.
-        let mut init_ctx = self.make_context(
+        // Build the lifecycle(Init) context. The stack we were just handed is
+        // inherited into the context so any `init_block` call made transitively
+        // by this block participates in the same cycle-detection frame.
+        let init_ctx = self.make_context(
             "init",
             name,
             std::collections::HashMap::new(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
+            stack.clone(),
         );
-        init_ctx.init_breadcrumbs = stack.clone();
 
         let cfg_src = self.config_source.clone();
         let block_name = name.to_string();
@@ -500,6 +526,35 @@ impl Wafer {
             }
         }
         self.all_blocks = Arc::new(map);
+    }
+}
+
+/// Convert a slot-level [`InitError`] into a [`WaferError`] for surfacing on
+/// dispatch paths (`Wafer::run_block`, flow executor) where the public surface
+/// is `OutputStream::error(...)`.
+///
+/// - `Permanent` / `Cycle` → `FAILED_PRECONDITION` (caller cannot recover by retrying).
+/// - `Transient` → `UNAVAILABLE` (caller may retry).
+pub(crate) fn init_error_to_wafer_error(
+    block: &str,
+    e: crate::runtime::slot::InitError,
+) -> wafer_block::core_types::WaferError {
+    use wafer_block::core_types::{ErrorCode, WaferError};
+
+    use crate::runtime::slot::InitError;
+    match e {
+        InitError::Permanent(s) => WaferError::new(
+            ErrorCode::FailedPrecondition,
+            format!("block `{block}` init failed permanently: {s}"),
+        ),
+        InitError::Transient(s) => WaferError::new(
+            ErrorCode::Unavailable,
+            format!("block `{block}` init transient failure: {s}"),
+        ),
+        InitError::Cycle { path } => WaferError::new(
+            ErrorCode::FailedPrecondition,
+            format!("block `{block}` init cycle detected: {}", path.join(" -> ")),
+        ),
     }
 }
 

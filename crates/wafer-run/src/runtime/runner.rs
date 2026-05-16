@@ -97,6 +97,14 @@ impl Wafer {
             }
         };
 
+        // Lazy init: ensure lifecycle(Init) has run on the target block before
+        // dispatching `handle`. Top-level dispatch starts a fresh init-stack;
+        // any transitive `init_block` calls inherit it through `RuntimeContext`.
+        let init_stack = crate::runtime::init_stack::InitStack::new();
+        if let Err(e) = self.init_block_with_stack(resolved, &init_stack).await {
+            return OutputStream::error(crate::runtime::init_error_to_wafer_error(resolved, e));
+        }
+
         let cancelled = Arc::new(AtomicBool::new(false));
         let caller_requires = {
             let info = block.info();
@@ -125,7 +133,7 @@ impl Wafer {
         // request appeared to come from a non-block caller — false denials.
         // Use the resolved block name instead. `flow_id` is empty (no flow
         // in scope at the top level).
-        let mut ctx = self.make_context("", resolved, block_config, cancelled, None);
+        let mut ctx = self.make_context("", resolved, block_config, cancelled, None, init_stack);
         ctx.caller_requires = caller_requires;
 
         // Observability

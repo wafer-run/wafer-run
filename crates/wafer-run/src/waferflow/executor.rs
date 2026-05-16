@@ -131,12 +131,15 @@ pub async fn execute(
             .as_ref()
             .map(parse_config_map)
             .unwrap_or_default();
+        // Each flow step gets its own init stack frame for cycle detection.
+        let step_init_stack = crate::runtime::init_stack::InitStack::new();
         let ctx = wafer.make_context(
             &flow.id,
             &block_name,
             step_config,
             cancelled.clone(),
             deadline,
+            step_init_stack.clone(),
         );
 
         // --- Look up block ---
@@ -153,6 +156,16 @@ pub async fn execute(
                 ));
             }
         };
+
+        // Lazy init: ensure the step's target block has had lifecycle(Init)
+        // run before dispatching `handle`. Surface init failure as an error
+        // event so the flow short-circuits via the standard error path.
+        if let Err(e) = wafer
+            .init_block_with_stack(&block_name, &step_init_stack)
+            .await
+        {
+            return OutputStream::error(crate::runtime::init_error_to_wafer_error(&block_name, e));
+        }
 
         // --- Observability: block start ---
         let obs_ctx = ObservabilityContext {

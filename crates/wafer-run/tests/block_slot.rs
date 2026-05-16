@@ -2,8 +2,11 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §3, §4
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use wafer_run::runtime::slot::{BlockSlot, InitError, InitializedState};
 
 #[tokio::test]
