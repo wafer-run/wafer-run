@@ -602,10 +602,7 @@ pub(crate) async fn run_init_pipeline(
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
     use crate::runtime::{config_source::ConfigError, slot::InitError};
 
-    let _guard = stack
-        .push(name)
-        .await
-        .map_err(|path| InitError::Cycle { path })?;
+    let _guard = stack.push(name).map_err(|path| InitError::Cycle { path })?;
 
     let block_name = name.to_string();
     let block_for_init = block.clone();

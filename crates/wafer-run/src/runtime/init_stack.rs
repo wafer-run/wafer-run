@@ -9,11 +9,23 @@
 //! `push(name)` is called, return the full path `[existing..., name]`
 //! as the cycle.
 //!
+//! ## Why a sync (`parking_lot::Mutex`) rather than `tokio::sync::Mutex`
+//!
+//! The critical sections here are tiny (a membership scan + push/clone of
+//! a small `Vec<String>`) with no `.await` while the lock is held, so
+//! blocking briefly is fine and preferable to pulling in tokio's
+//! async-mutex machinery. The decisive reason for the switch was that
+//! `Drop for InitGuard` is sync and used to fall back to `tokio::spawn`
+//! when `try_lock` failed; that hard-required `tokio/rt`, which is not
+//! available in `wasm32-unknown-unknown` workers (solobase-cloudflare).
+//! With a sync mutex `Drop` is straightforward and the tokio-rt
+//! dependency vanishes from the lock path.
+//!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §3, §4
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct InitStack {
@@ -30,8 +42,8 @@ impl InitStack {
     ///   the name on drop.
     /// - `Err(cycle_path)` if the name is already on the stack. The path is
     ///   `[existing..., name]` — exactly what to surface as `InitError::Cycle`.
-    pub async fn push(&self, name: &str) -> Result<InitGuard, Vec<String>> {
-        let mut guard = self.inner.lock().await;
+    pub fn push(&self, name: &str) -> Result<InitGuard, Vec<String>> {
+        let mut guard = self.inner.lock();
         if guard.iter().any(|n| n == name) {
             let mut path = guard.clone();
             path.push(name.to_string());
@@ -44,8 +56,8 @@ impl InitStack {
         })
     }
 
-    pub async fn snapshot(&self) -> Vec<String> {
-        self.inner.lock().await.clone()
+    pub fn snapshot(&self) -> Vec<String> {
+        self.inner.lock().clone()
     }
 }
 
@@ -58,31 +70,12 @@ pub struct InitGuard {
 
 impl Drop for InitGuard {
     fn drop(&mut self) {
-        let inner = self.inner.clone();
-        let name = self.name.clone();
-        // Drop is sync; we must briefly block to pop. The mutex is per-dispatch
-        // and should never be contended at drop time (the same task that
-        // pushed is also dropping the guard).
-        let popped = {
-            if let Ok(mut g) = inner.try_lock() {
-                if let Some(pos) = g.iter().rposition(|n| n == &name) {
-                    g.remove(pos);
-                }
-                true
-            } else {
-                false
-            }
-        };
-        if !popped {
-            // Best-effort: spawn a tokio task to pop. This branch should be
-            // unreachable in normal flow because push and drop happen on the
-            // same task without yielding the mutex.
-            tokio::spawn(async move {
-                let mut g = inner.lock().await;
-                if let Some(pos) = g.iter().rposition(|n| n == &name) {
-                    g.remove(pos);
-                }
-            });
+        // `parking_lot::Mutex::lock` is sync and infallible. No
+        // `tokio::spawn` fallback needed, so this path no longer requires
+        // `tokio/rt` and compiles cleanly for `wasm32-unknown-unknown`.
+        let mut g = self.inner.lock();
+        if let Some(pos) = g.iter().rposition(|n| n == &self.name) {
+            g.remove(pos);
         }
     }
 }
