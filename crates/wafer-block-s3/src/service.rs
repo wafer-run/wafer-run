@@ -294,12 +294,14 @@ impl StorageService for S3StorageService {
                 let objects_to_delete: Vec<aws_sdk_s3::types::ObjectIdentifier> = contents
                     .iter()
                     .filter_map(|obj| {
-                        obj.key().map(|k| {
-                            aws_sdk_s3::types::ObjectIdentifier::builder()
-                                .key(k)
-                                .build()
-                                .expect("key is set")
-                        })
+                        let k = obj.key()?;
+                        aws_sdk_s3::types::ObjectIdentifier::builder()
+                            .key(k)
+                            .build()
+                            .map_err(|e| {
+                                tracing::warn!(key = %k, err = %e, "skip object in batch delete");
+                            })
+                            .ok()
                     })
                     .collect();
 

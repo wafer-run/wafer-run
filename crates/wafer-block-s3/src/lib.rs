@@ -84,10 +84,15 @@ impl Block for S3StorageBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let service = self
-            .service
-            .get()
-            .expect("wafer-run/s3: not initialized — call lifecycle(Init) first");
+        let Some(service) = self.service.get() else {
+            // Reached if the runtime dispatches a message before lifecycle(Init)
+            // completes — programmer error in the host, but surface as a typed
+            // error rather than panicking so the requester gets a clean 500.
+            return OutputStream::error(WaferError::new(
+                ErrorCode::Internal,
+                "wafer-run/s3: not initialized — call lifecycle(Init) first",
+            ));
+        };
         let body = input.collect_to_bytes().await;
         wafer_core::interfaces::storage::handler::handle_message(service.as_ref(), &msg, &body)
             .await
