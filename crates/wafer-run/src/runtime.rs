@@ -215,12 +215,13 @@ pub struct Wafer {
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasmi")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
-    /// Per-block init slots populated by `register_block_inner` and consulted
-    /// by [`Wafer::init_block`] for lazy-once-success caching.
+    /// Per-block init slots populated by `register_block_inner` (code-registered
+    /// blocks) and `register_remote_block` (blocks downloaded during `seal()`).
+    /// Consulted by [`Wafer::init_block`] for lazy-once-success caching.
     ///
     /// Wrapped in `Arc` (same shape as `aliases`) so [`RuntimeContext`] can
     /// share a cheap clone without copying the map on every dispatch.
-    /// Mutations go through `Arc::make_mut` in `register_block_inner`.
+    /// Mutations go through `Arc::make_mut` in those two registration paths.
     pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
     /// Source of per-block env-var config, consulted on first init.
     pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
@@ -446,18 +447,18 @@ impl Wafer {
             .get(name)
             .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
             .clone();
-        // Defensive slot allocation: `register_block_inner` pairs every
-        // registration with a slot. The remote-block path in `Wafer::seal`
-        // (downloads referenced blocks not yet registered) inserts directly
-        // into `self.blocks` without populating `self.slots`. Allocate a
-        // fresh slot on miss. Concurrent first-callers for a seal-inserted
-        // block won't share the same slot (minor gap), but that's acceptable
-        // — remote-resolved blocks are not hot dispatch targets.
+        // Every registered block — including remote ones downloaded by
+        // `seal()` — pairs registration with a slot via `register_block_inner`
+        // or `register_remote_block`. If `self.blocks` contains `name` but
+        // `self.slots` does not, that is a runtime invariant violation; the
+        // panic message points at the bug rather than masking it with a
+        // fresh slot (which would let concurrent first-callers each run
+        // `lifecycle(Init)` independently).
         let slot = self
             .slots
             .get(name)
             .cloned()
-            .unwrap_or_else(|| Arc::new(crate::runtime::slot::BlockSlot::new()));
+            .expect("slot must exist for any registered block");
 
         // Build the lifecycle(Init) context. The stack we were just handed is
         // inherited into the context so any `init_block` call made transitively
@@ -825,6 +826,46 @@ impl Wafer {
         Ok(())
     }
 
+    /// Insert a block downloaded by `seal()`'s remote-resolution path while
+    /// running the same WRAP grant validation + slot allocation that
+    /// `register_block_inner` performs for code-registered blocks.
+    ///
+    /// Remote blocks must not bypass WRAP grant collection or slot allocation
+    /// — without a paired slot, concurrent first-callers would each construct
+    /// their own `BlockSlot` and run `lifecycle(Init)` twice, breaking the
+    /// once-only-success guarantee for stateful inits (migrations, idempotent
+    /// setup). See `Wafer::init_block_with_stack` / `RuntimeContext::dispatch_call`.
+    ///
+    /// Block-name and config-key-prefix validation are intentionally skipped
+    /// here: remote blocks come in under names the user already declared in
+    /// flow definitions or block_configs, and re-validating now would cause
+    /// `seal()` to reject blocks that were already accepted by the user's
+    /// configuration. Duplicate-registration is also not checked because
+    /// every remote-path call site filters `self.blocks.contains_key(name)`
+    /// before invoking this helper.
+    pub(crate) fn register_remote_block(
+        &mut self,
+        name: &str,
+        block: Arc<dyn Block>,
+    ) -> Result<(), RuntimeError> {
+        let info = block.info();
+        let admin_block: String = (*self.wrap_admin_block).clone();
+        let new_grants =
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+        if !new_grants.is_empty() {
+            let mut all = (*self.wrap_grants).clone();
+            all.extend(new_grants);
+            self.wrap_grants = Arc::new(all);
+        }
+
+        self.blocks.insert(name.to_string(), block);
+        Arc::make_mut(&mut self.slots).insert(
+            name.to_string(),
+            Arc::new(crate::runtime::slot::BlockSlot::new()),
+        );
+        Ok(())
+    }
+
     /// Path A: register every `#[wafer_block]`-annotated native block
     /// collected via `linkme` at link time. Called by
     /// `WaferBuilder::build()` when static registration is enabled (default).
@@ -859,6 +900,65 @@ impl Wafer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `Block` for unit tests that need a registered handle.
+    struct NoopBlock {
+        info: wafer_block::BlockInfo,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::block::Block for NoopBlock {
+        fn info(&self) -> wafer_block::BlockInfo {
+            self.info.clone()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::respond(vec![])
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _event: wafer_block::LifecycleEvent,
+        ) -> std::result::Result<(), wafer_block::WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Remote-resolution path (`seal()` downloads referenced blocks not yet
+    /// registered) must pair each insertion with a `BlockSlot`. Without
+    /// this, concurrent first-callers each construct their own slot and
+    /// both run `lifecycle(Init)` — breaking the once-only-success
+    /// guarantee for stateful inits (migrations, idempotent setup).
+    #[test]
+    fn register_remote_block_pairs_blocks_and_slot() {
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+
+        let block = Arc::new(NoopBlock {
+            info: wafer_block::BlockInfo::new("some-org/remote", "0.1.0", "iface@v1", "test"),
+        });
+        wafer
+            .register_remote_block("some-org/remote", block)
+            .expect("register_remote_block succeeds for valid block");
+
+        assert!(
+            wafer.blocks.contains_key("some-org/remote"),
+            "blocks map must contain remote block"
+        );
+        assert!(
+            wafer.slots.contains_key("some-org/remote"),
+            "slots map must contain a slot for every registered block — \
+             missing this lets concurrent first-callers each run lifecycle(Init)"
+        );
+    }
 
     #[test]
     fn test_block_name_to_var_prefix() {

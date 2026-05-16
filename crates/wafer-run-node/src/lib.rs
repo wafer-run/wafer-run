@@ -101,6 +101,10 @@ impl WaferRuntime {
     /// Uses `seal()` (no `bind()` on blocks) because the Node.js dev server
     /// has its own HTTP handling — blocks that spawn listeners are not needed
     /// here.
+    ///
+    /// Per-block `lifecycle(Init)` runs lazily on first dispatch per isolate
+    /// — `start()` does not eagerly dispatch Init. See
+    /// [`wafer_run::Wafer::seal`].
     #[napi]
     pub async fn start(&self) -> Result<()> {
         self.inner

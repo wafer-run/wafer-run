@@ -240,7 +240,7 @@ impl Wafer {
                 match self.resolve_remote_block(&client, &block_name).await? {
                     Some(block) => {
                         tracing::info!(block = %block_name, "downloaded remote block");
-                        self.blocks.insert(block_name.clone(), block);
+                        self.register_remote_block(&block_name, block)?;
                     }
                     None => {
                         return Err(RuntimeError::BlockNotFound {
@@ -255,7 +255,9 @@ impl Wafer {
 
         // 7. Finalize the startup snapshot. Block configs survive in
         // `self.block_configs` and are mirrored here for context consumers.
-        // (Lazy init reads from `self.block_configs` on first dispatch.)
+        // (Lazy init reads from the runtime's `ConfigSource` — not from
+        // `self.block_configs` — when dispatching `lifecycle(Init)` on
+        // first request; see `run_init_pipeline`.)
         self.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
             blocks: super::lifecycle::sorted_snapshot(self.blocks.values().map(|b| b.info())),
@@ -382,7 +384,7 @@ impl Wafer {
                     match self.resolve_remote_block(&client, block_name).await {
                         Ok(Some(block)) => {
                             tracing::info!(block = %block_name, "downloaded remote block");
-                            self.blocks.insert(block_name.clone(), block);
+                            self.register_remote_block(block_name, block)?;
                         }
                         Ok(None) => {
                             tracing::debug!(
@@ -402,7 +404,7 @@ impl Wafer {
                     .download_wasm_from_url(&client, wasm_url, &name)
                     .await?;
                 tracing::info!(block = %name, "downloaded remote WASM block from registry");
-                self.blocks.insert(name.clone(), block);
+                self.register_remote_block(&name, block)?;
             }
         }
 

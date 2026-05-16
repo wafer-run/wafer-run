@@ -347,15 +347,17 @@ impl RuntimeContext {
         // is detected. The init pipeline pushes `resolved_block_name` onto
         // the stack inside `run_init_pipeline`.
         //
-        // When the runtime built this context (`Wafer::make_context`), `slots`
-        // contains an entry for `resolved_block_name`; otherwise (defensively,
-        // for contexts constructed outside the runtime) fall back to a fresh
-        // slot — same bridge as `Wafer::init_block_with_stack`.
+        // Every registered block has a paired slot (`register_block_inner` /
+        // `register_remote_block`). A missing entry here means
+        // `resolved_block_name` was found in `self.blocks` but not
+        // `self.slots` — a runtime invariant violation, so panic loudly
+        // rather than silently constructing a fresh slot (which would let
+        // concurrent callers each run `lifecycle(Init)` independently).
         let init_slot = self
             .slots
             .get(resolved_block_name)
             .cloned()
-            .unwrap_or_else(|| Arc::new(crate::runtime::slot::BlockSlot::new()));
+            .expect("slot must exist for any registered block");
         if let Err(e) = crate::runtime::run_init_pipeline(
             resolved_block_name,
             block.clone(),

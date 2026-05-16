@@ -222,8 +222,18 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 
 /// Resolve all block references in registered flows (async).
 ///
-/// Returns immediately; invokes `cb` when resolution completes. On success
-/// the callback's `result` is NULL; on failure it is a JSON error string.
+/// Returns immediately; invokes `cb` when resolution (`seal()`) completes.
+/// On success the callback's `result` is NULL; on failure it is a JSON
+/// error string.
+///
+/// `seal()` performs composite-config expansion, `uses` gathering,
+/// capability resolution, remote-block download, and startup-snapshot
+/// finalization, but does **not** dispatch `lifecycle(Init)` eagerly.
+/// Per-block `Init` runs lazily on first dispatch per worker isolate —
+/// call `wafer_run_block` (or `wafer_run_flow`) to trigger init on a
+/// specific block. To validate config without dispatching, call
+/// `wafer_validate_all_block_configs` (FFI bindings TBD; see
+/// `Wafer::validate_all_block_configs`).
 #[no_mangle]
 pub unsafe extern "C" fn wafer_resolve(
     w: *mut WaferRuntime,
@@ -261,8 +271,18 @@ pub unsafe extern "C" fn wafer_resolve(
 
 /// Start the runtime without spawning block listeners (async).
 ///
-/// Returns immediately; invokes `cb` when start completes. On success the
-/// callback's `result` is NULL; on failure it is a JSON error string.
+/// Returns immediately; invokes `cb` when start (`seal()`) completes. On
+/// success the callback's `result` is NULL; on failure it is a JSON
+/// error string.
+///
+/// `seal()` performs composite-config expansion, `uses` gathering,
+/// capability resolution, remote-block download, and startup-snapshot
+/// finalization, but does **not** dispatch `lifecycle(Init)` eagerly.
+/// Per-block `Init` runs lazily on first dispatch per worker isolate —
+/// call `wafer_run_block` (or `wafer_run_flow`) to trigger init on a
+/// specific block. To validate config without dispatching, call
+/// `wafer_validate_all_block_configs` (FFI bindings TBD; see
+/// `Wafer::validate_all_block_configs`).
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(
     w: *mut WaferRuntime,
