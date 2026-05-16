@@ -27,19 +27,6 @@ pub enum RuntimeError {
         prefix: String,
     },
 
-    /// A block declared a typed WRAP grant (Network/Storage/Crypto) but the
-    /// admin block hasn't been set on the runtime yet. Only the admin block
-    /// may declare typed grants; without an admin block configured we cannot
-    /// validate the grant, so we fail loud rather than silently dropping it.
-    /// Fix: call `Wafer::set_admin_block(...)` before registering the block.
-    #[error(
-        "block '{block}' declared a typed WRAP grant ({resource_type}) but the admin block is not set on the runtime; call set_admin_block before register_block"
-    )]
-    WrapGrantAdminUnset {
-        block: String,
-        resource_type: String,
-    },
-
     // ── Block lifecycle ─────────────────────────────────────────────────
     /// A block failed during initialization (lifecycle start).
     #[error("block '{name}' init failed: {reason}")]

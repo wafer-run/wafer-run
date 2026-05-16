@@ -125,25 +125,75 @@ async fn typed_grant_from_non_admin_is_dropped() {
 }
 
 #[tokio::test]
-async fn typed_grant_without_admin_set_returns_error() {
+async fn typed_grant_without_admin_set_is_deferred_until_set_admin_block() {
+    // This is the linkme-registration scenario used by solobase: blocks
+    // with typed WRAP grants are registered before the embedder calls
+    // `set_admin_block`. Registration must NOT fail; instead, the grant
+    // is deferred and then re-collected when `set_admin_block` runs.
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
-    // wrap_admin_block is unset (empty). A typed grant must fail loud.
-    let result = wafer.register_block(
-        "test/granter",
-        Arc::new(GrantingBlock {
-            name: "test/granter",
-            grants: vec![
-                ResourceGrant::read("*", "https://example.com").typed(ResourceType::Network)
-            ],
-        }),
+    // wrap_admin_block is unset (empty) at registration time.
+    wafer
+        .register_block(
+            "suppers-ai/admin",
+            Arc::new(GrantingBlock {
+                name: "suppers-ai/admin",
+                grants: vec![
+                    ResourceGrant::read("*", "https://example.com").typed(ResourceType::Network)
+                ],
+            }),
+        )
+        .expect("registration must succeed even before set_admin_block");
+
+    // Immediately after registration, the typed grant is deferred.
+    assert!(
+        wafer.wrap_grants().is_empty(),
+        "typed grant must be deferred while admin block is unset: {:?}",
+        wafer.wrap_grants()
     );
 
-    let err = result.expect_err("expected WrapGrantAdminUnset");
-    let msg = err.to_string();
+    // Setting the admin block re-collects deferred typed grants.
+    wafer.set_admin_block("suppers-ai/admin");
+    let grants = wafer.wrap_grants();
+    assert_eq!(
+        grants.len(),
+        1,
+        "set_admin_block must re-collect the deferred typed grant, got {grants:?}"
+    );
+    assert_eq!(grants[0].resource, "https://example.com");
+}
+
+#[tokio::test]
+async fn set_admin_block_preserves_external_grants() {
+    // External grants (added via `add_wrap_grants`) must survive a
+    // `set_admin_block` rescan — they are not block-declared and have
+    // no way to be re-derived.
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "suppers-ai/admin",
+            Arc::new(GrantingBlock {
+                name: "suppers-ai/admin",
+                grants: vec![
+                    ResourceGrant::read("*", "https://example.com").typed(ResourceType::Network)
+                ],
+            }),
+        )
+        .expect("register");
+    wafer.add_wrap_grants(vec![ResourceGrant::read("test/other", "external/thing")]);
+
+    // Setting admin block triggers a rescan that must keep both grants.
+    wafer.set_admin_block("suppers-ai/admin");
+    let grants = wafer.wrap_grants();
+    let resources: Vec<&str> = grants.iter().map(|g| g.resource.as_str()).collect();
     assert!(
-        msg.contains("test/granter") && msg.contains("admin"),
-        "error must mention block and admin: {msg}"
+        resources.contains(&"https://example.com"),
+        "admin's typed grant should be present after rescan: {resources:?}"
+    );
+    assert!(
+        resources.contains(&"external/thing"),
+        "external grant must be preserved across rescan: {resources:?}"
     );
 }
 

@@ -40,13 +40,19 @@
 - `Wafer::init_block` / `init_block_with_stack` for lazy per-block init.
 - `Wafer::validate_all_block_configs` returning `ValidationReport`.
 - `WaferBuilder::config_source` setter.
-- `RuntimeError::WrapGrantAdminUnset` (fail-loud on typed grant from block
-  registered before `set_wrap_admin_block`).
 
 ### Refactored
 
 - WRAP grant collection moved from `resolve()`-time to `register_block()`-time
-  (per-block validation against the admin block).
+  (per-block validation against the admin block). Typed grants
+  (Network/Storage/Crypto) declared by a block that is registered before
+  `set_admin_block` is called are deferred (logged + dropped at
+  registration), then re-collected when `set_admin_block` runs a rescan
+  of every registered block. External grants added via
+  `Wafer::add_wrap_grants` are tracked separately and preserved across
+  rescans. This accommodates the linkme registration order used by
+  `WaferBuilder::build()`, where blocks are auto-registered before the
+  embedder gets a chance to call `set_admin_block`.
 
 ### Migration
 

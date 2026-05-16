@@ -17,20 +17,26 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
 
 /// Validate a single block's WRAP grant declarations and return the subset
 /// that passed validation. Called from `register_block_inner` so grants are
-/// available immediately after registration — no init pass required.
+/// available immediately after registration — no init pass required, and
+/// from `Wafer::set_admin_block` to (re-)collect typed grants from blocks
+/// that were registered before the admin block was known.
 ///
 /// Rules:
 /// - Typed grants (Network/Storage/Crypto) may only be declared by the
-///   admin block. If `admin_block` is empty (unset), returns
-///   `RuntimeError::WrapGrantAdminUnset` — we fail loud rather than
-///   silently dropping a security-sensitive grant.
+///   admin block. If `admin_block` is empty (unset) at registration time,
+///   the typed grant is deferred (logged and dropped). `set_admin_block`
+///   re-scans all already-registered blocks and re-runs this validation,
+///   so deferred typed grants from the admin block are picked up at that
+///   point. This accommodates the common pattern of constructing a
+///   `Wafer` (which auto-registers linkme-collected blocks during
+///   `WaferBuilder::build`) and only then calling `set_admin_block`.
 /// - Namespace grants must be owned by the declaring block (per
 ///   `wafer_block::wrap::resource_owner`). Unnamespaced or owned-by-other
-///   grants are logged and dropped (matches prior behaviour).
+///   grants are logged and dropped.
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
-) -> Result<Vec<wafer_block::types::ResourceGrant>, RuntimeError> {
+) -> Vec<wafer_block::types::ResourceGrant> {
     let mut out = Vec::new();
     for grant in &block_info.grants {
         // Network/Storage/Crypto typed grants use URLs / file-paths /
@@ -46,10 +52,16 @@ pub(crate) fn validate_and_collect_grants_for_block(
                 | Some(wafer_block::types::ResourceType::Crypto)
         ) {
             if admin_block.is_empty() {
-                return Err(RuntimeError::WrapGrantAdminUnset {
-                    block: block_info.name.clone(),
-                    resource_type: format!("{:?}", grant.resource_type),
-                });
+                // Admin block not yet set: defer this typed grant.
+                // `set_admin_block` re-runs this collector for every
+                // registered block once admin is known.
+                tracing::debug!(
+                    block = %block_info.name,
+                    resource = %grant.resource,
+                    resource_type = ?grant.resource_type,
+                    "WRAP: typed grant deferred — admin block not yet set; will be re-collected by set_admin_block",
+                );
+                continue;
             }
             if block_info.name == admin_block {
                 out.push(grant.clone());
@@ -85,15 +97,17 @@ pub(crate) fn validate_and_collect_grants_for_block(
             ),
         }
     }
-    Ok(out)
+    out
 }
 
 impl Wafer {
     /// Add extra WRAP grants (e.g. loaded from a database) to the runtime.
-    /// These are appended to the existing code-declared grants.
+    /// These are appended to the existing code-declared grants and tracked
+    /// separately so a later `set_admin_block` rescan does not drop them.
     /// Call this before `start()` / `seal()`, or between `seal()` and the
     /// first request.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
+        self.wrap_grants_external.extend(grants.iter().cloned());
         let mut all = (*self.wrap_grants).clone();
         all.extend(grants);
         self.wrap_grants = Arc::new(all);
