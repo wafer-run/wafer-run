@@ -30,6 +30,27 @@ const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 /// ABI version for WASM block compatibility.
 pub const ABI_VERSION: u32 = 1;
 
+/// Result of [`Wafer::validate_all_block_configs`]. Used by the `/_health`
+/// route to short-circuit boot when a required env var is missing.
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    /// Block names whose declared config keys all resolved successfully.
+    /// Sorted lexicographically for deterministic output.
+    pub ok: Vec<String>,
+    /// Blocks with missing required keys or an unreachable config source.
+    /// Sorted by `block` for deterministic output.
+    pub broken: Vec<BrokenBlock>,
+}
+
+/// A single block that failed declared-key validation.
+#[derive(Debug, Clone)]
+pub struct BrokenBlock {
+    pub block: String,
+    /// Missing required keys. Currently carries at most one entry — see
+    /// [`Wafer::validate_all_block_configs`] for why.
+    pub missing_keys: Vec<String>,
+}
+
 /// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
 #[cfg(feature = "wasm")]
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +483,58 @@ impl Wafer {
             stack,
         )
         .await
+    }
+
+    /// Walk every registered block's [`BlockInfo::config_keys`] and ask the
+    /// [`ConfigSource`](crate::runtime::config_source::ConfigSource) to load
+    /// values. Reports which blocks have missing required keys or
+    /// unreachable sources.
+    ///
+    /// Does **not** invoke any block's `lifecycle` or `handle`. Intended for
+    /// the `/_health` route in wafer-site (PR 3) to short-circuit boot when
+    /// a required env var is missing.
+    ///
+    /// # Limitation: single missing key per block
+    ///
+    /// [`ConfigError::MissingRequired`](crate::runtime::config_source::ConfigError::MissingRequired)
+    /// carries only the first missing key — `load_for_block` short-circuits
+    /// on the first miss. Each [`BrokenBlock`] therefore reports exactly one
+    /// missing key, even if the block declares several required keys that
+    /// are all absent. A richer report would require widening `ConfigError`
+    /// to carry `Vec<String>`; that's intentionally out of scope for this
+    /// change.
+    pub async fn validate_all_block_configs(&self) -> ValidationReport {
+        use crate::runtime::config_source::ConfigError;
+
+        let mut report = ValidationReport {
+            ok: Vec::new(),
+            broken: Vec::new(),
+        };
+        for (name, block) in self.blocks.iter() {
+            let info = block.info();
+            match self
+                .config_source
+                .load_for_block(name, &info.config_keys)
+                .await
+            {
+                Ok(_) => report.ok.push(name.clone()),
+                Err(ConfigError::MissingRequired { block, key }) => {
+                    report.broken.push(BrokenBlock {
+                        block,
+                        missing_keys: vec![key],
+                    });
+                }
+                Err(ConfigError::Transient { block, .. }) => {
+                    report.broken.push(BrokenBlock {
+                        block,
+                        missing_keys: vec!["<transient: source unreachable>".to_string()],
+                    });
+                }
+            }
+        }
+        report.ok.sort();
+        report.broken.sort_by(|a, b| a.block.cmp(&b.block));
+        report
     }
 
     /// Rebuild the all_blocks map from registered blocks + aliases.

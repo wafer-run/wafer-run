@@ -107,7 +107,7 @@ pub use runtime::RuntimeHandle;
 pub use runtime::{
     config_source::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource},
     slot::{BlockSlot, InitError, InitializedState},
-    Wafer,
+    BrokenBlock, ValidationReport, Wafer,
 };
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
