@@ -197,8 +197,17 @@ pub struct Wafer {
     /// Process-local; used by the call_block interface-action validator to
     /// emit the warning at most once per block.
     pub(crate) warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// WRAP: all validated resource grants collected from blocks at startup.
+    /// WRAP: merged grant list (code-declared + external).
+    /// This is what [`RuntimeContext`] receives and what
+    /// [`Wafer::wrap_grants`] returns. Rebuilt by `set_admin_block` (so
+    /// previously-deferred typed grants get re-collected) and by
+    /// `add_wrap_grants`.
     pub(crate) wrap_grants: Arc<Vec<wafer_block::types::ResourceGrant>>,
+    /// WRAP: extra grants supplied via [`Wafer::add_wrap_grants`] (e.g.
+    /// loaded from a database). Kept separately from block-declared
+    /// grants so `set_admin_block` can rebuild the code-declared portion
+    /// from `self.blocks` without losing externally-injected entries.
+    pub(crate) wrap_grants_external: Vec<wafer_block::types::ResourceGrant>,
     /// WRAP: the block ID that has admin privileges (exact match).
     pub(crate) wrap_admin_block: Arc<String>,
     /// Effective capabilities per block after declared ∩ config ∩ host
@@ -274,6 +283,7 @@ impl Wafer {
                 .collect(),
             warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
             wrap_grants: Arc::new(Vec::new()),
+            wrap_grants_external: Vec::new(),
             wrap_admin_block: Arc::new(String::new()),
             effective_capabilities: Arc::new(std::collections::HashMap::new()),
             asset_loader: Arc::new(crate::asset_loader::NoopAssetLoader),
@@ -297,8 +307,43 @@ impl Wafer {
 
     /// Set the admin block ID for WRAP access control.
     /// Must be set before `start()` / `seal()`.
+    ///
+    /// Re-scans every already-registered block's typed WRAP grants
+    /// (Network/Storage/Crypto) so admin-declared typed grants registered
+    /// before this call are collected. This is the recommended path for
+    /// embedders that auto-register blocks via `linkme` during
+    /// `WaferBuilder::build()` and only know the admin block id after
+    /// construction (e.g. solobase).
+    ///
+    /// External grants previously added via [`Wafer::add_wrap_grants`] are
+    /// preserved across the rescan.
     pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
         self.wrap_admin_block = Arc::new(block_id.into());
+        self.rebuild_wrap_grants();
+    }
+
+    /// Rebuild `self.wrap_grants` from scratch by walking every registered
+    /// block's declared grants (filtered through the per-block validator)
+    /// and concatenating the externally-supplied grants
+    /// (`self.wrap_grants_external`). Called by `set_admin_block` and
+    /// `add_wrap_grants`.
+    fn rebuild_wrap_grants(&mut self) {
+        let admin_block: String = (*self.wrap_admin_block).clone();
+        let mut merged: Vec<wafer_block::types::ResourceGrant> = Vec::new();
+        // Walk blocks in deterministic order for snapshot stability.
+        let mut names: Vec<&String> = self.blocks.keys().collect();
+        names.sort();
+        for name in names {
+            let block = &self.blocks[name];
+            let info = block.info();
+            let new_grants = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
+                &info,
+                &admin_block,
+            );
+            merged.extend(new_grants);
+        }
+        merged.extend(self.wrap_grants_external.iter().cloned());
+        self.wrap_grants = Arc::new(merged);
     }
 
     /// Get the collected WRAP grants (read-only).
@@ -602,10 +647,7 @@ pub(crate) async fn run_init_pipeline(
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
     use crate::runtime::{config_source::ConfigError, slot::InitError};
 
-    let _guard = stack
-        .push(name)
-        .await
-        .map_err(|path| InitError::Cycle { path })?;
+    let _guard = stack.push(name).map_err(|path| InitError::Cycle { path })?;
 
     let block_name = name.to_string();
     let block_for_init = block.clone();
@@ -791,11 +833,12 @@ impl Wafer {
         // Validate this block's WRAP grants and append them to the
         // runtime-wide grant list. Grants are static `BlockInfo` metadata —
         // no init pass required. Typed grants (Network/Storage/Crypto)
-        // require `set_admin_block(...)` to have been called first; if not,
-        // `WrapGrantAdminUnset` surfaces here rather than silently dropping.
+        // declared by a block registered before `set_admin_block` are
+        // deferred: `set_admin_block` re-scans every registered block and
+        // re-collects them, so the registration order doesn't matter.
         let admin_block: String = (*self.wrap_admin_block).clone();
         let new_grants =
-            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
         if !new_grants.is_empty() {
             let mut all = (*self.wrap_grants).clone();
             all.extend(new_grants);
@@ -851,7 +894,7 @@ impl Wafer {
         let info = block.info();
         let admin_block: String = (*self.wrap_admin_block).clone();
         let new_grants =
-            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
         if !new_grants.is_empty() {
             let mut all = (*self.wrap_grants).clone();
             all.extend(new_grants);
