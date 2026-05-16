@@ -14,10 +14,8 @@ use wafer_block::InterfaceSpec;
 
 use crate::block::BlockInfo;
 
-/// Immutable bundle of post-startup metadata. Populated in two phases:
-/// `block_configs` is captured in [`crate::runtime::Wafer::resolve`]
-/// (before the working `block_configs` map is drained into the Init
-/// lifecycle), then the rest is assembled in `start_without_bind`.
+/// Immutable bundle of post-startup metadata. Populated at the end of
+/// [`crate::runtime::Wafer::seal`].
 #[derive(Default, Clone)]
 pub struct StartupSnapshot {
     pub blocks: Vec<BlockInfo>,

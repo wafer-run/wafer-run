@@ -1,14 +1,11 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use super::Wafer;
 #[cfg(feature = "wasm")]
 use super::{parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION};
 #[cfg(feature = "wasm")]
 use crate::block::Block;
-use crate::{error::RuntimeError, types::*};
+use crate::error::RuntimeError;
 
 impl Wafer {
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -118,25 +115,42 @@ impl Wafer {
         }
     }
 
-    /// Resolve walks all flows and resolves block references.
+    /// Finalize runtime configuration before serving traffic.
     ///
-    /// Before resolving flows, initializes all registered blocks via
-    /// `lifecycle(Init)`. Blocks with configs (from `load_blocks_json` or
-    /// `add_block_config`) are initialized first (infrastructure), then
-    /// remaining blocks are initialized (features that may depend on infra).
-    pub async fn resolve(&mut self) -> Result<(), RuntimeError> {
-        // Resolve remote entries: download .flow.json / .wasm for deferred registrations
+    /// `seal()` performs the once-per-boot operations that lazy init does
+    /// **not** subsume:
+    ///
+    /// 1. Resolve remote entries (download `.flow.json` / `.wasm` for
+    ///    deferred registrations).
+    /// 2. Expand composite configs (e.g. `wafer-run/http-server` →
+    ///    `http-listener` + `router`).
+    /// 3. Expand declarative flow `config_map` / `config_defaults`.
+    /// 4. Gather `"uses"` contributions across all block configs.
+    /// 5. Compute effective capabilities per block (declared ∩ config ∩ host)
+    ///    and propagate them into each block.
+    /// 6. Resolve remote blocks referenced by flow steps (no Init dispatch —
+    ///    lazy init handles that on first request).
+    /// 7. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
+    ///    every [`crate::runtime::RuntimeContext`].
+    ///
+    /// Block `Init` lifecycle events are **not** dispatched here. Each block
+    /// is initialized on first dispatch via [`Wafer::init_block`] (lazy
+    /// once-success). Required-config presence is **not** validated here —
+    /// broken paths surface as 5xx on first invocation. Use
+    /// [`Wafer::validate_all_block_configs`] for proactive health checks.
+    pub async fn seal(&mut self) -> Result<(), RuntimeError> {
+        // 1. Resolve remote entries: download .flow.json / .wasm for deferred registrations
         #[cfg(feature = "wasm")]
         self.resolve_remote_entries().await?;
 
-        // Expand composite configs (e.g. wafer-run/http-server → http-listener + router)
+        // 2. Expand composite configs (e.g. wafer-run/http-server → http-listener + router)
         self.expand_composite_configs();
-        // Expand declarative flow config_map / config_defaults
+        // 3. Expand declarative flow config_map / config_defaults
         self.expand_declarative_flow_configs();
-        // Gather uses contributions before initializing blocks
+        // 4. Gather uses contributions
         self.gather_uses_configs();
 
-        // Compute effective capabilities per block: declared ∩ config ∩ host.
+        // 5. Compute effective capabilities per block: declared ∩ config ∩ host.
         // Also strip the reserved `capabilities` subkey from the block config
         // so it doesn't leak into `ctx.config_get(...)`.
         {
@@ -192,165 +206,9 @@ impl Wafer {
             self.effective_capabilities = std::sync::Arc::new(eff);
         }
 
-        // Validate required config presence across all registered blocks.
-        // Runs after composite/uses expansion so all configs are final.
-        {
-            let empty_cfg = serde_json::Value::Object(Default::default());
-            let owned: Vec<(wafer_block::types::BlockInfo, serde_json::Value)> = self
-                .blocks
-                .iter()
-                .map(|(name, block)| {
-                    let cfg = self
-                        .block_configs
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| empty_cfg.clone());
-                    (block.info(), cfg)
-                })
-                .collect();
-            let borrowed: Vec<(wafer_block::types::BlockInfo, &serde_json::Value)> = owned
-                .iter()
-                .map(|(info, cfg)| (info.clone(), cfg))
-                .collect();
-            let missing = super::validation::collect_missing_config(&borrowed);
-            if !missing.is_empty() {
-                return Err(RuntimeError::Config(
-                    super::validation::format_missing_config(&missing),
-                ));
-            }
-        }
-
-        // Stash the expanded configs in the startup snapshot before draining
-        // them into the Init lifecycle. `start_without_bind` finalises the
-        // rest of the snapshot once `resolve()` returns.
-        Arc::make_mut(&mut self.snapshot).block_configs = self.block_configs.clone();
-
-        let configs: Vec<(String, serde_json::Value)> = self.block_configs.drain().collect();
-
-        // Collect names of all pre-registered blocks for phase 2 ordering.
-        let pre_registered: Vec<String> = self.blocks.keys().cloned().collect();
-
-        // Track which blocks were initialized with config data.
-        let config_names: std::collections::HashSet<String> =
-            configs.iter().map(|(n, _)| n.clone()).collect();
-
-        // Sort configs: wafer-run/* infrastructure blocks first, then everything else.
-        let mut infra_configs = Vec::new();
-        let mut feature_configs = Vec::new();
-        for entry in &configs {
-            if entry.0.starts_with("wafer-run/") {
-                infra_configs.push(entry);
-            } else {
-                feature_configs.push(entry);
-            }
-        }
-
-        // Phase 1a: Initialize infrastructure blocks (wafer-run/*) with configs.
-        self.rebuild_all_blocks();
-        // Note: WRAP grants are now collected per-block in
-        // `register_block_inner` at registration time. See
-        // `validate_and_collect_grants_for_block` in `lifecycle.rs`.
-        for (name, config) in &infra_configs {
-            if let Some(block) = self.blocks.get(name.as_str()) {
-                let ctx = self.make_context(
-                    "init",
-                    name.as_str(),
-                    HashMap::new(),
-                    Arc::new(AtomicBool::new(false)),
-                    None,
-                    crate::runtime::init_stack::InitStack::new(),
-                );
-
-                let config_data = serde_json::to_vec(config).map_err(|e| {
-                    RuntimeError::Config(format!("serialize config for block {name:?}: {e}"))
-                })?;
-                block
-                    .lifecycle(
-                        &ctx,
-                        LifecycleEvent {
-                            event_type: LifecycleType::Init,
-                            data: config_data,
-                        },
-                    )
-                    .await
-                    .map_err(|e| RuntimeError::BlockInit {
-                        name: name.clone(),
-                        reason: e.to_string(),
-                    })?;
-            } else {
-                tracing::warn!(block = %name, "block config present but no block registered — skipping");
-            }
-        }
-
-        // Phase 1b: Initialize feature blocks with configs.
-        self.rebuild_all_blocks();
-        for (name, config) in &feature_configs {
-            if let Some(block) = self.blocks.get(name.as_str()) {
-                let ctx = self.make_context(
-                    "init",
-                    name.as_str(),
-                    HashMap::new(),
-                    Arc::new(AtomicBool::new(false)),
-                    None,
-                    crate::runtime::init_stack::InitStack::new(),
-                );
-
-                let config_data = serde_json::to_vec(config).map_err(|e| {
-                    RuntimeError::Config(format!("serialize config for block {name:?}: {e}"))
-                })?;
-                block
-                    .lifecycle(
-                        &ctx,
-                        LifecycleEvent {
-                            event_type: LifecycleType::Init,
-                            data: config_data,
-                        },
-                    )
-                    .await
-                    .map_err(|e| RuntimeError::BlockInit {
-                        name: name.clone(),
-                        reason: e.to_string(),
-                    })?;
-            } else {
-                tracing::warn!(block = %name, "block config present but no block registered — skipping");
-            }
-        }
-
-        // Rebuild the all_blocks snapshot so lifecycle contexts can find
-        // all blocks during phase 2.
-        self.rebuild_all_blocks();
-
-        // Phase 2: Initialize remaining pre-registered blocks (no config).
-        for name in &pre_registered {
-            if config_names.contains(name) {
-                continue; // Already initialized in phase 1
-            }
-            if let Some(block) = self.blocks.get(name) {
-                let ctx = self.make_context(
-                    "init",
-                    name.as_str(),
-                    HashMap::new(),
-                    Arc::new(AtomicBool::new(false)),
-                    None,
-                    crate::runtime::init_stack::InitStack::new(),
-                );
-                block
-                    .lifecycle(
-                        &ctx,
-                        LifecycleEvent {
-                            event_type: LifecycleType::Init,
-                            data: Vec::new(),
-                        },
-                    )
-                    .await
-                    .map_err(|e| RuntimeError::BlockInit {
-                        name: name.clone(),
-                        reason: e.to_string(),
-                    })?;
-            }
-        }
-
-        // Phase 3: Verify flow block references exist.
+        // 6. Resolve remote blocks referenced by flow steps but not yet
+        // registered. We only download here — Init lifecycle is dispatched
+        // lazily on first request via `Wafer::init_block`.
         // Collect all referenced block names first to avoid borrow conflict.
         let referenced_blocks: Vec<String> = self
             .flows
@@ -382,27 +240,6 @@ impl Wafer {
                 match self.resolve_remote_block(&client, &block_name).await? {
                     Some(block) => {
                         tracing::info!(block = %block_name, "downloaded remote block");
-                        let ctx = self.make_context(
-                            "init",
-                            block_name.as_str(),
-                            HashMap::new(),
-                            Arc::new(AtomicBool::new(false)),
-                            None,
-                            crate::runtime::init_stack::InitStack::new(),
-                        );
-                        block
-                            .lifecycle(
-                                &ctx,
-                                LifecycleEvent {
-                                    event_type: LifecycleType::Init,
-                                    data: Vec::new(),
-                                },
-                            )
-                            .await
-                            .map_err(|e| RuntimeError::BlockInit {
-                                name: block_name.clone(),
-                                reason: e.to_string(),
-                            })?;
                         self.blocks.insert(block_name.clone(), block);
                     }
                     None => {
@@ -416,8 +253,17 @@ impl Wafer {
             return Err(RuntimeError::BlockNotFound { name: block_name });
         }
 
-        // Rebuild snapshot so any Phase-3-resolved blocks are visible.
+        // 7. Finalize the startup snapshot. Block configs survive in
+        // `self.block_configs` and are mirrored here for context consumers.
+        // (Lazy init reads from `self.block_configs` on first dispatch.)
         self.rebuild_all_blocks();
+        self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
+            blocks: super::lifecycle::sorted_snapshot(self.blocks.values().map(|b| b.info())),
+            flow_infos: self.flows_info(),
+            flow_defs: self.flow_defs(),
+            block_configs: self.block_configs.clone(),
+            interface_specs: self.interface_specs.values().cloned().collect(),
+        });
 
         Ok(())
     }

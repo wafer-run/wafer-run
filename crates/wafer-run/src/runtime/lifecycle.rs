@@ -89,37 +89,10 @@ pub(crate) fn validate_and_collect_grants_for_block(
 }
 
 impl Wafer {
-    /// Initialize the runtime without calling `bind()` on blocks.
-    pub async fn start_without_bind(&mut self) -> Result<(), RuntimeError> {
-        // `resolve()` captures `block_configs` into the snapshot before the
-        // working map is drained for the Init lifecycle; the rest is filled
-        // in below. Until this point `self.snapshot` is the empty placeholder
-        // installed by `Wafer::empty()`.
-        self.resolve().await?;
-
-        // Rebuild the all_blocks map so contexts can see all resolved blocks
-        self.rebuild_all_blocks();
-
-        // Take the partial snapshot left by `resolve()` (carrying
-        // `block_configs`) and finalise it with the remaining fields. Sort
-        // blocks by stable name so consumers see deterministic order
-        // independent of HashMap's SipHash randomisation.
-        let block_configs = std::mem::take(&mut Arc::make_mut(&mut self.snapshot).block_configs);
-        self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
-            blocks: sorted_snapshot(self.blocks.values().map(|b| b.info())),
-            flow_infos: self.flows_info(),
-            flow_defs: self.flow_defs(),
-            block_configs,
-            interface_specs: self.interface_specs.values().cloned().collect(),
-        });
-
-        Ok(())
-    }
-
     /// Add extra WRAP grants (e.g. loaded from a database) to the runtime.
     /// These are appended to the existing code-declared grants.
-    /// Call this before `start()` / `start_without_bind()`, or between
-    /// `start_without_bind()` and the first request.
+    /// Call this before `start()` / `seal()`, or between `seal()` and the
+    /// first request.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
         let mut all = (*self.wrap_grants).clone();
         all.extend(grants);
@@ -128,16 +101,15 @@ impl Wafer {
 
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
     ///
-    /// # Validation
+    /// Finalizes runtime configuration via [`Wafer::seal`] (composite config
+    /// expansion, `uses` contributions, capability resolution, snapshot
+    /// finalization), then dispatches `lifecycle(Start)` on every registered
+    /// block. Block `Init` is **not** dispatched here — each block is
+    /// initialized lazily on first dispatch via [`Wafer::init_block`].
     ///
-    /// Before any block lifecycle event is dispatched, runs:
-    /// - **Config presence**: every registered block's declared `config_keys`
-    ///   that have no default and no `auto_generate` must be provided, or
-    ///   `start()` returns `RuntimeError::Config` with all missing
-    ///   `(block, key)` pairs aggregated into a single message. Lifecycle
-    ///   events are not dispatched on failure.
-    ///
-    /// See `crates/wafer-run/src/runtime/validation.rs`.
+    /// Use [`Wafer::validate_all_block_configs`] before `start()` for
+    /// proactive health checks; broken-config blocks otherwise surface as
+    /// 5xx on first invocation.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
         // CONTRACT: This event is consumed by `wafer dev` (in
@@ -152,7 +124,7 @@ impl Wafer {
             blocks = self.blocks.len(),
             "wafer runtime starting"
         );
-        self.start_without_bind().await?;
+        self.seal().await?;
 
         for (name, block) in &self.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id

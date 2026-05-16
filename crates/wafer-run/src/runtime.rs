@@ -179,9 +179,7 @@ pub struct Wafer {
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
     /// Single immutable bundle of post-startup metadata shared with every
-    /// [`RuntimeContext`]. Populated in two phases: `block_configs` is
-    /// captured during `resolve()` before the working map is drained;
-    /// the rest is filled in at the end of `start_without_bind`.
+    /// [`RuntimeContext`]. Populated at the end of [`Wafer::seal`].
     pub(crate) snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
@@ -297,13 +295,13 @@ impl Wafer {
     }
 
     /// Set the admin block ID for WRAP access control.
-    /// Must be set before `start()` / `start_without_bind()`.
+    /// Must be set before `start()` / `seal()`.
     pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
         self.wrap_admin_block = Arc::new(block_id.into());
     }
 
     /// Get the collected WRAP grants (read-only).
-    /// Available after `start()` / `start_without_bind()`.
+    /// Available after `start()` / `seal()`.
     pub fn wrap_grants(&self) -> &Arc<Vec<wafer_block::types::ResourceGrant>> {
         &self.wrap_grants
     }
@@ -449,13 +447,12 @@ impl Wafer {
             .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
             .clone();
         // Defensive slot allocation: `register_block_inner` pairs every
-        // registration with a slot, but the (deprecated) resolver paths in
-        // `runtime/resolver.rs` insert directly into `self.blocks` without
-        // populating `self.slots`. Until Task 1.11 deletes those paths,
-        // allocate a fresh slot on miss. Concurrent first-callers for a
-        // resolver-inserted block won't share the same slot (minor gap), but
-        // that's acceptable as a bridge — resolver-inserted blocks are not
-        // hot dispatch targets.
+        // registration with a slot. The remote-block path in `Wafer::seal`
+        // (downloads referenced blocks not yet registered) inserts directly
+        // into `self.blocks` without populating `self.slots`. Allocate a
+        // fresh slot on miss. Concurrent first-callers for a seal-inserted
+        // block won't share the same slot (minor gap), but that's acceptable
+        // — remote-resolved blocks are not hot dispatch targets.
         let slot = self
             .slots
             .get(name)

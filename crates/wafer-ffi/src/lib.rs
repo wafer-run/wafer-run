@@ -242,7 +242,7 @@ pub unsafe extern "C" fn wafer_resolve(
         let inner = runtime.inner.clone();
         let ud = UserData(user_data);
         runtime.rt.spawn(async move {
-            let result = inner.write().await.resolve().await;
+            let result = inner.write().await.seal().await;
             let err = match result {
                 Ok(()) => None,
                 Err(e) => Some(error_cstring(&e.to_string())),
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn wafer_start(
         let inner = runtime.inner.clone();
         let ud = UserData(user_data);
         runtime.rt.spawn(async move {
-            let result = inner.write().await.start_without_bind().await;
+            let result = inner.write().await.seal().await;
             let err = match result {
                 Ok(()) => None,
                 Err(e) => Some(error_cstring(&e.to_string())),

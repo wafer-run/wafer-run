@@ -83,27 +83,30 @@ impl WaferRuntime {
         Ok(())
     }
 
-    /// Resolve all block references in registered flows.
+    /// Finalize runtime configuration (composite config expansion, capability
+    /// resolution, snapshot finalization). Block `Init` is dispatched lazily
+    /// on first request. See [`wafer_run::Wafer::seal`].
     #[napi]
     pub async fn resolve(&self) -> Result<()> {
         self.inner
             .write()
             .await
-            .resolve()
+            .seal()
             .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
-    /// Start the runtime. Calls resolve() if not already resolved.
+    /// Start the runtime. Calls `seal()` if not already sealed.
     ///
-    /// Uses `start_without_bind()` because the Node.js dev server has its
-    /// own HTTP handling — blocks that spawn listeners are not needed here.
+    /// Uses `seal()` (no `bind()` on blocks) because the Node.js dev server
+    /// has its own HTTP handling — blocks that spawn listeners are not needed
+    /// here.
     #[napi]
     pub async fn start(&self) -> Result<()> {
         self.inner
             .write()
             .await
-            .start_without_bind()
+            .seal()
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         self.started.store(true, Ordering::Relaxed);
