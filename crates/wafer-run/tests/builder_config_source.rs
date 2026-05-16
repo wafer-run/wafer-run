@@ -3,8 +3,7 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use wafer_block::{
