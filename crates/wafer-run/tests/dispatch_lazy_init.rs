@@ -9,6 +9,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use wafer_block::{
+    context::Context,
     core_types::{LifecycleEvent, LifecycleType, Message, WaferError},
     streams::{input::InputStream, output::OutputStream},
     Block, BlockInfo, ConfigVar,
@@ -146,4 +147,93 @@ async fn run_block_skips_handle_if_init_fails() {
         }
         other => panic!("expected Error terminal, got {other:?}"),
     }
+}
+
+/// A block reached only via `call_block` from another block's `handle`
+/// must still run lifecycle(Init) lazily on first invocation. Before this
+/// fix, `RuntimeContext::dispatch_call` invoked `block.handle(...)` without
+/// consulting the init slot, so transitive callees skipped init.
+#[tokio::test]
+async fn call_block_initializes_callee_lazily() {
+    struct CallerBlock;
+
+    #[async_trait]
+    impl Block for CallerBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/caller", "0.1.0", "test/iface@v1", "test")
+        }
+
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            // Invoke the callee via call_block; the runtime must ensure
+            // lifecycle(Init) has run on the callee before its `handle` runs.
+            ctx.call_block("test/callee", Message::new(""), InputStream::empty())
+                .await
+        }
+    }
+
+    let callee_init_calls = Arc::new(AtomicUsize::new(0));
+    let callee_handle_calls = Arc::new(AtomicUsize::new(0));
+
+    let caller = Arc::new(CallerBlock);
+    let callee = Arc::new(CounterBlock {
+        name: "test/callee",
+        init_calls: callee_init_calls.clone(),
+        handle_calls: callee_handle_calls.clone(),
+        declared: vec![],
+    });
+
+    let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block("test/caller", caller)
+        .expect("register caller");
+    wafer
+        .register_block("test/callee", callee)
+        .expect("register callee");
+    wafer.rebuild_all_blocks();
+    let wafer = Arc::new(wafer);
+
+    let _out = wafer
+        .run_block("test/caller", Message::new(""), InputStream::empty())
+        .await;
+
+    // Callee reached only via call_block — its init must have run.
+    assert_eq!(
+        callee_init_calls.load(Ordering::SeqCst),
+        1,
+        "callee init must run lazily on call_block"
+    );
+    assert_eq!(
+        callee_handle_calls.load(Ordering::SeqCst),
+        1,
+        "callee handle must run after init"
+    );
+
+    // Second top-level dispatch: callee init must NOT re-run (slot caches Ok).
+    let _out2 = wafer
+        .run_block("test/caller", Message::new(""), InputStream::empty())
+        .await;
+    assert_eq!(
+        callee_init_calls.load(Ordering::SeqCst),
+        1,
+        "callee init must be cached across call_block invocations"
+    );
+    assert_eq!(
+        callee_handle_calls.load(Ordering::SeqCst),
+        2,
+        "callee handle re-runs on each call_block"
+    );
 }

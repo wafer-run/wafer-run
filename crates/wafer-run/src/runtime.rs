@@ -198,7 +198,11 @@ pub struct Wafer {
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
     /// Per-block init slots populated by `register_block_inner` and consulted
     /// by [`Wafer::init_block`] for lazy-once-success caching.
-    pub(crate) slots: HashMap<String, Arc<crate::runtime::slot::BlockSlot>>,
+    ///
+    /// Wrapped in `Arc` (same shape as `aliases`) so [`RuntimeContext`] can
+    /// share a cheap clone without copying the map on every dispatch.
+    /// Mutations go through `Arc::make_mut` in `register_block_inner`.
+    pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
     /// Source of per-block env-var config, consulted on first init.
     pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
 }
@@ -255,7 +259,7 @@ impl Wafer {
             asset_loader: Arc::new(crate::asset_loader::NoopAssetLoader),
             #[cfg(feature = "wasmi")]
             wasm_engine: None,
-            slots: HashMap::new(),
+            slots: Arc::new(HashMap::new()),
             config_source: Arc::new(crate::runtime::config_source::StaticConfigSource::default()),
         }
     }
@@ -379,6 +383,8 @@ impl Wafer {
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
             init_breadcrumbs,
+            slots: self.slots.clone(),
+            config_source: self.config_source.clone(),
         }
     }
 
@@ -405,25 +411,16 @@ impl Wafer {
 
     /// Same as [`Wafer::init_block`] but uses the caller's init-stack for
     /// cycle detection. Called from the top-level dispatch paths
-    /// (`Wafer::run_block`, the flow executor) so init runs at most once per
-    /// block per slot, with cycle detection across nested init.
-    ///
-    /// NOT wired into [`RuntimeContext::dispatch_call`] (block-to-block
-    /// `call_block`) in this task: that path doesn't carry a `Wafer`
-    /// reference, so threading through `slots` + `config_source` would
-    /// require enlarging `RuntimeContext`. Block-to-block transitive init
-    /// is rare in practice — callers reaching another block via
-    /// `call_block` are typically themselves inside a top-level dispatch
-    /// that already ran init on the entry block. The remaining gap is
-    /// transitive init of a callee that wasn't reached during the entry
-    /// init chain; that block's first call_block will hit `block.handle`
-    /// without an init guarantee. Tracking: PR1 follow-up.
+    /// (`Wafer::run_block`, the flow executor) and from
+    /// [`RuntimeContext::dispatch_call`] (block-to-block `call_block`) so
+    /// init runs at most once per block per slot, with cycle detection
+    /// across nested init.
     pub(crate) async fn init_block_with_stack(
         &self,
         name: &str,
         stack: &crate::runtime::init_stack::InitStack,
     ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
-        use crate::runtime::{config_source::ConfigError, slot::InitError};
+        use crate::runtime::slot::InitError;
 
         let block = self
             .blocks
@@ -444,16 +441,6 @@ impl Wafer {
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::runtime::slot::BlockSlot::new()));
 
-        // Push onto the dispatch-scoped init stack before locking the slot.
-        // If a parent frame already has this block on the stack, we hit a
-        // cycle and bail before re-running init. The guard pops on drop and
-        // must outlive the `get_or_init` call below so nested init from
-        // inside `lifecycle(Init)` sees this name on the stack.
-        let _guard = stack
-            .push(name)
-            .await
-            .map_err(|path| InitError::Cycle { path })?;
-
         // Build the lifecycle(Init) context. The stack we were just handed is
         // inherited into the context so any `init_block` call made transitively
         // by this block participates in the same cycle-detection frame.
@@ -466,49 +453,14 @@ impl Wafer {
             stack.clone(),
         );
 
-        let cfg_src = self.config_source.clone();
-        let block_name = name.to_string();
-        let block_for_init = block.clone();
-
-        slot.get_or_init(|| async move {
-            let info = block_for_init.info();
-            let env_cfg = cfg_src
-                .load_for_block(&block_name, &info.config_keys)
-                .await
-                .map_err(|e| match e {
-                    ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
-                        "block `{block}` missing required config key `{key}`"
-                    )),
-                    ConfigError::Transient { source, .. } => {
-                        InitError::Transient(format!("config fetch failed: {source}"))
-                    }
-                })?;
-
-            // Serialize as a JSON object of String→String so blocks can parse
-            // the lifecycle(Init) event via the existing `BlockConfig::from_event`
-            // pathway (which does serde_json::from_slice on event.data).
-            let cfg_map = env_cfg.into_inner();
-            let cfg_json: serde_json::Value = cfg_map
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-            let data = serde_json::to_vec(&cfg_json)
-                .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
-
-            block_for_init
-                .lifecycle(
-                    &init_ctx,
-                    wafer_block::core_types::LifecycleEvent {
-                        event_type: wafer_block::core_types::LifecycleType::Init,
-                        data,
-                    },
-                )
-                .await
-                .map_err(|e| InitError::Permanent(format!("lifecycle init failed: {e}")))?;
-
-            Ok(crate::runtime::slot::InitializedState::new())
-        })
+        run_init_pipeline(
+            name,
+            block,
+            slot,
+            self.config_source.clone(),
+            init_ctx,
+            stack,
+        )
         .await
     }
 
@@ -556,6 +508,78 @@ pub(crate) fn init_error_to_wafer_error(
             format!("block `{block}` init cycle detected: {}", path.join(" -> ")),
         ),
     }
+}
+
+/// Shared body of the lazy-init pipeline. Used by both
+/// [`Wafer::init_block_with_stack`] (top-level + transitive init from inside
+/// `lifecycle(Init)`) and [`RuntimeContext::dispatch_call`] (init the callee
+/// before block-to-block dispatch).
+///
+/// Pushes `name` onto the dispatch-scoped init stack, then delegates to the
+/// slot's `get_or_init`. The push happens before locking the slot so a parent
+/// frame already holding this block on the stack short-circuits with
+/// `InitError::Cycle` before re-entering init. The guard pops on drop and
+/// must outlive `get_or_init` so transitive `init_block` calls made from
+/// inside `lifecycle(Init)` see this name on the stack.
+pub(crate) async fn run_init_pipeline(
+    name: &str,
+    block: Arc<dyn Block>,
+    slot: Arc<crate::runtime::slot::BlockSlot>,
+    config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
+    init_ctx: RuntimeContext,
+    stack: &crate::runtime::init_stack::InitStack,
+) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+    use crate::runtime::{config_source::ConfigError, slot::InitError};
+
+    let _guard = stack
+        .push(name)
+        .await
+        .map_err(|path| InitError::Cycle { path })?;
+
+    let block_name = name.to_string();
+    let block_for_init = block.clone();
+    let cfg_src = config_source;
+
+    slot.get_or_init(|| async move {
+        let info = block_for_init.info();
+        let env_cfg = cfg_src
+            .load_for_block(&block_name, &info.config_keys)
+            .await
+            .map_err(|e| match e {
+                ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
+                    "block `{block}` missing required config key `{key}`"
+                )),
+                ConfigError::Transient { source, .. } => {
+                    InitError::Transient(format!("config fetch failed: {source}"))
+                }
+            })?;
+
+        // Serialize as a JSON object of String→String so blocks can parse
+        // the lifecycle(Init) event via the existing `BlockConfig::from_event`
+        // pathway (which does serde_json::from_slice on event.data).
+        let cfg_map = env_cfg.into_inner();
+        let cfg_json: serde_json::Value = cfg_map
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let data = serde_json::to_vec(&cfg_json)
+            .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
+
+        block_for_init
+            .lifecycle(
+                &init_ctx,
+                wafer_block::core_types::LifecycleEvent {
+                    event_type: wafer_block::core_types::LifecycleType::Init,
+                    data,
+                },
+            )
+            .await
+            .map_err(|e| InitError::Permanent(format!("lifecycle init failed: {e}")))?;
+
+        Ok(crate::runtime::slot::InitializedState::new())
+    })
+    .await
 }
 
 /// Deep-merge `src` into `dst`. For objects, keys are combined recursively.
@@ -706,8 +730,11 @@ impl Wafer {
 
         self.blocks.insert(name.to_string(), block);
         // Pair every registration with a fresh init slot so `Wafer::init_block`
-        // can lazily run lifecycle(Init) once per block.
-        self.slots.insert(
+        // can lazily run lifecycle(Init) once per block. Mutate through
+        // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
+        // Arc keep their snapshot (registration after startup is rare; the
+        // copy only happens on those occasional registrations).
+        Arc::make_mut(&mut self.slots).insert(
             name.to_string(),
             Arc::new(crate::runtime::slot::BlockSlot::new()),
         );

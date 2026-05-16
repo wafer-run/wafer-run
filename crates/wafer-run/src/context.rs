@@ -63,12 +63,28 @@ pub struct RuntimeContext {
     /// of the inner `Arc<Mutex<Vec<String>>>`, so all frames share state.
     /// Used by `Wafer::init_block` to surface `InitError::Cycle`.
     pub(crate) init_breadcrumbs: crate::runtime::init_stack::InitStack,
+    /// Snapshot of the runtime's per-block init slots. Shared via `Arc` with
+    /// [`Wafer::slots`]; consulted by [`RuntimeContext::dispatch_call`] to
+    /// drive lazy init on `call_block` callees. Empty (default) when the
+    /// context is built outside the runtime (e.g. in standalone tests).
+    pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
+    /// Source of per-block env-var config. Same `Arc` held by [`Wafer`];
+    /// consulted by `dispatch_call` to drive lazy init of `call_block`
+    /// callees.
+    pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
 }
 
 // --- Output helpers (used by RuntimeContext impl) ---
 
 fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
     OutputStream::error(WaferError::new(code, message))
+}
+
+/// Convert an init-pipeline error into an OutputStream terminal error.
+/// Shares the `Permanent` / `Transient` / `Cycle` → code mapping with
+/// `Wafer::run_block`'s top-level path.
+fn err_output_from_init(block: &str, e: crate::runtime::slot::InitError) -> OutputStream {
+    OutputStream::error(crate::runtime::init_error_to_wafer_error(block, e))
 }
 
 /// RAII guard that decrements `call_depth` on drop, even if the block panics.
@@ -321,7 +337,37 @@ impl RuntimeContext {
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: sub_attachments,
             init_breadcrumbs: self.init_breadcrumbs.clone(),
+            slots: self.slots.clone(),
+            config_source: self.config_source.clone(),
         };
+
+        // Lazy init: ensure lifecycle(Init) has run on the callee before
+        // dispatching `handle`. Inherits `self.init_breadcrumbs` so a cycle
+        // (block A.init -> A.handle -> call_block(B) where B.init -> ... -> A)
+        // is detected. The init pipeline pushes `resolved_block_name` onto
+        // the stack inside `run_init_pipeline`.
+        //
+        // When the runtime built this context (`Wafer::make_context`), `slots`
+        // contains an entry for `resolved_block_name`; otherwise (defensively,
+        // for contexts constructed outside the runtime) fall back to a fresh
+        // slot — same bridge as `Wafer::init_block_with_stack`.
+        let init_slot = self
+            .slots
+            .get(resolved_block_name)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(crate::runtime::slot::BlockSlot::new()));
+        if let Err(e) = crate::runtime::run_init_pipeline(
+            resolved_block_name,
+            block.clone(),
+            init_slot,
+            self.config_source.clone(),
+            sub_ctx.clone(),
+            &self.init_breadcrumbs,
+        )
+        .await
+        {
+            return err_output_from_init(resolved_block_name, e);
+        }
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
