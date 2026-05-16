@@ -227,7 +227,7 @@ async fn test_single_block_flow() {
     w.register_block("test/upper", Arc::new(UpperBlock))
         .unwrap();
     w.add_flow(single_step_flow("to-upper", "test/upper"));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(
         &w,
@@ -283,7 +283,7 @@ async fn test_sequential_flow() {
             step("c", "test/append-c"),
         ],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "abc", Message::new("test"), b"start".to_vec()).await;
     assert!(result.is_respond(), "expected respond, got: {result:?}");
@@ -525,7 +525,7 @@ async fn test_observability_flow_hooks() {
     w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
     w.add_flow(single_step_flow("observed", "test/noop"));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     run_flow(&w, "observed", Message::new("test"), b"data".to_vec()).await;
 
@@ -590,7 +590,7 @@ async fn test_observability_block_hooks() {
         "two-steps",
         vec![step("s1", "test/step-1"), step("s2", "test/step-2")],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     run_flow(&w, "two-steps", Message::new("test"), vec![]).await;
 
@@ -655,7 +655,7 @@ async fn test_flow_reference() {
         "main-flow",
         vec![step("v", "test/validate"), step("s", "test/store")],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(
         &w,
@@ -704,7 +704,7 @@ async fn test_drop_short_circuits_flow() {
             step("s", "test/should-not-run-2"),
         ],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     // Drop in step 1 causes the entire flow to stop with Drop result
     let result = run_flow(&w, "drop-short-circuit", Message::new("test"), vec![]).await;
@@ -730,7 +730,7 @@ async fn test_flow_reference_not_found() {
     }]);
 
     w.add_flow(make_flow("bad-ref", vec![s]));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "bad-ref", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
@@ -783,7 +783,7 @@ async fn test_on_error_stop() {
         vec![step("f", "test/fail"), step("a", "test/after-fail")],
         "stop",
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "stop-flow", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
@@ -835,7 +835,7 @@ async fn test_on_error_continue() {
         ],
         "continue",
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "cont-flow", Message::new("test"), vec![]).await;
 
@@ -874,7 +874,7 @@ async fn test_on_error_continue_no_more_nodes() {
         vec![step("f", "test/fail-at-end")],
         "continue",
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "cont-end", Message::new("test"), vec![]).await;
 
@@ -915,7 +915,7 @@ async fn test_drop_action() {
             step("u", "test/unreachable-after-drop"),
         ],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "drop-flow", Message::new("test"), b"data".to_vec()).await;
     assert!(result.is_drop(), "expected drop, got: {result:?}");
@@ -975,7 +975,7 @@ async fn test_block_with_config() {
             serde_json::json!({"prefix": "hello"}),
         )],
     ));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "config-flow", Message::new("test"), b"world".to_vec()).await;
     assert!(result.is_respond(), "expected respond, got: {result:?}");
@@ -1034,7 +1034,7 @@ async fn test_resolve_missing_block() {
 
     w.add_flow(single_step_flow("broken", "unregistered-block"));
 
-    let err = w.resolve().await.unwrap_err().to_string();
+    let err = w.seal().await.unwrap_err().to_string();
     assert!(err.contains("unregistered-block"), "Error: {err}");
 }
 
@@ -1059,7 +1059,7 @@ async fn test_add_flow_json() {
     }"#,
     )
     .expect("add_flow_json failed");
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "from-json", Message::new("test"), b"hello".to_vec()).await;
     // EchoBlock passes body through, so responds with "hello"
@@ -1092,7 +1092,7 @@ async fn test_panic_recovery() {
         .unwrap();
 
     w.add_flow(single_step_flow("panic-flow", "test/panicker"));
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "panic-flow", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
@@ -1156,7 +1156,7 @@ async fn test_start_and_stop() {
     w.add_flow(single_step_flow("lifecycle-test", "test/lifecycle-block"));
 
     // Start implicitly resolves if not already resolved
-    w.start_without_bind().await.expect("start failed");
+    w.seal().await.expect("start failed");
 
     let result = run_flow(&w, "lifecycle-test", Message::new("test"), vec![]).await;
     assert!(result.is_respond(), "expected respond, got: {result:?}");
@@ -1357,7 +1357,7 @@ async fn test_resolve_versioned_block_download_error() {
         "acme/nonexistent-block@v1.0.0",
     ));
 
-    let err = w.resolve().await.unwrap_err().to_string();
+    let err = w.seal().await.unwrap_err().to_string();
     assert!(
         err.contains("not found")
             || err.contains("failed to download")
@@ -1377,7 +1377,7 @@ async fn test_resolve_unversioned_block_download_error() {
         "acme/nonexistent-block",
     ));
 
-    let err = w.resolve().await.unwrap_err().to_string();
+    let err = w.seal().await.unwrap_err().to_string();
     assert!(
         err.contains("not found")
             || err.contains("failed to fetch releases")
@@ -1467,7 +1467,7 @@ async fn test_waferflow_simple_pipeline() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     // Set up input as body bytes
     let input = serde_json::to_vec(&serde_json::json!({ "name": "world" })).unwrap();
@@ -1585,7 +1585,7 @@ async fn test_waferflow_conditional_routing() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     // Test positive
     let input = serde_json::to_vec(&serde_json::json!({ "number": 42 })).unwrap();
@@ -1669,7 +1669,7 @@ async fn test_waferflow_max_steps_limit() {
     }"#;
 
     w.add_flow_json(flow_json).expect("add flow json failed");
-    w.resolve().await.expect("resolve failed");
+    w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "infinite", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");

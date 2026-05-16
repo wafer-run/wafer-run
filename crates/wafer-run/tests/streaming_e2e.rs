@@ -173,7 +173,7 @@ fn setup() -> Wafer {
 #[tokio::test]
 async fn echo_round_trip() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let body = run(&w, "test/echo", b"hello streaming".to_vec())
         .await
         .unwrap();
@@ -183,7 +183,7 @@ async fn echo_round_trip() {
 #[tokio::test]
 async fn uppercase_transforms() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let body = run(&w, "test/upper", b"hello".to_vec()).await.unwrap();
     assert_eq!(body, b"HELLO");
 }
@@ -191,7 +191,7 @@ async fn uppercase_transforms() {
 #[tokio::test]
 async fn pipe_chains_via_call_block() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let body = run(&w, "test/pipe", b"hello pipe".to_vec()).await.unwrap();
     assert_eq!(body, b"HELLO PIPE");
 }
@@ -199,7 +199,7 @@ async fn pipe_chains_via_call_block() {
 #[tokio::test]
 async fn error_returns_terminal() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let result = run(&w, "test/error", vec![]).await;
     match result {
         Err(TerminalNotResponse::Error(e)) => {
@@ -213,7 +213,7 @@ async fn error_returns_terminal() {
 #[tokio::test]
 async fn drop_returns_terminal() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let result = run(&w, "test/drop", vec![]).await;
     assert!(matches!(result, Err(TerminalNotResponse::Drop)));
 }
@@ -255,7 +255,7 @@ impl Context for MockCtx {
 #[tokio::test]
 async fn multi_chunk_collect_buffered() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let body = run(&w, "test/multi", vec![]).await.unwrap();
     assert_eq!(body, b"hello world");
 }
@@ -263,7 +263,7 @@ async fn multi_chunk_collect_buffered() {
 #[tokio::test]
 async fn empty_input() {
     let mut w = setup();
-    w.resolve().await.unwrap();
+    w.seal().await.unwrap();
     let body = run(&w, "test/echo", vec![]).await.unwrap();
     assert!(body.is_empty());
 }

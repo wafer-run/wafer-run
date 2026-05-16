@@ -81,7 +81,7 @@ async fn run_block_initializes_target_on_first_call() {
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
     wafer.register_block("test/foo", block).expect("register");
     // run_block resolves through all_blocks; populate it without going
-    // through start_without_bind() (which would itself dispatch lifecycle).
+    // through seal() so this test exercises lazy init in isolation.
     wafer.rebuild_all_blocks();
     let wafer = Arc::new(wafer);
 
