@@ -104,7 +104,11 @@ pub use observability::{ObservabilityBus, ObservabilityContext};
 pub use router::Router;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::RuntimeHandle;
-pub use runtime::Wafer;
+pub use runtime::{
+    config_source::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource},
+    slot::{BlockSlot, InitError, InitializedState},
+    BrokenBlock, ValidationReport, Wafer,
+};
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
 #[cfg(not(target_arch = "wasm32"))]

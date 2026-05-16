@@ -11,7 +11,7 @@ use std::sync::{
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::RwLock;
-use wafer_run::{Message, Wafer, WasmiBlock};
+use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 
 /// The WAFER runtime, exposed as a JavaScript class.
 ///
@@ -52,7 +52,7 @@ impl WaferRuntime {
     /// Create a new WAFER runtime instance.
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
-        let inner = Wafer::new()
+        let inner = Wafer::new(Arc::new(StaticConfigSource::default()))
             .map_err(|e| Error::from_reason(format!("failed to initialise Wafer runtime: {e}")))?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -83,27 +83,34 @@ impl WaferRuntime {
         Ok(())
     }
 
-    /// Resolve all block references in registered flows.
+    /// Finalize runtime configuration (composite config expansion, capability
+    /// resolution, snapshot finalization). Block `Init` is dispatched lazily
+    /// on first request. See [`wafer_run::Wafer::seal`].
     #[napi]
     pub async fn resolve(&self) -> Result<()> {
         self.inner
             .write()
             .await
-            .resolve()
+            .seal()
             .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
-    /// Start the runtime. Calls resolve() if not already resolved.
+    /// Start the runtime. Calls `seal()` if not already sealed.
     ///
-    /// Uses `start_without_bind()` because the Node.js dev server has its
-    /// own HTTP handling — blocks that spawn listeners are not needed here.
+    /// Uses `seal()` (no `bind()` on blocks) because the Node.js dev server
+    /// has its own HTTP handling — blocks that spawn listeners are not needed
+    /// here.
+    ///
+    /// Per-block `lifecycle(Init)` runs lazily on first dispatch per isolate
+    /// — `start()` does not eagerly dispatch Init. See
+    /// [`wafer_run::Wafer::seal`].
     #[napi]
     pub async fn start(&self) -> Result<()> {
         self.inner
             .write()
             .await
-            .start_without_bind()
+            .seal()
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         self.started.store(true, Ordering::Relaxed);

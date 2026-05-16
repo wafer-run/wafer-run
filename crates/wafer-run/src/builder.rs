@@ -17,11 +17,14 @@
 //! which is also gated. Explicit `.lockfile(path)` still compiles on every
 //! target and errors loudly when the path can't be read.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use wafer_block::error::RuntimeError;
 
-use crate::runtime::Wafer;
+use crate::runtime::{
+    config_source::{ConfigSource, StaticConfigSource},
+    Wafer,
+};
 
 /// How `WaferBuilder` should locate `wafer.lock`.
 #[derive(Debug, Clone)]
@@ -43,10 +46,11 @@ pub(crate) enum LockfileSource {
 ///
 /// Both Path A (linkme static registration) and Path B (lockfile) default
 /// to enabled. Use `disable_inventory()` / `disable_lockfile()` to opt out.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WaferBuilder {
     enable_inventory: bool,
     lockfile: LockfileSource,
+    config_source: Arc<dyn ConfigSource>,
 }
 
 impl Default for WaferBuilder {
@@ -54,6 +58,7 @@ impl Default for WaferBuilder {
         Self {
             enable_inventory: true,
             lockfile: LockfileSource::Auto,
+            config_source: Arc::new(StaticConfigSource::default()),
         }
     }
 }
@@ -80,9 +85,18 @@ impl WaferBuilder {
         self
     }
 
+    /// Supply the [`ConfigSource`] the runtime consults on first init for each
+    /// block. Defaults to an empty [`StaticConfigSource`]; production callers
+    /// install env/D1 sources here.
+    pub fn config_source(mut self, source: Arc<dyn ConfigSource>) -> Self {
+        self.config_source = source;
+        self
+    }
+
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         let mut w = Wafer::empty();
+        w.config_source = self.config_source;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

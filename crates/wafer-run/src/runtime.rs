@@ -12,10 +12,13 @@ use crate::{
     types::*,
 };
 
+pub mod config_source;
+pub mod init_stack;
 pub mod lifecycle;
 pub mod registry;
 pub mod resolver;
 pub mod runner;
+pub mod slot;
 pub mod validation;
 
 // Re-export the standalone function so external callers see it at the old path.
@@ -26,6 +29,27 @@ const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 
 /// ABI version for WASM block compatibility.
 pub const ABI_VERSION: u32 = 1;
+
+/// Result of [`Wafer::validate_all_block_configs`]. Used by the `/_health`
+/// route to short-circuit boot when a required env var is missing.
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    /// Block names whose declared config keys all resolved successfully.
+    /// Sorted lexicographically for deterministic output.
+    pub ok: Vec<String>,
+    /// Blocks with missing required keys or an unreachable config source.
+    /// Sorted by `block` for deterministic output.
+    pub broken: Vec<BrokenBlock>,
+}
+
+/// A single block that failed declared-key validation.
+#[derive(Debug, Clone)]
+pub struct BrokenBlock {
+    pub block: String,
+    /// Missing required keys. Currently carries at most one entry — see
+    /// [`Wafer::validate_all_block_configs`] for why.
+    pub missing_keys: Vec<String>,
+}
 
 /// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
 #[cfg(feature = "wasm")]
@@ -155,9 +179,7 @@ pub struct Wafer {
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     pub hooks: ObservabilityBus,
     /// Single immutable bundle of post-startup metadata shared with every
-    /// [`RuntimeContext`]. Populated in two phases: `block_configs` is
-    /// captured during `resolve()` before the working map is drained;
-    /// the rest is filled in at the end of `start_without_bind`.
+    /// [`RuntimeContext`]. Populated at the end of [`Wafer::seal`].
     pub(crate) snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
     /// can be used wherever a block or flow name is expected.
@@ -193,6 +215,16 @@ pub struct Wafer {
     /// Shared WASM engine for all WASM blocks (fuel-metered).
     #[cfg(feature = "wasmi")]
     pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
+    /// Per-block init slots populated by `register_block_inner` (code-registered
+    /// blocks) and `register_remote_block` (blocks downloaded during `seal()`).
+    /// Consulted by [`Wafer::init_block`] for lazy-once-success caching.
+    ///
+    /// Wrapped in `Arc` (same shape as `aliases`) so [`RuntimeContext`] can
+    /// share a cheap clone without copying the map on every dispatch.
+    /// Mutations go through `Arc::make_mut` in those two registration paths.
+    pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
+    /// Source of per-block env-var config, consulted on first init.
+    pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
 }
 
 impl Wafer {
@@ -201,12 +233,19 @@ impl Wafer {
     /// (Path A) plus `./wafer.lock` cache loading (Path B). For finer
     /// control, use `Wafer::builder()`.
     ///
+    /// `config_source` is the per-block env-var config source consulted on
+    /// first init. Pass `Arc::new(StaticConfigSource::default())` for tests;
+    /// production callers wire in `EnvConfigSource` (solobase-core) or
+    /// `D1ConfigSource` (solobase-cloudflare).
+    ///
     /// Returns an error if either path fails: a duplicate block name,
     /// a malformed lockfile, or a cache miss for a lockfile entry. A
     /// missing `./wafer.lock` is **not** an error — Path B simply
     /// no-ops in that case.
-    pub fn new() -> Result<Self, RuntimeError> {
-        Self::builder().build()
+    pub fn new(
+        config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
+    ) -> Result<Self, RuntimeError> {
+        Self::builder().config_source(config_source).build()
     }
 
     /// Builder for fine-grained control: opt-out of either auto-registration
@@ -240,6 +279,8 @@ impl Wafer {
             asset_loader: Arc::new(crate::asset_loader::NoopAssetLoader),
             #[cfg(feature = "wasmi")]
             wasm_engine: None,
+            slots: Arc::new(HashMap::new()),
+            config_source: Arc::new(crate::runtime::config_source::StaticConfigSource::default()),
         }
     }
 
@@ -255,13 +296,13 @@ impl Wafer {
     }
 
     /// Set the admin block ID for WRAP access control.
-    /// Must be set before `start()` / `start_without_bind()`.
+    /// Must be set before `start()` / `seal()`.
     pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
         self.wrap_admin_block = Arc::new(block_id.into());
     }
 
     /// Get the collected WRAP grants (read-only).
-    /// Available after `start()` / `start_without_bind()`.
+    /// Available after `start()` / `seal()`.
     pub fn wrap_grants(&self) -> &Arc<Vec<wafer_block::types::ResourceGrant>> {
         &self.wrap_grants
     }
@@ -329,6 +370,12 @@ impl Wafer {
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
+    ///
+    /// `init_breadcrumbs` is the per-dispatch init cycle-detection stack.
+    /// Top-level callers (HTTP listener, lifecycle, flow executor) pass
+    /// `InitStack::new()`. Nested callers (the `init_block_with_stack`
+    /// pipeline) pass the inherited stack so transitive `init_block`
+    /// calls participate in the same frame.
     pub(crate) fn make_context(
         &self,
         flow_id: impl Into<String>,
@@ -336,6 +383,7 @@ impl Wafer {
         config: HashMap<String, String>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
+        init_breadcrumbs: crate::runtime::init_stack::InitStack,
     ) -> RuntimeContext {
         RuntimeContext {
             flow_id: flow_id.into(),
@@ -354,7 +402,137 @@ impl Wafer {
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
+            init_breadcrumbs,
+            slots: self.slots.clone(),
+            config_source: self.config_source.clone(),
         }
+    }
+
+    /// Lazily initialize the named block. Returns the cached `InitializedState`
+    /// if init has already succeeded, or the cached `Permanent` error.
+    ///
+    /// On the first call:
+    /// 1. Loads the block's declared env-config via [`ConfigSource::load_for_block`].
+    /// 2. Serializes the resulting `HashMap<String,String>` to JSON bytes.
+    /// 3. Invokes `block.lifecycle(Init { data })` with a fresh init-stack
+    ///    `RuntimeContext` so any nested `init_block` call participates in
+    ///    cycle detection.
+    ///
+    /// Outcome caching follows [`BlockSlot::get_or_init`]: `Ok` and
+    /// [`InitError::Permanent`] are cached for the slot's lifetime;
+    /// [`InitError::Transient`] and [`InitError::Cycle`] are not.
+    pub async fn init_block(
+        &self,
+        name: &str,
+    ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+        self.init_block_with_stack(name, &crate::runtime::init_stack::InitStack::new())
+            .await
+    }
+
+    /// Same as [`Wafer::init_block`] but uses the caller's init-stack for
+    /// cycle detection. Called from the top-level dispatch paths
+    /// (`Wafer::run_block`, the flow executor) and from
+    /// [`RuntimeContext::dispatch_call`] (block-to-block `call_block`) so
+    /// init runs at most once per block per slot, with cycle detection
+    /// across nested init.
+    pub(crate) async fn init_block_with_stack(
+        &self,
+        name: &str,
+        stack: &crate::runtime::init_stack::InitStack,
+    ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+        use crate::runtime::slot::InitError;
+
+        let block = self
+            .blocks
+            .get(name)
+            .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
+            .clone();
+        // Every registered block — including remote ones downloaded by
+        // `seal()` — pairs registration with a slot via `register_block_inner`
+        // or `register_remote_block`. If `self.blocks` contains `name` but
+        // `self.slots` does not, that is a runtime invariant violation; the
+        // panic message points at the bug rather than masking it with a
+        // fresh slot (which would let concurrent first-callers each run
+        // `lifecycle(Init)` independently).
+        let slot = self
+            .slots
+            .get(name)
+            .cloned()
+            .expect("slot must exist for any registered block");
+
+        // Build the lifecycle(Init) context. The stack we were just handed is
+        // inherited into the context so any `init_block` call made transitively
+        // by this block participates in the same cycle-detection frame.
+        let init_ctx = self.make_context(
+            "init",
+            name,
+            std::collections::HashMap::new(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+            stack.clone(),
+        );
+
+        run_init_pipeline(
+            name,
+            block,
+            slot,
+            self.config_source.clone(),
+            init_ctx,
+            stack,
+        )
+        .await
+    }
+
+    /// Walk every registered block's [`BlockInfo::config_keys`] and ask the
+    /// [`ConfigSource`](crate::runtime::config_source::ConfigSource) to load
+    /// values. Reports which blocks have missing required keys or
+    /// unreachable sources.
+    ///
+    /// Does **not** invoke any block's `lifecycle` or `handle`. Intended for
+    /// the `/_health` route in wafer-site (PR 3) to short-circuit boot when
+    /// a required env var is missing.
+    ///
+    /// # Limitation: single missing key per block
+    ///
+    /// [`ConfigError::MissingRequired`](crate::runtime::config_source::ConfigError::MissingRequired)
+    /// carries only the first missing key — `load_for_block` short-circuits
+    /// on the first miss. Each [`BrokenBlock`] therefore reports exactly one
+    /// missing key, even if the block declares several required keys that
+    /// are all absent. A richer report would require widening `ConfigError`
+    /// to carry `Vec<String>`; that's intentionally out of scope for this
+    /// change.
+    pub async fn validate_all_block_configs(&self) -> ValidationReport {
+        use crate::runtime::config_source::ConfigError;
+
+        let mut report = ValidationReport {
+            ok: Vec::new(),
+            broken: Vec::new(),
+        };
+        for (name, block) in self.blocks.iter() {
+            let info = block.info();
+            match self
+                .config_source
+                .load_for_block(name, &info.config_keys)
+                .await
+            {
+                Ok(_) => report.ok.push(name.clone()),
+                Err(ConfigError::MissingRequired { block, key }) => {
+                    report.broken.push(BrokenBlock {
+                        block,
+                        missing_keys: vec![key],
+                    });
+                }
+                Err(ConfigError::Transient { block, .. }) => {
+                    report.broken.push(BrokenBlock {
+                        block,
+                        missing_keys: vec!["<transient: source unreachable>".to_string()],
+                    });
+                }
+            }
+        }
+        report.ok.sort();
+        report.broken.sort_by(|a, b| a.block.cmp(&b.block));
+        report
     }
 
     /// Rebuild the all_blocks map from registered blocks + aliases.
@@ -372,6 +550,107 @@ impl Wafer {
         }
         self.all_blocks = Arc::new(map);
     }
+}
+
+/// Convert a slot-level [`InitError`] into a [`WaferError`] for surfacing on
+/// dispatch paths (`Wafer::run_block`, flow executor) where the public surface
+/// is `OutputStream::error(...)`.
+///
+/// - `Permanent` / `Cycle` → `FAILED_PRECONDITION` (caller cannot recover by retrying).
+/// - `Transient` → `UNAVAILABLE` (caller may retry).
+pub(crate) fn init_error_to_wafer_error(
+    block: &str,
+    e: crate::runtime::slot::InitError,
+) -> wafer_block::core_types::WaferError {
+    use wafer_block::core_types::{ErrorCode, WaferError};
+
+    use crate::runtime::slot::InitError;
+    match e {
+        InitError::Permanent(s) => WaferError::new(
+            ErrorCode::FailedPrecondition,
+            format!("block `{block}` init failed permanently: {s}"),
+        ),
+        InitError::Transient(s) => WaferError::new(
+            ErrorCode::Unavailable,
+            format!("block `{block}` init transient failure: {s}"),
+        ),
+        InitError::Cycle { path } => WaferError::new(
+            ErrorCode::FailedPrecondition,
+            format!("block `{block}` init cycle detected: {}", path.join(" -> ")),
+        ),
+    }
+}
+
+/// Shared body of the lazy-init pipeline. Used by both
+/// [`Wafer::init_block_with_stack`] (top-level + transitive init from inside
+/// `lifecycle(Init)`) and [`RuntimeContext::dispatch_call`] (init the callee
+/// before block-to-block dispatch).
+///
+/// Pushes `name` onto the dispatch-scoped init stack, then delegates to the
+/// slot's `get_or_init`. The push happens before locking the slot so a parent
+/// frame already holding this block on the stack short-circuits with
+/// `InitError::Cycle` before re-entering init. The guard pops on drop and
+/// must outlive `get_or_init` so transitive `init_block` calls made from
+/// inside `lifecycle(Init)` see this name on the stack.
+pub(crate) async fn run_init_pipeline(
+    name: &str,
+    block: Arc<dyn Block>,
+    slot: Arc<crate::runtime::slot::BlockSlot>,
+    config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
+    init_ctx: RuntimeContext,
+    stack: &crate::runtime::init_stack::InitStack,
+) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+    use crate::runtime::{config_source::ConfigError, slot::InitError};
+
+    let _guard = stack
+        .push(name)
+        .await
+        .map_err(|path| InitError::Cycle { path })?;
+
+    let block_name = name.to_string();
+    let block_for_init = block.clone();
+    let cfg_src = config_source;
+
+    slot.get_or_init(|| async move {
+        let info = block_for_init.info();
+        let env_cfg = cfg_src
+            .load_for_block(&block_name, &info.config_keys)
+            .await
+            .map_err(|e| match e {
+                ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
+                    "block `{block}` missing required config key `{key}`"
+                )),
+                ConfigError::Transient { source, .. } => {
+                    InitError::Transient(format!("config fetch failed: {source}"))
+                }
+            })?;
+
+        // Serialize as a JSON object of String→String so blocks can parse
+        // the lifecycle(Init) event via the existing `BlockConfig::from_event`
+        // pathway (which does serde_json::from_slice on event.data).
+        let cfg_map = env_cfg.into_inner();
+        let cfg_json: serde_json::Value = cfg_map
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let data = serde_json::to_vec(&cfg_json)
+            .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
+
+        block_for_init
+            .lifecycle(
+                &init_ctx,
+                wafer_block::core_types::LifecycleEvent {
+                    event_type: wafer_block::core_types::LifecycleType::Init,
+                    data,
+                },
+            )
+            .await
+            .map_err(|e| InitError::Permanent(format!("lifecycle init failed: {e}")))?;
+
+        Ok(crate::runtime::slot::InitializedState::new())
+    })
+    .await
 }
 
 /// Deep-merge `src` into `dst`. For objects, keys are combined recursively.
@@ -509,6 +788,20 @@ impl Wafer {
             }
         }
 
+        // Validate this block's WRAP grants and append them to the
+        // runtime-wide grant list. Grants are static `BlockInfo` metadata —
+        // no init pass required. Typed grants (Network/Storage/Crypto)
+        // require `set_admin_block(...)` to have been called first; if not,
+        // `WrapGrantAdminUnset` surfaces here rather than silently dropping.
+        let admin_block: String = (*self.wrap_admin_block).clone();
+        let new_grants =
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+        if !new_grants.is_empty() {
+            let mut all = (*self.wrap_grants).clone();
+            all.extend(new_grants);
+            self.wrap_grants = Arc::new(all);
+        }
+
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
         // skipped without any unsafe code.
@@ -521,6 +814,55 @@ impl Wafer {
         }
 
         self.blocks.insert(name.to_string(), block);
+        // Pair every registration with a fresh init slot so `Wafer::init_block`
+        // can lazily run lifecycle(Init) once per block. Mutate through
+        // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
+        // Arc keep their snapshot (registration after startup is rare; the
+        // copy only happens on those occasional registrations).
+        Arc::make_mut(&mut self.slots).insert(
+            name.to_string(),
+            Arc::new(crate::runtime::slot::BlockSlot::new()),
+        );
+        Ok(())
+    }
+
+    /// Insert a block downloaded by `seal()`'s remote-resolution path while
+    /// running the same WRAP grant validation + slot allocation that
+    /// `register_block_inner` performs for code-registered blocks.
+    ///
+    /// Remote blocks must not bypass WRAP grant collection or slot allocation
+    /// — without a paired slot, concurrent first-callers would each construct
+    /// their own `BlockSlot` and run `lifecycle(Init)` twice, breaking the
+    /// once-only-success guarantee for stateful inits (migrations, idempotent
+    /// setup). See `Wafer::init_block_with_stack` / `RuntimeContext::dispatch_call`.
+    ///
+    /// Block-name and config-key-prefix validation are intentionally skipped
+    /// here: remote blocks come in under names the user already declared in
+    /// flow definitions or block_configs, and re-validating now would cause
+    /// `seal()` to reject blocks that were already accepted by the user's
+    /// configuration. Duplicate-registration is also not checked because
+    /// every remote-path call site filters `self.blocks.contains_key(name)`
+    /// before invoking this helper.
+    pub(crate) fn register_remote_block(
+        &mut self,
+        name: &str,
+        block: Arc<dyn Block>,
+    ) -> Result<(), RuntimeError> {
+        let info = block.info();
+        let admin_block: String = (*self.wrap_admin_block).clone();
+        let new_grants =
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+        if !new_grants.is_empty() {
+            let mut all = (*self.wrap_grants).clone();
+            all.extend(new_grants);
+            self.wrap_grants = Arc::new(all);
+        }
+
+        self.blocks.insert(name.to_string(), block);
+        Arc::make_mut(&mut self.slots).insert(
+            name.to_string(),
+            Arc::new(crate::runtime::slot::BlockSlot::new()),
+        );
         Ok(())
     }
 
@@ -558,6 +900,65 @@ impl Wafer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `Block` for unit tests that need a registered handle.
+    struct NoopBlock {
+        info: wafer_block::BlockInfo,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::block::Block for NoopBlock {
+        fn info(&self) -> wafer_block::BlockInfo {
+            self.info.clone()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::respond(vec![])
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _event: wafer_block::LifecycleEvent,
+        ) -> std::result::Result<(), wafer_block::WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Remote-resolution path (`seal()` downloads referenced blocks not yet
+    /// registered) must pair each insertion with a `BlockSlot`. Without
+    /// this, concurrent first-callers each construct their own slot and
+    /// both run `lifecycle(Init)` — breaking the once-only-success
+    /// guarantee for stateful inits (migrations, idempotent setup).
+    #[test]
+    fn register_remote_block_pairs_blocks_and_slot() {
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+
+        let block = Arc::new(NoopBlock {
+            info: wafer_block::BlockInfo::new("some-org/remote", "0.1.0", "iface@v1", "test"),
+        });
+        wafer
+            .register_remote_block("some-org/remote", block)
+            .expect("register_remote_block succeeds for valid block");
+
+        assert!(
+            wafer.blocks.contains_key("some-org/remote"),
+            "blocks map must contain remote block"
+        );
+        assert!(
+            wafer.slots.contains_key("some-org/remote"),
+            "slots map must contain a slot for every registered block — \
+             missing this lets concurrent first-callers each run lifecycle(Init)"
+        );
+    }
 
     #[test]
     fn test_block_name_to_var_prefix() {

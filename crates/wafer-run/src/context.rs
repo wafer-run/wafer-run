@@ -58,12 +58,33 @@ pub struct RuntimeContext {
     /// by `lookup_attachment`. Empty for top-level calls and for `call_block`
     /// (without attachments).
     pub current_attachments: Arc<BTreeMap<String, Attachment>>,
+    /// Per-top-level-dispatch init breadcrumbs for cycle detection.
+    /// Fresh stack at each `Wafer::run`; nested dispatches inherit via clone
+    /// of the inner `Arc<Mutex<Vec<String>>>`, so all frames share state.
+    /// Used by `Wafer::init_block` to surface `InitError::Cycle`.
+    pub(crate) init_breadcrumbs: crate::runtime::init_stack::InitStack,
+    /// Snapshot of the runtime's per-block init slots. Shared via `Arc` with
+    /// [`Wafer::slots`]; consulted by [`RuntimeContext::dispatch_call`] to
+    /// drive lazy init on `call_block` callees. Empty (default) when the
+    /// context is built outside the runtime (e.g. in standalone tests).
+    pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
+    /// Source of per-block env-var config. Same `Arc` held by [`Wafer`];
+    /// consulted by `dispatch_call` to drive lazy init of `call_block`
+    /// callees.
+    pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
 }
 
 // --- Output helpers (used by RuntimeContext impl) ---
 
 fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
     OutputStream::error(WaferError::new(code, message))
+}
+
+/// Convert an init-pipeline error into an OutputStream terminal error.
+/// Shares the `Permanent` / `Transient` / `Cycle` → code mapping with
+/// `Wafer::run_block`'s top-level path.
+fn err_output_from_init(block: &str, e: crate::runtime::slot::InitError) -> OutputStream {
+    OutputStream::error(crate::runtime::init_error_to_wafer_error(block, e))
 }
 
 /// RAII guard that decrements `call_depth` on drop, even if the block panics.
@@ -315,7 +336,40 @@ impl RuntimeContext {
             wrap_grants: self.wrap_grants.clone(),
             wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: sub_attachments,
+            init_breadcrumbs: self.init_breadcrumbs.clone(),
+            slots: self.slots.clone(),
+            config_source: self.config_source.clone(),
         };
+
+        // Lazy init: ensure lifecycle(Init) has run on the callee before
+        // dispatching `handle`. Inherits `self.init_breadcrumbs` so a cycle
+        // (block A.init -> A.handle -> call_block(B) where B.init -> ... -> A)
+        // is detected. The init pipeline pushes `resolved_block_name` onto
+        // the stack inside `run_init_pipeline`.
+        //
+        // Every registered block has a paired slot (`register_block_inner` /
+        // `register_remote_block`). A missing entry here means
+        // `resolved_block_name` was found in `self.blocks` but not
+        // `self.slots` — a runtime invariant violation, so panic loudly
+        // rather than silently constructing a fresh slot (which would let
+        // concurrent callers each run `lifecycle(Init)` independently).
+        let init_slot = self
+            .slots
+            .get(resolved_block_name)
+            .cloned()
+            .expect("slot must exist for any registered block");
+        if let Err(e) = crate::runtime::run_init_pipeline(
+            resolved_block_name,
+            block.clone(),
+            init_slot,
+            self.config_source.clone(),
+            sub_ctx.clone(),
+            &self.init_breadcrumbs,
+        )
+        .await
+        {
+            return err_output_from_init(resolved_block_name, e);
+        }
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in

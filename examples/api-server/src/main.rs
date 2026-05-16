@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("info,wafer=debug")
         .init();
 
-    let mut wafer = Wafer::new()?;
+    let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
     // --- Register blocks ---
     wafer_flow_http_server::register(

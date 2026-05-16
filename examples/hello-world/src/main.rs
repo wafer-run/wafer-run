@@ -30,7 +30,7 @@ impl Block for HelloBlock {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let mut wafer = Wafer::new()?;
+    let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
     // Register the HTTP server (infra + router)
     wafer_flow_http_server::register(

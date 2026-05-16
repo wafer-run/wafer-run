@@ -9,7 +9,11 @@ repository = "https://github.com/wafer-run/wafer-run"
 [features]
 default = ["wasm"]
 wasmi = ["dep:wasmi", "dep:getrandom"]
-wasm = ["wasmi", "dep:reqwest", "dep:tokio"]
+# `wasm` keeps the historical bundle of "needs full async runtime + remote
+# block fetching": wasmi interpreter, reqwest for downloads, and tokio's
+# rt + rt-multi-thread for native-side hosting. tokio::sync::Mutex (used by
+# BlockSlot) is always-on via the base `tokio` dep below.
+wasm = ["wasmi", "dep:reqwest", "tokio/rt", "tokio/rt-multi-thread"]
 full = ["wasm", "dep:tracing-subscriber"]
 # Throwaway feature flag that gates a streaming-ABI spike test (see
 # tests/streaming_spike.rs). Registers an extra `wafer_spike` host import
@@ -35,7 +39,11 @@ tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, optional = true }
+# Always-on: BlockSlot uses tokio::sync::Mutex, which works on every target
+# (wasm32 included) since `sync` doesn't need the tokio runtime. Heavier
+# features (rt, rt-multi-thread) come in via the `wasm` feature for native
+# hosts that actually run a tokio runtime.
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }

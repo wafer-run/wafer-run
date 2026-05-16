@@ -140,24 +140,10 @@ impl Wafer {
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
         let name = type_name.into();
-        super::validate_block_name(&name)?;
-        if self.blocks.contains_key(&name) {
-            return Err(RuntimeError::DuplicateBlock { name });
-        }
-
-        // Propagate the current asset loader to the block before inserting.
-        // Only WasmiBlock instances override `as_any()`, so native blocks are
-        // skipped without any unsafe code.
-        #[cfg(feature = "wasmi")]
-        if let Some(wasmi_block) = block
-            .as_any()
-            .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
-        {
-            wasmi_block.set_asset_loader(self.asset_loader.clone());
-        }
-
-        self.blocks.insert(name, block);
-        Ok(())
+        // Delegate to the shared inner impl so block-name validation, the
+        // config_keys prefix check, and init-slot allocation all happen on
+        // every registration path (trait + inherent).
+        <Self as wafer_block::registry::BlockRegistry>::register_block(self, &name, block)
     }
 
     /// Register a WaferFlow definition.

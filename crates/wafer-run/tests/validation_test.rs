@@ -1,17 +1,19 @@
 //! Integration tests for config validation and interface action validation.
 //!
-//! Test A: start() rejects missing required config.
-//! Test B: start() succeeds when all required config is provided.
+//! Test A: validate_all_block_configs reports missing required config.
+//! Test B: validate_all_block_configs returns OK when all required config
+//!         is provided via ConfigSource.
 //! Test C: call_block rejects an action not in a known interface.
 //! Test D: call_block allows an unknown (custom) interface with a warning.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use wafer_block::types::ConfigVar;
 use wafer_run::{
     block::{Block, BlockInfo},
     context::Context,
+    runtime::config_source::{ConfigSource, StaticConfigSource},
     streams::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
@@ -51,7 +53,10 @@ impl Block for NeedsConfigBlock {
 }
 
 #[tokio::test]
-async fn start_fails_on_missing_required_config() {
+async fn validate_reports_missing_required_config() {
+    // Lazy-init: missing required config no longer fails at `seal()` —
+    // it surfaces on first dispatch. Operators check
+    // `validate_all_block_configs()` proactively (e.g. on `/_health`).
     let mut w = Wafer::builder()
         .disable_inventory()
         .disable_lockfile()
@@ -59,44 +64,62 @@ async fn start_fails_on_missing_required_config() {
         .expect("empty wafer build is infallible");
     w.register_block("test-org/needs-config", Arc::new(NeedsConfigBlock))
         .unwrap();
-    // No add_block_config call => required key is absent
+    // No config provided => required key is absent.
 
-    let err = w.start_without_bind().await.unwrap_err();
-    let err_msg = err.to_string();
+    // `seal()` itself does NOT fail on missing required config.
+    w.seal()
+        .await
+        .expect("seal must not validate config eagerly");
 
-    // The error should be a Config variant and mention the block name + key
+    // The validation report should flag the block as broken.
+    let report = w.validate_all_block_configs().await;
     assert!(
-        err_msg.contains("config error"),
-        "expected 'config error' prefix, got: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("test-org/needs-config"),
-        "error should mention block name, got: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("TEST_ORG__NEEDS_CONFIG__API_KEY"),
-        "error should mention the missing key, got: {err_msg}"
+        report
+            .broken
+            .iter()
+            .any(|b| b.block == "test-org/needs-config"
+                && b.missing_keys
+                    .iter()
+                    .any(|k| k == "TEST_ORG__NEEDS_CONFIG__API_KEY")),
+        "expected broken report for test-org/needs-config / TEST_ORG__NEEDS_CONFIG__API_KEY, \
+         got: {:?}",
+        report.broken
     );
 }
 
 #[tokio::test]
-async fn start_succeeds_when_all_required_present() {
+async fn validate_succeeds_when_all_required_present() {
+    // Required config is provided via the ConfigSource (the lazy-init
+    // pathway). `add_block_config` is reserved for flow-event JSON, not
+    // env-var declared keys.
+    let mut data = HashMap::new();
+    data.insert(
+        "TEST_ORG__NEEDS_CONFIG__API_KEY".to_string(),
+        "secret-value".to_string(),
+    );
+    let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::new(data));
+
     let mut w = Wafer::builder()
         .disable_inventory()
         .disable_lockfile()
+        .config_source(cfg_src)
         .build()
         .expect("empty wafer build is infallible");
     w.register_block("test-org/needs-config", Arc::new(NeedsConfigBlock))
         .unwrap();
-    // Provide the required key
-    w.add_block_config(
-        "test-org/needs-config",
-        serde_json::json!({ "TEST_ORG__NEEDS_CONFIG__API_KEY": "secret-value" }),
-    );
 
-    w.start_without_bind()
-        .await
-        .expect("start should succeed when all required config is provided");
+    w.seal().await.expect("seal should succeed");
+    let report = w.validate_all_block_configs().await;
+    assert!(
+        report.broken.is_empty(),
+        "expected no broken blocks, got: {:?}",
+        report.broken
+    );
+    assert!(
+        report.ok.iter().any(|n| n == "test-org/needs-config"),
+        "expected test-org/needs-config in ok list, got: {:?}",
+        report.ok
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +177,7 @@ async fn call_block_rejects_wrong_action_for_interface() {
     w.register_block("test-org/bad-action-caller", Arc::new(BadActionCallerBlock))
         .unwrap();
 
-    w.start_without_bind().await.expect("start should succeed");
+    w.seal().await.expect("start should succeed");
 
     // Run the caller block, which internally calls the db block with "publish"
     let output = w
@@ -244,7 +267,7 @@ async fn call_block_allows_custom_interface_with_warning() {
     )
     .unwrap();
 
-    w.start_without_bind().await.expect("start should succeed");
+    w.seal().await.expect("start should succeed");
 
     // The caller block forwards to the custom-interface block.
     // Even though "my-org/custom@v1" is unknown, the call must NOT be rejected —
