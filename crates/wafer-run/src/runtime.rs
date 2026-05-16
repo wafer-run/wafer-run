@@ -652,6 +652,12 @@ pub(crate) async fn run_init_pipeline(
     let block_name = name.to_string();
     let block_for_init = block.clone();
     let cfg_src = config_source;
+    // Snapshot of caller-registered JSON config (via `Wafer::add_block_config`).
+    // Threaded into the init payload alongside env-resolved keys so blocks like
+    // `wafer-run/router` (which read `"routes"` from `event.data`) still see
+    // their config after lazy init. See the regression test
+    // `init_merges_block_config`.
+    let block_configs_snapshot = init_ctx.snapshot.block_configs.clone();
 
     slot.get_or_init(|| async move {
         let info = block_for_init.info();
@@ -667,16 +673,24 @@ pub(crate) async fn run_init_pipeline(
                 }
             })?;
 
-        // Serialize as a JSON object of String→String so blocks can parse
-        // the lifecycle(Init) event via the existing `BlockConfig::from_event`
-        // pathway (which does serde_json::from_slice on event.data).
-        let cfg_map = env_cfg.into_inner();
-        let cfg_json: serde_json::Value = cfg_map
-            .into_iter()
-            .map(|(k, v)| (k, serde_json::Value::String(v)))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-        let data = serde_json::to_vec(&cfg_json)
+        // Build the lifecycle(Init).data payload: start from the JSON config
+        // the caller registered via `Wafer::add_block_config` (if any), then
+        // overlay env-resolved values on top. Env-config keys win — operators
+        // can override JSON config via env vars.
+        //
+        // Blocks parse this via `BlockConfig::from_event`, which does
+        // `serde_json::from_slice` on `event.data`. PR #98 originally serialized
+        // only the env map, silently dropping `add_block_config` JSON (notably
+        // `wafer-run/router`'s `"routes"` array). This merge restores the
+        // pre-#98 contract.
+        let mut merged: serde_json::Map<String, serde_json::Value> = block_configs_snapshot
+            .get(&block_name)
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        for (k, v) in env_cfg.into_inner() {
+            merged.insert(k, serde_json::Value::String(v));
+        }
+        let data = serde_json::to_vec(&serde_json::Value::Object(merged))
             .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
 
         block_for_init
