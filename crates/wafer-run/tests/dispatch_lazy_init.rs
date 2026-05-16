@@ -237,3 +237,128 @@ async fn call_block_initializes_callee_lazily() {
         "callee handle re-runs on each call_block"
     );
 }
+
+/// Transitive init cycle (A.init → B.init → A) must surface as
+/// `InitError::Cycle` (mapped to `FAILED_PRECONDITION`) on the top-level
+/// output stream — without ever running `handle` on either block.
+///
+/// The shared `init_breadcrumbs` Arc inside `RuntimeContext` propagates
+/// the init stack across `call_block` boundaries; this test verifies that
+/// propagation end-to-end. Without it, B's init would not see A on the
+/// stack and we'd recurse forever (or deadlock on A's slot lock).
+#[tokio::test]
+async fn transitive_init_cycle_surfaces_failed_precondition() {
+    use wafer_block::{core_types::ErrorCode, streams::output::TerminalNotResponse};
+
+    /// Calls into another block during `lifecycle(Init)`. Used to compose
+    /// A→B→A and observe the cycle.
+    struct CallDuringInitBlock {
+        name: &'static str,
+        callee: &'static str,
+        init_calls: Arc<AtomicUsize>,
+        handle_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Block for CallDuringInitBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(self.name, "0.1.0", "test/iface@v1", "test")
+        }
+
+        async fn lifecycle(
+            &self,
+            ctx: &dyn Context,
+            event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            if event.event_type == LifecycleType::Init {
+                self.init_calls.fetch_add(1, Ordering::SeqCst);
+                // Trigger init on `callee` from inside our own init —
+                // this is the move that closes the cycle when callee.init
+                // ultimately tries to init us again.
+                let out = ctx
+                    .call_block(self.callee, Message::new(""), InputStream::empty())
+                    .await;
+                // The recursive call returns an error stream when the
+                // cycle is detected; surface it as a lifecycle error so
+                // the runtime's lazy-init pipeline records it.
+                if let Err(TerminalNotResponse::Error(e)) = out.collect_buffered().await {
+                    return Err(e);
+                }
+            }
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            self.handle_calls.fetch_add(1, Ordering::SeqCst);
+            OutputStream::respond(Vec::new())
+        }
+    }
+
+    let a_init = Arc::new(AtomicUsize::new(0));
+    let a_handle = Arc::new(AtomicUsize::new(0));
+    let b_init = Arc::new(AtomicUsize::new(0));
+    let b_handle = Arc::new(AtomicUsize::new(0));
+
+    let a = Arc::new(CallDuringInitBlock {
+        name: "test/a",
+        callee: "test/b",
+        init_calls: a_init.clone(),
+        handle_calls: a_handle.clone(),
+    });
+    let b = Arc::new(CallDuringInitBlock {
+        name: "test/b",
+        callee: "test/a",
+        init_calls: b_init.clone(),
+        handle_calls: b_handle.clone(),
+    });
+
+    let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer.register_block("test/a", a).expect("register a");
+    wafer.register_block("test/b", b).expect("register b");
+    wafer.rebuild_all_blocks();
+    let wafer = Arc::new(wafer);
+
+    let out = wafer
+        .run_block("test/a", Message::new(""), InputStream::empty())
+        .await;
+
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => {
+            assert_eq!(
+                e.code,
+                ErrorCode::FailedPrecondition,
+                "cycle must surface as FAILED_PRECONDITION, got {:?}",
+                e.code
+            );
+            assert!(
+                e.message.contains("test/a"),
+                "cycle error must name test/a; got: {}",
+                e.message
+            );
+            assert!(
+                e.message.contains("test/b"),
+                "cycle error must name test/b; got: {}",
+                e.message
+            );
+        }
+        other => panic!("expected Error terminal for transitive init cycle, got {other:?}"),
+    }
+
+    // Neither `handle` should have run — init failed for both blocks.
+    assert_eq!(
+        a_handle.load(Ordering::SeqCst),
+        0,
+        "A.handle must not run when its init cycle-fails"
+    );
+    assert_eq!(
+        b_handle.load(Ordering::SeqCst),
+        0,
+        "B.handle must not run when its init participates in a cycle"
+    );
+}
