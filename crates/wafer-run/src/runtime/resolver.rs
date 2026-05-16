@@ -247,7 +247,9 @@ impl Wafer {
 
         // Phase 1a: Initialize infrastructure blocks (wafer-run/*) with configs.
         self.rebuild_all_blocks();
-        self.collect_wrap_grants();
+        // Note: WRAP grants are now collected per-block in
+        // `register_block_inner` at registration time. See
+        // `validate_and_collect_grants_for_block` in `lifecycle.rs`.
         for (name, config) in &infra_configs {
             if let Some(block) = self.blocks.get(name.as_str()) {
                 let ctx = self.make_context(

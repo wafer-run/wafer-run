@@ -790,6 +790,20 @@ impl Wafer {
             }
         }
 
+        // Validate this block's WRAP grants and append them to the
+        // runtime-wide grant list. Grants are static `BlockInfo` metadata —
+        // no init pass required. Typed grants (Network/Storage/Crypto)
+        // require `set_admin_block(...)` to have been called first; if not,
+        // `WrapGrantAdminUnset` surfaces here rather than silently dropping.
+        let admin_block: String = (*self.wrap_admin_block).clone();
+        let new_grants =
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block)?;
+        if !new_grants.is_empty() {
+            let mut all = (*self.wrap_grants).clone();
+            all.extend(new_grants);
+            self.wrap_grants = Arc::new(all);
+        }
+
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
         // skipped without any unsafe code.
