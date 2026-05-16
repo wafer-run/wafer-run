@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use thiserror::Error;
 use wafer_block::ConfigVar;
+
+use crate::compat::{MaybeSend, MaybeSync};
 
 /// The env-var config payload returned for a single block on lazy init.
 ///
@@ -65,8 +66,9 @@ pub enum ConfigError {
 /// - `StaticConfigSource` — in-memory `HashMap` for tests (this module).
 /// - `EnvConfigSource` — reads `std::env::var` (solobase-core, PR 2).
 /// - `D1ConfigSource` — reads Cloudflare D1 (solobase-cloudflare, PR 2).
-#[async_trait]
-pub trait ConfigSource: Send + Sync + 'static {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait ConfigSource: MaybeSend + MaybeSync + 'static {
     /// Load the values for `block`'s declared env-var config keys.
     ///
     /// Implementations should:
@@ -97,7 +99,8 @@ impl StaticConfigSource {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl ConfigSource for StaticConfigSource {
     async fn load_for_block(
         &self,
