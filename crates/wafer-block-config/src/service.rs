@@ -1,3 +1,8 @@
+//! Environment-variable backed [`ConfigService`] implementation.
+//!
+//! Lookups check in-process runtime overrides first, then fall back to
+//! `std::env::var`. Writes go to the override map, not the real environment.
+
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
@@ -10,6 +15,7 @@ pub struct EnvConfigService {
 }
 
 impl EnvConfigService {
+    /// Create an empty service that reads from the process environment, with no overrides set.
     pub fn new() -> Self {
         Self {
             overrides: RwLock::new(HashMap::new()),

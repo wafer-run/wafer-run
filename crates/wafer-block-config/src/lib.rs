@@ -5,6 +5,8 @@
 //!
 //! Use `wafer_core::service_blocks::config::register_with()` to register.
 
+#![warn(missing_docs)]
+
 pub mod service;
 #[cfg(feature = "toml")]
 pub mod toml;
