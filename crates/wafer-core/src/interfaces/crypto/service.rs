@@ -2,16 +2,22 @@ use std::{collections::HashMap, time::Duration};
 
 use thiserror::Error;
 
+/// Errors returned by [`CryptoService`] operations.
 #[derive(Error, Debug)]
 pub enum CryptoError {
+    /// Failure while computing a password hash.
     #[error("hash error: {0}")]
     HashError(String),
+    /// `compare_hash` rejected the password.
     #[error("password mismatch")]
     PasswordMismatch,
+    /// Failure while issuing / signing a token.
     #[error("sign error: {0}")]
     SignError(String),
+    /// Failure while verifying / decoding a token.
     #[error("verify error: {0}")]
     VerifyError(String),
+    /// Catch-all variant carrying an arbitrary backend message.
     #[error("{0}")]
     Other(String),
 }

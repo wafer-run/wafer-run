@@ -16,6 +16,7 @@ pub struct NetworkBlock {
 }
 
 impl NetworkBlock {
+    /// Wrap the given `NetworkService` implementation as a `NetworkBlock`.
     pub fn new(service: Arc<dyn NetworkService>) -> Self {
         Self { service }
     }

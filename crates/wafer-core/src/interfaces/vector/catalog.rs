@@ -1,17 +1,26 @@
 //! Hardcoded catalog of supported embedding models.
 
+/// Static metadata about an embedding model entry in the built-in catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelInfo {
+    /// Canonical model identifier (matches the value passed to `embed`).
     pub id: &'static str,
+    /// Output embedding dimensionality.
     pub dimensions: u32,
+    /// Approximate on-disk size of the model weights, in bytes.
     pub approx_size_bytes: u64,
+    /// Which embedding runtimes can serve this model.
     pub runtimes: RuntimeCompat,
 }
 
+/// Flags describing which embedding runtimes can host a given model.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeCompat {
+    /// Available via the native FastEmbed runtime.
     pub native_fastembed: bool,
+    /// Available via Cloudflare Workers AI.
     pub workers_ai: bool,
+    /// Available via the in-browser Transformers.js runtime.
     pub browser_transformers: bool,
 }
 
@@ -48,14 +57,17 @@ const CATALOG: &[ModelInfo] = &[
     },
 ];
 
+/// Borrow the full hardcoded catalog of supported embedding models.
 pub fn model_catalog() -> &'static [ModelInfo] {
     CATALOG
 }
 
+/// Look up the catalog entry for the given model `id`, if any.
 pub fn get_model(id: &str) -> Option<&'static ModelInfo> {
     CATALOG.iter().find(|m| m.id == id)
 }
 
+/// Default embedding model used when callers do not specify one explicitly.
 pub const DEFAULT_MODEL: &str = "bge-m3";
 
 #[cfg(test)]

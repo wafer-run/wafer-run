@@ -21,6 +21,7 @@ pub struct AuthBlock {
 }
 
 impl AuthBlock {
+    /// Wrap the given `AuthService` implementation as an `AuthBlock`.
     pub fn new(service: Arc<dyn AuthService>) -> Self {
         Self { service }
     }

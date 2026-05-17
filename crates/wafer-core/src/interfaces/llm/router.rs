@@ -16,11 +16,14 @@ use super::service::{
     ChatChunk, ChatRequest, LlmError, LlmService, LoadProgress, ModelInfo, ModelStatus,
 };
 
+/// `LlmService` that fans `claims_backend`-routed calls out to a list of
+/// registered backend implementations.
 pub struct MultiBackendLlmService {
     impls: Vec<(String, Arc<dyn LlmService>)>,
 }
 
 impl MultiBackendLlmService {
+    /// Construct an empty router; backends are added with [`register`](Self::register).
     pub fn new() -> Self {
         Self { impls: Vec::new() }
     }

@@ -18,6 +18,7 @@ pub struct ImageBlock {
 }
 
 impl ImageBlock {
+    /// Wrap the given `ImageService` implementation as an `ImageBlock`.
     pub fn new(service: Arc<dyn ImageService>) -> Self {
         Self { service }
     }

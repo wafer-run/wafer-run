@@ -114,6 +114,9 @@ fn image_error_to_block_error(e: service::ImageError) -> (ErrorCode, String) {
 
 // ---------- Entry point ----------
 
+/// Dispatch an `image.*` message to the appropriate handler on `service` and
+/// return the resulting output stream. Unknown ops yield an `INVALID_ARGUMENT`
+/// error stream.
 pub async fn handle_message(
     service: Arc<dyn ImageService>,
     msg: &Message,

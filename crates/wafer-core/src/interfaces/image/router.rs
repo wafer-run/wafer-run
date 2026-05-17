@@ -12,11 +12,14 @@ use super::service::{
     ImageError, ImageRequest, ImageResponse, ImageService, LoadProgress, ModelInfo, ModelStatus,
 };
 
+/// `ImageService` that fans `claims_backend`-routed calls out to a list of
+/// registered backend implementations.
 pub struct MultiBackendImageService {
     impls: Vec<(String, Arc<dyn ImageService>)>,
 }
 
 impl MultiBackendImageService {
+    /// Construct an empty router; backends are added with [`register`](Self::register).
     pub fn new() -> Self {
         Self { impls: Vec::new() }
     }

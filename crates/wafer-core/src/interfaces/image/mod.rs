@@ -6,5 +6,7 @@
 //! is in `handler`.
 
 pub mod handler;
+/// Multi-backend router that dispatches `image.*` ops based on `claims_backend`.
 pub mod router;
+/// `ImageService` trait and image transform / encode request/response types.
 pub mod service;

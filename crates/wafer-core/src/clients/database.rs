@@ -76,12 +76,14 @@ fn to_wire_sort(sort: &[SortField]) -> Vec<WireSortFieldDef> {
 dual_api! {
     // --- Core CRUD ---
 
+    /// Fetch a single record from `collection` by primary-key `id`.
     pub fn get(ctx, collection: &str, id: &str) -> Result<Record, WaferError> {
         let req = GetRequest { collection: collection.to_string(), id: id.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_GET, &req, Some(collection), false, Some("db"))?;
         decode(&data)
     }
 
+    /// List records in `collection` matching `opts` (filters, sort, limit, offset).
     pub fn list(ctx, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
         let req = ListRequest {
             collection: collection.to_string(),
@@ -102,6 +104,7 @@ dual_api! {
         decode(&data)
     }
 
+    /// Insert a record into `collection` from `data` and return the stored row.
     pub fn create(ctx, collection: &str, data: HashMap<String, serde_json::Value>) -> Result<Record, WaferError> {
         let req = CreateRequest { collection: collection.to_string(), data };
         let resp = svc!(
@@ -115,6 +118,7 @@ dual_api! {
         decode(&resp)
     }
 
+    /// Update the record `id` in `collection` with the fields in `data` and return the result.
     pub fn update(ctx, collection: &str, id: &str, data: HashMap<String, serde_json::Value>) -> Result<Record, WaferError> {
         let req = UpdateRequest { collection: collection.to_string(), id: id.to_string(), data };
         let resp = svc!(
@@ -128,12 +132,14 @@ dual_api! {
         decode(&resp)
     }
 
+    /// Delete the record `id` from `collection`.
     pub fn delete(ctx, collection: &str, id: &str) -> Result<(), WaferError> {
         let req = DeleteRequest { collection: collection.to_string(), id: id.to_string() };
         svc!(ctx, BLOCK, ServiceOp::DATABASE_DELETE, &req, Some(collection), true, Some("db"))?;
         Ok(())
     }
 
+    /// Count records in `collection` matching `filters`.
     pub fn count(ctx, collection: &str, filters: &[Filter]) -> Result<i64, WaferError> {
         let req = CountRequest {
             collection: collection.to_string(),
@@ -151,6 +157,7 @@ dual_api! {
         Ok(resp.count)
     }
 
+    /// Sum the numeric `field` across records in `collection` matching `filters`.
     pub fn sum(ctx, collection: &str, field: &str, filters: &[Filter]) -> Result<f64, WaferError> {
         let req = SumRequest {
             collection: collection.to_string(),
@@ -169,6 +176,8 @@ dual_api! {
         Ok(resp.sum)
     }
 
+    /// Run a raw SQL `SELECT` (or other read-only) query with positional `args`.
+    /// Admin-gated under WRAP; prefer the typed CRUD helpers above for block code.
     pub fn query_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, WaferError> {
         let req = QueryRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -182,6 +191,8 @@ dual_api! {
         decode(&data)
     }
 
+    /// Run a raw SQL write/DDL `query` with positional `args`; returns `rows_affected`.
+    /// Admin-gated under WRAP — use `ddl` for block self-DDL instead.
     pub fn exec_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<i64, WaferError> {
         let req = ExecRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -227,6 +238,8 @@ dual_api! {
 
     // --- Higher-level helpers ---
 
+    /// Fetch the first record in `collection` where `field == value`.
+    /// Returns `Err(NOT_FOUND)` if no row matches.
     pub fn get_by_field(ctx, collection: &str, field: &str, value: serde_json::Value) -> Result<Record, WaferError> {
         let result = svc_fn!(ctx, list(
             collection,
@@ -247,6 +260,7 @@ dual_api! {
             .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
     }
 
+    /// Update the record in `collection` whose `field == value`, or insert `data` if none exists.
     pub fn upsert(
         ctx,
         collection: &str,
@@ -308,6 +322,8 @@ dual_api! {
         Ok(result.records)
     }
 
+    /// Page through `collection` returning page `page` of `page_size` rows plus `total_count`.
+    /// `page` and `page_size` are clamped to a minimum of 1 / 20 respectively.
     pub fn paginated_list(
         ctx,
         collection: &str,
@@ -330,6 +346,7 @@ dual_api! {
         ))
     }
 
+    /// Soft-delete a record by setting `deleted_at` to the current UTC RFC3339 timestamp.
     pub fn soft_delete(ctx, collection: &str, id: &str) -> Result<Record, WaferError> {
         let mut data = HashMap::new();
         data.insert(
@@ -339,6 +356,7 @@ dual_api! {
         svc_fn!(ctx, update(collection, id, data))
     }
 
+    /// Delete every record in `collection` where `field == value`.
     pub fn delete_by_field(
         ctx,
         collection: &str,
@@ -355,6 +373,7 @@ dual_api! {
         ))
     }
 
+    /// Count records in `collection` where `field == value`.
     pub fn count_by_field(
         ctx,
         collection: &str,
@@ -371,6 +390,7 @@ dual_api! {
         ))
     }
 
+    /// Delete every record in `collection` matching `filters`.
     pub fn delete_by_filters(ctx, collection: &str, filters: Vec<Filter>) -> Result<(), WaferError> {
         let req = DeleteWhereRequest {
             collection: collection.to_string(),
@@ -423,6 +443,7 @@ dual_api! {
         Ok(resp.records)
     }
 
+    /// Apply `data` as an update to every record in `collection` matching `filters`.
     pub fn update_by_filters(
         ctx,
         collection: &str,

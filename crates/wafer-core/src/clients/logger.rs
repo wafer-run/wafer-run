@@ -33,26 +33,31 @@ async fn log(
     }
 }
 
+/// Emit a debug-level log line via the logger block.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn debug(ctx: &dyn Context, message: &str) {
     log(ctx, ServiceOp::LOGGER_DEBUG, message, &HashMap::new()).await;
 }
 
+/// Emit an info-level log line via the logger block.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn info(ctx: &dyn Context, message: &str) {
     log(ctx, ServiceOp::LOGGER_INFO, message, &HashMap::new()).await;
 }
 
+/// Emit a warn-level log line via the logger block.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn warn(ctx: &dyn Context, message: &str) {
     log(ctx, ServiceOp::LOGGER_WARN, message, &HashMap::new()).await;
 }
 
+/// Emit an error-level log line via the logger block.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn error(ctx: &dyn Context, message: &str) {
     log(ctx, ServiceOp::LOGGER_ERROR, message, &HashMap::new()).await;
 }
 
+/// Emit a debug-level log line with structured fields attached.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn debug_with(
     ctx: &dyn Context,
@@ -62,6 +67,7 @@ pub async fn debug_with(
     log(ctx, ServiceOp::LOGGER_DEBUG, message, fields).await;
 }
 
+/// Emit an info-level log line with structured fields attached.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn info_with(
     ctx: &dyn Context,
@@ -71,6 +77,7 @@ pub async fn info_with(
     log(ctx, ServiceOp::LOGGER_INFO, message, fields).await;
 }
 
+/// Emit a warn-level log line with structured fields attached.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn warn_with(
     ctx: &dyn Context,
@@ -80,6 +87,7 @@ pub async fn warn_with(
     log(ctx, ServiceOp::LOGGER_WARN, message, fields).await;
 }
 
+/// Emit an error-level log line with structured fields attached.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn error_with(
     ctx: &dyn Context,
@@ -103,41 +111,49 @@ fn log(kind: &str, message: &str, fields: &HashMap<String, serde_json::Value>) {
     let _ = call_service(BLOCK, kind, &req, None, false, None);
 }
 
+/// Emit a debug-level log line via the logger block.
 #[cfg(feature = "wasm-component")]
 pub fn debug(message: &str) {
     log(ServiceOp::LOGGER_DEBUG, message, &HashMap::new());
 }
 
+/// Emit an info-level log line via the logger block.
 #[cfg(feature = "wasm-component")]
 pub fn info(message: &str) {
     log(ServiceOp::LOGGER_INFO, message, &HashMap::new());
 }
 
+/// Emit a warn-level log line via the logger block.
 #[cfg(feature = "wasm-component")]
 pub fn warn(message: &str) {
     log(ServiceOp::LOGGER_WARN, message, &HashMap::new());
 }
 
+/// Emit an error-level log line via the logger block.
 #[cfg(feature = "wasm-component")]
 pub fn error(message: &str) {
     log(ServiceOp::LOGGER_ERROR, message, &HashMap::new());
 }
 
+/// Emit a debug-level log line with structured fields attached.
 #[cfg(feature = "wasm-component")]
 pub fn debug_with(message: &str, fields: &HashMap<String, serde_json::Value>) {
     log(ServiceOp::LOGGER_DEBUG, message, fields);
 }
 
+/// Emit an info-level log line with structured fields attached.
 #[cfg(feature = "wasm-component")]
 pub fn info_with(message: &str, fields: &HashMap<String, serde_json::Value>) {
     log(ServiceOp::LOGGER_INFO, message, fields);
 }
 
+/// Emit a warn-level log line with structured fields attached.
 #[cfg(feature = "wasm-component")]
 pub fn warn_with(message: &str, fields: &HashMap<String, serde_json::Value>) {
     log(ServiceOp::LOGGER_WARN, message, fields);
 }
 
+/// Emit an error-level log line with structured fields attached.
 #[cfg(feature = "wasm-component")]
 pub fn error_with(message: &str, fields: &HashMap<String, serde_json::Value>) {
     log(ServiceOp::LOGGER_ERROR, message, fields);

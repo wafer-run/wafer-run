@@ -16,6 +16,7 @@ pub struct StorageBlock {
 }
 
 impl StorageBlock {
+    /// Wrap the given `StorageService` implementation as a `StorageBlock`.
     pub fn new(service: Arc<dyn StorageService>) -> Self {
         Self { service }
     }

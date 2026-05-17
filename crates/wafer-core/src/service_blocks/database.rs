@@ -18,6 +18,8 @@ pub struct DatabaseBlock {
 }
 
 impl DatabaseBlock {
+    /// Wrap the given `DatabaseService` implementation as a `DatabaseBlock`
+    /// with an initially empty declarative table list.
     pub fn new(service: Arc<dyn DatabaseService>) -> Self {
         Self {
             service,

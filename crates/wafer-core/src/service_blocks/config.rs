@@ -16,6 +16,7 @@ pub struct ConfigBlock {
 }
 
 impl ConfigBlock {
+    /// Wrap the given `ConfigService` implementation as a `ConfigBlock`.
     pub fn new(service: Arc<dyn ConfigService>) -> Self {
         Self { service }
     }
