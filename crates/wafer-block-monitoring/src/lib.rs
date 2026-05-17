@@ -1,3 +1,18 @@
+//! Request metrics and a loopback-only stats endpoint for the WAFER runtime.
+//!
+//! Registers the `wafer-run/monitoring` block, a middleware that counts
+//! requests / paths / response statuses and exposes a JSON snapshot at
+//! `/_stats` (alias `/_monitoring`). The endpoint paths are configurable
+//! via the `stats_path` / `monitoring_path` keys (block-level Init config
+//! or per-request `ctx.config_get`).
+//!
+//! The stats payload is hand-rolled JSON (not Prometheus / OpenTelemetry)
+//! and only served to clients whose source IP parses as a loopback address
+//! (127.0.0.0/8, `::1`, or `::ffff:127.x.y.z`). Front it with an auth
+//! middleware if you need broader access.
+
+#![warn(missing_docs)]
+
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -15,8 +30,10 @@ use wafer_run::*;
 const DEFAULT_STATS_PATH: &str = "/_stats";
 const DEFAULT_MONITORING_PATH: &str = "/_monitoring";
 
-/// MonitoringBlock tracks request metrics and provides a stats endpoint.
-pub struct MonitoringBlock {
+/// Middleware block that tracks per-request metrics and serves the JSON
+/// stats endpoint. Singleton per Wafer instance; instantiated by
+/// [`register`].
+pub(crate) struct MonitoringBlock {
     start_time: Instant,
     stats: Mutex<MonitoringStats>,
     /// Init-cached endpoint paths. `handle()` prefers per-request
@@ -41,26 +58,7 @@ impl Default for EndpointPaths {
 
 struct MonitoringStats {
     total_requests: u64,
-    // NOTE: error_count is not automatically incremented because this middleware
-    // runs before downstream handlers. Call `increment_error()` externally or
-    // check response status in a post-processing step.
-    error_count: u64,
-    status_counts: HashMap<String, u64>,
     path_counts: HashMap<String, u64>,
-}
-
-impl MonitoringBlock {
-    /// Increment the error count. Call from post-processing when a response
-    /// indicates an error (e.g., HTTP 5xx status).
-    pub fn record_error(&self) {
-        self.stats.lock().error_count += 1;
-    }
-
-    /// Record a response status code for metrics tracking.
-    pub fn record_status(&self, status: &str) {
-        let mut stats = self.stats.lock();
-        *stats.status_counts.entry(status.to_string()).or_insert(0) += 1;
-    }
 }
 
 impl Default for MonitoringBlock {
@@ -70,13 +68,13 @@ impl Default for MonitoringBlock {
 }
 
 impl MonitoringBlock {
-    pub fn new() -> Self {
+    /// Construct a fresh monitoring block with the uptime clock started
+    /// at `now` and all counters zeroed.
+    pub(crate) fn new() -> Self {
         Self {
             start_time: Instant::now(),
             stats: Mutex::new(MonitoringStats {
                 total_requests: 0,
-                error_count: 0,
-                status_counts: HashMap::new(),
                 path_counts: HashMap::new(),
             }),
             paths: RwLock::new(EndpointPaths::default()),
@@ -188,8 +186,6 @@ impl Block for MonitoringBlock {
                 serde_json::json!({
                     "uptime_seconds": uptime,
                     "total_requests": stats.total_requests,
-                    "error_count": stats.error_count,
-                    "status_counts": stats.status_counts,
                     "top_paths": stats.path_counts,
                 })
             };
@@ -237,6 +233,9 @@ impl Block for MonitoringBlock {
     }
 }
 
+/// Register the `wafer-run/monitoring` block on `w`. Idempotent per
+/// runtime — calling twice returns the duplicate-name error from
+/// [`Wafer::register_block`].
 pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/monitoring", Arc::new(MonitoringBlock::new()))
 }
