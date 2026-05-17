@@ -126,4 +126,18 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// to retain a Context handle past the lifetime of a borrow (e.g.
     /// AuthServiceImpl populating a OnceLock from its `init` method).
     fn clone_arc(&self) -> std::sync::Arc<dyn Context>;
+
+    /// Validate every registered block's declared `ConfigVar` against the
+    /// active config source — same semantics as
+    /// `Wafer::validate_all_block_configs`, but callable from inside a
+    /// block. Used by deploy-time health endpoints (e.g. wafer-site's
+    /// `/_health` route) to surface missing required config keys after
+    /// lazy init.
+    ///
+    /// Default impl returns an empty report. Context impls that don't
+    /// run inside the WAFER runtime (test mocks, FFI shims) have no
+    /// blocks or config source to walk; they leave this as-is.
+    async fn validate_all_block_configs(&self) -> crate::validation::ValidationReport {
+        crate::validation::ValidationReport::default()
+    }
 }
