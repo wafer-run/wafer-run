@@ -4,14 +4,14 @@ use std::path::Path;
 ///
 /// Accepts a file path (or bare filename) and returns the MIME type string
 /// based on its extension. Unknown extensions return `"application/octet-stream"`.
-pub fn mime_for_ext(path: &Path) -> &'static str {
+pub(crate) fn mime_for_ext(path: &Path) -> &'static str {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     mime_for_ext_str(ext)
 }
 
 /// Guess the MIME content type from a bare extension string (without the dot).
-pub fn mime_for_ext_str(ext: &str) -> &'static str {
+pub(crate) fn mime_for_ext_str(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
