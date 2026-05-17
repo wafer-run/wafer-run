@@ -1,3 +1,15 @@
+#![warn(missing_docs)]
+//! CORS middleware block for the WAFER runtime.
+//!
+//! Implements RFC 6454 cross-origin request handling: parses the request
+//! `Origin` header, consults a configured allow-list, and sets the
+//! `Access-Control-Allow-*` response headers (plus `Vary: Origin`) on
+//! the outgoing message. OPTIONS preflight requests short-circuit with
+//! a 204 via [`OutputStream::drop_request`].
+//!
+//! See the [`CorsBlock`] type for the configuration contract and the
+//! fail-closed behavior introduced by SEC-087/SEC-088.
+
 use std::sync::RwLock;
 
 use wafer_block::*;
@@ -25,7 +37,7 @@ use wafer_block::*;
 /// (either via wildcard or allow-list match), the block also sets
 /// `Vary: Origin`. Without it, intermediary caches can serve a response
 /// targeted at Origin A to a request from Origin B — see SEC-088.
-pub struct CorsBlock {
+pub(crate) struct CorsBlock {
     /// Allow-list resolved at `Init` lifecycle, used as fallback when the
     /// per-request context does not supply `allowed_origins`. `None` until
     /// Init succeeds.
@@ -42,7 +54,15 @@ impl Default for CorsBlock {
 }
 
 impl CorsBlock {
-    pub fn new() -> Self {
+    /// Construct a `CorsBlock` with no allow-list resolved and the standard
+    /// header defaults (`GET, POST, PUT, PATCH, DELETE, OPTIONS` for
+    /// `Access-Control-Allow-Methods`; `Content-Type, Authorization,
+    /// X-Requested-With` for `Access-Control-Allow-Headers`; 24-hour
+    /// `Access-Control-Max-Age`). The allow-list stays `None` — and the
+    /// block therefore fails closed on cross-origin requests — until
+    /// `lifecycle(Init)` parses block config or per-request `ctx.config_get`
+    /// supplies one. See SEC-087 for the rationale.
+    pub(crate) fn new() -> Self {
         Self {
             allowed_origins: RwLock::new(None),
             allowed_methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
