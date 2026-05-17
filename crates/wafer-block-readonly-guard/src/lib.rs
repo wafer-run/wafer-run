@@ -1,7 +1,18 @@
+#![warn(missing_docs)]
+//! Read-only guard middleware block for the WAFER runtime.
+//!
+//! When the `readonly` flow config var is `true`/`1`, this middleware rejects
+//! `create`/`update`/`delete` request actions with [`ErrorCode::PermissionDenied`]
+//! and lets all other actions (e.g. `retrieve`, `list`) pass through unchanged.
+
 use wafer_block::*;
 
-/// ReadonlyGuardBlock blocks write operations when in read-only mode.
+/// Middleware block that rejects write actions when its flow is configured for read-only mode.
+///
+/// Registered as `wafer-run/readonly-guard`. Behavior is driven by the `readonly` flow config
+/// var; the in-struct `enabled` field is only used as the fallback when no config is provided.
 pub struct ReadonlyGuardBlock {
+    /// Fallback read-only state used when the flow has no `readonly` config var set.
     enabled: bool,
 }
 
@@ -12,6 +23,10 @@ impl Default for ReadonlyGuardBlock {
 }
 
 impl ReadonlyGuardBlock {
+    /// Construct a new guard with the fallback read-only flag disabled.
+    ///
+    /// The effective mode at request time is taken from the `readonly` flow config var;
+    /// this fallback only applies when that var is absent.
     pub fn new() -> Self {
         Self { enabled: false }
     }
