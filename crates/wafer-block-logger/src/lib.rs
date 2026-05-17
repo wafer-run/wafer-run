@@ -5,4 +5,6 @@
 //!
 //! Use `wafer_core::service_blocks::logger::register_with()` to register.
 
+#![warn(missing_docs)]
+
 pub mod service;

@@ -1,7 +1,14 @@
+//! Native `LoggerService` implementation backed by the `tracing` crate.
+//!
+//! Re-exports `LoggerService` and `Field` from `wafer_core::interfaces::logger`
+//! so consumers can `use wafer_block_logger::service::{LoggerService, Field, TracingLogger}`.
+
 // Re-export the trait and types from wafer-core.
 pub use wafer_core::interfaces::logger::service::*;
 
-/// TracingLogger implements LoggerService using the tracing crate.
+/// `LoggerService` implementation that forwards every call to the `tracing` crate
+/// at the matching level (`debug!`/`info!`/`warn!`/`error!`) with fields rendered
+/// as a trailing `key=value key=value` string on the default target.
 pub struct TracingLogger;
 
 impl LoggerService for TracingLogger {
