@@ -1,9 +1,28 @@
+#![warn(missing_docs)]
+
+//! `wafer-run/router` — config-driven request router block.
+//!
+//! Reads a `routes` JSON array from block config during `lifecycle(Init)` and
+//! at handle-time matches each incoming [`Message`] against the configured
+//! entries by action (or HTTP method, auto-normalized) and path pattern
+//! (exact, `{var}` capture, or `/**` suffix wildcard). The first match wins
+//! and the message is dispatched to the named handler block via
+//! [`Context::call_block`]; captured path variables are stamped onto the
+//! message as `req.param.*` meta. Misses return [`ErrorCode::NotFound`].
+//!
+//! Registered link-time as `wafer-run/router` via
+//! [`wafer_run::register_static_block!`]; consumers don't construct
+//! the block type directly.
+
 use std::sync::OnceLock;
 
 use wafer_block::*;
 
-/// Normalize a value to a standard action. Accepts both action names
-/// (`"retrieve"`) and HTTP methods (`"GET"`).
+/// Normalizes an action token to the standard [`RequestAction`] vocabulary,
+/// accepting either canonical action names (`"retrieve"`, `"create"`, …) or
+/// HTTP methods (`GET`/`HEAD` → retrieve, `POST` → create, `PUT`/`PATCH` →
+/// update, `DELETE` → delete, `OPTIONS` → execute). Unknown tokens are
+/// passed through lowercased.
 fn normalize_action(s: &str) -> String {
     match s.to_uppercase().as_str() {
         "GET" | "HEAD" => RequestAction::RETRIEVE.to_string(),
@@ -77,7 +96,7 @@ fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
 /// { "path": "/users", "methods": ["GET"],      "block": "list-users" }
 /// ```
 /// HTTP methods are automatically mapped to actions (GET -> retrieve, etc.).
-pub struct RouterBlock {
+pub(crate) struct RouterBlock {
     routes: OnceLock<Vec<Route>>,
 }
 
@@ -88,7 +107,9 @@ impl Default for RouterBlock {
 }
 
 impl RouterBlock {
-    pub fn new() -> Self {
+    /// Builds a fresh router with an empty, uninitialized route table; the
+    /// table is populated once on `lifecycle(Init)` from block config.
+    pub(crate) fn new() -> Self {
         Self {
             routes: OnceLock::new(),
         }
