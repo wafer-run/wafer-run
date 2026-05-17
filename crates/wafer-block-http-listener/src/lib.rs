@@ -1,3 +1,16 @@
+#![warn(missing_docs)]
+//! HTTP transport block for WAFER: binds a TCP listener, converts incoming
+//! HTTP requests into WAFER [`Message`]s + [`InputStream`]s, dispatches to a
+//! configured flow or block, and converts the resulting [`OutputStream`] back
+//! into an HTTP response.
+//!
+//! Registered as the `wafer-run/http-listener` block via
+//! [`wafer_run::register_static_block!`]. The only public entry point most
+//! consumers need is the block name itself; the [`http_to_message`] and
+//! [`wafer_output_to_response`] helpers are re-exported for embedders that
+//! bypass the listener (e.g. running a WAFER flow inside an existing axum
+//! router).
+
 use std::sync::OnceLock;
 
 use axum::{
@@ -28,7 +41,20 @@ fn http_method_to_action(method: &Method) -> &'static str {
     }
 }
 
-/// Convert an HTTP request into a WAFER Message (no body — body flows via InputStream).
+/// Convert an HTTP request head into a WAFER [`Message`].
+///
+/// The body is **not** placed on the message — it flows separately via
+/// [`InputStream`]. Each header is copied to meta as
+/// `http.header.{lowercased-name}`, each query parameter as both
+/// `http.query.{name}` and `{META_REQ_QUERY_PREFIX}{name}` (with `+`/`%XX`
+/// decoded via `form_urlencoded::parse`). Method/path/remote-addr are
+/// mirrored into normalized request meta keys (`META_REQ_ACTION`,
+/// `META_REQ_RESOURCE`, `META_REQ_CLIENT_IP`, `META_REQ_CONTENT_TYPE`) so
+/// downstream blocks need not know the request originated over HTTP.
+///
+/// HTTP method maps to a WAFER `RequestAction`:
+/// `GET`/`HEAD` → `RETRIEVE`, `POST` → `CREATE`, `PUT`/`PATCH` → `UPDATE`,
+/// `DELETE` → `DELETE`, everything else → `EXECUTE`.
 pub fn http_to_message(
     method: Method,
     uri_path: &str,
@@ -163,8 +189,26 @@ fn get_error_status_code(error: Option<&WaferError>, meta: &[MetaEntry]) -> u16 
     500
 }
 
-/// Convert a buffered OutputStream result to an HTTP response.
-/// Buffered approach: collect the entire OutputStream before responding.
+/// Collect a WAFER [`OutputStream`] and turn the terminal event into an
+/// HTTP response.
+///
+/// Buffered: the full output body is read into memory before any bytes are
+/// written to the wire (no streaming response). The terminal-event mapping
+/// is:
+///
+/// - `Ok(buffered)` → `200` (or `META_RESP_STATUS` override) with the
+///   collected body; meta keys prefixed with `META_RESP_HEADER_PREFIX` /
+///   `META_RESP_COOKIE_PREFIX` become response headers / `Set-Cookie`
+///   entries, defaulting `Content-Type: application/json`.
+/// - `TerminalNotResponse::Error(WaferError)` → status derived from
+///   [`ErrorCode`] (e.g. `NotFound` → 404, `PermissionDenied` → 403),
+///   overridable via `META_RESP_STATUS`, body
+///   `{"error": <code>, "message": <msg>}`.
+/// - `TerminalNotResponse::Drop` → `204 No Content`.
+/// - `TerminalNotResponse::Continue` → empty `200` (the HTTP boundary has
+///   nowhere further to forward).
+/// - `TerminalNotResponse::Malformed` → `500` (stream ended without a
+///   terminal event; logged at `tracing::error`).
 pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
     use wafer_block::streams::output::TerminalNotResponse;
 
@@ -253,7 +297,20 @@ fn internal_error_response() -> axum::http::Response<Body> {
 
 use wafer_run::config::DispatchTarget;
 
-pub struct HttpListenerBlock {
+/// Block implementing the HTTP transport.
+///
+/// Singleton infrastructure block (one listener per registration). On
+/// `LifecycleType::Init` it caches the `listen` socket address and the
+/// `dispatch_target` (flow id or block name) from its [`BlockInfo`]
+/// config. The actual TCP bind + axum server is spawned in
+/// [`Block::bind`] once the runtime hands over a `RuntimeHandle`, and is
+/// shut down via a `tokio::sync::oneshot` channel on
+/// `LifecycleType::Stop`.
+///
+/// The `handle` method itself only returns `OutputStream::continue_with(msg)`;
+/// real request handling happens inside the spawned axum task, not in the
+/// block-message pipeline.
+pub(crate) struct HttpListenerBlock {
     target: OnceLock<DispatchTarget>,
     listen: OnceLock<String>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -266,7 +323,10 @@ impl Default for HttpListenerBlock {
 }
 
 impl HttpListenerBlock {
-    pub fn new() -> Self {
+    /// Construct an unconfigured listener. `target` and `listen` are filled
+    /// in from [`BlockInfo`] config on the `Init` lifecycle event; the
+    /// underlying TCP listener is not bound until [`Block::bind`] runs.
+    pub(crate) fn new() -> Self {
         Self {
             target: OnceLock::new(),
             listen: OnceLock::new(),
