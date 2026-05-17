@@ -13,12 +13,18 @@ use crate::{
 };
 
 pub mod config_source;
+/// Init-time call stack used to detect cycles when blocks `Init`-call each other.
 pub mod init_stack;
+/// Lifecycle orchestrator: drives `setup` → `validate_config` → `start` across all blocks.
 pub mod lifecycle;
+/// Block registry — name-to-instance map populated via `Wafer::register_block`.
 pub mod registry;
+/// Block-name resolver: aliases → registered native → URL → registry manifest.
 pub mod resolver;
+/// Per-block runner with cancellation, timeout and observability hook wiring.
 pub mod runner;
 pub mod slot;
+/// Post-registration validation of declared interfaces and block configs.
 pub mod validation;
 
 // Re-export the standalone function so external callers see it at the old path.
@@ -40,8 +46,11 @@ pub use wafer_block::{BrokenBlock, ValidationReport};
 #[cfg(feature = "wasm")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteBlockRef {
+    /// Org slug (left-hand side of `org/block`).
     pub org: String,
+    /// Block name (right-hand side of `org/block`).
     pub block: String,
+    /// Semver-style version following `@`.
     pub version: String,
 }
 
@@ -162,6 +171,7 @@ pub struct Wafer {
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
     /// All registered blocks + aliases, shared with contexts.
     pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
+    /// Observability hook bus — exposed so consumers can register flow/block callbacks.
     pub hooks: ObservabilityBus,
     /// Single immutable bundle of post-startup metadata shared with every
     /// [`RuntimeContext`]. Populated at the end of [`Wafer::seal`].

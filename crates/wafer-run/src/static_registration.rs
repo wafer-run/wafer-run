@@ -21,7 +21,9 @@ use crate::block::Block;
 ///   annotated type must expose `fn new() -> Self` and must implement
 ///   `Block` — the macro emits `|| Arc::new(<Ty>::new()) as Arc<dyn Block>`.
 pub struct StaticBlockRegistration {
+    /// `{org}/{block}` identifier supplied to `#[wafer_block]`.
     pub name: &'static str,
+    /// Zero-arg constructor that materialises the block as `Arc<dyn Block>`.
     pub factory: fn() -> Arc<dyn Block>,
 }
 

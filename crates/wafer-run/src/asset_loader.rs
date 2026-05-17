@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+/// Outcome of an asset-load attempt as reported back to the WASM guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetLoadStatus {
     /// Asset is loaded and ready to be invoked.
@@ -18,19 +19,28 @@ pub enum AssetLoadStatus {
     Failed(AssetLoadError),
 }
 
+/// Categorised failure reasons surfaced through [`AssetLoadStatus::Failed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetLoadError {
+    /// Network or transport-level error while fetching the asset.
     Network(String),
+    /// Fetched bytes hashed to a value that didn't match the manifest's expected SHA.
     ShaMismatch {
+        /// Asset id (as declared in `BlockInfo::external_assets`).
         id: String,
+        /// Expected SHA-256 (hex) recorded in the manifest.
         expected: String,
+        /// Actual SHA-256 (hex) computed from the fetched bytes.
         got: String,
     },
+    /// No loader is registered for the asset's scheme/source.
     UnknownLoader(String),
+    /// Fallback for errors that don't fit the categories above.
     Unknown(String),
 }
 
 impl AssetLoadError {
+    /// Build a [`Self::ShaMismatch`] without forcing callers to allocate the strings.
     pub fn sha_mismatch(id: &str, expected: &str, got: &str) -> Self {
         Self::ShaMismatch {
             id: id.to_string(),
@@ -65,6 +75,7 @@ impl fmt::Display for AssetLoadError {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait LoadAssetCallback: wafer_block::MaybeSend + wafer_block::MaybeSync {
+    /// Fetch (or look up) the asset identified by `asset_id` and report its current state.
     async fn load(&self, asset_id: &str) -> AssetLoadStatus;
 }
 

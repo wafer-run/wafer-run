@@ -44,9 +44,11 @@ impl std::ops::Add<std::time::Duration> for Instant {
 // Boxed future type aliases (Send on native, !Send on wasm32)
 // ---------------------------------------------------------------------------
 
+/// Boxed future returned across runtime async boundaries (native — requires `Send`).
 #[cfg(not(target_arch = "wasm32"))]
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Boxed future returned across runtime async boundaries (wasm32 — single-threaded).
 #[cfg(target_arch = "wasm32")]
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 

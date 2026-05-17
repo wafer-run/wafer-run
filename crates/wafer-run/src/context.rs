@@ -25,10 +25,15 @@ use crate::{block::Block, platform::Instant, types::*};
 /// that points at the same shared snapshots; used by [`Context::clone_arc`].
 #[derive(Clone)]
 pub struct RuntimeContext {
+    /// Identifier of the flow currently executing (matches `WaferFlow::id`).
     pub flow_id: String,
+    /// Identifier of the node within the flow that triggered this context.
     pub node_id: String,
+    /// Resolved per-block config map (string-keyed) snapshotted at flow start.
     pub config: Arc<HashMap<String, String>>,
+    /// Shared cancellation flag — set by the runtime when the flow is aborted.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional wall-clock deadline after which the runtime will signal cancellation.
     pub deadline: Option<Instant>,
     /// All registered blocks.
     pub all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,

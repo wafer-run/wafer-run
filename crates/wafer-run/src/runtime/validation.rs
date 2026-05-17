@@ -10,7 +10,9 @@ use wafer_block::types::{BlockInfo, InterfaceSpec};
 /// A single `(block, key)` pair whose required config value was not provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingConfig {
+    /// Name of the block whose required key is missing.
     pub block_name: String,
+    /// Key that was declared required but not provided.
     pub key: String,
 }
 
@@ -71,7 +73,10 @@ pub enum ActionCheck {
     /// The action is not listed in the interface's action map.
     ///
     /// Message is pre-formatted for use in a `WaferError::invalid_argument`.
-    Invalid { message: String },
+    Invalid {
+        /// Pre-formatted, human-readable error message suitable for surfacing to callers.
+        message: String,
+    },
     /// The block's interface string does not match any registered `InterfaceSpec`.
     ///
     /// Caller should warn-once and then treat the call as valid (backward compat

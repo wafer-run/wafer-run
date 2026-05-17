@@ -10,30 +10,43 @@ use crate::{
 /// ObservabilityContext provides metadata for observability hooks.
 #[derive(Clone)]
 pub struct ObservabilityContext {
+    /// Identifier of the flow currently executing.
     pub flow_id: String,
+    /// Slash-delimited path of the node within the flow tree.
     pub node_path: String,
+    /// Registered block name handling this node.
     pub block_name: String,
+    /// Per-flow trace correlation id propagated to downstream calls.
     pub trace_id: String,
+    /// Message currently in flight, if available at this hook point.
     pub message: Option<Message>,
 }
 
+/// Closure invoked when a block starts executing (native target — requires `Send + Sync`).
 #[cfg(not(target_arch = "wasm32"))]
 pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext) + Send + Sync>;
+/// Closure invoked when a block starts executing (wasm32 target — single-threaded).
 #[cfg(target_arch = "wasm32")]
 pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext)>;
 
+/// Closure invoked when a block finishes, with its elapsed duration (native target).
 #[cfg(not(target_arch = "wasm32"))]
 pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration) + Send + Sync>;
+/// Closure invoked when a block finishes, with its elapsed duration (wasm32 target).
 #[cfg(target_arch = "wasm32")]
 pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration)>;
 
+/// Closure invoked at the start of a flow (native target).
 #[cfg(not(target_arch = "wasm32"))]
 pub type FlowStartHandler = Arc<dyn Fn(&str, &Message) + Send + Sync>;
+/// Closure invoked at the start of a flow (wasm32 target).
 #[cfg(target_arch = "wasm32")]
 pub type FlowStartHandler = Arc<dyn Fn(&str, &Message)>;
 
+/// Closure invoked at the end of a flow with its total duration (native target).
 #[cfg(not(target_arch = "wasm32"))]
 pub type FlowEndHandler = Arc<dyn Fn(&str, Duration) + Send + Sync>;
+/// Closure invoked at the end of a flow with its total duration (wasm32 target).
 #[cfg(target_arch = "wasm32")]
 pub type FlowEndHandler = Arc<dyn Fn(&str, Duration)>;
 
@@ -46,6 +59,7 @@ pub struct ObservabilityBus {
 }
 
 impl ObservabilityBus {
+    /// Create an empty bus with no subscribers.
     pub fn new() -> Self {
         Self {
             block_start_handlers: RwLock::new(Vec::new()),
@@ -55,6 +69,7 @@ impl ObservabilityBus {
         }
     }
 
+    /// Register a callback fired immediately before each block runs.
     pub fn on_block_start(
         &self,
         h: impl Fn(&ObservabilityContext) + MaybeSend + MaybeSync + 'static,
@@ -62,6 +77,7 @@ impl ObservabilityBus {
         self.block_start_handlers.write().push(Arc::new(h));
     }
 
+    /// Register a callback fired immediately after each block runs, with its elapsed duration.
     pub fn on_block_end(
         &self,
         h: impl Fn(&ObservabilityContext, Duration) + MaybeSend + MaybeSync + 'static,
@@ -69,10 +85,12 @@ impl ObservabilityBus {
         self.block_end_handlers.write().push(Arc::new(h));
     }
 
+    /// Register a callback fired at the start of every flow execution.
     pub fn on_flow_start(&self, h: impl Fn(&str, &Message) + MaybeSend + MaybeSync + 'static) {
         self.flow_start_handlers.write().push(Arc::new(h));
     }
 
+    /// Register a callback fired at the end of every flow execution.
     pub fn on_flow_end(&self, h: impl Fn(&str, Duration) + MaybeSend + MaybeSync + 'static) {
         self.flow_end_handlers.write().push(Arc::new(h));
     }
