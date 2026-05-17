@@ -237,10 +237,14 @@ pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Respo
 }
 
 fn internal_error_response() -> axum::http::Response<Body> {
+    // `.body()` only errors on header-builder misuse; this hand-rolled
+    // response sets neither headers nor an extension that could fail. The
+    // expect documents the structural invariant rather than papering over
+    // a runtime error case.
     axum::http::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .body(Body::from("internal server error"))
-        .unwrap()
+        .expect("static response body is always well-formed")
 }
 
 // ---------------------------------------------------------------------------
