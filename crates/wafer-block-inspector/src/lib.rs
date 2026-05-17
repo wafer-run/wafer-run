@@ -1,3 +1,10 @@
+#![warn(missing_docs)]
+//! Runtime introspection block (`wafer-run/inspector`).
+//!
+//! Exposes a read-only HTTP surface that lists the runtime's registered blocks,
+//! flows, and interface specs, plus a small static HTML UI for browsing them.
+//! Intended for operators and developers; access defaults to the `admin` role.
+
 use parking_lot::RwLock;
 use wafer_block::*;
 
@@ -16,8 +23,12 @@ enum AccessPolicy {
     Roles(Vec<String>),
 }
 
-/// InspectorBlock provides runtime introspection — listing blocks, flows, and
-/// serving a visual UI.
+/// Read-only HTTP block that exposes the runtime's registered blocks, flows,
+/// and interface specs as JSON, plus a small HTML UI at `/ui`.
+///
+/// Routes (suffix-matched against the message path so any mount prefix works):
+/// `/app`, `/blocks`, `/blocks/{name}`, `/flows`, `/flows/{id}`,
+/// `/interfaces`, `/ui`; any other path returns a counts summary.
 pub struct InspectorBlock {
     policy: RwLock<AccessPolicy>,
 }
@@ -29,6 +40,10 @@ impl Default for InspectorBlock {
 }
 
 impl InspectorBlock {
+    /// Construct an inspector with the default `admin`-role access policy.
+    ///
+    /// Override at lifecycle `Init` time by passing config of the shape
+    /// `{ "allow_anonymous": true }` or `{ "allowed_roles": ["..."] }`.
     pub fn new() -> Self {
         Self {
             policy: RwLock::new(AccessPolicy::Roles(vec!["admin".to_string()])),
