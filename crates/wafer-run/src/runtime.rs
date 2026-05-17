@@ -30,26 +30,11 @@ const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 /// ABI version for WASM block compatibility.
 pub const ABI_VERSION: u32 = 1;
 
-/// Result of [`Wafer::validate_all_block_configs`]. Used by the `/_health`
-/// route to short-circuit boot when a required env var is missing.
-#[derive(Debug, Clone)]
-pub struct ValidationReport {
-    /// Block names whose declared config keys all resolved successfully.
-    /// Sorted lexicographically for deterministic output.
-    pub ok: Vec<String>,
-    /// Blocks with missing required keys or an unreachable config source.
-    /// Sorted by `block` for deterministic output.
-    pub broken: Vec<BrokenBlock>,
-}
-
-/// A single block that failed declared-key validation.
-#[derive(Debug, Clone)]
-pub struct BrokenBlock {
-    pub block: String,
-    /// Missing required keys. Currently carries at most one entry — see
-    /// [`Wafer::validate_all_block_configs`] for why.
-    pub missing_keys: Vec<String>,
-}
+// Re-export so consumers continue to write `wafer_run::ValidationReport` /
+// `wafer_run::BrokenBlock`. The canonical definitions now live in
+// `wafer-block` (alongside the `Context` trait whose
+// `validate_all_block_configs` method returns them).
+pub use wafer_block::{BrokenBlock, ValidationReport};
 
 /// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
 #[cfg(feature = "wasm")]

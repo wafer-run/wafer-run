@@ -47,6 +47,7 @@ pub mod router;
 pub mod spawn;
 pub mod stream;
 pub mod streams;
+pub mod validation;
 pub mod wrap;
 
 pub use block::Block;
@@ -69,3 +70,4 @@ pub use streams::{
     input::InputStream,
     output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };
+pub use validation::{BrokenBlock, ValidationReport};
