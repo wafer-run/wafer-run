@@ -5,11 +5,16 @@ use serde::{Deserialize, Serialize};
 
 // --- Requests ---
 
+/// Request for `storage.put`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutRequest {
+    /// Folder (bucket) name.
     pub folder: String,
+    /// Object key within `folder`.
     pub key: String,
+    /// Object body bytes.
     pub data: Vec<u8>,
+    /// MIME type (defaults to `application/octet-stream`).
     #[serde(default = "default_content_type")]
     pub content_type: String,
 }
@@ -18,38 +23,54 @@ fn default_content_type() -> String {
     "application/octet-stream".to_string()
 }
 
+/// Request for `storage.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
+    /// Folder (bucket) name.
     pub folder: String,
+    /// Object key within `folder`.
     pub key: String,
 }
 
+/// Request for `storage.delete`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRequest {
+    /// Folder (bucket) name.
     pub folder: String,
+    /// Object key within `folder`.
     pub key: String,
 }
 
+/// Request for `storage.list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListRequest {
+    /// Folder (bucket) name.
     pub folder: String,
+    /// Optional key prefix to filter on.
     #[serde(default)]
     pub prefix: String,
+    /// Maximum number of objects to return (0 = backend default).
     #[serde(default)]
     pub limit: i64,
+    /// Number of objects to skip for pagination.
     #[serde(default)]
     pub offset: i64,
 }
 
+/// Request for `storage.create_folder`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFolderRequest {
+    /// Folder name to create.
     pub name: String,
+    /// Whether the folder grants public read access.
     #[serde(default)]
     pub public: bool,
 }
 
+/// Request for `storage.delete_folder`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteFolderRequest {
+    /// Folder name to delete.
     pub name: String,
 }
 
@@ -58,30 +79,42 @@ pub struct DeleteFolderRequest {
 /// Metadata about a stored object, returned inside `GetResponse` and `ObjectList`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectInfo {
+    /// Object key.
     pub key: String,
+    /// Object size in bytes.
     pub size: i64,
+    /// MIME type.
     pub content_type: String,
+    /// Last-modified timestamp (UTC).
     pub last_modified: DateTime<Utc>,
 }
 
+/// Response for `storage.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetResponse {
+    /// Object body bytes.
     pub data: Vec<u8>,
+    /// Object metadata.
     pub info: ObjectInfo,
 }
 
 /// Paginated list of objects returned by the `list` operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectList {
+    /// Objects in this page.
     pub objects: Vec<ObjectInfo>,
+    /// Total number of objects matching the filter (across all pages).
     pub total_count: i64,
 }
 
 /// Metadata about a storage folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderInfo {
+    /// Folder name.
     pub name: String,
+    /// Whether the folder grants public read access.
     pub public: bool,
+    /// Folder creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
 }
 

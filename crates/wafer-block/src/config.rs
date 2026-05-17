@@ -12,6 +12,9 @@ pub struct BlockConfig {
 }
 
 impl BlockConfig {
+    /// Parse the JSON payload from a [`LifecycleEvent`] (e.g. the `Start`
+    /// event carrying per-flow-step config) into a [`BlockConfig`]. Invalid
+    /// or empty payloads yield an empty config (all lookups return defaults).
     pub fn from_event(event: &LifecycleEvent) -> Self {
         let inner = if !event.data.is_empty() {
             serde_json::from_slice(&event.data).ok()
@@ -21,6 +24,8 @@ impl BlockConfig {
         Self { inner }
     }
 
+    /// Return the string-typed value for `key`, or `""` if missing or
+    /// the value is not a JSON string.
     pub fn str(&self, key: &str) -> &str {
         self.inner
             .as_ref()
@@ -29,15 +34,20 @@ impl BlockConfig {
             .unwrap_or("")
     }
 
+    /// Return the raw JSON value for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.inner.as_ref().and_then(|c| c.get(key))
     }
 
+    /// Parse the standard `block` / `flow` keys into a [`DispatchTarget`].
     pub fn dispatch_target(&self) -> Option<DispatchTarget> {
         DispatchTarget::from_config(self.inner.as_ref())
     }
 }
 
+/// Flatten the top-level keys of a JSON object into a `HashMap<String,
+/// String>`. Strings, numbers, and booleans are stringified; nested
+/// objects/arrays are ignored.
 pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap<String, String> {
     let mut cfg = std::collections::HashMap::new();
     if let Some(obj) = config.as_object() {
@@ -59,6 +69,9 @@ pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap
     cfg
 }
 
+/// Parse a duration string of the form `"30s"`, `"500ms"`, `"5m"`, `"2h"`
+/// (or a bare integer = seconds). Returns [`Duration::ZERO`] on empty or
+/// malformed input (logged as a warning).
 pub fn parse_duration(s: &str) -> Duration {
     if s.is_empty() {
         return Duration::ZERO;
@@ -87,11 +100,15 @@ pub fn parse_duration(s: &str) -> Duration {
 /// A dispatch target: either a flow or a single block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DispatchTarget {
+    /// Dispatch to a named flow.
     Flow(String),
+    /// Dispatch directly to a single block by name.
     Block(String),
 }
 
 impl DispatchTarget {
+    /// Extract a [`DispatchTarget`] from the standard `block` / `flow` keys
+    /// of a JSON config object. `block` takes precedence over `flow`.
     pub fn from_config(config: Option<&serde_json::Value>) -> Option<Self> {
         let block = config
             .and_then(|c| c.get("block"))

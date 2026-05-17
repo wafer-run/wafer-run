@@ -4,12 +4,17 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Outbound HTTP request payload for `network.do`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
+    /// HTTP method (e.g. `"GET"`, `"POST"`).
     pub method: String,
+    /// Target URL.
     pub url: String,
+    /// Request headers (single value per name).
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Optional request body bytes.
     #[serde(default)]
     pub body: Option<Vec<u8>>,
 }
@@ -18,7 +23,9 @@ pub struct Request {
 /// Contains all the response metadata except the body itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseHeader {
+    /// HTTP status code (e.g. `200`, `404`).
     pub status_code: u16,
+    /// Response headers (each name may have multiple values).
     pub headers: HashMap<String, Vec<String>>,
 }
 
@@ -26,8 +33,11 @@ pub struct ResponseHeader {
 /// SDK helper reconstructs this from `ResponseHeader` + accumulated chunks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
+    /// HTTP status code (e.g. `200`, `404`).
     pub status_code: u16,
+    /// Response headers (each name may have multiple values).
     pub headers: HashMap<String, Vec<String>>,
+    /// Full response body bytes.
     pub body: Vec<u8>,
 }
 

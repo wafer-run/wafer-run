@@ -6,21 +6,28 @@ use serde::{Deserialize, Serialize};
 
 // --- Requests ---
 
+/// Request for `config.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
+    /// Full config key (e.g. `SOLOBASE__JWT_SECRET`).
     pub key: String,
 }
 
+/// Request for `config.set`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRequest {
+    /// Full config key to write.
     pub key: String,
+    /// New stringified value.
     pub value: String,
 }
 
 // --- Responses ---
 
+/// Response for `config.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetResponse {
+    /// Resolved value, or `""` when the key is unset.
     pub value: String,
 }
 

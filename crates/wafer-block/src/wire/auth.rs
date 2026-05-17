@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 
 // --- Requests ---
 
+/// Request for `auth.user_profile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfileRequest {
+    /// User id whose profile to fetch.
     pub user_id: String,
 }
 
@@ -24,27 +26,37 @@ pub struct UserProfileRequest {
 /// Response for `auth.require_user` / `auth.require_token` / `auth.require_role`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserIdResponse {
+    /// Authenticated user id resolved from the request context.
     pub user_id: String,
 }
 
 /// Org summary embedded in `UserProfileResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgSummary {
+    /// Org short name (slug).
     pub name: String,
+    /// External provider used for org verification (e.g. `"github"`).
     pub verified_via: Option<String>,
+    /// External provider-side identifier the verification refers to.
     pub verified_ref: Option<String>,
+    /// Whether this org name is reserved by the platform.
     pub is_reserved: bool,
 }
 
 /// Response for `auth.user_profile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfileResponse {
+    /// User id.
     pub id: String,
+    /// Primary email address.
     pub email: String,
+    /// User-chosen display name.
     pub display_name: String,
+    /// Optional avatar URL.
     pub avatar_url: Option<String>,
     /// `"User"` or `"Admin"` — matches `auth::service::Role` serde repr.
     pub role: String,
+    /// Orgs this user is a member of.
     pub orgs: Vec<OrgSummary>,
 }
 

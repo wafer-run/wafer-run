@@ -4,21 +4,25 @@
 //! On `wasm32`, they are blanket-implemented for all types so that traits can
 //! drop the `Send + Sync` requirement without duplicating their definition.
 
+/// Trait alias: `Send` on native, an empty marker on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSend: Send {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Send + ?Sized> MaybeSend for T {}
 
+/// Trait alias: `Send` on native, an empty marker on wasm32.
 #[cfg(target_arch = "wasm32")]
 pub trait MaybeSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSend for T {}
 
+/// Trait alias: `Sync` on native, an empty marker on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSync: Sync {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Sync + ?Sized> MaybeSync for T {}
 
+/// Trait alias: `Sync` on native, an empty marker on wasm32.
 #[cfg(target_arch = "wasm32")]
 pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]

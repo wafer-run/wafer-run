@@ -16,12 +16,16 @@ use std::collections::HashMap;
 /// HTTP method for block endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HttpMethod {
+    /// HTTP `GET`.
     #[serde(rename = "GET")]
     Get,
+    /// HTTP `POST`.
     #[serde(rename = "POST")]
     Post,
+    /// HTTP `PATCH`.
     #[serde(rename = "PATCH")]
     Patch,
+    /// HTTP `DELETE`.
     #[serde(rename = "DELETE")]
     Delete,
 }
@@ -41,9 +45,12 @@ impl std::fmt::Display for HttpMethod {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthLevel {
+    /// No authentication required.
     #[default]
     Public,
+    /// Any logged-in user is allowed.
     Authenticated,
+    /// Admin role required.
     Admin,
 }
 
@@ -74,8 +81,10 @@ pub enum BlockCategory {
 /// Whether a block runs as native code or as a sandboxed WASM component.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlockRuntime {
+    /// Block compiled into the host binary as native code.
     #[default]
     Native,
+    /// Block loaded as a sandboxed WASM module.
     Wasm,
 }
 
@@ -112,6 +121,8 @@ impl std::fmt::Display for ResourceType {
 }
 
 impl ResourceType {
+    /// Parse a `ResourceType` from its lowercase string form. Returns `None`
+    /// for unrecognized values.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "db" => Some(Self::Db),
@@ -184,12 +195,19 @@ fn default_instance_mode() -> crate::InstanceMode {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockInfo {
     // -- Core identity --
+    /// Block name in the canonical `{org}/{block}` form.
     pub name: String,
+    /// Semantic version string for the block implementation.
     pub version: String,
+    /// Interface identifier (e.g. `"middleware@v1"`) — see [`InterfaceSpec`].
     pub interface: String,
+    /// One-line human-readable summary of what the block does.
     pub summary: String,
+    /// How many instances are created and when (default: `PerNode`).
     #[serde(default = "default_instance_mode")]
     pub instance_mode: crate::InstanceMode,
+    /// Names of other blocks this block depends on. Used by the runtime to
+    /// validate the registry and (eventually) order initialization.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
 
@@ -316,16 +334,19 @@ impl BlockInfo {
         }
     }
 
+    /// Set the [`crate::InstanceMode`] (default: `PerNode`).
     pub fn instance_mode(mut self, mode: crate::InstanceMode) -> Self {
         self.instance_mode = mode;
         self
     }
 
+    /// Set the list of dependency block names.
     pub fn requires(mut self, requires: Vec<String>) -> Self {
         self.requires = requires;
         self
     }
 
+    /// Set the database collections this block declares.
     pub fn collections(mut self, collections: Vec<CollectionSchema>) -> Self {
         self.collections = collections;
         self
@@ -338,46 +359,55 @@ impl BlockInfo {
         self
     }
 
+    /// Set the process env-var-style config keys this block declares.
     pub fn config_keys(mut self, config_keys: Vec<BlockConfigKey>) -> Self {
         self.config_keys = config_keys;
         self
     }
 
+    /// Set the WRAP resource grants this block issues to other blocks.
     pub fn grants(mut self, grants: Vec<ResourceGrant>) -> Self {
         self.grants = grants;
         self
     }
 
+    /// Set the admin-UI category for this block.
     pub fn category(mut self, category: BlockCategory) -> Self {
         self.category = category;
         self
     }
 
+    /// Set the runtime kind (native vs WASM).
     pub fn runtime(mut self, runtime: BlockRuntime) -> Self {
         self.runtime = runtime;
         self
     }
 
+    /// Mark this block as admin-disable-able.
     pub fn can_disable(mut self, can_disable: bool) -> Self {
         self.can_disable = can_disable;
         self
     }
 
+    /// Set whether the block is enabled on first run.
     pub fn default_enabled(mut self, default_enabled: bool) -> Self {
         self.default_enabled = default_enabled;
         self
     }
 
+    /// Set the longer description shown in the admin UI.
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
         self
     }
 
+    /// Set the HTTP endpoints exposed by this block.
     pub fn endpoints(mut self, endpoints: Vec<BlockEndpoint>) -> Self {
         self.endpoints = endpoints;
         self
     }
 
+    /// Set the relative URL where the block's admin UI lives.
     pub fn admin_url(mut self, url: impl Into<String>) -> Self {
         self.admin_url = url.into();
         self
@@ -391,16 +421,19 @@ impl BlockInfo {
         self
     }
 
+    /// Mark this block as an agent-callable skill.
     pub fn role(mut self, role: SkillRole) -> Self {
         self.role = Some(role);
         self
     }
 
+    /// Attach the OpenAI-compatible tool descriptor used by agent blocks.
     pub fn tool(mut self, tool: SkillTool) -> Self {
         self.tool = Some(tool);
         self
     }
 
+    /// Declare heavy external WASM/JS assets the host must lazily fetch.
     pub fn external_assets(mut self, assets: Vec<ExternalAsset>) -> Self {
         self.external_assets = assets;
         self
@@ -410,24 +443,35 @@ impl BlockInfo {
 /// An HTTP endpoint exposed by a block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockEndpoint {
+    /// HTTP method this endpoint responds to.
     pub method: HttpMethod,
+    /// Absolute URL path (typically `/b/{block}/...`).
     pub path: String,
+    /// Short summary shown in the admin/OpenAPI UI.
     #[serde(default)]
     pub summary: String,
+    /// Auth level required by the router to admit a request.
     #[serde(default)]
     pub auth: AuthLevel,
+    /// Longer description for OpenAPI / docs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// JSON Schema describing the request body, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<serde_json::Value>,
+    /// JSON Schema describing the response body, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+    /// JSON Schema describing URL path parameters, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_params: Option<serde_json::Value>,
+    /// JSON Schema describing query parameters, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_params: Option<serde_json::Value>,
+    /// Free-form tags for grouping endpoints in OpenAPI.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Whether the endpoint is marked deprecated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deprecated: bool,
 }
@@ -467,62 +511,75 @@ impl BlockEndpoint {
         }
     }
 
+    /// Create a `GET` endpoint at `path`.
     pub fn get(path: &str) -> Self {
         Self::new(HttpMethod::Get, path)
     }
 
+    /// Create a `POST` endpoint at `path`.
     pub fn post(path: &str) -> Self {
         Self::new(HttpMethod::Post, path)
     }
 
+    /// Create a `PATCH` endpoint at `path`.
     pub fn patch(path: &str) -> Self {
         Self::new(HttpMethod::Patch, path)
     }
 
+    /// Create a `DELETE` endpoint at `path`.
     pub fn delete(path: &str) -> Self {
         Self::new(HttpMethod::Delete, path)
     }
 
+    /// Set the short summary text.
     pub fn summary(mut self, summary: &str) -> Self {
         self.summary = summary.into();
         self
     }
 
+    /// Set the longer description text.
     pub fn description(mut self, description: &str) -> Self {
         self.description = description.into();
         self
     }
 
+    /// Set the required [`AuthLevel`].
     pub fn auth(mut self, auth: AuthLevel) -> Self {
         self.auth = auth;
         self
     }
 
+    /// Attach a manually-specified JSON Schema for the request body.
     pub fn input_schema(mut self, schema: serde_json::Value) -> Self {
         self.input_schema = Some(schema);
         self
     }
 
+    /// Attach a manually-specified JSON Schema for the response body.
     pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
         self.output_schema = Some(schema);
         self
     }
 
+    /// Attach a manually-specified JSON Schema for URL path parameters.
     pub fn path_params_schema(mut self, schema: serde_json::Value) -> Self {
         self.path_params = Some(schema);
         self
     }
 
+    /// Attach a manually-specified JSON Schema for query parameters.
     pub fn query_params_schema(mut self, schema: serde_json::Value) -> Self {
         self.query_params = Some(schema);
         self
     }
 
+    /// Set the OpenAPI tag list.
     pub fn tags(mut self, tags: &[&str]) -> Self {
         self.tags = tags.iter().map(|s| s.to_string()).collect();
         self
     }
 
+    /// Mark the endpoint as deprecated.
     pub fn deprecated(mut self) -> Self {
         self.deprecated = true;
         self
@@ -536,6 +593,7 @@ impl BlockEndpoint {
             || self.query_params.is_some()
     }
 
+    /// Derive the request-body JSON Schema from `T` via `schemars`.
     #[cfg(feature = "json-schema")]
     pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
         let schema = schemars::schema_for!(T);
@@ -543,6 +601,7 @@ impl BlockEndpoint {
         self
     }
 
+    /// Derive the response-body JSON Schema from `T` via `schemars`.
     #[cfg(feature = "json-schema")]
     pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
         let schema = schemars::schema_for!(T);
@@ -550,6 +609,7 @@ impl BlockEndpoint {
         self
     }
 
+    /// Derive the path-params JSON Schema from `T` via `schemars`.
     #[cfg(feature = "json-schema")]
     pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
         let schema = schemars::schema_for!(T);
@@ -557,6 +617,7 @@ impl BlockEndpoint {
         self
     }
 
+    /// Derive the query-params JSON Schema from `T` via `schemars`.
     #[cfg(feature = "json-schema")]
     pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
         let schema = schemars::schema_for!(T);
@@ -570,11 +631,16 @@ impl BlockEndpoint {
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum InputType {
+    /// Plain text input.
     #[default]
     Text,
+    /// Boolean on/off toggle.
     Toggle,
+    /// Password field (masked, treated as sensitive).
     Password,
+    /// Color picker.
     Color,
+    /// URL field (validated on write).
     Url,
 }
 
@@ -634,26 +700,31 @@ impl ConfigVar {
         }
     }
 
+    /// Set the display label for the admin UI.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
     }
 
+    /// Set the human-readable description.
     pub fn description(mut self, description: &str) -> Self {
         self.description = description.into();
         self
     }
 
+    /// Set the default value used when the variable is not configured.
     pub fn default_value(mut self, default: &str) -> Self {
         self.default = default.into();
         self
     }
 
+    /// Set the UI [`InputType`] (drives masking, validation, widget).
     pub fn input_type(mut self, input_type: InputType) -> Self {
         self.input_type = input_type;
         self
     }
 
+    /// Attach a warning string shown in the admin UI on edit.
     pub fn warning(mut self, warning: &str) -> Self {
         self.warning = warning.into();
         self
@@ -736,8 +807,11 @@ pub struct ActionSpec {
 /// A database collection (table) declared by a block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionSchema {
+    /// Collection (table) name, typically `{org}__{block}__{name}`.
     pub name: String,
+    /// Field (column) definitions.
     pub fields: Vec<FieldSchema>,
+    /// Indexes to be ensured on the collection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<IndexSchema>,
 }
@@ -745,14 +819,20 @@ pub struct CollectionSchema {
 /// A field (column) in a collection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FieldSchema {
+    /// Column name.
     pub name: String,
+    /// Backend-portable type name (e.g. `"text"`, `"integer"`, `"json"`).
     pub field_type: String,
+    /// Whether values in this column must be unique.
     #[serde(default)]
     pub unique: bool,
+    /// Whether the column is nullable.
     #[serde(default)]
     pub optional: bool,
+    /// Default value expression (empty = no default).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_value: String,
+    /// Optional foreign-key reference, formatted as `"table.column"`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reference: String,
 }
@@ -760,7 +840,9 @@ pub struct FieldSchema {
 /// An index on a collection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexSchema {
+    /// Column names included in the index, in order.
     pub fields: Vec<String>,
+    /// Whether the index enforces a uniqueness constraint.
     #[serde(default)]
     pub unique: bool,
 }
@@ -770,6 +852,7 @@ pub struct IndexSchema {
 // ---------------------------------------------------------------------------
 
 impl CollectionSchema {
+    /// Start a new collection definition with the given table name.
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -778,35 +861,41 @@ impl CollectionSchema {
         }
     }
 
+    /// Append a plain field of `field_type`.
     pub fn field(mut self, name: &str, field_type: &str) -> Self {
         self.fields.push(FieldSchema::new(name, field_type));
         self
     }
 
+    /// Append a uniqueness-constrained field.
     pub fn field_unique(mut self, name: &str, field_type: &str) -> Self {
         self.fields
             .push(FieldSchema::new(name, field_type).set_unique());
         self
     }
 
+    /// Append a nullable field.
     pub fn field_optional(mut self, name: &str, field_type: &str) -> Self {
         self.fields
             .push(FieldSchema::new(name, field_type).set_optional());
         self
     }
 
+    /// Append a field with a default value.
     pub fn field_default(mut self, name: &str, field_type: &str, default: &str) -> Self {
         self.fields
             .push(FieldSchema::new(name, field_type).set_default(default));
         self
     }
 
+    /// Append a foreign-key field referencing `reference` (`"table.column"`).
     pub fn field_ref(mut self, name: &str, field_type: &str, reference: &str) -> Self {
         self.fields
             .push(FieldSchema::new(name, field_type).set_ref(reference));
         self
     }
 
+    /// Append a non-unique index over the given fields.
     pub fn index(mut self, fields: &[&str]) -> Self {
         self.indexes.push(IndexSchema {
             fields: fields.iter().map(|s| s.to_string()).collect(),
@@ -815,6 +904,7 @@ impl CollectionSchema {
         self
     }
 
+    /// Append a unique index over the given fields.
     pub fn unique_index(mut self, fields: &[&str]) -> Self {
         self.indexes.push(IndexSchema {
             fields: fields.iter().map(|s| s.to_string()).collect(),
@@ -825,6 +915,7 @@ impl CollectionSchema {
 }
 
 impl FieldSchema {
+    /// Create a new field with the given name and type.
     pub fn new(name: &str, field_type: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -836,18 +927,22 @@ impl FieldSchema {
         }
     }
 
+    /// Mark the field as unique.
     pub fn set_unique(mut self) -> Self {
         self.unique = true;
         self
     }
+    /// Mark the field as nullable.
     pub fn set_optional(mut self) -> Self {
         self.optional = true;
         self
     }
+    /// Set the field's default value expression.
     pub fn set_default(mut self, val: &str) -> Self {
         self.default_value = val.to_string();
         self
     }
+    /// Set the field's foreign-key reference (`"table.column"`).
     pub fn set_ref(mut self, reference: &str) -> Self {
         self.reference = reference.to_string();
         self
@@ -868,6 +963,7 @@ pub struct UiRoute {
 }
 
 impl UiRoute {
+    /// Build a UI route with an explicit list of required role names.
     pub fn new(path: &str, roles: &[&str]) -> Self {
         Self {
             path: path.to_string(),
@@ -900,20 +996,31 @@ impl UiRoute {
 /// the string literals — same name, same place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
+    /// Read (GET).
     Retrieve,
+    /// Create (POST).
     Create,
+    /// Mutate (PATCH/PUT).
     Update,
+    /// Remove (DELETE).
     Delete,
+    /// Custom RPC-style action (POST without CRUD semantics).
     Execute,
 }
 
 impl RequestAction {
+    /// Wire constant for [`Self::Retrieve`].
     pub const RETRIEVE: &'static str = "retrieve";
+    /// Wire constant for [`Self::Create`].
     pub const CREATE: &'static str = "create";
+    /// Wire constant for [`Self::Update`].
     pub const UPDATE: &'static str = "update";
+    /// Wire constant for [`Self::Delete`].
     pub const DELETE: &'static str = "delete";
+    /// Wire constant for [`Self::Execute`].
     pub const EXECUTE: &'static str = "execute";
 
+    /// Return the canonical lowercase string for this action.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Retrieve => Self::RETRIEVE,
@@ -929,23 +1036,42 @@ impl RequestAction {
 // ErrorCode backward-compatible constants
 // ---------------------------------------------------------------------------
 
+/// Backward-compatible `SCREAMING_CASE` aliases for [`crate::ErrorCode`]
+/// variants. Newer code should prefer the variant names directly.
 impl crate::ErrorCode {
+    /// Alias for [`Self::Ok`].
     pub const OK: Self = Self::Ok;
+    /// Alias for [`Self::Cancelled`].
     pub const CANCELLED: Self = Self::Cancelled;
+    /// Alias for [`Self::Unknown`].
     pub const UNKNOWN: Self = Self::Unknown;
+    /// Alias for [`Self::InvalidArgument`].
     pub const INVALID_ARGUMENT: Self = Self::InvalidArgument;
+    /// Alias for [`Self::DeadlineExceeded`].
     pub const DEADLINE_EXCEEDED: Self = Self::DeadlineExceeded;
+    /// Alias for [`Self::NotFound`].
     pub const NOT_FOUND: Self = Self::NotFound;
+    /// Alias for [`Self::AlreadyExists`].
     pub const ALREADY_EXISTS: Self = Self::AlreadyExists;
+    /// Alias for [`Self::PermissionDenied`].
     pub const PERMISSION_DENIED: Self = Self::PermissionDenied;
+    /// Alias for [`Self::ResourceExhausted`].
     pub const RESOURCE_EXHAUSTED: Self = Self::ResourceExhausted;
+    /// Alias for [`Self::FailedPrecondition`].
     pub const FAILED_PRECONDITION: Self = Self::FailedPrecondition;
+    /// Alias for [`Self::Aborted`].
     pub const ABORTED: Self = Self::Aborted;
+    /// Alias for [`Self::OutOfRange`].
     pub const OUT_OF_RANGE: Self = Self::OutOfRange;
+    /// Alias for [`Self::Unimplemented`].
     pub const UNIMPLEMENTED: Self = Self::Unimplemented;
+    /// Alias for [`Self::Internal`].
     pub const INTERNAL: Self = Self::Internal;
+    /// Alias for [`Self::Unavailable`].
     pub const UNAVAILABLE: Self = Self::Unavailable;
+    /// Alias for [`Self::DataLoss`].
     pub const DATA_LOSS: Self = Self::DataLoss;
+    /// Alias for [`Self::Unauthenticated`].
     pub const UNAUTHENTICATED: Self = Self::Unauthenticated;
 }
 
@@ -1111,8 +1237,11 @@ impl crate::Message {
 
 /// Convenience trait giving `HashMap`-like access to `Vec<MetaEntry>`.
 pub trait MetaAccess {
+    /// Look up the value for `key`, returning `None` if absent.
     fn get(&self, key: &str) -> Option<&str>;
+    /// Set `key` to `value`, replacing any existing entry with the same key.
     fn set(&mut self, key: String, value: String);
+    /// Whether an entry for `key` exists.
     fn contains_key(&self, key: &str) -> bool;
 }
 
@@ -1178,6 +1307,7 @@ pub enum SkillRole {
 /// Mirrors the shape consumed by WebLLM and remote LLM providers.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillTool {
+    /// Natural-language description shown to the LLM.
     pub description: String,
     /// Free-form JSON Schema describing the tool's input arguments.
     pub parameters: serde_json::Value,
@@ -1198,10 +1328,15 @@ pub struct SkillTool {
 /// longer than the default on slow links (e.g. ffmpeg-core ~31 MB).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExternalAsset {
+    /// Stable asset identifier used by the host loader (e.g. `"ffmpeg-core"`).
     pub id: String,
+    /// Controlled-vocabulary loader name the host knows how to invoke.
     pub loader: String,
+    /// Asset version string for cache-busting/audit.
     pub version: String,
+    /// Source URL the host fetches the asset from.
     pub url: String,
+    /// Expected SHA-256 (hex) of the asset bytes, verified after download.
     pub sha256: String,
     /// Optional per-asset load timeout in milliseconds. When `None`, the
     /// host applies its default. `skip_serializing_if = "Option::is_none"`

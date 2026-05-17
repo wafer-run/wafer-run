@@ -8,6 +8,9 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{ErrorCode, WaferError};
 
+/// Encode `v` as MessagePack bytes using named-map field encoding for forward
+/// compatibility. Returns a [`WaferError`] with [`ErrorCode::INTERNAL`] on
+/// serialization failure.
 pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     // `to_vec_named` (not `to_vec`) encodes structs as named maps rather than
     // positional arrays. This keeps the wire format forward-compatible:
@@ -23,6 +26,9 @@ pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     })
 }
 
+/// Decode MessagePack bytes into `T`. Unknown fields are ignored (forward
+/// compatibility). Returns a [`WaferError`] with [`ErrorCode::INTERNAL`] on
+/// deserialization failure.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WaferError> {
     rmp_serde::from_slice(bytes).map_err(|e| {
         WaferError::new(

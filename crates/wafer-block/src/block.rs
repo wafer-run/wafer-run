@@ -18,6 +18,8 @@ use crate::{
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
+    /// Static metadata describing this block (name, version, routes,
+    /// declared config keys, capabilities, etc).
     fn info(&self) -> BlockInfo;
 
     /// Handle an incoming message. Request body bytes (if any) flow in via `input`.
@@ -25,6 +27,8 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     /// one terminal event (Complete/Error/Drop/Continue).
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream;
 
+    /// Lifecycle hook invoked by the runtime for events such as `Init`,
+    /// `Migrate`, and `Shutdown`. Default implementation is a no-op.
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,

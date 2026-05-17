@@ -1,3 +1,8 @@
+//! Output side of a block invocation: an [`OutputStream`] consumer paired
+//! with an [`OutputSink`] producer handle. The producer emits zero or more
+//! [`StreamEvent::Chunk`]/[`StreamEvent::Meta`] events followed by exactly
+//! one terminal event (`Complete`/`Error`/`Drop`/`Continue`).
+
 use std::{
     future::Future,
     pin::Pin,
@@ -248,7 +253,10 @@ impl Drop for OutputStream {
 /// The collected view of a complete output stream, produced by `OutputStream::collect_buffered`.
 #[derive(Debug)]
 pub struct BufferedResponse {
+    /// Concatenated body bytes from all `Chunk` events.
     pub body: Vec<u8>,
+    /// Mid-stream `Meta` entries plus trailing meta from the `Complete`
+    /// terminal, in stream order.
     pub meta: Vec<MetaEntry>,
 }
 
@@ -256,8 +264,11 @@ pub struct BufferedResponse {
 /// with something other than `Complete`.
 #[derive(Debug)]
 pub enum TerminalNotResponse {
+    /// Stream ended with [`StreamEvent::Error`].
     Error(WaferError),
+    /// Stream ended with [`StreamEvent::Drop`].
     Drop,
+    /// Stream ended with [`StreamEvent::Continue`].
     Continue(Message),
     /// Stream ended without emitting any terminal event (protocol violation).
     Malformed,
