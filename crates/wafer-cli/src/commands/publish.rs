@@ -34,7 +34,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
         );
     }
 
-    // TODO: stream via reqwest::Body::wrap_stream once the registry cap grows past a few hundred MiB.
+    // TODO(#104): stream via reqwest::Body::wrap_stream once the registry cap grows past a few hundred MiB.
     let bytes =
         std::fs::read(&tarball_path).with_context(|| format!("read {}", tarball_path.display()))?;
 

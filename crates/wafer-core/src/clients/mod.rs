@@ -147,8 +147,8 @@ pub(crate) fn call_service(
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
     let _ = (block, kind, data, resource, is_write, resource_type);
-    // TODO: implement WASM sync call_block via ABI host import when redesigning
-    // the WASM component path for the streaming protocol.
+    // TODO(#103): implement WASM sync call_block via ABI host import when
+    // redesigning the WASM component path for the streaming protocol.
     Err(WaferError::new(
         ErrorCode::UNIMPLEMENTED,
         "wasm-component call_service not yet implemented for streaming protocol",
