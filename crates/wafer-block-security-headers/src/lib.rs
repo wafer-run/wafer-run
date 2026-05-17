@@ -1,3 +1,13 @@
+//! Security-headers block — appends a baseline of HTTP response headers
+//! (Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options,
+//! X-Frame-Options, Referrer-Policy, Permissions-Policy) to every message
+//! that passes through it. The CSP is tenant-configurable via the `csp`
+//! [`ConfigVar`] but the operator-supplied directives are merged on top of
+//! a restrictive baseline (see [`merge_csp`]) so they can only widen the
+//! policy in safe ways.
+
+#![warn(missing_docs)]
+
 use std::sync::RwLock;
 
 use wafer_block::*;
@@ -34,6 +44,11 @@ impl Default for SecurityHeadersBlock {
 }
 
 impl SecurityHeadersBlock {
+    /// Build a new block seeded with the restrictive [`DEFAULT_CSP`].
+    ///
+    /// Any operator-supplied `csp` config will replace the seeded value
+    /// (after merging through [`merge_csp`]) the first time the runtime
+    /// fires the `Init` lifecycle event.
     pub fn new() -> Self {
         Self {
             csp: RwLock::new(DEFAULT_CSP.to_string()),
