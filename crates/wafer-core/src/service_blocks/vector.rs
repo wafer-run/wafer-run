@@ -22,6 +22,7 @@ pub struct VectorBlock {
 }
 
 impl VectorBlock {
+    /// Wrap the given `VectorService` + `EmbeddingService` pair as a `VectorBlock`.
     pub fn new(vector: Arc<dyn VectorService>, embedding: Arc<dyn EmbeddingService>) -> Self {
         Self { vector, embedding }
     }

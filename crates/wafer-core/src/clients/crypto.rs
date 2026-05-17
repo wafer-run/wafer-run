@@ -20,6 +20,7 @@ const BLOCK: &str = "wafer-run/crypto";
 // ===========================================================================
 
 dual_api! {
+    /// Hash `password` via the crypto block; returns the encoded hash string.
     pub fn hash(ctx, password: &str) -> Result<String, WaferError> {
         let req = HashRequest { password: password.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_HASH, &req, Some("hash"), false, Some("crypto"))?;
@@ -27,6 +28,8 @@ dual_api! {
         Ok(resp.hash)
     }
 
+    /// Verify `password` against `hash`. Returns `Ok(())` on match,
+    /// `Err(UNAUTHENTICATED)` on mismatch, or another `WaferError` on transport failure.
     pub fn compare_hash(ctx, password: &str, hash: &str) -> Result<(), WaferError> {
         let req = CompareHashRequest { password: password.to_string(), hash: hash.to_string() };
         let data = svc!(
@@ -45,6 +48,7 @@ dual_api! {
         }
     }
 
+    /// Issue a signed JWT carrying `claims`, valid for `expiry`.
     pub fn sign(
         ctx,
         claims: &HashMap<String, serde_json::Value>,
@@ -63,6 +67,7 @@ dual_api! {
         Ok(resp.token)
     }
 
+    /// Verify the JWT `token` and return the decoded claims map.
     pub fn verify(ctx, token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
         let req = VerifyRequest { token: token.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, Some("verify"), false, Some("crypto"))?;
@@ -70,6 +75,7 @@ dual_api! {
         Ok(resp.claims)
     }
 
+    /// Return `n` cryptographically random bytes from the crypto block.
     pub fn random_bytes(ctx, n: usize) -> Result<Vec<u8>, WaferError> {
         let req = RandomBytesRequest { n };
         let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_RANDOM_BYTES, &req, Some("random_bytes"), false, Some("crypto"))?;

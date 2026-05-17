@@ -39,6 +39,7 @@ const BLOCK: &str = "wafer-run/storage";
 // ===========================================================================
 
 dual_api! {
+    /// Upload an object to `folder/key` with body `data` and the given `content_type`.
     pub fn put(ctx, folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), WaferError> {
         let req = PutRequest {
             folder: folder.to_string(),
@@ -51,6 +52,7 @@ dual_api! {
         Ok(())
     }
 
+    /// Delete the object at `folder/key`.
     pub fn delete(ctx, folder: &str, key: &str) -> Result<(), WaferError> {
         let req = DeleteRequest {
             folder: folder.to_string(),
@@ -61,6 +63,7 @@ dual_api! {
         Ok(())
     }
 
+    /// List objects in `folder` matching `opts` (prefix / pagination).
     pub fn list(ctx, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
         let req = ListRequest {
             folder: folder.to_string(),
@@ -79,6 +82,7 @@ dual_api! {
         decode(&data)
     }
 
+    /// Create the bucket / folder `name`; `public` controls public read access on backends that support it.
     pub fn create_folder(ctx, name: &str, public: bool) -> Result<(), WaferError> {
         let req = CreateFolderRequest {
             name: name.to_string(),
@@ -88,12 +92,14 @@ dual_api! {
         Ok(())
     }
 
+    /// Delete the bucket / folder `name` and all objects within it.
     pub fn delete_folder(ctx, name: &str) -> Result<(), WaferError> {
         let req = DeleteFolderRequest { name: name.to_string() };
         svc!(ctx, BLOCK, ServiceOp::STORAGE_DELETE_FOLDER, &req, Some(name), true, Some("storage"))?;
         Ok(())
     }
 
+    /// List every folder / bucket known to the storage block.
     pub fn list_folders(ctx,) -> Result<Vec<FolderInfo>, WaferError> {
         let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_LIST_FOLDERS, &serde_json::json!({}), None, false, Some("storage"))?;
         decode(&data)

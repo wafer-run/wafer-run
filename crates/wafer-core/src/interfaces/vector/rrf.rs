@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+/// Default RRF dampening constant (`k`) recommended by Cormack et al. (2009).
 pub const DEFAULT_RRF_K: f32 = 60.0;
 
 /// Fuse multiple ranked ID lists into a single ranked list via RRF.

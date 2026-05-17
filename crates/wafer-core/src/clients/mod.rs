@@ -1,12 +1,22 @@
+/// Typed RPC client for the auth service (sessions, user lookup, role checks).
 pub mod auth;
+/// Typed RPC client for reading typed config values via the runtime's config block.
 pub mod config;
+/// Typed RPC client for the crypto service (hash/verify, JWT issue/verify, random bytes).
 pub mod crypto;
+/// Typed RPC client for the database service (CRUD, query, migration helpers).
 pub mod database;
+/// Typed RPC client for the image service (transform, encode, metadata).
 pub mod image;
+/// Typed RPC client for the LLM service (text generation, embeddings, tools).
 pub mod llm;
+/// Typed RPC client for the logger service.
 pub mod logger;
+/// Typed RPC client for the network service (outbound HTTP requests).
 pub mod network;
+/// Typed RPC client for the storage service (object put/get/list/delete).
 pub mod storage;
+/// Typed RPC client for the vector + embedding service (upsert, search, hybrid).
 pub mod vector;
 
 #[cfg(not(feature = "wasm-component"))]

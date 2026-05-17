@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 // ---------- Request side ----------
 
+/// A chat-completion request directed at a specific backend / model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ChatRequest {
@@ -18,9 +19,12 @@ pub struct ChatRequest {
     pub backend_id: String,
     /// Model id within the backend.
     pub model: String,
+    /// Conversation history (system / user / assistant / tool messages).
     pub messages: Vec<ChatMessage>,
+    /// Generation parameters (temperature, max tokens, …).
     #[serde(default)]
     pub params: ChatParams,
+    /// Tool / function definitions the model may call.
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
     /// Backend-specific parameter overflow.
@@ -28,30 +32,44 @@ pub struct ChatRequest {
     pub extra: serde_json::Value,
 }
 
+/// Generation parameters shared across most chat backends.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ChatParams {
+    /// Maximum tokens to generate.
     pub max_tokens: Option<u32>,
+    /// Sampling temperature.
     pub temperature: Option<f32>,
+    /// Nucleus-sampling top-p.
     pub top_p: Option<f32>,
+    /// Stop sequences that terminate generation.
     #[serde(default)]
     pub stop_sequences: Vec<String>,
+    /// Deterministic sampling seed.
     pub seed: Option<u64>,
+    /// Constrain the response format (text, JSON, JSON Schema).
     pub response_format: Option<ResponseFormat>,
 }
 
+/// Constraint on the model's response format.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum ResponseFormat {
+    /// Free-form text (default).
     Text,
+    /// Any valid JSON value.
     Json,
+    /// JSON conforming to the supplied JSON Schema.
     JsonSchema(serde_json::Value),
 }
 
+/// A single message in a [`ChatRequest`] conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ChatMessage {
+    /// Who is speaking.
     pub role: ChatRole,
+    /// Message content (text or multimodal).
     pub content: ChatContent,
     /// Set on `Role::Tool` messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,50 +79,79 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
 }
 
+/// Speaker role attached to a [`ChatMessage`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChatRole {
+    /// System / developer instruction.
     System,
+    /// End-user input.
     User,
+    /// Model output.
     Assistant,
+    /// Tool / function result fed back to the model.
     Tool,
 }
 
+/// Content of a [`ChatMessage`] — plain text or a multimodal part list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum ChatContent {
+    /// Single text chunk.
     Text(String),
     /// Multimodal content. Impls that don't support the requested parts should
     /// return `LlmError::NotSupported`.
     Parts(Vec<ContentPart>),
 }
 
+/// A single part of a multimodal [`ChatContent::Parts`] message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum ContentPart {
+    /// Text fragment.
     Text(String),
-    ImageUrl { url: String, detail: Option<String> },
-    ImageBytes { bytes: Vec<u8>, mime_type: String },
+    /// Image referenced by URL.
+    ImageUrl {
+        /// Image URL.
+        url: String,
+        /// Optional backend-specific detail hint (e.g. `"auto"`, `"high"`).
+        detail: Option<String>,
+    },
+    /// Image supplied inline as bytes.
+    ImageBytes {
+        /// Raw image bytes.
+        bytes: Vec<u8>,
+        /// MIME type of `bytes` (e.g. `image/png`).
+        mime_type: String,
+    },
 }
 
+/// Definition of a tool / function the model may call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ToolDefinition {
+    /// Tool name as advertised to the model.
     pub name: String,
+    /// Human-readable description; the model uses this to decide when to call the tool.
     pub description: String,
     /// JSON Schema describing the tool's arguments.
     pub parameters: serde_json::Value,
 }
 
+/// A tool invocation emitted by the model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ToolCall {
+    /// Unique id for correlating this call with its later `Role::Tool` response.
     pub id: String,
+    /// Name of the tool being invoked.
     pub name: String,
+    /// Arguments the model produced (interpreted per the tool's JSON Schema).
     pub arguments: serde_json::Value,
 }
 
 impl ToolDefinition {
+    /// Build a `ToolDefinition` from its `name`, `description`, and parameter schema.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -119,6 +166,7 @@ impl ToolDefinition {
 }
 
 impl ToolCall {
+    /// Build a `ToolCall` from its `id`, tool `name`, and `arguments`.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -205,10 +253,13 @@ impl ChatMessage {
 
 // ---------- Response side ----------
 
+/// A single streamed event from [`LlmService::chat_stream`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ChatChunk {
+    /// Incremental update carried by this chunk.
     pub delta: ChunkDelta,
+    /// Reason generation stopped, set on the terminal chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
     /// Present on the terminal chunk when the backend reports usage.
@@ -216,41 +267,62 @@ pub struct ChatChunk {
     pub usage: Option<TokenUsage>,
 }
 
+/// Incremental delta carried by a [`ChatChunk`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum ChunkDelta {
+    /// Additional text appended to the assistant response.
     Text(String),
+    /// A tool call is starting; subsequent `ToolCallArguments` deltas append to it.
     ToolCallStart {
+        /// Tool-call id for correlation.
         id: String,
+        /// Tool name being invoked.
         name: String,
     },
+    /// Incremental piece of a tool call's `arguments` JSON.
     ToolCallArguments {
+        /// Tool-call id this delta belongs to.
         id: String,
+        /// Partial arguments JSON fragment.
         arguments_delta: String,
     },
+    /// The tool call with the given id has been fully transmitted.
     ToolCallComplete {
+        /// Tool-call id that completed.
         id: String,
     },
     /// Meta-only chunk (heartbeats, usage updates).
     Empty,
 }
 
+/// Reason an LLM stream terminated.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FinishReason {
+    /// Model emitted a natural stop / EOS token.
     Stop,
+    /// Generation hit the `max_tokens` budget.
     Length,
+    /// Model requested a tool call; the runtime should execute it and resume.
     ToolCall,
+    /// Output was filtered by the backend's content-safety system.
     ContentFilter,
+    /// Generation aborted with an error.
     Error,
 }
 
+/// Token-usage accounting reported by the backend.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TokenUsage {
+    /// Tokens billed for the prompt / input.
     pub input_tokens: u32,
+    /// Tokens billed for the generated output.
     pub output_tokens: u32,
+    /// Tokens served from a prompt cache, if the backend exposes the metric.
     pub cached_tokens: Option<u32>,
+    /// Tokens spent on hidden reasoning, if the backend exposes the metric.
     pub reasoning_tokens: Option<u32>,
 }
 
@@ -352,55 +424,76 @@ impl TokenUsage {
 
 // ---------- Model management ----------
 
+/// Metadata describing a model exposed by an LLM backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ModelInfo {
+    /// Backend that owns this model.
     pub backend_id: String,
+    /// Model id within the backend.
     pub model_id: String,
+    /// Human-readable display name.
     pub display_name: String,
+    /// Optional capability hints.
     #[serde(default)]
     pub capabilities: ModelCapabilities,
 }
 
+/// Capability hints describing what a model supports.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModelCapabilities {
+    /// Supports streaming chat output.
     pub streaming: bool,
+    /// Supports tool / function calling.
     pub tools: bool,
+    /// Supports image / multimodal input.
     pub vision: bool,
+    /// Supports structured JSON output mode.
     pub json_mode: bool,
+    /// Maximum input context size in tokens, if known.
     pub max_context_tokens: Option<u32>,
+    /// Maximum generated output size in tokens, if known.
     pub max_output_tokens: Option<u32>,
 }
 
+/// Current lifecycle status of a model on a backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct ModelStatus {
+    /// High-level state.
     pub state: ModelState,
     /// 0.0–1.0 when `state == Loading`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<f32>,
 }
 
+/// High-level lifecycle state of a backend model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ModelState {
     /// Local: weights loaded. Remote: endpoint reachable.
     Ready,
+    /// Local: weights currently downloading or initializing.
     Loading,
     /// Local only — weights not in memory.
     Unloaded,
+    /// Model is in a failed state.
     Error {
+        /// Failure message.
         message: String,
     },
 }
 
+/// Streaming progress event emitted by [`LlmService::load_model`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LoadProgress {
     /// e.g. `"downloading"`, `"initializing"`, `"compiling"`.
     pub stage: String,
+    /// Bytes downloaded so far, if known.
     pub bytes_downloaded: Option<u64>,
+    /// Total bytes to download, if known.
     pub bytes_total: Option<u64>,
 }
 
@@ -419,6 +512,7 @@ impl ModelInfo {
         }
     }
 
+    /// Replace the `capabilities` field; chainable on `new()`.
     pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
         self.capabilities = capabilities;
         self
@@ -438,6 +532,7 @@ impl LoadProgress {
 }
 
 impl ModelStatus {
+    /// A status reporting the model is ready to serve.
     pub fn ready() -> Self {
         Self {
             state: ModelState::Ready,
@@ -445,6 +540,7 @@ impl ModelStatus {
         }
     }
 
+    /// A status reporting the model is currently loading at the given progress fraction.
     pub fn loading(progress: f32) -> Self {
         Self {
             state: ModelState::Loading,
@@ -452,6 +548,7 @@ impl ModelStatus {
         }
     }
 
+    /// A status reporting the model is known but not currently resident.
     pub fn unloaded() -> Self {
         Self {
             state: ModelState::Unloaded,
@@ -472,23 +569,32 @@ impl ModelStatus {
 
 // ---------- Error ----------
 
+/// Errors returned by [`LlmService`] operations.
 #[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LlmError {
+    /// Operation is not implemented by this backend.
     #[error("not supported by this backend")]
     NotSupported,
+    /// Caller supplied an invalid request.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// Backend reported an internal failure.
     #[error("backend error: {0}")]
     BackendError(String),
+    /// Requested model is not known to the backend.
     #[error("model not found: {0}")]
     ModelNotFound(String),
+    /// Backend rejected the call due to rate limiting.
     #[error("rate limited")]
     RateLimited,
+    /// Backend rejected the call due to missing / invalid credentials.
     #[error("unauthorized")]
     Unauthorized,
+    /// Network-level failure (e.g. upstream provider).
     #[error("network error: {0}")]
     Network(String),
+    /// Operation was cancelled via its `CancellationToken`.
     #[error("cancelled")]
     Cancelled,
 }

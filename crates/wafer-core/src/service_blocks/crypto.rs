@@ -16,6 +16,7 @@ pub struct CryptoBlock {
 }
 
 impl CryptoBlock {
+    /// Wrap the given `CryptoService` implementation as a `CryptoBlock`.
     pub fn new(service: Arc<dyn CryptoService>) -> Self {
         Self { service }
     }

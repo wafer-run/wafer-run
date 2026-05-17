@@ -36,6 +36,7 @@ const VECTOR_BLOCK: &str = "wafer-run/vector";
 // ===========================================================================
 
 dual_api! {
+    /// Create a vector index described by `config` on the vector block.
     pub fn create_index(ctx, config: VectorIndexConfig) -> Result<(), WaferError> {
         let req = CreateIndexRequest { config };
         svc!(
@@ -49,6 +50,7 @@ dual_api! {
         Ok(())
     }
 
+    /// Drop the vector index `name`.
     pub fn delete_index(ctx, name: &str) -> Result<(), WaferError> {
         let req = DeleteIndexRequest { name: name.to_string() };
         svc!(
@@ -62,6 +64,7 @@ dual_api! {
         Ok(())
     }
 
+    /// Insert or replace `entries` in the named vector `index`.
     pub fn upsert(ctx, index: &str, entries: Vec<VectorEntry>) -> Result<(), WaferError> {
         let req = UpsertRequest { index: index.to_string(), entries };
         svc!(
@@ -75,6 +78,8 @@ dual_api! {
         Ok(())
     }
 
+    /// Search `index` for the `top_k` nearest matches under the chosen `mode`
+    /// (vector / keyword / hybrid), optionally constrained by `filter`.
     pub fn query(
         ctx,
         index: &str,
@@ -104,6 +109,7 @@ dual_api! {
         Ok(resp.matches)
     }
 
+    /// Remove the entries whose ids are listed in `ids` from `index`.
     pub fn delete(ctx, index: &str, ids: Vec<String>) -> Result<(), WaferError> {
         let req = DeleteRequest { index: index.to_string(), ids };
         svc!(
@@ -117,6 +123,7 @@ dual_api! {
         Ok(())
     }
 
+    /// Return the number of entries currently stored in `index`.
     pub fn count(ctx, index: &str) -> Result<u64, WaferError> {
         let req = CountRequest { index: index.to_string() };
         let data = svc!(

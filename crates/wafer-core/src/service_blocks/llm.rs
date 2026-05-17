@@ -18,6 +18,7 @@ pub struct LlmBlock {
 }
 
 impl LlmBlock {
+    /// Wrap the given `LlmService` implementation as an `LlmBlock`.
     pub fn new(service: Arc<dyn LlmService>) -> Self {
         Self { service }
     }

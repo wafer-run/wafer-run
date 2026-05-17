@@ -10,12 +10,16 @@ pub use wafer_run::schema::{
     DataType, DefaultVal, DefaultValue, Index, Reference, Table,
 };
 
+/// Errors returned by [`DatabaseService`] operations.
 #[derive(Error, Debug)]
 pub enum DatabaseError {
+    /// No record with the requested id exists.
     #[error("record not found")]
     NotFound,
+    /// Backend-internal failure.
     #[error("database error: {0}")]
     Internal(String),
+    /// Wrapped foreign error from a backend driver.
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -203,25 +207,35 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 /// Record represents a single database record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
+    /// Primary-key identifier as text.
     pub id: String,
+    /// Remaining columns rendered as a JSON-valued map.
     pub data: HashMap<String, serde_json::Value>,
 }
 
 /// RecordList represents a paginated list of records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordList {
+    /// Records on the current page.
     pub records: Vec<Record>,
+    /// Total matching rows across all pages (may be `records.len()` when count is skipped).
     pub total_count: i64,
+    /// 1-based page index of this result set.
     pub page: i64,
+    /// Maximum rows per page used to compute `page`.
     pub page_size: i64,
 }
 
 /// ListOptions configures a List query.
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
+    /// Filters combined with `AND` to restrict the result set.
     pub filters: Vec<Filter>,
+    /// Sort directives applied in declaration order.
     pub sort: Vec<SortField>,
+    /// Maximum rows to return; `0` means backend-default.
     pub limit: i64,
+    /// Number of rows to skip before returning results.
     pub offset: i64,
     /// When `true`, backends MUST skip the `SELECT COUNT(*)` query and
     /// return `RecordList.total_count = records.len() as i64`. Wrapper
@@ -233,27 +247,41 @@ pub struct ListOptions {
 /// Filter represents a single filter condition.
 #[derive(Debug, Clone)]
 pub struct Filter {
+    /// Column / field name being filtered.
     pub field: String,
+    /// Comparison operator.
     pub operator: FilterOp,
+    /// Value to compare against (interpreted per `operator`).
     pub value: serde_json::Value,
 }
 
 /// FilterOp defines supported filter operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterOp {
+    /// `field = value`.
     Equal,
+    /// `field <> value`.
     NotEqual,
+    /// `field > value`.
     GreaterThan,
+    /// `field >= value`.
     GreaterEqual,
+    /// `field < value`.
     LessThan,
+    /// `field <= value`.
     LessEqual,
+    /// `field LIKE value` (backend-specific pattern syntax).
     Like,
+    /// `field IN (value…)` where `value` is a JSON array.
     In,
+    /// `field IS NULL` (ignores `value`).
     IsNull,
+    /// `field IS NOT NULL` (ignores `value`).
     IsNotNull,
 }
 
 impl FilterOp {
+    /// Render the operator as its SQL keyword form.
     pub fn as_sql(&self) -> &'static str {
         match self {
             Self::Equal => "=",
@@ -273,6 +301,8 @@ impl FilterOp {
 /// SortField defines a sort directive.
 #[derive(Debug, Clone)]
 pub struct SortField {
+    /// Column / field name to sort by.
     pub field: String,
+    /// `true` for descending order, `false` for ascending.
     pub desc: bool,
 }

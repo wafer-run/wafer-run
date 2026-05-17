@@ -9,45 +9,68 @@ use wafer_block::Message;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct UserId(pub String);
 
+/// Coarse-grained role attached to a user account.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
+    /// Regular user without admin privileges.
     User,
+    /// Administrator with elevated privileges.
     Admin,
 }
 
+/// Scope a Personal Access Token must carry to authorize an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenScope {
+    /// Permits publishing block releases / artifacts on the user's behalf.
     Publish,
 }
 
+/// Summary view of an organization the user belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OrgSummary {
+    /// Organization name (matches the `{org}` slug used in block ids).
     pub name: String,
+    /// Identity provider used to verify ownership (e.g. `github`), if any.
     pub verified_via: Option<String>,
+    /// Provider-specific reference (e.g. GitHub org slug) recorded at verification time.
     pub verified_ref: Option<String>,
+    /// Whether this org is reserved (only admins may operate on reserved orgs).
     pub is_reserved: bool,
 }
 
+/// Full user profile returned by [`AuthService::user_profile`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserProfile {
+    /// Stable user identifier.
     pub id: UserId,
+    /// Primary email address.
     pub email: String,
+    /// Human-readable display name.
     pub display_name: String,
+    /// Optional avatar URL.
     pub avatar_url: Option<String>,
+    /// Role assigned to the user.
     pub role: Role,
+    /// Organizations the user is a member of.
     pub orgs: Vec<OrgSummary>,
 }
 
+/// Errors returned by [`AuthService`] operations.
 #[derive(Error, Debug)]
 pub enum AuthError {
+    /// No valid credential present on the request.
     #[error("unauthorized")]
     Unauthorized,
+    /// Credentials are valid but the action is not permitted.
     #[error("forbidden")]
     Forbidden,
+    /// Upstream identity provider returned an error or was unreachable.
     #[error("provider down: {0}")]
     ProviderDown(String),
+    /// Requested user / resource does not exist.
     #[error("not found")]
     NotFound,
+    /// Catch-all internal failure.
     #[error("{0}")]
     Internal(String),
 }
@@ -95,6 +118,7 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         org_ref: &str,
     ) -> Result<bool, AuthError>;
 
+    /// Look up the full profile for `user`.
     async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError>;
 }
 

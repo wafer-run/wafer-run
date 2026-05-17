@@ -211,6 +211,9 @@ fn service_load_progress_to_wire(p: service::LoadProgress) -> wire::LoadProgress
 
 // ---------- Entry point ----------
 
+/// Dispatch an `llm.*` message to the appropriate handler on `service` and
+/// return the resulting output stream. Unknown ops yield an `INVALID_ARGUMENT`
+/// error stream.
 pub async fn handle_message(
     service: Arc<dyn LlmService>,
     msg: &Message,

@@ -16,6 +16,7 @@ pub struct LoggerBlock {
 }
 
 impl LoggerBlock {
+    /// Wrap the given `LoggerService` implementation as a `LoggerBlock`.
     pub fn new(service: Arc<dyn LoggerService>) -> Self {
         Self { service }
     }

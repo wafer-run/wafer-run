@@ -2,12 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Errors returned by [`StorageService`] operations.
 #[derive(Error, Debug)]
 pub enum StorageError {
+    /// No object exists at the requested folder/key.
     #[error("object not found")]
     NotFound,
+    /// Backend-internal failure.
     #[error("storage error: {0}")]
     Internal(String),
+    /// Wrapped foreign error from a backend driver.
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -47,31 +51,43 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 /// ObjectInfo contains metadata about a stored object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectInfo {
+    /// Object key (path within its folder).
     pub key: String,
+    /// Size of the object body in bytes.
     pub size: i64,
+    /// Content-Type recorded at upload time.
     pub content_type: String,
+    /// Last-modified timestamp from the backend.
     pub last_modified: DateTime<Utc>,
 }
 
 /// ObjectList represents a paginated list of objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectList {
+    /// Objects in the current page.
     pub objects: Vec<ObjectInfo>,
+    /// Total objects matching the query across all pages.
     pub total_count: i64,
 }
 
 /// FolderInfo contains metadata about a storage folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderInfo {
+    /// Folder / bucket name.
     pub name: String,
+    /// Whether the folder grants public read access.
     pub public: bool,
+    /// Creation timestamp from the backend.
     pub created_at: DateTime<Utc>,
 }
 
 /// ListOptions configures a List query for objects.
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
+    /// Restrict results to keys starting with this prefix (empty = no filter).
     pub prefix: String,
+    /// Maximum number of objects to return (0 = backend default).
     pub limit: i64,
+    /// Number of objects to skip for pagination.
     pub offset: i64,
 }
