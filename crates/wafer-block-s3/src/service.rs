@@ -1,3 +1,10 @@
+//! S3-compatible [`StorageService`] implementation backing the `wafer-run/s3` block.
+//!
+//! Works against AWS S3 and any S3-compatible endpoint (MinIO, Tigris, Cloudflare R2)
+//! via [`S3StorageService::with_endpoint`]. Custom endpoints force path-style addressing
+//! for MinIO compatibility. Objects are namespaced as `{prefix}/{folder}/{key}` and
+//! folders are materialized as zero-length marker objects ending in `/`.
+
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
 use wafer_core::interfaces::storage::service::*;

@@ -3,6 +3,8 @@
 //! Self-contained block wrapping the S3 storage service.
 //! Uses the shared storage message handler for the `storage@v1` interface.
 
+#![warn(missing_docs)]
+
 pub mod service;
 
 use std::sync::{Arc, OnceLock};
@@ -24,7 +26,7 @@ const DEFAULT_BUCKET: &str = "solobase";
 /// - Process env (declared in `BlockInfo::config_keys`):
 ///   `WAFER_RUN__S3__ENDPOINT`, `WAFER_RUN__S3__REGION`.
 ///   These are typically uniform across flows in a single wafer-run process.
-pub struct S3StorageBlock {
+pub(crate) struct S3StorageBlock {
     service: OnceLock<Arc<dyn StorageService>>,
 }
 
@@ -35,7 +37,8 @@ impl Default for S3StorageBlock {
 }
 
 impl S3StorageBlock {
-    pub fn new() -> Self {
+    /// Construct an uninitialized block; the storage service is built during `lifecycle(Init)`.
+    pub(crate) fn new() -> Self {
         Self {
             service: OnceLock::new(),
         }
