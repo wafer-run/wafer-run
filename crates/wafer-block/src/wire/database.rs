@@ -15,11 +15,15 @@ use serde::{Deserialize, Serialize};
 
 // --- Filter / sort sub-types ---
 
+/// A single WHERE-clause predicate: `field <operator> value`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterDef {
+    /// Column name to filter on.
     pub field: String,
+    /// Comparison operator (`eq`, `ne`, `lt`, `gt`, `like`, …). Defaults to `eq`.
     #[serde(default = "default_operator")]
     pub operator: String,
+    /// JSON value compared against the column.
     #[serde(default)]
     pub value: serde_json::Value,
 }
@@ -28,30 +32,42 @@ fn default_operator() -> String {
     "eq".to_string()
 }
 
+/// One element of an ORDER BY clause.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortFieldDef {
+    /// Column name to sort by.
     pub field: String,
+    /// Whether to sort descending (default `false` = ascending).
     #[serde(default)]
     pub desc: bool,
 }
 
 // --- Requests ---
 
+/// Request for `database.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// Primary-key id of the row.
     pub id: String,
 }
 
+/// Request for `database.list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
+    /// ORDER BY clause.
     #[serde(default)]
     pub sort: Vec<SortFieldDef>,
+    /// Maximum number of rows to return (0 = backend default).
     #[serde(default)]
     pub limit: i64,
+    /// Number of rows to skip for pagination.
     #[serde(default)]
     pub offset: i64,
     /// When `true`, backends skip the `SELECT COUNT(*)` query and return
@@ -63,80 +79,116 @@ pub struct ListRequest {
     pub skip_count: bool,
 }
 
+/// Request for `database.create`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// Column → value map to insert.
     pub data: HashMap<String, serde_json::Value>,
 }
 
+/// Request for `database.update`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// Primary-key id of the row to update.
     pub id: String,
+    /// Column → value map to set.
     pub data: HashMap<String, serde_json::Value>,
 }
 
+/// Request for `database.delete`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// Primary-key id of the row to delete.
     pub id: String,
 }
 
+/// Request for `database.count`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CountRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
 }
 
+/// Request for `database.sum`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// Numeric column to sum.
     pub field: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
 }
 
+/// Request for `database.query_raw`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRawRequest {
+    /// SQL `SELECT` text with `?` placeholders.
     pub query: String,
+    /// Positional bind arguments for the placeholders.
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
 }
 
+/// Request for `database.exec_raw`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRawRequest {
+    /// SQL mutation statement (`INSERT`, `UPDATE`, `DELETE`, DDL).
     pub query: String,
+    /// Positional bind arguments for the placeholders.
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
 }
 
+/// Request for `database.delete_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
 }
 
+/// Request for `database.delete_where_count`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereCountRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
 }
 
+/// Request for `database.take_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakeWhereRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
 }
 
+/// Request for `database.update_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateWhereRequest {
+    /// Collection (table) name.
     pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
     pub filters: Vec<FilterDef>,
+    /// Column → value map to set on matching rows.
     pub data: HashMap<String, serde_json::Value>,
 }
 
@@ -146,41 +198,58 @@ pub struct UpdateWhereRequest {
 /// `interfaces::database::service::Record`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
+    /// Primary-key id of the row.
     pub id: String,
+    /// Column → value map.
     pub data: HashMap<String, serde_json::Value>,
 }
 
 /// Paginated list of records returned by `list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordList {
+    /// Records in this page.
     pub records: Vec<Record>,
+    /// Total matching rows in the collection (or this page's count when
+    /// `skip_count` was set on the request).
     pub total_count: i64,
+    /// 1-indexed page number.
     pub page: i64,
+    /// Number of records per page.
     pub page_size: i64,
 }
 
+/// Response for `database.count`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CountResponse {
+    /// Number of matching rows.
     pub count: i64,
 }
 
+/// Response for `database.sum`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumResponse {
+    /// Aggregated sum of the requested column.
     pub sum: f64,
 }
 
+/// Response for `database.delete_where_count`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereCountResponse {
+    /// Number of rows deleted.
     pub count: i64,
 }
 
+/// Response for `database.take_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakeWhereResponse {
+    /// Rows that were atomically removed and returned.
     pub records: Vec<Record>,
 }
 
+/// Response for `database.exec_raw`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRawResponse {
+    /// Number of rows affected by the statement.
     pub rows_affected: i64,
 }
 

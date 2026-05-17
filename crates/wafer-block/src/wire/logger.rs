@@ -9,10 +9,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Request payload for `logger.{debug,info,warn,error}`. The log level is
+/// carried in `Message::kind`, not in this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRequest {
+    /// Human-readable log message.
     #[serde(default)]
     pub message: String,
+    /// Structured key/value fields attached to the log line.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub fields: HashMap<String, serde_json::Value>,
 }

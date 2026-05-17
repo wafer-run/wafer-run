@@ -85,7 +85,8 @@ pub struct BlockCapabilities {
 }
 
 impl BlockCapabilities {
-    /// Unrestricted capabilities -- used by native Rust blocks.
+    /// Unrestricted capabilities — used by native Rust blocks. All services
+    /// allowed, all wildcards set, no allowlists enforced.
     pub fn unrestricted() -> Self {
         Self {
             collections: {
@@ -114,7 +115,7 @@ impl BlockCapabilities {
         }
     }
 
-    /// No capabilities -- completely sandboxed.
+    /// No capabilities — completely sandboxed default for untrusted WASM blocks.
     pub fn none() -> Self {
         Self {
             collections: HashSet::new(),
@@ -131,14 +132,20 @@ impl BlockCapabilities {
         }
     }
 
+    /// Whether this capability set permits operations against `collection`
+    /// (matches `"*"` wildcard or an exact entry).
     pub fn allows_collection(&self, collection: &str) -> bool {
         self.collections.contains("*") || self.collections.contains(collection)
     }
 
+    /// Whether this capability set permits operations on `folder` in the
+    /// storage service (matches `"*"` wildcard or an exact entry).
     pub fn allows_storage_folder(&self, folder: &str) -> bool {
         self.storage_folders.contains("*") || self.storage_folders.contains(folder)
     }
 
+    /// Whether outbound HTTP to `url` is permitted (network enabled, and URL
+    /// matches one of `network_allow` prefixes, or `network_allow` is empty).
     pub fn allows_network_url(&self, url: &str) -> bool {
         if !self.network {
             return false;
@@ -158,6 +165,8 @@ impl BlockCapabilities {
         })
     }
 
+    /// Whether the block may read/write config key `key` (empty allowlist
+    /// means no restriction).
     pub fn allows_config_key(&self, key: &str) -> bool {
         if self.config_keys.is_empty() {
             return true;
@@ -293,26 +302,37 @@ impl BlockCapabilities {
 /// `apply_config_overrides`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigCapabilityOverrides {
+    /// Override for [`BlockCapabilities::collections`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collections: Option<HashSet<String>>,
+    /// Override for [`BlockCapabilities::raw_sql`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_sql: Option<bool>,
+    /// Override for [`BlockCapabilities::ddl`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl: Option<bool>,
+    /// Override for [`BlockCapabilities::storage_folders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_folders: Option<HashSet<String>>,
+    /// Override for [`BlockCapabilities::crypto`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crypto: Option<bool>,
+    /// Override for [`BlockCapabilities::network`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<bool>,
+    /// Override for [`BlockCapabilities::network_allow`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_allow: Option<Vec<String>>,
+    /// Override for [`BlockCapabilities::config`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<bool>,
+    /// Override for [`BlockCapabilities::config_keys`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_keys: Option<HashSet<String>>,
+    /// Override for [`BlockCapabilities::callable_blocks`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callable_blocks: Option<HashSet<String>>,
+    /// Override for [`BlockCapabilities::headers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<HeaderPolicyOverrides>,
 }
@@ -320,10 +340,13 @@ pub struct ConfigCapabilityOverrides {
 /// Sparse header-policy overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HeaderPolicyOverrides {
+    /// Override for [`HeaderPolicy::readable`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readable: Option<Vec<String>>,
+    /// Override for [`HeaderPolicy::writable`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writable: Option<Vec<String>>,
+    /// Override for [`HeaderPolicy::masked`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masked: Option<Vec<String>>,
 }

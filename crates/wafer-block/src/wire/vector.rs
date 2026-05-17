@@ -12,10 +12,14 @@ use serde::{Deserialize, Serialize};
 
 // ---- Index / entry types ----
 
+/// A single (id, vector, metadata) row to upsert into a vector index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorEntry {
+    /// Caller-supplied row id.
     pub id: String,
+    /// Embedding vector.
     pub vector: Vec<f32>,
+    /// Arbitrary JSON metadata stored alongside the vector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Required when the index has `keyword_search: true`; ignored otherwise.
@@ -23,36 +27,54 @@ pub struct VectorEntry {
     pub text: Option<String>,
 }
 
+/// One result row returned by `vector.query`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorMatch {
+    /// Matched row id.
     pub id: String,
+    /// Similarity score (metric-dependent).
     pub score: f32,
+    /// Optional metadata payload (echoed from the stored entry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Distance metric used by a vector index.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceMetric {
+    /// Cosine similarity.
     Cosine,
+    /// Euclidean (L2) distance.
     Euclidean,
+    /// Dot product.
     DotProduct,
 }
 
+/// Search modality requested by `vector.query`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
+    /// Pure vector similarity search.
     Vector,
+    /// Pure keyword/BM25 search.
     Keyword,
+    /// Hybrid vector + keyword search.
     Hybrid,
 }
 
+/// Index configuration declared at creation time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorIndexConfig {
+    /// Index name.
     pub name: String,
+    /// Embedding model identifier used by this index.
     pub model: String,
+    /// Vector dimensionality.
     pub dimensions: u32,
+    /// Distance metric used for similarity.
     pub metric: DistanceMetric,
+    /// Whether the index also stores text for keyword/hybrid search.
     #[serde(default)]
     pub keyword_search: bool,
 }
@@ -60,82 +82,117 @@ pub struct VectorIndexConfig {
 /// Equality-only metadata filter. Keys are dot-paths into the entry metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetadataFilter {
+    /// Equality constraints: each `path => value` must match exactly.
     #[serde(default)]
     pub equals: BTreeMap<String, serde_json::Value>,
 }
 
 // ---- Vector requests / responses ----
 
+/// Request for `vector.create_index`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateIndexRequest {
+    /// Index configuration to create.
     pub config: VectorIndexConfig,
 }
 
+/// Request for `vector.delete_index`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteIndexRequest {
+    /// Name of the index to delete.
     pub name: String,
 }
 
+/// Request for `vector.upsert`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpsertRequest {
+    /// Target index name.
     pub index: String,
+    /// Entries to upsert.
     pub entries: Vec<VectorEntry>,
 }
 
+/// Request for `vector.query`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryRequest {
+    /// Index name to query.
     pub index: String,
+    /// Query vector (length must match the index `dimensions`).
     pub vector: Vec<f32>,
+    /// Maximum number of results to return.
     pub top_k: usize,
+    /// Optional metadata filter to apply.
     #[serde(default)]
     pub filter: Option<MetadataFilter>,
+    /// Search modality (vector / keyword / hybrid).
     pub mode: SearchMode,
+    /// Keyword query string (required when `mode` is `Keyword` or `Hybrid`).
     #[serde(default)]
     pub keyword_query: Option<String>,
 }
 
+/// Request for `vector.delete`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteRequest {
+    /// Index name.
     pub index: String,
+    /// Ids of rows to delete.
     pub ids: Vec<String>,
 }
 
+/// Request for `vector.count`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountRequest {
+    /// Index name.
     pub index: String,
 }
 
+/// Response for `vector.query`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryResponse {
+    /// Matched rows, sorted by descending similarity score.
     pub matches: Vec<VectorMatch>,
 }
 
+/// Response for `vector.count`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountResponse {
+    /// Number of entries in the index.
     pub count: u64,
 }
 
 // ---- Embedding requests / responses ----
 
+/// Request for `embedding.embed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbedRequest {
+    /// Texts to embed (one vector returned per input).
     pub texts: Vec<String>,
 }
 
+/// Response for `embedding.embed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbedResponse {
+    /// Embedding model identifier that produced these vectors.
     pub model: String,
+    /// Vector dimensionality.
     pub dimensions: u32,
+    /// One vector per input text, in input order.
     pub vectors: Vec<Vec<f32>>,
 }
 
+/// Request for `embedding.count_tokens`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountTokensRequest {
+    /// Text to tokenize.
     pub text: String,
 }
 
+/// Response for `embedding.count_tokens`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CountTokensResponse {
+    /// Number of tokens `text` decomposes to under the active embedding
+    /// tokenizer.
     pub tokens: u64,
 }
 

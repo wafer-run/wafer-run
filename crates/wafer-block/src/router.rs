@@ -31,6 +31,8 @@ pub struct Router {
 /// Generate a convenience method that delegates to `on()` with a fixed action.
 macro_rules! route_method {
     ($name:ident, $action:expr) => {
+        /// Register `handler` for the action implied by the method name at
+        /// path `pattern` (supports `{var}` placeholders).
         #[cfg(not(target_arch = "wasm32"))]
         pub fn $name(
             &mut self,
@@ -42,6 +44,8 @@ macro_rules! route_method {
         ) {
             self.on($action, pattern, handler);
         }
+        /// Register `handler` for the action implied by the method name at
+        /// path `pattern` (supports `{var}` placeholders).
         #[cfg(target_arch = "wasm32")]
         pub fn $name(
             &mut self,
@@ -54,10 +58,13 @@ macro_rules! route_method {
 }
 
 impl Router {
+    /// Create an empty router with no routes registered.
     pub fn new() -> Self {
         Self { routes: Vec::new() }
     }
 
+    /// Register `handler` for `action` at path `pattern` (supports `{var}`
+    /// path placeholders, captured into `req.param.{var}` on dispatch).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn on(
         &mut self,
@@ -72,6 +79,8 @@ impl Router {
         });
     }
 
+    /// Register `handler` for `action` at path `pattern` (wasm32 variant
+    /// without `Send + Sync` bounds).
     #[cfg(target_arch = "wasm32")]
     pub fn on(
         &mut self,
@@ -92,6 +101,9 @@ impl Router {
     route_method!(delete, RequestAction::Delete);
     route_method!(execute, RequestAction::Execute);
 
+    /// Dispatch `msg` against the registered routes. On no match, returns
+    /// `OutputStream::drop_request()` for `execute` actions or a
+    /// `NotFound` error stream otherwise.
     pub fn route(&self, ctx: &dyn Context, mut msg: Message, input: InputStream) -> OutputStream {
         let action = msg.get_meta(META_REQ_ACTION).to_string();
         let path = msg.get_meta(META_REQ_RESOURCE).to_string();

@@ -10,20 +10,29 @@ use serde::{Deserialize, Serialize};
 
 // --- Requests ---
 
+/// Request for `crypto.hash` — produce a salted hash of `password`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashRequest {
+    /// Plaintext password to hash.
     pub password: String,
 }
 
+/// Request for `crypto.compare_hash` — verify a candidate against a stored
+/// hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareHashRequest {
+    /// Candidate plaintext password.
     pub password: String,
+    /// Previously produced hash string.
     pub hash: String,
 }
 
+/// Request for `crypto.sign` — produce a signed token over `claims`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignRequest {
+    /// Claims to encode into the token payload.
     pub claims: HashMap<String, serde_json::Value>,
+    /// Lifetime of the token in seconds (defaults to 1h).
     #[serde(default = "default_expiry")]
     pub expiry_secs: u64,
 }
@@ -32,13 +41,18 @@ fn default_expiry() -> u64 {
     3600
 }
 
+/// Request for `crypto.verify` — verify a token and return its claims.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyRequest {
+    /// Token string to verify.
     pub token: String,
 }
 
+/// Request for `crypto.random_bytes` — request `n` cryptographically random
+/// bytes (defaults to 32).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomBytesRequest {
+    /// Number of bytes to generate.
     #[serde(default = "default_random_len")]
     pub n: usize,
 }
@@ -49,29 +63,40 @@ fn default_random_len() -> usize {
 
 // --- Responses ---
 
+/// Response for `crypto.hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashResponse {
+    /// Encoded hash string (algorithm-specific format).
     pub hash: String,
 }
 
+/// Response for `crypto.compare_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareHashResponse {
+    /// Whether the candidate matched the hash. Serialized as `"match"` on
+    /// the wire.
     #[serde(rename = "match")]
     pub matches: bool,
 }
 
+/// Response for `crypto.sign`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignResponse {
+    /// Signed token string (e.g. JWT).
     pub token: String,
 }
 
+/// Response for `crypto.verify`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyResponse {
+    /// Verified claims extracted from the token.
     pub claims: HashMap<String, serde_json::Value>,
 }
 
+/// Response for `crypto.random_bytes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomBytesResponse {
+    /// Random bytes (length = requested `n`).
     pub bytes: Vec<u8>,
 }
 

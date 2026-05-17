@@ -1,3 +1,8 @@
+//! [`StreamEvent`] — the event type yielded by an
+//! [`crate::streams::output::OutputStream`]. Streams produce zero or more
+//! non-terminal events (chunks/meta) followed by exactly one terminal event
+//! (complete/error/drop/continue).
+
 use crate::core_types::{Message, MetaEntry, WaferError};
 
 /// An event in an OutputStream. The stream yields zero-or-more non-terminal
@@ -11,7 +16,10 @@ pub enum StreamEvent {
     Meta(MetaEntry),
 
     /// Terminal: stream completed normally. Carries trailing metadata.
-    Complete { meta: Vec<MetaEntry> },
+    Complete {
+        /// Trailing metadata (e.g. HTTP trailers) emitted with the close.
+        meta: Vec<MetaEntry>,
+    },
 
     /// Terminal: stream failed.
     ///

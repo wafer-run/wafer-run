@@ -11,36 +11,58 @@ use serde::{Deserialize, Serialize};
 /// A key-value metadata entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MetaEntry {
+    /// Dotted key name (e.g. `req.action`, `auth.user_id`). See [`crate::meta`]
+    /// for the well-known constants.
     pub key: String,
+    /// String-encoded value associated with `key`.
     pub value: String,
 }
 
 /// A message flowing through the block flow.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Message {
+    /// Message kind/action discriminator (e.g. HTTP method, service op name).
     pub kind: String,
+    /// Out-of-band attributes attached to the message.
     pub meta: Vec<MetaEntry>,
 }
 
 /// gRPC-style error codes for WAFER.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
+    /// Operation completed successfully (rarely used in errors).
     Ok,
+    /// Operation was cancelled by the caller.
     Cancelled,
+    /// Unknown error; the source did not classify it.
     Unknown,
+    /// Caller supplied an invalid argument.
     InvalidArgument,
+    /// Deadline expired before the operation could complete.
     DeadlineExceeded,
+    /// Requested resource does not exist.
     NotFound,
+    /// Resource being created already exists.
     AlreadyExists,
+    /// Caller lacks permission for the operation.
     PermissionDenied,
+    /// A quota or rate limit was exhausted.
     ResourceExhausted,
+    /// Operation rejected because the system is not in the required state.
     FailedPrecondition,
+    /// Operation was aborted (often due to a concurrency conflict).
     Aborted,
+    /// Operation attempted past the valid range.
     OutOfRange,
+    /// Operation is not implemented or not supported.
     Unimplemented,
+    /// Internal invariant violated.
     Internal,
+    /// Service is temporarily unavailable.
     Unavailable,
+    /// Unrecoverable data loss or corruption.
     DataLoss,
+    /// Caller did not provide valid authentication credentials.
     Unauthenticated,
 }
 
@@ -53,8 +75,11 @@ impl fmt::Display for ErrorCode {
 /// A structured error returned by a block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WaferError {
+    /// Coarse error classification, modeled on gRPC status codes.
     pub code: ErrorCode,
+    /// Human-readable error message.
     pub message: String,
+    /// Structured key/value attributes (e.g. resource name, retry hint).
     pub meta: Vec<MetaEntry>,
 }
 
@@ -67,24 +92,33 @@ impl fmt::Display for WaferError {
 /// How many block instances are created and when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceMode {
+    /// One instance per node (the runtime process).
     PerNode,
+    /// One instance shared across the entire deployment.
     Singleton,
+    /// One instance per flow definition.
     PerFlow,
+    /// A fresh instance for every execution.
     PerExecution,
 }
 
 /// The kind of lifecycle event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LifecycleType {
+    /// First-time initialization (run migrations, seed defaults).
     Init,
+    /// Block is being brought online and may begin serving requests.
     Start,
+    /// Block is being shut down; release resources.
     Stop,
 }
 
 /// A lifecycle event sent to blocks during transitions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LifecycleEvent {
+    /// Which lifecycle transition triggered this event.
     pub event_type: LifecycleType,
+    /// Opaque event payload (codec-encoded by the sender).
     pub data: Vec<u8>,
 }
 
@@ -99,8 +133,11 @@ pub struct LifecycleEvent {
 /// cross the host↔guest boundary without JSON-array inflation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Attachment {
+    /// MIME type of the payload (e.g. `image/png`, `application/pdf`).
     pub mime: String,
+    /// Raw payload bytes (not base64 — encoded directly by MessagePack).
     pub bytes: Vec<u8>,
+    /// Optional client-supplied filename.
     pub filename: Option<String>,
 }
 

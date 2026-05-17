@@ -9,28 +9,47 @@ pub enum RuntimeError {
     // ── Block registration ──────────────────────────────────────────────
     /// A referenced block was not found in the registry.
     #[error("block '{name}' not found")]
-    BlockNotFound { name: String },
+    BlockNotFound {
+        /// Block name that was looked up but not registered.
+        name: String,
+    },
 
     /// A block with the same name is already registered.
     #[error("block '{name}' already registered")]
-    DuplicateBlock { name: String },
+    DuplicateBlock {
+        /// The conflicting block name.
+        name: String,
+    },
 
     /// Block name does not follow the `{org}/{block}` naming convention.
     #[error("invalid block name '{name}': {reason}")]
-    InvalidBlockName { name: String, reason: String },
+    InvalidBlockName {
+        /// The offending name.
+        name: String,
+        /// Why the name was rejected.
+        reason: String,
+    },
 
     /// A block's config var doesn't match its expected prefix.
     #[error("block '{name}' declares config var '{var}' which doesn't match prefix '{prefix}'")]
     ConfigVarPrefix {
+        /// Block name.
         name: String,
+        /// The declared config key.
         var: String,
+        /// The expected `{ORG}__{BLOCK}__` prefix.
         prefix: String,
     },
 
     // ── Block lifecycle ─────────────────────────────────────────────────
     /// A block failed during initialization (lifecycle start).
     #[error("block '{name}' init failed: {reason}")]
-    BlockInit { name: String, reason: String },
+    BlockInit {
+        /// Block name.
+        name: String,
+        /// Cause of the init failure.
+        reason: String,
+    },
 
     // ── Configuration ───────────────────────────────────────────────────
     /// Configuration error (parsing, serialization, file I/O).
@@ -62,15 +81,20 @@ pub enum RuntimeError {
     /// The remote block requires a newer ABI version than the runtime supports.
     #[error("ABI mismatch for block '{name}': requires {required}, runtime supports {supported}")]
     AbiMismatch {
+        /// Block name.
         name: String,
+        /// ABI version the block was built against.
         required: u32,
+        /// Highest ABI version this runtime understands.
         supported: u32,
     },
 
     /// Inventory registration of a block failed.
     #[error("inventory registration of '{name}' failed: {source}")]
     Inventory {
+        /// Block name whose `inventory!` entry failed to register.
         name: String,
+        /// Underlying registration failure.
         #[source]
         source: Box<RuntimeError>,
     },
