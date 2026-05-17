@@ -48,6 +48,9 @@ pub struct LocalStorageService {
 }
 
 impl LocalStorageService {
+    /// Construct a service rooted at `root`, creating the directory tree if it
+    /// does not yet exist. All subsequent reads/writes are confined to this
+    /// root via [`Self::validate_path`].
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let root = root.into();
         fs::create_dir_all(&root)
