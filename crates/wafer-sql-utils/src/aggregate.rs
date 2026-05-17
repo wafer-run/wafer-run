@@ -134,10 +134,15 @@ pub fn build_avg(
 /// Aggregate function type.
 #[derive(Debug, Clone)]
 pub enum AggFunc {
+    /// `COUNT(...)` — row count over the inner expression (`*` if no field).
     Count,
+    /// `SUM(...)` — numeric sum of the inner expression.
     Sum,
+    /// `AVG(...)` — arithmetic mean of the inner expression.
     Avg,
+    /// `MAX(...)` — greatest value of the inner expression.
     Max,
+    /// `MIN(...)` — smallest value of the inner expression.
     Min,
     /// `COALESCE(col, default)` — not a true aggregate, but a null-replacement
     /// wrapper that callers can fold into the aggregate-builder pipeline so
@@ -206,14 +211,21 @@ impl AggregateColumn {
 /// Configuration for a grouped aggregate query.
 #[derive(Debug, Clone)]
 pub struct GroupedQueryConfig {
+    /// Source table name (interpolated as a quoted identifier).
     pub table: String,
     /// Plain columns to select (not aggregated).
     pub select_columns: Vec<String>,
     /// Aggregate expressions.
     pub aggregates: Vec<AggregateColumn>,
+    /// `WHERE` predicates AND-ed together; rendered via
+    /// [`crate::query::build_condition`].
     pub filters: Vec<Filter>,
+    /// Columns to `GROUP BY` (interpolated as quoted identifiers).
     pub group_by: Vec<String>,
+    /// `ORDER BY` clauses; alias names (e.g. `cnt`) are valid because the
+    /// aggregates are emitted with `AS` aliases.
     pub order_by: Vec<SortField>,
+    /// Optional `LIMIT N`; values `<= 0` are dropped.
     pub limit: Option<i64>,
 }
 
