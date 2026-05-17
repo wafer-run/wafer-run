@@ -44,7 +44,10 @@ pub enum InitError {
     /// An init cycle was detected (block A's init calls block B whose init
     /// calls block A). Not cached — handled at dispatch level via `InitStack`.
     #[error("init cycle detected: {path:?}")]
-    Cycle { path: Vec<String> },
+    Cycle {
+        /// Sequence of block names forming the detected init cycle.
+        path: Vec<String>,
+    },
 }
 
 /// The opaque result of a successful `lifecycle(Init)`.
@@ -56,6 +59,7 @@ pub enum InitError {
 pub struct InitializedState;
 
 impl InitializedState {
+    /// Construct the (currently unit-shaped) successful init state.
     pub fn new() -> Self {
         Self
     }
@@ -81,6 +85,7 @@ pub struct BlockSlot {
 }
 
 impl BlockSlot {
+    /// Build an empty slot with no cached outcome.
     pub fn new() -> Self {
         Self::default()
     }

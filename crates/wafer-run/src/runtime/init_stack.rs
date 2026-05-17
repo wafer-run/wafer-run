@@ -27,12 +27,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+/// Shared per-dispatch stack of block names currently being initialised, used to detect cycles.
 #[derive(Debug, Clone, Default)]
 pub struct InitStack {
     inner: Arc<Mutex<Vec<String>>>,
 }
 
 impl InitStack {
+    /// Build an empty stack.
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,6 +58,7 @@ impl InitStack {
         })
     }
 
+    /// Clone-snapshot the current stack contents for diagnostics.
     pub fn snapshot(&self) -> Vec<String> {
         self.inner.lock().clone()
     }

@@ -4,8 +4,11 @@
 //! Each block receives a message, processes it, and returns a result
 //! that determines the next step in the flow.
 
+#![warn(missing_docs)]
+
 pub mod asset_loader;
 pub mod block;
+/// Shared identifiers (error codes, service names) used across host/guest boundaries.
 pub mod common;
 pub mod compat;
 pub mod config;
@@ -15,20 +18,29 @@ pub mod discovery;
 pub mod error;
 pub mod executor;
 pub mod helpers;
+/// Block manifest schema — versioned JSON descriptor of a block's interface, config and grants.
 pub mod manifest;
+/// Re-exports of the canonical metadata constants defined in `wafer-block`.
 pub mod meta;
+/// Observability hooks: pluggable callbacks fired on flow/block lifecycle events.
 pub mod observability;
 pub mod platform;
 mod registry_loader;
 pub mod router;
+/// Top-level runtime: the `Wafer` instance, block slots, config sources and validation.
 pub mod runtime;
+/// JSON Schema types used by block manifests to describe message/config shape.
 pub mod schema;
+/// SSRF defenses and other security helpers shared by host- and native-side fetchers.
 pub mod security;
 pub mod snapshot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod static_registration;
+/// Re-exports of the core runtime value types (`Message`, `MetaEntry`, `WaferError`, …) from `wafer-block`.
 pub mod types;
+/// Executor for `WaferFlow` definitions — runs a sequence of blocks against an input message.
 pub mod waferflow;
+/// WASM block loader and host capabilities (gated by the `wasmi` feature on native targets).
 pub mod wasm;
 
 /// Register a block at link time via `linkme`.

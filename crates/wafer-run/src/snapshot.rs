@@ -18,11 +18,15 @@ use crate::block::BlockInfo;
 /// [`crate::runtime::Wafer::seal`].
 #[derive(Default, Clone)]
 pub struct StartupSnapshot {
+    /// Public metadata for every registered block, in registration order.
     pub blocks: Vec<BlockInfo>,
+    /// Metadata for every loaded flow (id, description, declared interfaces).
     pub flow_infos: Vec<wafer_flow::FlowInfo>,
+    /// Parsed flow definitions, indexable by `FlowInfo.id`.
     pub flow_defs: Vec<wafer_flow::WaferFlow>,
     /// Expanded per-block configs (after registrar-driven expansion).
     pub block_configs: HashMap<String, serde_json::Value>,
+    /// Interface contracts declared by registered blocks, deduplicated.
     pub interface_specs: Vec<InterfaceSpec>,
 }
 

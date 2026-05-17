@@ -33,10 +33,12 @@ impl EnvBlockConfig {
         Self { inner }
     }
 
+    /// Look up a value by its SCREAMING_SNAKE env-var key.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.inner.get(key).map(String::as_str)
     }
 
+    /// Consume `self` and yield the underlying key→value map.
     pub fn into_inner(self) -> HashMap<String, String> {
         self.inner
     }
@@ -48,13 +50,20 @@ pub enum ConfigError {
     /// A `required: true` key (i.e. `optional: false`) has no value in the
     /// source and no non-empty default in its `ConfigVar`.
     #[error("required config key `{key}` missing for block `{block}`")]
-    MissingRequired { block: String, key: String },
+    MissingRequired {
+        /// Block name being initialised.
+        block: String,
+        /// SCREAMING_SNAKE key that was required but not supplied.
+        key: String,
+    },
 
     /// A transient I/O error (network timeout, D1 failure). The caller may
     /// retry; the error is not cached in the block slot.
     #[error("transient error fetching config for `{block}`: {source}")]
     Transient {
+        /// Block name whose config load failed.
         block: String,
+        /// Underlying transport error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -94,6 +103,7 @@ pub struct StaticConfigSource {
 }
 
 impl StaticConfigSource {
+    /// Build a source backed by an explicit key→value map.
     pub fn new(data: HashMap<String, String>) -> Self {
         Self { data }
     }

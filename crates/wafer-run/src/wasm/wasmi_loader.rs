@@ -1344,6 +1344,7 @@ fn instantiate(
 // WasmiBlock
 // ---------------------------------------------------------------------------
 
+/// `Block` implementation that runs a WASM module via the `wasmi` interpreter.
 pub struct WasmiBlock {
     engine: Engine,
     module: Module,
@@ -1370,6 +1371,7 @@ unsafe impl Send for WasmiBlock {}
 unsafe impl Sync for WasmiBlock {}
 
 impl WasmiBlock {
+    /// Read a WASM module from disk and compile it (native-only convenience wrapper).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &str) -> Result<Self, RuntimeError> {
         let bytes = std::fs::read(path)
@@ -1377,10 +1379,12 @@ impl WasmiBlock {
         Self::load_from_bytes(&bytes)
     }
 
+    /// Compile a WASM module from raw bytes with unrestricted host capabilities.
     pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
         Self::load_with_capabilities(wasm_bytes, BlockCapabilities::unrestricted())
     }
 
+    /// Compile a WASM module with a custom capability set (filters host imports).
     pub fn load_with_capabilities(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
@@ -1391,6 +1395,7 @@ impl WasmiBlock {
         Self::load_with_engine(&engine, wasm_bytes, caps)
     }
 
+    /// Compile a WASM module reusing an existing `wasmi::Engine` (lets callers share fuel config).
     pub fn load_with_engine(
         engine: &Engine,
         wasm_bytes: &[u8],
