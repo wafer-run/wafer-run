@@ -128,9 +128,13 @@ impl Wafer {
     ///   its own migrations) never fire until a request happens to touch
     ///   them transitively, leaving fresh deploys in a broken state.
     ///
-    /// Init failures are logged and tolerated — a failed Init can be retried
-    /// by a later dispatch, and tolerating it keeps boot resilient when one
-    /// misconfigured block would otherwise wedge the whole runtime.
+    /// Init failures are logged and tolerated — transient failures can be
+    /// retried by a later dispatch, and tolerating permanent ones keeps boot
+    /// resilient when one misconfigured block would otherwise wedge the
+    /// whole runtime. Callers that need ordering guarantees should call
+    /// [`Wafer::init_block`] for the required-first blocks before invoking
+    /// this method (slot caching makes the second call a no-op for any
+    /// block already initialised).
     pub async fn init_all_blocks(&self) {
         let block_names: Vec<String> = self.blocks.keys().cloned().collect();
         for name in &block_names {
