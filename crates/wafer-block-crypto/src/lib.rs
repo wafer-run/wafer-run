@@ -5,4 +5,8 @@
 //!
 //! Use `wafer_core::service_blocks::crypto::register_with()` to register.
 
+#![warn(missing_docs)]
+
+/// Concrete `CryptoService` implementation: argon2id password hashing and
+/// HMAC-SHA256 (HS256) JWT signing, with per-block keys derived via HKDF-SHA256.
 pub mod service;
