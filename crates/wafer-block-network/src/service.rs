@@ -105,6 +105,8 @@ pub struct HttpNetworkService {
 }
 
 impl HttpNetworkService {
+    /// Construct a service with an uninitialised client; the underlying
+    /// `reqwest::Client` is built on the first call to [`Self::client`].
     pub fn new() -> Self {
         Self {
             client: std::sync::OnceLock::new(),
