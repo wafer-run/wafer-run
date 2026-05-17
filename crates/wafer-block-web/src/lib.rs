@@ -1,3 +1,14 @@
+//! Static file server block for wafer-run.
+//!
+//! Provides `wafer-run/web`, an HTTP-handler block that serves assets out of
+//! a `wafer-run/storage` folder with sensible defaults for caching, clean
+//! URLs, SPA fallback, and MIME-type detection. The block is registered into
+//! the runtime at link time via [`wafer_run::register_static_block!`]; consumers
+//! enable it by depending on this crate and supplying a `wafer-run/web`
+//! block-config entry.
+
+#![warn(missing_docs)]
+
 mod mime;
 
 use std::{path::Path, sync::OnceLock};
@@ -5,7 +16,8 @@ use std::{path::Path, sync::OnceLock};
 use wafer_block::*;
 use wafer_core::clients::storage as store;
 
-/// WebBlock serves static files from wafer-run/storage with caching and SPA support.
+/// HTTP-handler block that serves static files from `wafer-run/storage`
+/// with caching, clean-URL resolution, and optional SPA fallback.
 ///
 /// Configure via `add_block_config("wafer-run/web", json!({...}))`:
 ///   - `web_root`: storage folder name (default: "public")
@@ -14,7 +26,7 @@ use wafer_core::clients::storage as store;
 ///   - `web_index`: index file name (default: "index.html")
 ///   - `cache_max_age`: Cache-Control max-age for static assets (default: 3600)
 ///   - `immutable_max_age`: max-age for hashed assets (default: 31536000)
-pub struct WebBlock {
+pub(crate) struct WebBlock {
     config: OnceLock<WebConfig>,
 }
 
@@ -25,7 +37,9 @@ impl Default for WebBlock {
 }
 
 impl WebBlock {
-    pub fn new() -> Self {
+    /// Construct a `WebBlock` with no resolved config; the runtime fills it
+    /// in via the `Init` lifecycle event before the first request is served.
+    pub(crate) fn new() -> Self {
         Self {
             config: OnceLock::new(),
         }
