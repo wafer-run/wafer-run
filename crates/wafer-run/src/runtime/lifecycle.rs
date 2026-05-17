@@ -113,6 +113,38 @@ impl Wafer {
         self.wrap_grants = Arc::new(all);
     }
 
+    /// Eagerly run `lifecycle(Init)` on every registered block. Lazy init
+    /// semantics for [`Wafer::run_block`] / `call_block` are preserved —
+    /// this method just pre-runs Init for every block so on-boot failures
+    /// surface before the first request.
+    ///
+    /// Used by:
+    /// - [`Wafer::start`] (native), which needs every block initialized
+    ///   before `bind()` because some blocks (e.g. `wafer-run/http-listener`)
+    ///   read their config in Init and consume it in `bind()`.
+    /// - Cloudflare Workers' boot path (`solobase-cloudflare`), which calls
+    ///   [`Wafer::seal`] but not `start()`/`bind()`. Without an eager pass,
+    ///   blocks that need Init-time side effects (e.g. admin block running
+    ///   its own migrations) never fire until a request happens to touch
+    ///   them transitively, leaving fresh deploys in a broken state.
+    ///
+    /// Init failures are logged and tolerated — a failed Init can be retried
+    /// by a later dispatch, and tolerating it keeps boot resilient when one
+    /// misconfigured block would otherwise wedge the whole runtime.
+    pub async fn init_all_blocks(&self) {
+        let block_names: Vec<String> = self.blocks.keys().cloned().collect();
+        for name in &block_names {
+            let stack = crate::runtime::init_stack::InitStack::new();
+            if let Err(e) = self.init_block_with_stack(name, &stack).await {
+                tracing::error!(
+                    block = %name,
+                    error = %e,
+                    "block init lifecycle failed during init_all_blocks",
+                );
+            }
+        }
+    }
+
     /// Start the runtime, wrap in `Arc`, and call `bind()` on all blocks.
     ///
     /// Finalizes runtime configuration via [`Wafer::seal`] (composite config
@@ -147,31 +179,7 @@ impl Wafer {
             "wafer runtime starting"
         );
         self.seal().await?;
-
-        // Eager Init pass: every registered block runs `lifecycle(Init)`
-        // before the Start dispatch and `bind()`. Required because some
-        // blocks (notably `wafer-run/http-listener`) read their config in
-        // Init and consume the resulting state inside `bind()`. Lazy
-        // semantics for `run_block` / dispatch_call are preserved — only
-        // the eager `start()` path pre-runs Init.
-        //
-        // Init failures are logged and tolerated (same pattern as the
-        // Start dispatch below): a failed Init can be retried by a
-        // later dispatch, and tolerating it keeps boot resilient when one
-        // misconfigured block would otherwise wedge the whole runtime.
-        {
-            let block_names: Vec<String> = self.blocks.keys().cloned().collect();
-            for name in &block_names {
-                let stack = crate::runtime::init_stack::InitStack::new();
-                if let Err(e) = self.init_block_with_stack(name, &stack).await {
-                    tracing::error!(
-                        block = %name,
-                        error = %e,
-                        "block init lifecycle failed during start()",
-                    );
-                }
-            }
-        }
+        self.init_all_blocks().await;
 
         for (name, block) in &self.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
