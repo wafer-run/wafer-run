@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! `wafer-run/ip-rate-limit` — per-IP rate-limiting middleware block.
 //!
 //! ## Status: native-only
@@ -32,13 +34,17 @@ use std::{
 use parking_lot::Mutex;
 use wafer_run::{types::ConfigVar, *};
 
-/// Source of monotonic time for rate-limit windowing. Injected for tests.
-pub trait Clock: Send + Sync {
+/// Source of monotonic time for rate-limit windowing.
+///
+/// Production uses [`SystemClock`] (wrapping [`Instant::now`]); tests inject a
+/// controllable fake so window-reset behaviour can be exercised without sleeping.
+pub(crate) trait Clock: Send + Sync {
+    /// Returns the current monotonic instant used to stamp bucket windows.
     fn now(&self) -> Instant;
 }
 
-/// Default production clock backed by `std::time::Instant::now()`.
-pub struct SystemClock;
+/// Default production [`Clock`] backed by [`std::time::Instant::now`].
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -46,8 +52,16 @@ impl Clock for SystemClock {
     }
 }
 
-/// RateLimitBlock provides per-IP rate limiting.
-pub struct RateLimitBlock {
+/// Per-IP fixed-window rate-limiter block.
+///
+/// Maintains an in-memory `HashMap<client_ip, RateBucket>` guarded by a
+/// [`parking_lot::Mutex`]. Each bucket counts requests within a fixed window
+/// (defaults: 1000 requests per 60-second window, overridable per-flow via the
+/// `max_requests` / `window_seconds` config). On overflow the block emits a
+/// [`WaferError`] with [`ErrorCode::ResourceExhausted`] and `Retry-After` /
+/// `X-RateLimit-*` response-header meta; on allow it forwards the message with
+/// `X-RateLimit-Remaining` set. Single-process / native-only — see crate docs.
+pub(crate) struct RateLimitBlock {
     max_requests: u32,
     window: Duration,
     buckets: Mutex<HashMap<String, RateBucket>>,
@@ -66,11 +80,14 @@ impl Default for RateLimitBlock {
 }
 
 impl RateLimitBlock {
-    pub fn new() -> Self {
+    /// Builds a block with the production [`SystemClock`].
+    pub(crate) fn new() -> Self {
         Self::with_clock(Arc::new(SystemClock))
     }
 
-    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+    /// Builds a block with a caller-supplied [`Clock`]. Used by tests to drive
+    /// window-reset behaviour deterministically.
+    pub(crate) fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             max_requests: 1000,
             window: Duration::from_secs(60),
@@ -215,6 +232,8 @@ impl Block for RateLimitBlock {
     }
 }
 
+/// Registers the `wafer-run/ip-rate-limit` block on the given [`Wafer`]
+/// runtime. Returns `Err` if a block with the same name is already registered.
 pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
     w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
 }
