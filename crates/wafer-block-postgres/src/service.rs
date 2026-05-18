@@ -152,8 +152,10 @@ impl PostgresDatabaseService {
             data.insert("updated_at".to_string(), serde_json::Value::String(now));
         }
 
-        // Auto-create table if it doesn't exist
-        self.ensure_table_async(&table, &data).await?;
+        // Ensure any new columns exist (matches the `update` / `update_where`
+        // paths). Table creation itself is the responsibility of the block's
+        // migration files, not lazy on-insert DDL.
+        self.ensure_columns_from_data(&table, &data).await?;
 
         // Sorted-key iteration so the generated INSERT is stable across
         // process starts. HashMap order is randomized by RandomState; without
@@ -549,26 +551,6 @@ impl PostgresDatabaseService {
             .into_iter()
             .map(|(name,)| name.to_lowercase())
             .collect())
-    }
-
-    /// Auto-create a table with id, created_at, updated_at and any additional
-    /// columns from the data map.
-    async fn ensure_table_async(
-        &self,
-        table: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        // Create the base table
-        let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())"
-        );
-        sqlx::query(&create_sql)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(format!("ensure_table: {e}")))?;
-
-        // Add any missing columns from data
-        self.ensure_columns_from_data(table, data).await
     }
 
     /// Add any columns that exist in `data` but not yet in the table.

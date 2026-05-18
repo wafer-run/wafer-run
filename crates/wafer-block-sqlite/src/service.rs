@@ -117,42 +117,6 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     }
 }
 
-/// Auto-create a table with columns matching the provided data keys.
-/// Uses TEXT type for all columns (SQLite is dynamically typed anyway).
-/// The `id` column is used as the primary key.
-fn ensure_table(db: &Connection, table: &str, data: &HashMap<String, serde_json::Value>) {
-    let safe_table = sanitize_ident(table);
-    let mut col_defs = Vec::new();
-    for key in data.keys() {
-        let safe_key = sanitize_ident(key);
-        if key == "id" {
-            col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
-        } else {
-            col_defs.push(format!("{safe_key} TEXT"));
-        }
-    }
-    if !data.contains_key("id") {
-        col_defs.insert(0, "id TEXT PRIMARY KEY".to_string());
-    }
-    let sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} ({})",
-        safe_table,
-        col_defs.join(", ")
-    );
-    db.execute_batch(&sql).ok();
-
-    // Also ensure any missing columns are added (for when a table exists but new fields are inserted)
-    if let Ok(existing) = table_columns(db, &safe_table) {
-        for key in data.keys() {
-            let safe_key = sanitize_ident(key);
-            if !existing.contains(&safe_key.to_lowercase()) {
-                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_key} TEXT");
-                db.execute_batch(&alter).ok();
-            }
-        }
-    }
-}
-
 /// Get list of column names for an existing table.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
     let safe_table = sanitize_ident(table);
@@ -365,9 +329,6 @@ impl DatabaseService for SQLiteDatabaseService {
         if !data.contains_key("updated_at") {
             data.insert("updated_at".to_string(), serde_json::Value::String(now));
         }
-
-        // Auto-create table if it doesn't exist
-        ensure_table(&db, &table, &data);
 
         // Sorted-key iteration so the generated INSERT is stable across
         // process starts. HashMap order is randomized by RandomState, which
@@ -1091,8 +1052,36 @@ mod tests {
         collection: &str,
         rows: Vec<serde_json::Value>,
     ) {
-        // Ensure the table exists by creating one row and deleting it, or just
-        // create rows directly.
+        // Declare a TEXT-everything schema from the union of row keys, then
+        // create it via `ensure_schema_table` before inserting. The runtime
+        // no longer auto-creates tables on first insert — production callers
+        // run explicit migrations at `Init`, and the test fixture mirrors
+        // that contract.
+        let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for row in &rows {
+            if let serde_json::Value::Object(map) = row {
+                for k in map.keys() {
+                    if k != "id" && k != "created_at" && k != "updated_at" {
+                        keys.insert(k.clone());
+                    }
+                }
+            }
+        }
+        let mut columns = vec![pk("id")];
+        for k in &keys {
+            columns.push(Column::new(k, DataType::Text).null());
+        }
+        columns.push(Column::new("created_at", DataType::Text).null());
+        columns.push(Column::new("updated_at", DataType::Text).null());
+        let table = Table {
+            name: collection.to_string(),
+            columns,
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        svc.ensure_schema_table(&table).await.unwrap();
+
         for row in rows {
             let mut data = std::collections::HashMap::new();
             if let serde_json::Value::Object(map) = row {
