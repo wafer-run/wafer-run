@@ -1,3 +1,7 @@
+//! End-to-end test for `wafer login`: spawns the binary, pipes a paste-token
+//! over stdin, and asserts the registry `/me` round-trip persists credentials
+//! to a temp `XDG_CONFIG_HOME`.
+
 use std::{
     io::Write,
     process::{Command, Stdio},

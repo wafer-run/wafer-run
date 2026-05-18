@@ -1,3 +1,12 @@
+#![warn(missing_docs)]
+//! `wafer` — command-line tool for creating, building, testing, packaging, and
+//! publishing WAFER blocks.
+//!
+//! This is a bin-only crate (no `lib.rs`). All modules below are private to
+//! `main.rs`; items marked `pub` are technically `pub(crate)` in effect because
+//! the crate exposes no library API. The `#![warn(missing_docs)]` attribute is
+//! kept on for consistency with the rest of the workspace.
+
 mod build;
 mod cache;
 mod commands;

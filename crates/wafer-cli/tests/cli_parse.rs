@@ -1,3 +1,6 @@
+//! Unit tests for the `wafer yank` target-string parser
+//! (`{org}/{block}@{version}`).
+
 /// Test parsing of the yank target format: org/block@version
 fn parse_target(s: &str) -> Result<(String, String, String), String> {
     let (org, rest) = s
