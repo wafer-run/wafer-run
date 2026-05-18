@@ -117,6 +117,29 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     }
 }
 
+/// For each key in `data` that isn't already a column on `table`, run
+/// `ALTER TABLE ... ADD COLUMN ... TEXT`. Mirrors the lazy column-add
+/// behaviour postgres + D1 keep on the `create` path — the table itself
+/// must already exist via the block's migration files, but new columns
+/// supplied through `data` are added on demand.
+fn ensure_columns_from_data(
+    db: &Connection,
+    table: &str,
+    data: &HashMap<String, serde_json::Value>,
+) {
+    let safe_table = sanitize_ident(table);
+    let Ok(existing) = table_columns(db, &safe_table) else {
+        return;
+    };
+    for key in data.keys() {
+        let safe_key = sanitize_ident(key);
+        if !existing.contains(&safe_key.to_lowercase()) {
+            let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_key} TEXT");
+            db.execute_batch(&alter).ok();
+        }
+    }
+}
+
 /// Get list of column names for an existing table.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
     let safe_table = sanitize_ident(table);
@@ -329,6 +352,10 @@ impl DatabaseService for SQLiteDatabaseService {
         if !data.contains_key("updated_at") {
             data.insert("updated_at".to_string(), serde_json::Value::String(now));
         }
+
+        // Ensure any new columns exist (matches the postgres + D1 `create`
+        // paths). Table creation itself is the block migration's job.
+        ensure_columns_from_data(&db, &table, &data);
 
         // Sorted-key iteration so the generated INSERT is stable across
         // process starts. HashMap order is randomized by RandomState, which
