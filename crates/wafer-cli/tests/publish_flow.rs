@@ -1,3 +1,7 @@
+//! End-to-end test for `wafer publish`: scaffolds a minimal block, stubs the
+//! registry POST endpoint with `wiremock`, and asserts the CLI uploads the
+//! expected multipart payload with the configured auth token.
+
 use wiremock::{
     matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
