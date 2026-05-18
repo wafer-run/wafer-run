@@ -16,6 +16,7 @@
 //!   result (lifecycle ops) or a JSON error in the returned string
 //!   (synchronous ops).
 //! - Panics are caught at every FFI boundary.
+#![warn(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
 use std::{
