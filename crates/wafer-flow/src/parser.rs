@@ -1,6 +1,11 @@
+//! JSON deserialization for [`WaferFlow`] documents.
+
 use crate::{error::ParseError, types::WaferFlow};
 
-/// Parse a JSON string into a WaferFlow definition.
+/// Parse a JSON string into a [`WaferFlow`] definition.
+///
+/// Performs no semantic validation — call [`crate::validate`] on the result
+/// before handing the flow to the runtime.
 pub fn parse(json: &str) -> Result<WaferFlow, ParseError> {
     let flow: WaferFlow = serde_json::from_str(json)?;
     Ok(flow)

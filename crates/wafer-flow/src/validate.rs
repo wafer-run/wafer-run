@@ -1,8 +1,16 @@
+//! Semantic validation for parsed [`WaferFlow`] documents.
+
 use std::collections::HashSet;
 
 use crate::{error::ValidationError, expr, types::WaferFlow};
 
-/// Validate a parsed WaferFlow definition for semantic correctness.
+/// Validate a parsed [`WaferFlow`] for semantic correctness.
+///
+/// Checks performed: at least one step exists; step ids are unique
+/// (including across `parallel` branches); every `next.step` points at a
+/// known step; every conditional `next` block has an unconditional default;
+/// and every `when`, `each`, and `$.`-prefixed `input` value parses as a
+/// valid expression. Returns *all* problems found, not just the first.
 pub fn validate(flow: &WaferFlow) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
 
