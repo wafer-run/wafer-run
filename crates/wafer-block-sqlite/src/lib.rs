@@ -5,6 +5,12 @@
 //!
 //! Use `wafer_core::service_blocks::database::register_with()` to register.
 
+#![warn(missing_docs)]
+
+/// SQLite-backed implementation of the `wafer-core` `DatabaseService`
+/// interface. Exposes `SQLiteDatabaseService`, which dispatches the
+/// schemaless CRUD/list/aggregate ops over a single pooled
+/// `rusqlite::Connection` guarded by a `Mutex`.
 pub mod service;
 
 /// Register the `sqlite-vec` extension with SQLite's auto-extension list

@@ -12,7 +12,10 @@ pub struct SQLiteDatabaseService {
 }
 
 impl SQLiteDatabaseService {
-    pub fn new(db: Connection) -> Self {
+    /// Wrap an open `rusqlite::Connection`, enabling WAL journaling,
+    /// foreign-key enforcement, and a 5s busy timeout. PRAGMA failures
+    /// are logged but non-fatal so callers always get a usable service.
+    pub(crate) fn new(db: Connection) -> Self {
         // Enable WAL mode and foreign keys
         if let Err(e) = db.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -24,12 +27,18 @@ impl SQLiteDatabaseService {
         Self { db: Mutex::new(db) }
     }
 
+    /// Open a SQLite database file at `path` (creating it if absent) and
+    /// return a configured service. Used by `solobase-native` to back the
+    /// `wafer-run/sqlite` block with an on-disk DB.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
         let conn = Connection::open(path)
             .map_err(|e| DatabaseError::Internal(format!("open database: {e}")))?;
         Ok(Self::new(conn))
     }
 
+    /// Open an in-memory SQLite database for tests and ephemeral
+    /// workloads. The connection lives for the lifetime of the returned
+    /// service and is dropped with it.
     pub fn open_in_memory() -> Result<Self, DatabaseError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| DatabaseError::Internal(format!("open in-memory database: {e}")))?;
