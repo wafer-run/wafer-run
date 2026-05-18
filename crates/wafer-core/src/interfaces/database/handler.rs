@@ -100,16 +100,49 @@ fn service_record_list_to_wire(l: service::RecordList) -> wire::RecordList {
     }
 }
 
+/// Substrings of structured backend errors that are safe to surface to
+/// callers. These are operator-authored DDL outcomes (column names,
+/// table names) — never user-supplied content — so they don't leak
+/// secrets, and consumers like `solobase-core::migration_helper` need to
+/// see them to decide whether a failure is benign (e.g. re-running an
+/// `ALTER TABLE … ADD COLUMN` after the column already exists).
+///
+/// Every other internal error message stays scrubbed.
+const PRESERVED_DB_ERROR_SUBSTRINGS: &[&str] = &[
+    // SQLite / D1
+    "duplicate column name",
+    // PostgreSQL
+    "already exists",
+];
+
+fn is_preserved_db_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    PRESERVED_DB_ERROR_SUBSTRINGS
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     match e {
         DatabaseError::NotFound => WaferError::new(ErrorCode::NOT_FOUND, "record not found"),
         DatabaseError::Internal(msg) => {
-            tracing::error!(error = %msg, "database internal error");
-            WaferError::new(ErrorCode::INTERNAL, "internal database error")
+            if is_preserved_db_error(&msg) {
+                tracing::warn!(error = %msg, "database structured error (preserved)");
+                WaferError::new(ErrorCode::INTERNAL, msg)
+            } else {
+                tracing::error!(error = %msg, "database internal error");
+                WaferError::new(ErrorCode::INTERNAL, "internal database error")
+            }
         }
         DatabaseError::Other(err) => {
-            tracing::error!(error = %err, "database error");
-            WaferError::new(ErrorCode::INTERNAL, "internal database error")
+            let msg = err.to_string();
+            if is_preserved_db_error(&msg) {
+                tracing::warn!(error = %msg, "database structured error (preserved)");
+                WaferError::new(ErrorCode::INTERNAL, msg)
+            } else {
+                tracing::error!(error = %msg, "database error");
+                WaferError::new(ErrorCode::INTERNAL, "internal database error")
+            }
         }
     }
 }
@@ -324,6 +357,47 @@ pub async fn handle_lifecycle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_duplicate_column_error_messages() {
+        // SQLite / D1 wording
+        let w = db_error_to_wafer(DatabaseError::Internal(
+            "duplicate column name: block".to_string(),
+        ));
+        assert_eq!(w.code, ErrorCode::INTERNAL);
+        assert!(
+            w.message.contains("duplicate column name"),
+            "expected preserved message, got: {}",
+            w.message
+        );
+
+        // PostgreSQL wording
+        let w = db_error_to_wafer(DatabaseError::Internal(
+            r#"column "block" of relation "variables" already exists"#.to_string(),
+        ));
+        assert!(
+            w.message.contains("already exists"),
+            "expected preserved message, got: {}",
+            w.message
+        );
+    }
+
+    #[test]
+    fn scrubs_generic_internal_errors() {
+        // Random backend internal failures still get scrubbed so we don't
+        // leak driver internals or connection strings.
+        let w = db_error_to_wafer(DatabaseError::Internal(
+            "connection refused: tcp://10.0.0.5:5432".to_string(),
+        ));
+        assert_eq!(w.message, "internal database error");
+    }
+
+    #[test]
+    fn not_found_stays_descriptive() {
+        let w = db_error_to_wafer(DatabaseError::NotFound);
+        assert_eq!(w.code, ErrorCode::NOT_FOUND);
+        assert_eq!(w.message, "record not found");
+    }
 
     #[test]
     fn parse_filter_op_known_ops() {
