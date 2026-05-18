@@ -41,6 +41,7 @@ impl Default for FakeDb {
 }
 
 impl FakeDb {
+    /// Build an empty fake with no collections and no failure injection.
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeDbState {
@@ -66,10 +67,13 @@ impl FakeDb {
             .extend(rows);
     }
 
+    /// Switch the fake into a failure mode so subsequent dispatches return
+    /// `ErrorCode::INTERNAL` — used to exercise caller error handling.
     pub fn set_failure(&self, mode: FailureMode) {
         self.state.lock().failure = mode;
     }
 
+    /// Drop all seeded collections and reset failure mode to `None`.
     pub fn clear(&self) {
         let mut s = self.state.lock();
         s.collections.clear();

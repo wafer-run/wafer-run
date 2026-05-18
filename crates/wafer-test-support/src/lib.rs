@@ -5,6 +5,8 @@
 //! in-memory state) and a `WaferBuilder` helper that assembles a running
 //! `Wafer` runtime with common test wiring.
 
+#![warn(missing_docs)]
+
 pub mod builder;
 pub mod fake_crypto;
 pub mod fake_db;

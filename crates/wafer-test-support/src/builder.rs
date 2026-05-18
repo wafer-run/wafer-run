@@ -7,6 +7,9 @@ use wafer_run::{error::RuntimeError, Wafer};
 
 use crate::{fake_crypto::FakeCrypto, fake_db::FakeDb};
 
+/// Fluent helper that assembles a minimal `Wafer` runtime with the fakes and
+/// aliases tests need. Disables inventory + lockfile loading so each test
+/// starts from an empty registry.
 pub struct WaferBuilder {
     wafer: Wafer,
 }
@@ -18,6 +21,7 @@ impl Default for WaferBuilder {
 }
 
 impl WaferBuilder {
+    /// Create a builder wrapping a fresh `Wafer` with no blocks registered.
     pub fn new() -> Self {
         Self {
             wafer: Wafer::builder()
