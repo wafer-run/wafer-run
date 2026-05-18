@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! `wafer-run/http-server` — batteries-included HTTP server flow.
 //!
 //! Registers a flow that chains the standard infrastructure blocks
