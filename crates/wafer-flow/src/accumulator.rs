@@ -1,16 +1,25 @@
+//! Runtime state for a flow execution: stores step outputs and resolves
+//! `$.step-id.field` references against them.
+
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use crate::{error::ExprError, expr};
 
-/// Stores step outputs and resolves `$.` references against stored data.
+/// Stores step outputs keyed by step id and resolves `$.` references and
+/// `when` expressions against the stored data.
+///
+/// The executor creates one accumulator per flow invocation, seeds it with
+/// the caller's payload under the `input` key, then calls [`set`](Self::set)
+/// after every step.
 #[derive(Debug, Clone)]
 pub struct Accumulator {
     data: HashMap<String, Value>,
 }
 
 impl Accumulator {
+    /// Create an empty accumulator with no stored step outputs.
     pub fn new() -> Self {
         Self {
             data: HashMap::new(),
