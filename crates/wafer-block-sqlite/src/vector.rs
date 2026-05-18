@@ -15,15 +15,27 @@ use wafer_sql_utils::vector::VectorIndexSchema;
 
 use crate::ensure_vec_loaded;
 
+/// `VectorService` backed by SQLite + `sqlite-vec` (`vec0` virtual
+/// tables) for ANN search and FTS5 for keyword search. A single pooled
+/// `rusqlite::Connection` is guarded by a `Mutex`; callers are expected
+/// to register the `sqlite-vec` auto-extension before opening the
+/// connection (see [`crate::ensure_vec_loaded`]).
 pub struct SqliteVecService {
     db: Mutex<Connection>,
 }
 
 impl SqliteVecService {
+    /// Wrap an existing `rusqlite::Connection` that already has the
+    /// `sqlite-vec` extension loaded. Used by `solobase-core` to bind a
+    /// shared on-disk DB to the vector service.
     pub fn new(db: Connection) -> Self {
         Self { db: Mutex::new(db) }
     }
 
+    /// Open an in-memory SQLite connection with `sqlite-vec` registered
+    /// via [`crate::ensure_vec_loaded`]. Intended for tests — registration
+    /// happens on a throwaway probe connection first because
+    /// `sqlite3_auto_extension` only affects connections opened after it.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         // Register the sqlite-vec auto-extension BEFORE opening the connection.
         // `sqlite3_auto_extension` only affects connections opened after
