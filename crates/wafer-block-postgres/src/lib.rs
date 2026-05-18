@@ -3,6 +3,13 @@
 //! Self-contained block wrapping the PostgreSQL database service.
 //! Uses the shared database message handler for the `database@v1` interface.
 
+#![warn(missing_docs)]
+
+/// PostgreSQL implementation of `wafer_core::interfaces::database::service::DatabaseService`.
+///
+/// Exposed publicly so native consumers (e.g. `solobase-native`) can construct
+/// the service directly from a connection URL when running outside the
+/// block lifecycle.
 pub mod service;
 
 use std::{
@@ -27,7 +34,7 @@ const DATABASE_URL_ENV: &str = "WAFER_RUN__POSTGRES__DATABASE_URL";
 /// Initialized during `lifecycle(Init)`. Reads its connection URL from the
 /// `WAFER_RUN__POSTGRES__DATABASE_URL` env var — a wafer-run process
 /// typically points at one database, so this lives in `config_keys`.
-pub struct PostgresDatabaseBlock {
+pub(crate) struct PostgresDatabaseBlock {
     service: OnceLock<Arc<dyn DatabaseService>>,
     tables: OnceLock<Vec<Table>>,
 }
@@ -39,7 +46,8 @@ impl Default for PostgresDatabaseBlock {
 }
 
 impl PostgresDatabaseBlock {
-    pub fn new() -> Self {
+    /// Construct a fresh block with empty (uninitialized) service and table state.
+    pub(crate) fn new() -> Self {
         Self {
             service: OnceLock::new(),
             tables: OnceLock::new(),
