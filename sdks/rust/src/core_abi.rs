@@ -28,16 +28,22 @@ use wafer_block::{MetaEntry, WaferError};
 /// [`GuestResult::drop_request`] to construct values.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GuestResult {
+    /// Discriminator (`"Respond"`, `"Error"`, or `"Drop"`) telling the host which arm to take.
     pub action: String,
+    /// Response body and trailing meta when `action == "Respond"`.
     pub response: Option<GuestResponse>,
+    /// Structured error when `action == "Error"`.
     pub error: Option<WaferError>,
+    /// Optional updated `Message` to forward downstream alongside the response.
     pub message: Option<wafer_block::Message>,
 }
 
 /// The response body returned by a successful WASM block invocation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GuestResponse {
+    /// Body bytes returned to the caller.
     pub data: Vec<u8>,
+    /// Trailing meta entries appended to the response stream.
     pub meta: Vec<MetaEntry>,
 }
 
