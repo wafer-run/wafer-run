@@ -37,7 +37,7 @@ use wafer_block::*;
 /// (either via wildcard or allow-list match), the block also sets
 /// `Vary: Origin`. Without it, intermediary caches can serve a response
 /// targeted at Origin A to a request from Origin B — see SEC-088.
-pub(crate) struct CorsBlock {
+pub struct CorsBlock {
     /// Allow-list resolved at `Init` lifecycle, used as fallback when the
     /// per-request context does not supply `allowed_origins`. `None` until
     /// Init succeeds.
@@ -62,7 +62,7 @@ impl CorsBlock {
     /// block therefore fails closed on cross-origin requests — until
     /// `lifecycle(Init)` parses block config or per-request `ctx.config_get`
     /// supplies one. See SEC-087 for the rationale.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             allowed_origins: RwLock::new(None),
             allowed_methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),

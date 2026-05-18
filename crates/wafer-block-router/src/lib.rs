@@ -96,7 +96,7 @@ fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
 /// { "path": "/users", "methods": ["GET"],      "block": "list-users" }
 /// ```
 /// HTTP methods are automatically mapped to actions (GET -> retrieve, etc.).
-pub(crate) struct RouterBlock {
+pub struct RouterBlock {
     routes: OnceLock<Vec<Route>>,
 }
 
@@ -109,7 +109,7 @@ impl Default for RouterBlock {
 impl RouterBlock {
     /// Builds a fresh router with an empty, uninitialized route table; the
     /// table is populated once on `lifecycle(Init)` from block config.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             routes: OnceLock::new(),
         }

@@ -26,7 +26,7 @@ use wafer_core::clients::storage as store;
 ///   - `web_index`: index file name (default: "index.html")
 ///   - `cache_max_age`: Cache-Control max-age for static assets (default: 3600)
 ///   - `immutable_max_age`: max-age for hashed assets (default: 31536000)
-pub(crate) struct WebBlock {
+pub struct WebBlock {
     config: OnceLock<WebConfig>,
 }
 
@@ -39,7 +39,7 @@ impl Default for WebBlock {
 impl WebBlock {
     /// Construct a `WebBlock` with no resolved config; the runtime fills it
     /// in via the `Init` lifecycle event before the first request is served.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             config: OnceLock::new(),
         }
