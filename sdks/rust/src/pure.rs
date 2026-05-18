@@ -52,12 +52,19 @@ pub trait PureBlock {
 /// Block definition metadata for pure blocks.
 #[derive(Debug, Clone)]
 pub struct BlockDef {
+    /// Fully-qualified block id, e.g. `@my-org/my-repo/uppercase`.
     pub id: String,
+    /// Human-readable block name shown in tooling.
     pub name: String,
+    /// Semver version string for this block.
     pub version: String,
+    /// Optional short description of what the block does.
     pub description: Option<String>,
+    /// Optional JSON schema describing the expected input shape.
     pub input: Option<String>,
+    /// Optional JSON schema describing the produced output shape.
     pub output: Option<String>,
+    /// Runtime identifier (e.g. `"wasm"`) advertised to WaferFlow.
     pub runtime: Option<String>,
 }
 

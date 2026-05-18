@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! WAFER guest SDK for writing blocks compiled to WebAssembly.
 //!
 //! This crate provides the types and traits needed to implement a WASM
