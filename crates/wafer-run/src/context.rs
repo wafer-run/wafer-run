@@ -29,8 +29,20 @@ pub struct RuntimeContext {
     pub flow_id: String,
     /// Identifier of the node within the flow that triggered this context.
     pub node_id: String,
-    /// Resolved per-block config map (string-keyed) snapshotted at flow start.
-    pub config: Arc<HashMap<String, String>>,
+    /// Per-call config overrides — flow-step `step.config`, per-frame
+    /// caller-supplied keys, etc. Wins over [`Self::config_snapshot`] in
+    /// [`Context::config_get`]. Made `pub(crate)` so [`Context::config_get`]
+    /// is the only access path; if callers need raw map access in the future,
+    /// add a method that returns a layered view rather than re-exposing the
+    /// field.
+    pub(crate) config: Arc<HashMap<String, String>>,
+    /// Embedder-supplied env-style configuration snapshot, shared `Arc` with
+    /// the [`Wafer`] that produced this context (see
+    /// [`Wafer::set_config_snapshot`]). Layered under [`Self::config`] —
+    /// override wins. Empty by default; populated by consumers such as
+    /// `solobase-cloudflare` and `solobase-native` once they have loaded
+    /// env vars / D1 variables at boot.
+    pub(crate) config_snapshot: Arc<HashMap<String, String>>,
     /// Shared cancellation flag — set by the runtime when the flow is aborted.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     /// Optional wall-clock deadline after which the runtime will signal cancellation.
@@ -328,6 +340,7 @@ impl RuntimeContext {
             flow_id: self.flow_id.clone(),
             node_id: block_name.to_string(),
             config: self.config.clone(),
+            config_snapshot: self.config_snapshot.clone(),
             cancelled: self.cancelled.clone(),
             deadline: self.deadline,
             all_blocks: self.all_blocks.clone(),
@@ -455,7 +468,11 @@ impl Context for RuntimeContext {
     }
 
     fn config_get(&self, key: &str) -> Option<&str> {
-        self.config.get(key).map(|s| s.as_str())
+        // Per-call overrides win; embedder snapshot is the fallback.
+        self.config
+            .get(key)
+            .or_else(|| self.config_snapshot.get(key))
+            .map(|s| s.as_str())
     }
 
     fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
