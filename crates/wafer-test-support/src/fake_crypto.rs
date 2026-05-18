@@ -21,6 +21,9 @@ pub(crate) struct FakeCryptoState {
     pub failure: FailureMode,
 }
 
+/// In-memory `crypto@v1` fake that signs and verifies real HS256 JWTs against
+/// a configurable secret. Use this to test code paths that go through
+/// `wafer-run/crypto` without pulling the production crypto block.
 pub struct FakeCrypto {
     pub(crate) state: Arc<Mutex<FakeCryptoState>>,
 }
@@ -32,10 +35,13 @@ impl Default for FakeCrypto {
 }
 
 impl FakeCrypto {
+    /// Build a fake seeded with a fixed deterministic test secret.
     pub fn new() -> Self {
         Self::with_secret(b"test-secret-do-not-use-in-prod".to_vec())
     }
 
+    /// Build a fake using the given HMAC secret — handy for cross-instance
+    /// "wrong key" verification tests.
     pub fn with_secret(secret: impl Into<Vec<u8>>) -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeCryptoState {
@@ -45,6 +51,8 @@ impl FakeCrypto {
         }
     }
 
+    /// Switch the fake into a failure mode so subsequent dispatches return
+    /// `ErrorCode::INTERNAL` — used to exercise caller error handling.
     pub fn set_failure(&self, mode: FailureMode) {
         self.state.lock().failure = mode;
     }
