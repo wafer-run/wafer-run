@@ -229,6 +229,22 @@ pub struct Wafer {
     pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
     /// Source of per-block env-var config, consulted on first init.
     pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
+    /// Embedder-supplied env-style config snapshot. Cloned into every
+    /// [`RuntimeContext`] [`make_context`](Self::make_context) produces, so
+    /// blocks reach values via `ctx.config_get(key)` regardless of lifecycle
+    /// stage (Init/Start/Stop) or request handler.
+    ///
+    /// Empty by default; populate via
+    /// [`Wafer::set_config_snapshot`]. Solobase consumers wire it from the
+    /// same `env_vars` map they pass to `make_config_service`, so the
+    /// synchronous `ctx.config_get` path and the async `wafer-run/config`
+    /// block resolve to identical values.
+    ///
+    /// Distinct from [`Self::config_source`], which is queried lazily per
+    /// block on first init (and serves the `wafer-run/config` block's async
+    /// `config::get(ctx, key).await` path); the snapshot is a shared
+    /// synchronous fallback for boot-time values that every block sees.
+    pub(crate) config_snapshot: Arc<HashMap<String, String>>,
 }
 
 impl Wafer {
@@ -286,7 +302,31 @@ impl Wafer {
             wasm_engine: None,
             slots: Arc::new(HashMap::new()),
             config_source: Arc::new(crate::runtime::config_source::StaticConfigSource::default()),
+            config_snapshot: Arc::new(HashMap::new()),
         }
+    }
+
+    /// Install an embedder-supplied env-style config snapshot. Replaces any
+    /// previous snapshot. Wired into every subsequent
+    /// [`RuntimeContext`](crate::context::RuntimeContext) via
+    /// [`make_context`](Self::make_context); blocks read it via
+    /// `ctx.config_get(key)`.
+    ///
+    /// Per-call config (e.g. `step.config` on a flow step) wins over the
+    /// snapshot — see `Context::config_get` for the layering.
+    ///
+    /// Best called once before `seal()` / `start()`; calling later is allowed
+    /// but contexts already produced (e.g. for in-flight `init_block` runs)
+    /// hold the previous snapshot's `Arc` until they drop.
+    pub fn set_config_snapshot(&mut self, snapshot: HashMap<String, String>) {
+        self.config_snapshot = Arc::new(snapshot);
+    }
+
+    /// Borrow the embedder-supplied config snapshot installed via
+    /// [`set_config_snapshot`](Self::set_config_snapshot). Returns an empty
+    /// map if no snapshot has been installed.
+    pub fn config_snapshot(&self) -> &Arc<HashMap<String, String>> {
+        &self.config_snapshot
     }
 
     /// Returns all resolved blocks as an Arc for use in contexts.
@@ -429,6 +469,7 @@ impl Wafer {
             flow_id: flow_id.into(),
             node_id: node_id.into(),
             config: Arc::new(config),
+            config_snapshot: self.config_snapshot.clone(),
             cancelled,
             deadline,
             all_blocks: self.all_blocks_arc(),
@@ -1035,6 +1076,69 @@ mod tests {
         assert!(validate_block_name("some-long-repo/test-block").is_ok());
         assert!(validate_block_name("a/b").is_ok());
         assert!(validate_block_name("org123/block456").is_ok());
+    }
+
+    fn test_wafer() -> Wafer {
+        Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible")
+    }
+
+    fn test_ctx(w: &Wafer, overrides: HashMap<String, String>) -> RuntimeContext {
+        w.make_context(
+            "test-flow",
+            "test-node",
+            overrides,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+            crate::runtime::init_stack::InitStack::new(),
+        )
+    }
+
+    #[test]
+    fn config_snapshot_is_visible_via_config_get() {
+        use wafer_block::context::Context as _;
+        let mut w = test_wafer();
+        let mut snap = HashMap::new();
+        snap.insert("KEY".to_string(), "from-snapshot".to_string());
+        w.set_config_snapshot(snap);
+        let ctx = test_ctx(&w, HashMap::new());
+        assert_eq!(ctx.config_get("KEY"), Some("from-snapshot"));
+        assert_eq!(ctx.config_get("UNSET"), None);
+    }
+
+    #[test]
+    fn per_call_override_wins_over_snapshot() {
+        use wafer_block::context::Context as _;
+        let mut w = test_wafer();
+        let mut snap = HashMap::new();
+        snap.insert("KEY".to_string(), "from-snapshot".to_string());
+        w.set_config_snapshot(snap);
+        let mut ov = HashMap::new();
+        ov.insert("KEY".to_string(), "from-override".to_string());
+        let ctx = test_ctx(&w, ov);
+        assert_eq!(ctx.config_get("KEY"), Some("from-override"));
+    }
+
+    #[test]
+    fn snapshot_default_is_empty_and_config_get_returns_none() {
+        use wafer_block::context::Context as _;
+        let w = test_wafer();
+        let ctx = test_ctx(&w, HashMap::new());
+        assert_eq!(ctx.config_get("ANY"), None);
+        assert!(w.config_snapshot().is_empty());
+    }
+
+    #[test]
+    fn override_only_keys_still_resolve_with_no_snapshot_set() {
+        use wafer_block::context::Context as _;
+        let w = test_wafer();
+        let mut ov = HashMap::new();
+        ov.insert("KEY".to_string(), "from-override".to_string());
+        let ctx = test_ctx(&w, ov);
+        assert_eq!(ctx.config_get("KEY"), Some("from-override"));
     }
 
     #[test]
