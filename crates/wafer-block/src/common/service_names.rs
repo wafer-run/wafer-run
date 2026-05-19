@@ -57,6 +57,8 @@ impl ServiceOp {
     pub const DATABASE_TAKE_WHERE: &str = "database.take_where";
     /// Update every row matching a filter.
     pub const DATABASE_UPDATE_WHERE: &str = "database.update_where";
+    /// Atomically increment a numeric column on rows matching a filter.
+    pub const DATABASE_INCREMENT_FIELD_WHERE: &str = "database.increment_field_where";
     /// Write an object to storage.
     pub const STORAGE_PUT: &str = "storage.put";
     /// Read an object from storage.

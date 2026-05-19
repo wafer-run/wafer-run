@@ -192,6 +192,23 @@ pub struct UpdateWhereRequest {
     pub data: HashMap<String, serde_json::Value>,
 }
 
+/// Request for `database.increment_field_where`. Atomically increments a
+/// numeric column on every row matching the filter — a single
+/// `UPDATE … SET col = col + delta WHERE …` round-trip with no
+/// read-modify-write race.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncrementFieldWhereRequest {
+    /// Collection (table) name.
+    pub collection: String,
+    /// Column to atomically increment.
+    pub col: String,
+    /// Signed delta to add (negative = decrement).
+    pub delta: i64,
+    /// WHERE-clause predicates (AND-combined).
+    #[serde(default)]
+    pub filters: Vec<FilterDef>,
+}
+
 // --- Responses ---
 
 /// Single record returned by `get`, `create`, `update`. Matches
@@ -514,6 +531,22 @@ mod tests {
         assert_eq!(
             hex, "81a77265636f72647390",
             "TakeWhereResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_increment_field_where_request() {
+        let req = IncrementFieldWhereRequest {
+            collection: String::new(),
+            col: String::new(),
+            delta: 0,
+            filters: vec![],
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "84aa636f6c6c656374696f6ea0a3636f6ca0a564656c746100a766696c7465727390",
+            "IncrementFieldWhereRequest schema changed — review consumer impact before updating this literal"
         );
     }
 }
