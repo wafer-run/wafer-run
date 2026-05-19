@@ -463,6 +463,37 @@ impl PostgresDatabaseService {
         Ok(())
     }
 
+    async fn increment_field_where_async(
+        &self,
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_exists_async(&table).await? {
+            return Ok(0);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let (sql, sea_vals) = wafer_sql_utils::query::build_increment_field_where(
+            &table,
+            col,
+            delta,
+            filters,
+            Backend::Postgres,
+        );
+        let params = sea_values_to_json(sea_vals);
+        let mut q = sqlx::query(&sql);
+        for p in &params {
+            q = bind_json_value_query(q, p);
+        }
+        let result = q
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(result.rows_affected() as i64)
+    }
+
     // -----------------------------------------------------------------
     // Schema DDL async helpers
     // -----------------------------------------------------------------
@@ -735,6 +766,17 @@ impl DatabaseService for PostgresDatabaseService {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         self.update_where_async(collection, filters, data).await
+    }
+
+    async fn increment_field_where(
+        &self,
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        self.increment_field_where_async(collection, col, delta, filters)
+            .await
     }
 }
 

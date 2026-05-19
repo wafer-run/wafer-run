@@ -714,6 +714,39 @@ impl DatabaseService for SQLiteDatabaseService {
         Ok(())
     }
 
+    async fn increment_field_where(
+        &self,
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let table = sanitize_ident(collection);
+        if !table_exists(&db, &table) {
+            return Ok(0);
+        }
+        let (sql, sea_vals) = wafer_sql_utils::query::build_increment_field_where(
+            &table,
+            col,
+            delta,
+            filters,
+            Backend::Sqlite,
+        );
+        let params = sea_to_sql_params(sea_vals);
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = db
+            .execute(&sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(rows as i64)
+    }
+
     // --- Schema management ---
 
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
@@ -1249,6 +1282,72 @@ mod tests {
         }];
         let taken = svc.take_where("no_such_table", &filters).await.unwrap();
         assert!(taken.is_empty());
+    }
+
+    #[tokio::test]
+    async fn increment_field_where_atomically_bumps_matching_rows() {
+        let svc = make_test_svc();
+        // access_count needs to be INTEGER for arithmetic; the TEXT-everything
+        // helper seeds it as TEXT, so build the schema manually.
+        let table = Table {
+            name: "shares".into(),
+            columns: vec![
+                pk("id"),
+                Column::new("access_count", DataType::Int).null(),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        svc.ensure_schema_table(&table).await.unwrap();
+        for id in ["a", "b", "c"] {
+            let mut row = std::collections::HashMap::new();
+            row.insert("id".into(), serde_json::json!(id));
+            row.insert("access_count".into(), serde_json::json!(0));
+            svc.create("shares", row).await.unwrap();
+        }
+
+        // CAS-style bump on a single id with a max-cap predicate (the share.rs
+        // pattern this op is built for).
+        let filters = vec![
+            Filter {
+                field: "id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("a"),
+            },
+            Filter {
+                field: "access_count".into(),
+                operator: FilterOp::LessThan,
+                value: serde_json::json!(5_i64),
+            },
+        ];
+        let rows = svc
+            .increment_field_where("shares", "access_count", 1, &filters)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "exactly one row should match");
+
+        let r = svc.get("shares", "a").await.unwrap();
+        assert_eq!(r.data["access_count"], serde_json::json!(1));
+        let untouched = svc.get("shares", "b").await.unwrap();
+        assert_eq!(untouched.data["access_count"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn increment_field_where_on_missing_table_returns_zero() {
+        let svc = make_test_svc();
+        let filters = vec![Filter {
+            field: "id".into(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("nope"),
+        }];
+        let rows = svc
+            .increment_field_where("no_such_table", "access_count", 1, &filters)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]
