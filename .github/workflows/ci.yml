@@ -42,6 +42,7 @@ jobs:
       - name: Build echo_block.wasm test fixture
         run: |
           (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
+          mkdir -p crates/wafer-run/testdata
           cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
              crates/wafer-run/testdata/echo_block.wasm
 
@@ -70,6 +71,7 @@ jobs:
       - name: Build echo_block.wasm test fixture
         run: |
           (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
+          mkdir -p crates/wafer-run/testdata
           cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
              crates/wafer-run/testdata/echo_block.wasm
 
