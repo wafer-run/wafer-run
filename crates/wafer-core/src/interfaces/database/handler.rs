@@ -328,6 +328,29 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
+        ServiceOp::DATABASE_INCREMENT_FIELD_WHERE => {
+            let req = decode_or_err!(
+                body,
+                wire::IncrementFieldWhereRequest,
+                "database.increment_field_where"
+            );
+            if let Err(e) = check_collection(msg, &req.collection) {
+                return OutputStream::error(e);
+            }
+            let filters = match convert_filters(req.filters) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service
+                .increment_field_where(&req.collection, &req.col, req.delta, &filters)
+                .await
+            {
+                Ok(rows) => to_output(&wire::ExecRawResponse {
+                    rows_affected: rows,
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
         other => OutputStream::error(WaferError::new(
             ErrorCode::UNIMPLEMENTED,
             format!("unknown database operation: {other}"),
