@@ -10,9 +10,9 @@ use wafer_block::{
     wire::database::{
         CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
         DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
-        FilterDef as WireFilterDef, GetRequest, ListRequest, QueryRawRequest,
-        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
-        TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
+        FilterDef as WireFilterDef, GetRequest, IncrementFieldWhereRequest, ListRequest,
+        QueryRawRequest, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
     },
     WaferError,
 };
@@ -464,5 +464,35 @@ dual_api! {
             Some("db")
         )?;
         Ok(())
+    }
+
+    /// Atomically increment `col` by `delta` on every row in `collection`
+    /// matching `filters`. Returns the number of rows modified. Use a negative
+    /// `delta` to decrement. The backend issues a single
+    /// `UPDATE … SET col = col + delta WHERE …` round-trip — no
+    /// read-modify-write race, unlike a `list` + `update` sequence.
+    pub fn increment_field_where(
+        ctx,
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, WaferError> {
+        let req = IncrementFieldWhereRequest {
+            collection: collection.to_string(),
+            col: col.to_string(),
+            delta,
+            filters: to_wire_filters(filters),
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_INCREMENT_FIELD_WHERE,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: ExecRawResponse = decode(&data)?;
+        Ok(resp.rows_affected)
     }
 }
