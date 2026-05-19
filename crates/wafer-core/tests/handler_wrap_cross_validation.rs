@@ -377,6 +377,15 @@ mod db_fakes {
         ) -> Result<(), DatabaseError> {
             Ok(())
         }
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
         async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
             Ok(())
         }
@@ -434,6 +443,27 @@ async fn database_update_where_rejects_mismatched_collection() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::DATABASE_UPDATE_WHERE, "decoy", "write", "db");
+    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let err = terminal_error(out).await.expect("expected error");
+    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn database_increment_field_where_rejects_mismatched_collection() {
+    let svc = db_fakes::OkDb;
+    let req = wire::database::IncrementFieldWhereRequest {
+        collection: "real_table".into(),
+        col: "access_count".into(),
+        delta: 1,
+        filters: vec![],
+    };
+    let body = codec::encode(&req).unwrap();
+    let msg = msg_with_meta(
+        ServiceOp::DATABASE_INCREMENT_FIELD_WHERE,
+        "decoy",
+        "write",
+        "db",
+    );
     let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);

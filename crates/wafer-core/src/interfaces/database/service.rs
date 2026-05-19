@@ -180,6 +180,26 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
+    /// Atomically increment `col` by `delta` on every row in `collection`
+    /// matching `filters`. Returns the number of rows modified. Use a negative
+    /// `delta` to decrement.
+    ///
+    /// Implementations must perform this as a single
+    /// `UPDATE … SET col = col + delta WHERE …` round-trip — the whole point
+    /// of this op is the absence of a read-modify-write race. The default
+    /// here returns an `Internal` error so backends are forced to override.
+    async fn increment_field_where(
+        &self,
+        _collection: &str,
+        _col: &str,
+        _delta: i64,
+        _filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Internal(
+            "increment_field_where is not implemented by this database backend".into(),
+        ))
+    }
+
     // --- Schema management methods ---
 
     /// Ensure a table exists matching the given schema definition.
