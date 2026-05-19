@@ -68,12 +68,16 @@ jobs:
         with:
           prefix-key: test
 
-      - name: Build echo_block.wasm test fixture
+      - name: Build wasm test fixtures
         run: |
           (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
           mkdir -p crates/wafer-run/testdata
           cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
              crates/wafer-run/testdata/echo_block.wasm
+          cargo build --release --target wasm32-wasip1 \
+            --manifest-path crates/wafer-run/tests/attachment_dispatch/Cargo.toml
+          cargo build --release --target wasm32-wasip1 \
+            --manifest-path crates/wafer-run/tests/dispatch_guest/Cargo.toml
 
       - name: Run tests
         run: cargo test --workspace
