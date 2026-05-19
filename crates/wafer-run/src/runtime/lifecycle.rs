@@ -169,7 +169,32 @@ impl Wafer {
     /// proactive health checks; broken-config blocks otherwise surface as
     /// 5xx on first invocation.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn start(mut self) -> Result<Arc<Self>, RuntimeError> {
+    pub async fn start(self) -> Result<Arc<Self>, RuntimeError> {
+        self.start_with_priority(&[]).await
+    }
+
+    /// Like [`Wafer::start`], but eagerly initializes the named
+    /// `priority_blocks` in order BEFORE `init_all_blocks` runs. Useful when
+    /// one block's `Init` step creates infrastructure (tables, secrets,
+    /// snapshots) that subsequent block inits depend on — without this hook
+    /// `init_all_blocks` iterates `HashMap::keys()` in unspecified order,
+    /// which means dependent blocks can lose the race and permanent-fail on
+    /// missing state.
+    ///
+    /// Slot caching ([`crate::runtime::slot::BlockSlot::get_or_init`]) makes
+    /// the second `init_block` call inside `init_all_blocks` a no-op for any
+    /// `priority_blocks` entry already initialized here. Priority-block init
+    /// failures are logged-and-tolerated, matching the resilience contract
+    /// of `init_all_blocks`.
+    ///
+    /// Unknown names in `priority_blocks` are silently skipped — no point in
+    /// failing the whole runtime over a typo, and the rest of the start path
+    /// will surface the resolution error on first call to the missing block.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn start_with_priority(
+        mut self,
+        priority_blocks: &[&str],
+    ) -> Result<Arc<Self>, RuntimeError> {
         // CONTRACT: This event is consumed by `wafer dev` (in
         // `wafer-cli/src/commands/dev/summary.rs`) to detect the start of a
         // runtime spawn. The combination of target = "wafer.runtime",
@@ -183,6 +208,18 @@ impl Wafer {
             "wafer runtime starting"
         );
         self.seal().await?;
+        for name in priority_blocks {
+            if !self.blocks.contains_key(*name) {
+                continue;
+            }
+            if let Err(e) = self.init_block(name).await {
+                tracing::warn!(
+                    block = %name,
+                    error = %e,
+                    "priority block init failed; non-priority blocks will continue",
+                );
+            }
+        }
         self.init_all_blocks().await;
 
         for (name, block) in &self.blocks {
