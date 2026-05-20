@@ -2,9 +2,9 @@
 //! existing native code paths (tests, native runtime) compile and run unchanged.
 
 use std::{collections::BTreeMap, sync::Arc};
-use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{streams::output::OutputStream, Attachment, Context, InputStream, Message};
+use wafer_block_macro::wafer_async_trait;
 
 #[derive(Clone)]
 struct PlainContext;

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{
     block::Block,
@@ -9,6 +8,7 @@ use wafer_block::{
     types::BlockInfo,
     BlockRegistry, RuntimeError, *,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::interfaces::vector::{
     handler,

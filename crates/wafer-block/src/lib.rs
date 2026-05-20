@@ -28,8 +28,7 @@ pub use types::{
     InterfaceSpec, MetaAccess, RequestAction, ResourceGrant, ResourceType, SkillRole, SkillTool,
     UiRoute,
 };
-pub use wafer_block_macro::wafer_async_trait;
-pub use wafer_block_macro::wafer_block;
+pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 
 // All modules below are now wasm32-compatible: streams use
 // `spawn_producer` (tokio::spawn on native, spawn_local on wasm32), and other

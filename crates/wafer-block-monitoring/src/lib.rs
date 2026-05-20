@@ -19,10 +19,10 @@ use std::{
     sync::{Arc, RwLock},
     time::Instant,
 };
-use wafer_block_macro::wafer_async_trait;
 
 use parking_lot::Mutex;
 use wafer_block::ConfigVar;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::*;
 
 /// Default routes for the stats / monitoring endpoints. Overridable via

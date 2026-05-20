@@ -7,8 +7,7 @@
 //! without the WASM ABI overhead.
 
 use wafer_block::{types::SkillRole, Message};
-use wafer_block_macro::wafer_async_trait;
-use wafer_block_macro::wafer_block;
+use wafer_block_macro::{wafer_async_trait, wafer_block};
 use wafer_sdk::core_abi::GuestResult;
 
 mod skill_block {

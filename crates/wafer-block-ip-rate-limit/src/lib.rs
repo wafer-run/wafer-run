@@ -30,9 +30,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use wafer_block_macro::wafer_async_trait;
 
 use parking_lot::Mutex;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::{types::ConfigVar, *};
 
 /// Source of monotonic time for rate-limit windowing.

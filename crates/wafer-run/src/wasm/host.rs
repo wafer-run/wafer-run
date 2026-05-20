@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
-use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{
     core_types::Attachment,
     streams::{input::InputStream, output::OutputStream},
     Message,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::context::Context;
 

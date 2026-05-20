@@ -12,7 +12,6 @@
 //! router).
 
 use std::sync::OnceLock;
-use wafer_block_macro::wafer_async_trait;
 
 use axum::{
     body::Body,
@@ -20,6 +19,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode},
 };
 use parking_lot::Mutex;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::{
     block::{Block, BlockCategory, BlockInfo},
     common::ErrorCode,

@@ -1,6 +1,7 @@
 //! The Context trait — runtime capabilities provided to blocks.
 
 use std::collections::BTreeMap;
+
 use wafer_block_macro::wafer_async_trait;
 
 use crate::{

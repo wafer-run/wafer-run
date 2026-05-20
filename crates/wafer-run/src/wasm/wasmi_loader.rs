@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
-use wafer_block_macro::wafer_async_trait;
 
 use tracing::{debug, warn};
 use wafer_block::streams::{input::InputStream, output::OutputStream};
+use wafer_block_macro::wafer_async_trait;
 use wasmi::{Caller, Engine, Error as WasmiError, Linker, Module, Store, TypedResumableCall, Val};
 
 use super::{

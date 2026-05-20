@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
 };
-use wafer_block_macro::wafer_async_trait;
 
 // Re-export the trait from wafer-block.
 pub use wafer_block::context::Context;
@@ -13,6 +12,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     types::ResourceGrant,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::{block::Block, platform::Instant, types::*};
 

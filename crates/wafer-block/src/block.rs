@@ -1,5 +1,7 @@
 //! The Block trait — core interface every WAFER block must implement.
 
+use wafer_block_macro::wafer_async_trait;
+
 use crate::{
     capabilities::BlockCapabilities,
     context::Context,
@@ -7,7 +9,6 @@ use crate::{
     streams::{input::InputStream, output::OutputStream},
     types::{BlockInfo, UiRoute},
 };
-use wafer_block_macro::wafer_async_trait;
 
 /// Block is the core interface every WAFER block must implement.
 ///

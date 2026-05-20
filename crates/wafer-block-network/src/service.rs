@@ -1,8 +1,8 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use wafer_block_macro::wafer_async_trait;
 
 use futures::StreamExt;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use wafer_block_macro::wafer_async_trait;
 // Re-export the trait and types from wafer-core.
 pub use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response,

@@ -992,8 +992,9 @@ impl Wafer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_block_macro::wafer_async_trait;
+
+    use super::*;
 
     /// Minimal `Block` for unit tests that need a registered handle.
     struct NoopBlock {

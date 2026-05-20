@@ -16,9 +16,9 @@ use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
-use wafer_block_macro::wafer_async_trait;
 
 use service::PostgresDatabaseService;
+use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_run::{
     block::{Block, BlockCategory, BlockInfo},

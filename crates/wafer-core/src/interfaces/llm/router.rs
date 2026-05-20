@@ -8,10 +8,10 @@
 //! across every registered impl, tolerating per-backend failures.
 
 use std::sync::Arc;
-use wafer_block_macro::wafer_async_trait;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+use wafer_block_macro::wafer_async_trait;
 
 use super::service::{
     ChatChunk, ChatRequest, LlmError, LlmService, LoadProgress, ModelInfo, ModelStatus,

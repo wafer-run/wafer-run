@@ -6,7 +6,6 @@
 //! no other code-level references from the consumer binary.
 
 use std::sync::Arc;
-use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{
     block::Block,
@@ -15,7 +14,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     types::BlockInfo,
 };
-use wafer_block_macro::wafer_block;
+use wafer_block_macro::{wafer_async_trait, wafer_block};
 use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 struct TestBlock;

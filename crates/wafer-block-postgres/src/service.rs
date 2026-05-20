@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use wafer_block_macro::wafer_async_trait;
 
 use sqlx::{postgres::PgRow, PgPool, Row};
+use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::*;
 use wafer_sql_utils::{
     base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,

@@ -4,10 +4,10 @@
 //! Mirrors `interfaces::llm::router::MultiBackendLlmService`.
 
 use std::sync::Arc;
-use wafer_block_macro::wafer_async_trait;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+use wafer_block_macro::wafer_async_trait;
 
 use super::service::{
     ImageError, ImageRequest, ImageResponse, ImageService, LoadProgress, ModelInfo, ModelStatus,

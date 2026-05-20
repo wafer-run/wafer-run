@@ -7,6 +7,7 @@
 //! "External asset loading (host side)".
 
 use std::fmt;
+
 use wafer_block_macro::wafer_async_trait;
 
 /// Outcome of an asset-load attempt as reported back to the WASM guest.

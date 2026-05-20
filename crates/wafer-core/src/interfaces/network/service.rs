@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use wafer_block_macro::wafer_async_trait;
 
 use thiserror::Error;
+use wafer_block_macro::wafer_async_trait;
 
 /// Errors returned by [`NetworkService`] operations.
 #[derive(Error, Debug)]
