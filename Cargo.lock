@@ -6222,6 +6222,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
