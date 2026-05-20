@@ -973,10 +973,9 @@ mod tests {
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], serde_json::json!("alice"));
     }
@@ -1000,10 +999,9 @@ mod tests {
             skip_count: false,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
-        let sql = stmt.sql;
-        assert!(sql.contains("ORDER BY"));
-        assert!(sql.contains("LIMIT"));
-        assert!(sql.contains("OFFSET"));
+        assert!(stmt.sql.contains("ORDER BY"));
+        assert!(stmt.sql.contains("LIMIT"));
+        assert!(stmt.sql.contains("OFFSET"));
     }
 
     #[test]
@@ -1022,12 +1020,11 @@ mod tests {
         ];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 2);
     }
 
@@ -1040,10 +1037,9 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("IN"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 3);
         assert_eq!(params[0], serde_json::json!("active"));
         assert_eq!(params[1], serde_json::json!("pending"));
@@ -1061,13 +1057,12 @@ mod tests {
         let stmt =
             wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 2);
     }
 
@@ -1081,12 +1076,11 @@ mod tests {
         let stmt =
             wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("WHERE"));
         // 2 params: the COALESCE default (0) + the filter value
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 2);
     }
 
@@ -1098,10 +1092,8 @@ mod tests {
             value: serde_json::Value::Null,
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
-        let sql = stmt.sql;
-        let sea_vals = stmt.values;
-        assert!(sql.contains("IS NULL"));
-        let params = sea_values_to_json(sea_vals);
+        assert!(stmt.sql.contains("IS NULL"));
+        let params = sea_values_to_json(stmt.values);
         assert!(params.is_empty());
     }
 
@@ -1113,10 +1105,8 @@ mod tests {
             value: serde_json::Value::Null,
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
-        let sql = stmt.sql;
-        let sea_vals = stmt.values;
-        assert!(sql.contains("IS NOT NULL"));
-        let params = sea_values_to_json(sea_vals);
+        assert!(stmt.sql.contains("IS NOT NULL"));
+        let params = sea_values_to_json(stmt.values);
         assert!(params.is_empty());
     }
 
@@ -1129,10 +1119,9 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("LIKE"));
         assert!(sql.contains("$1"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 1);
     }
 
@@ -1157,11 +1146,10 @@ mod tests {
         ];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
         assert!(sql.contains("$3"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 3);
     }
 
@@ -1227,11 +1215,10 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 1);
     }
 
@@ -1248,14 +1235,13 @@ mod tests {
             Backend::Postgres,
         );
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(
             sql.contains("RETURNING"),
             "should contain RETURNING clause: {sql}"
         );
-        let params = sea_values_to_json(sea_vals);
+        let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 1);
     }
 }

@@ -938,12 +938,11 @@ mod tests {
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("WHERE"));
         // SQLite uses ? placeholders, not $N
         assert!(sql.contains("?"), "SQLite should use ? placeholders");
         assert!(!sql.contains("$1"), "SQLite should not use $N placeholders");
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], SqlValue::Text("alice".to_string()));
     }
@@ -967,10 +966,9 @@ mod tests {
             skip_count: false,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
-        let sql = stmt.sql;
-        assert!(sql.contains("ORDER BY"));
-        assert!(sql.contains("LIMIT"));
-        assert!(sql.contains("OFFSET"));
+        assert!(stmt.sql.contains("ORDER BY"));
+        assert!(stmt.sql.contains("LIMIT"));
+        assert!(stmt.sql.contains("OFFSET"));
     }
 
     #[test]
@@ -982,10 +980,9 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert_eq!(params.len(), 1);
     }
 
@@ -999,11 +996,10 @@ mod tests {
         let stmt =
             wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert!(!params.is_empty());
     }
 
@@ -1016,10 +1012,9 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("IN"));
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], SqlValue::Text("active".to_string()));
         assert_eq!(params[1], SqlValue::Text("pending".to_string()));
@@ -1036,11 +1031,10 @@ mod tests {
         let stmt =
             wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert_eq!(params.len(), 2);
     }
 
@@ -1052,10 +1046,8 @@ mod tests {
             value: serde_json::Value::Null,
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
-        let sql = stmt.sql;
-        let sea_vals = stmt.values;
-        assert!(sql.contains("IS NULL"));
-        let params = sea_to_sql_params(sea_vals);
+        assert!(stmt.sql.contains("IS NULL"));
+        let params = sea_to_sql_params(stmt.values);
         assert!(params.is_empty());
     }
 
@@ -1067,10 +1059,8 @@ mod tests {
             value: serde_json::Value::Null,
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
-        let sql = stmt.sql;
-        let sea_vals = stmt.values;
-        assert!(sql.contains("IS NOT NULL"));
-        let params = sea_to_sql_params(sea_vals);
+        assert!(stmt.sql.contains("IS NOT NULL"));
+        let params = sea_to_sql_params(stmt.values);
         assert!(params.is_empty());
     }
 
@@ -1082,8 +1072,7 @@ mod tests {
             value: serde_json::json!("%alice%"),
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
-        let sql = stmt.sql;
-        assert!(sql.contains("LIKE"));
+        assert!(stmt.sql.contains("LIKE"));
     }
 
     #[test]
@@ -1102,10 +1091,9 @@ mod tests {
         ];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
         let sql = stmt.sql;
-        let sea_vals = stmt.values;
         assert!(sql.contains(">="));
         assert!(sql.contains("<"));
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         assert_eq!(params.len(), 2);
     }
 

@@ -5,13 +5,12 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    db::{Filter, FilterOp, ListOptions, SortField},
     streams::output::OutputStream,
     wire::database as wire,
     *,
 };
 use wafer_run::schema::Table;
-
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
 use super::service::{self, DatabaseError, DatabaseService};
 use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
@@ -245,7 +244,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_EXECUTE => {
             let req = decode_or_err!(body, wire::ExecuteRequest, "database.execute");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.exec_raw(&req.sql, &req.args).await {
@@ -255,7 +254,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_QUERY => {
             let req = decode_or_err!(body, wire::QueryRequest, "database.query");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.query_raw(&req.sql, &req.args).await {

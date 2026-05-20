@@ -49,6 +49,13 @@ impl VectorIndexSchema {
         }
     }
 
+    // ---------- Private helpers ----------
+
+    /// Wrap a DDL SQL string into a [`Statement`] keyed to this index's meta-table.
+    fn ddl_stmt(&self, sql: String) -> crate::Statement {
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
+    }
+
     // ---------- DDL ----------
 
     /// `CREATE VIRTUAL TABLE {vec_table} USING vec0(embedding float[{dims}]);`
@@ -68,14 +75,14 @@ impl VectorIndexSchema {
                 text TEXT\n\
              );"
         );
-        crate::Statement::new(sql, vec![], meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `CREATE VIRTUAL TABLE {fts_table} USING fts5(id UNINDEXED, text);`
     pub fn build_create_fts(&self) -> crate::Statement {
         let fts_table = &self.fts_table;
         let sql = format!("CREATE VIRTUAL TABLE {fts_table} USING fts5(id UNINDEXED, text);");
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// Three `DROP TABLE IF EXISTS` statements (vec / meta / fts), in
@@ -107,7 +114,7 @@ impl VectorIndexSchema {
     /// `SELECT rowid FROM {meta_table} WHERE id = ?1`
     pub fn build_select_rowid_by_id(&self) -> crate::Statement {
         let sql = format!("SELECT rowid FROM {} WHERE id = ?1", self.meta_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `INSERT INTO {meta_table}(id, rowid, metadata, text)
@@ -122,7 +129,7 @@ impl VectorIndexSchema {
             "INSERT INTO {meta_table}(id, rowid, metadata, text) \
              VALUES (?1, (SELECT COALESCE(MAX(rowid), 0) + 1 FROM {meta_table}), ?2, ?3)"
         );
-        crate::Statement::new(sql, vec![], meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `UPDATE {meta_table} SET metadata = ?1, text = ?2 WHERE id = ?3`
@@ -131,13 +138,13 @@ impl VectorIndexSchema {
             "UPDATE {} SET metadata = ?1, text = ?2 WHERE id = ?3",
             self.meta_table
         );
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `SELECT COUNT(*) FROM {meta_table}`
     pub fn build_count_meta(&self) -> crate::Statement {
         let sql = format!("SELECT COUNT(*) FROM {}", self.meta_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `SELECT id, metadata FROM {meta_table} WHERE id IN (?,?,...)`
@@ -149,7 +156,7 @@ impl VectorIndexSchema {
             "SELECT id, metadata FROM {} WHERE id IN ({in_clause})",
             self.meta_table
         );
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `SELECT rowid FROM {meta_table} WHERE id IN (?,?,...)`
@@ -159,14 +166,14 @@ impl VectorIndexSchema {
             "SELECT rowid FROM {} WHERE id IN ({in_clause})",
             self.meta_table
         );
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `DELETE FROM {meta_table} WHERE id IN (?,?,...)`
     pub fn build_delete_meta_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
         let sql = format!("DELETE FROM {} WHERE id IN ({in_clause})", self.meta_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     // ---------- Vec table CRUD ----------
@@ -177,13 +184,13 @@ impl VectorIndexSchema {
             "INSERT INTO {}(rowid, embedding) VALUES (?1, ?2)",
             self.vec_table
         );
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `DELETE FROM {vec_table} WHERE rowid = ?1`
     pub fn build_delete_vec_by_rowid(&self) -> crate::Statement {
         let sql = format!("DELETE FROM {} WHERE rowid = ?1", self.vec_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     // ---------- FTS table CRUD ----------
@@ -191,20 +198,20 @@ impl VectorIndexSchema {
     /// `INSERT INTO {fts_table}(id, text) VALUES (?1, ?2)`
     pub fn build_insert_fts(&self) -> crate::Statement {
         let sql = format!("INSERT INTO {}(id, text) VALUES (?1, ?2)", self.fts_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `DELETE FROM {fts_table} WHERE id = ?1`
     pub fn build_delete_fts_by_id(&self) -> crate::Statement {
         let sql = format!("DELETE FROM {} WHERE id = ?1", self.fts_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// `DELETE FROM {fts_table} WHERE id IN (?,?,...)`
     pub fn build_delete_fts_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
         let sql = format!("DELETE FROM {} WHERE id IN ({in_clause})", self.fts_table);
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     // ---------- Search queries (SQLite-vec / FTS5 specific) ----------
@@ -226,7 +233,7 @@ impl VectorIndexSchema {
              ) v JOIN {meta_table} m ON m.rowid = v.rowid \
              ORDER BY v.distance"
         );
-        crate::Statement::new(sql, vec![], meta_table.clone())
+        self.ddl_stmt(sql)
     }
 
     /// FTS5 keyword-rank query using bm25. Bind `?1` to the FTS5 query
@@ -239,7 +246,7 @@ impl VectorIndexSchema {
              FROM {fts_table} WHERE {fts_table} MATCH ?1 \
              ORDER BY score LIMIT ?2"
         );
-        crate::Statement::new(sql, vec![], self.meta_table.clone())
+        self.ddl_stmt(sql)
     }
 }
 

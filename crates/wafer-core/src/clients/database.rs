@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
+// `Filter`, `FilterOp`, `ListOptions`, `SortField` are defined in wafer_block::db;
+// import them non-pub for use in conversion helpers and method signatures.
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
 pub use wafer_block::wire::database::{Record, RecordList};
@@ -26,9 +29,6 @@ pub use crate::interfaces::database::service::{
     default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
     DefaultVal, DefaultValue, Index, Reference, Table,
 };
-// `Filter`, `FilterOp`, `ListOptions`, `SortField` are defined in wafer_block::db;
-// import them non-pub for use in conversion helpers and method signatures.
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
 const BLOCK: &str = "wafer-run/database";
 
