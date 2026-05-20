@@ -76,8 +76,7 @@ impl CorsBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for CorsBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

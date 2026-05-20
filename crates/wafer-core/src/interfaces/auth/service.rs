@@ -4,6 +4,7 @@
 
 use thiserror::Error;
 use wafer_block::Message;
+use wafer_block_macro::wafer_async_trait;
 
 /// Opaque user identifier. Wraps a uuid v7 string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -76,8 +77,7 @@ pub enum AuthError {
 }
 
 /// Cross-block auth contract. See spec §4.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// One-shot lifecycle hook. Invoked by the framework `AuthBlock` on
     /// `LifecycleType::Init`. Default implementation is a no-op; concrete

@@ -7,6 +7,7 @@
 //! "External asset loading (host side)".
 
 use std::fmt;
+use wafer_block_macro::wafer_async_trait;
 
 /// Outcome of an asset-load attempt as reported back to the WASM guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +73,7 @@ impl fmt::Display for AssetLoadError {
 /// browser primitives like `JsFuture` (the SW host in solobase-web does
 /// this). The supertrait bound uses `wafer_block::compat::{MaybeSend,
 /// MaybeSync}`, matching the pattern already applied to `Block`.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait LoadAssetCallback: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Fetch (or look up) the asset identified by `asset_id` and report its current state.
     async fn load(&self, asset_id: &str) -> AssetLoadStatus;
@@ -84,8 +84,7 @@ pub trait LoadAssetCallback: wafer_block::MaybeSend + wafer_block::MaybeSync {
 /// hanging.
 pub struct NoopAssetLoader;
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl LoadAssetCallback for NoopAssetLoader {
     async fn load(&self, asset_id: &str) -> AssetLoadStatus {
         AssetLoadStatus::Failed(AssetLoadError::UnknownLoader(format!(

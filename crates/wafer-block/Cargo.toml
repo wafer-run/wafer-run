@@ -21,7 +21,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 wafer-flow = { workspace = true }
-wafer-block-macro = { path = "../wafer-block-macro" }
+wafer-block-macro = { workspace = true }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
 rmp-serde = "1.3"

@@ -38,6 +38,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
+wafer-block-macro = { workspace = true }
 futures = { workspace = true }
 # Always-on: BlockSlot uses tokio::sync::Mutex, which works on every target
 # (wasm32 included) since `sync` doesn't need the tokio runtime. Heavier
@@ -70,7 +71,6 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 tempfile = { workspace = true }
 tracing-test = "0.2"
 wat = "1"
-wafer-block-macro = { path = "../wafer-block-macro" }
 wafer-sdk = { path = "../../sdks/rust" }
 wafer-test-support = { path = "../wafer-test-support" }
 wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }

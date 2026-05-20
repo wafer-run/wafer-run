@@ -28,6 +28,7 @@ pub use types::{
     InterfaceSpec, MetaAccess, RequestAction, ResourceGrant, ResourceType, SkillRole, SkillTool,
     UiRoute,
 };
+pub use wafer_block_macro::wafer_async_trait;
 pub use wafer_block_macro::wafer_block;
 
 // All modules below are now wasm32-compatible: streams use

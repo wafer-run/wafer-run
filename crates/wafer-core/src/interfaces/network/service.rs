@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use wafer_block_macro::wafer_async_trait;
 
 use thiserror::Error;
 
@@ -38,8 +39,7 @@ pub struct Response {
 }
 
 /// Service provides outbound network connectivity.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait NetworkService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Issue `req` and return the upstream response, or a transport error.
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;

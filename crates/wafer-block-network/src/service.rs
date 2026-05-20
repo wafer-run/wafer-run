@@ -1,4 +1,5 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use wafer_block_macro::wafer_async_trait;
 
 use futures::StreamExt;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
@@ -149,8 +150,7 @@ fn max_response_bytes() -> usize {
         .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES)
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl NetworkService for HttpNetworkService {
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
         // SSRF protection: block requests to private/internal IPs.

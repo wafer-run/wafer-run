@@ -16,6 +16,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
+use wafer_block_macro::wafer_async_trait;
 
 use service::PostgresDatabaseService;
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -55,8 +56,7 @@ impl PostgresDatabaseBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for PostgresDatabaseBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

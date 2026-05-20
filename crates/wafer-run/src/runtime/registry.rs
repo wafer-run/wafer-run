@@ -190,13 +190,13 @@ mod tests {
         types::BlockInfo,
         Message, WaferError,
     };
+    use wafer_block_macro::wafer_async_trait;
 
     use crate::Wafer;
 
     struct NoopBlock;
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl crate::block::Block for NoopBlock {
         fn info(&self) -> BlockInfo {
             BlockInfo::new("noop", "0.0.1", "noop.handle", "noop block for testing")

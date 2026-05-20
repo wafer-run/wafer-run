@@ -1,4 +1,5 @@
 use std::{collections::HashMap, sync::Mutex};
+use wafer_block_macro::wafer_async_trait;
 
 use rusqlite::{types::Value as SqlValue, Connection, Row};
 use wafer_core::interfaces::database::service::*;
@@ -210,8 +211,7 @@ fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], so
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl DatabaseService for SQLiteDatabaseService {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
         let db = self

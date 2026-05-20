@@ -13,6 +13,7 @@ aws-config = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+wafer-block-macro = { workspace = true }
 chrono = { workspace = true }
 
 [lints]

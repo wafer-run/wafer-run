@@ -7,6 +7,7 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+use wafer_block_macro::wafer_async_trait;
 
 // ---------- Request side ----------
 
@@ -614,8 +615,7 @@ pub enum LlmError {
 /// `MaybeSend + MaybeSync` follows the same pattern as `DatabaseService`:
 /// `Send + Sync` on native, unbounded on `wasm32` (where futures aren't
 /// required to be `Send`).
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait LlmService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'static {
     /// Stream of chat chunks for the given request.
     ///

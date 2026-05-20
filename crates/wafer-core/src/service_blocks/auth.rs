@@ -4,6 +4,7 @@
 //! shared handler in `interfaces::auth::handler` routes `auth.*` messages.
 
 use std::sync::Arc;
+use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{
     block::Block,
@@ -27,8 +28,7 @@ impl AuthBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for AuthBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(
@@ -87,8 +87,7 @@ mod tests {
         inits: Arc<AtomicUsize>,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl AuthService for InitCounterService {
         async fn init(&self, _ctx: &dyn Context) -> Result<(), AuthError> {
             self.inits.fetch_add(1, Ordering::SeqCst);
@@ -190,8 +189,7 @@ mod tests {
         grants: Vec<wafer_block::types::ResourceGrant>,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl AuthService for GrantsService {
         fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
             self.grants.clone()

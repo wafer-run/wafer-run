@@ -12,6 +12,7 @@
 //! router).
 
 use std::sync::OnceLock;
+use wafer_block_macro::wafer_async_trait;
 
 use axum::{
     body::Body,
@@ -335,8 +336,7 @@ impl HttpListenerBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

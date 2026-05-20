@@ -400,6 +400,52 @@ impl Parse for MetaList {
 }
 
 // ---------------------------------------------------------------------------
+// #[wafer_async_trait] proc macro
+// ---------------------------------------------------------------------------
+
+/// Convenience attribute macro that expands to the platform-appropriate
+/// `async_trait` annotation.
+///
+/// On native targets (`not(target_arch = "wasm32")`) the trait/impl requires
+/// `Send` bounds; on `wasm32` (single-threaded) the `?Send` relaxation is
+/// used instead. Rather than repeating the two-attribute cfg_attr pair at
+/// every site, apply `#[wafer_async_trait]` once:
+///
+/// ```rust,ignore
+/// use wafer_block_macro::wafer_async_trait;
+///
+/// #[wafer_async_trait]
+/// trait MyService {
+///     async fn do_work(&self) -> Result<(), Error>;
+/// }
+///
+/// #[wafer_async_trait]
+/// impl MyService for MyImpl {
+///     async fn do_work(&self) -> Result<(), Error> { Ok(()) }
+/// }
+/// ```
+///
+/// This expands to:
+/// ```rust,ignore
+/// #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
+/// #[cfg_attr(target_arch = "wasm32",     ::async_trait::async_trait(?Send))]
+/// trait MyService { ... }
+/// ```
+#[proc_macro_attribute]
+pub fn wafer_async_trait(
+    _attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let item_ts: proc_macro2::TokenStream = item.into();
+    let expanded = quote::quote! {
+        #[cfg_attr(not(target_arch = "wasm32"), ::async_trait::async_trait)]
+        #[cfg_attr(target_arch = "wasm32", ::async_trait::async_trait(?Send))]
+        #item_ts
+    };
+    expanded.into()
+}
+
+// ---------------------------------------------------------------------------
 // #[wafer_block] proc macro
 // ---------------------------------------------------------------------------
 

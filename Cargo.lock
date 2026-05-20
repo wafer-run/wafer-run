@@ -6005,6 +6005,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6049,6 +6050,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6062,6 +6064,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6073,6 +6076,7 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "tokio",
+ "wafer-block-macro",
  "wafer-run",
  "wafer-test-support",
 ]
@@ -6084,6 +6088,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "tracing",
+ "wafer-block-macro",
  "wafer-core",
 ]
 
@@ -6107,6 +6112,7 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
+ "tokio",
  "trybuild",
  "wafer-block",
  "wafer-run",
@@ -6121,6 +6127,7 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6136,6 +6143,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wafer-block-macro",
  "wafer-core",
  "wafer-run",
 ]
@@ -6152,6 +6160,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wafer-block-macro",
  "wafer-core",
  "wafer-run",
  "wafer-sql-utils",
@@ -6165,6 +6174,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
  "wafer-test-support",
 ]
@@ -6176,6 +6186,7 @@ dependencies = [
  "async-trait",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6190,6 +6201,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-core",
 ]
 
@@ -6200,6 +6212,7 @@ dependencies = [
  "async-trait",
  "serde_json",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 
@@ -6217,6 +6230,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wafer-block-fastembed",
+ "wafer-block-macro",
  "wafer-core",
  "wafer-sql-utils",
 ]
@@ -6228,6 +6242,7 @@ dependencies = [
  "async-trait",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-core",
  "wafer-run",
 ]
@@ -6284,6 +6299,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "wafer-block",
+ "wafer-block-macro",
  "wafer-run",
 ]
 

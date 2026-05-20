@@ -4,6 +4,7 @@
 //! Mirrors `interfaces::llm::router::MultiBackendLlmService`.
 
 use std::sync::Arc;
+use wafer_block_macro::wafer_async_trait;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
@@ -49,8 +50,7 @@ impl Default for MultiBackendImageService {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl ImageService for MultiBackendImageService {
     async fn generate(
         &self,

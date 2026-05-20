@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use wafer_block_macro::wafer_async_trait;
 
 use wafer_block::{
     block::Block,
@@ -22,8 +23,7 @@ impl StorageBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for StorageBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

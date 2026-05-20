@@ -246,8 +246,7 @@ async fn serve_index_spa(ctx: &dyn Context, config: &WebConfig) -> OutputStream 
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for WebBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(
