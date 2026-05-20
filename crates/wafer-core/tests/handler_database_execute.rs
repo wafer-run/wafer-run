@@ -322,7 +322,7 @@ async fn query_without_matching_grant_returns_permission_denied() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn execute_with_only_read_grant_returns_permission_denied() {
+fn wrap_check_access_denies_write_op_with_read_only_grant() {
     // Simulate the runtime's pre-dispatch WRAP check for DATABASE_EXECUTE.
     // The client sets is_write=true (META_WRAP_ACCESS="write"). A read-only
     // grant must not satisfy this request.
