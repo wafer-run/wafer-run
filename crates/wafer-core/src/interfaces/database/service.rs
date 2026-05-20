@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wafer_block_macro::wafer_async_trait;
+// Re-export query types from wafer-block so external callers keep their
+// existing import paths.
+pub use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_run::schema::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
@@ -244,85 +247,4 @@ pub struct RecordList {
     pub page: i64,
     /// Maximum rows per page used to compute `page`.
     pub page_size: i64,
-}
-
-/// ListOptions configures a List query.
-#[derive(Debug, Clone, Default)]
-pub struct ListOptions {
-    /// Filters combined with `AND` to restrict the result set.
-    pub filters: Vec<Filter>,
-    /// Sort directives applied in declaration order.
-    pub sort: Vec<SortField>,
-    /// Maximum rows to return; `0` means backend-default.
-    pub limit: i64,
-    /// Number of rows to skip before returning results.
-    pub offset: i64,
-    /// When `true`, backends MUST skip the `SELECT COUNT(*)` query and
-    /// return `RecordList.total_count = records.len() as i64`. Wrapper
-    /// helpers `list_all` and `list_sorted` set this; bare `list` does
-    /// not. See `wire::database::ListRequest::skip_count`.
-    pub skip_count: bool,
-}
-
-/// Filter represents a single filter condition.
-#[derive(Debug, Clone)]
-pub struct Filter {
-    /// Column / field name being filtered.
-    pub field: String,
-    /// Comparison operator.
-    pub operator: FilterOp,
-    /// Value to compare against (interpreted per `operator`).
-    pub value: serde_json::Value,
-}
-
-/// FilterOp defines supported filter operators.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterOp {
-    /// `field = value`.
-    Equal,
-    /// `field <> value`.
-    NotEqual,
-    /// `field > value`.
-    GreaterThan,
-    /// `field >= value`.
-    GreaterEqual,
-    /// `field < value`.
-    LessThan,
-    /// `field <= value`.
-    LessEqual,
-    /// `field LIKE value` (backend-specific pattern syntax).
-    Like,
-    /// `field IN (value…)` where `value` is a JSON array.
-    In,
-    /// `field IS NULL` (ignores `value`).
-    IsNull,
-    /// `field IS NOT NULL` (ignores `value`).
-    IsNotNull,
-}
-
-impl FilterOp {
-    /// Render the operator as its SQL keyword form.
-    pub fn as_sql(&self) -> &'static str {
-        match self {
-            Self::Equal => "=",
-            Self::NotEqual => "!=",
-            Self::GreaterThan => ">",
-            Self::GreaterEqual => ">=",
-            Self::LessThan => "<",
-            Self::LessEqual => "<=",
-            Self::Like => "LIKE",
-            Self::In => "IN",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
-        }
-    }
-}
-
-/// SortField defines a sort directive.
-#[derive(Debug, Clone)]
-pub struct SortField {
-    /// Column / field name to sort by.
-    pub field: String,
-    /// `true` for descending order, `false` for ascending.
-    pub desc: bool,
 }

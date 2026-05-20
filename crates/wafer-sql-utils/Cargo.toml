@@ -6,7 +6,8 @@ license.workspace = true
 description = "Shared SQL query builders for WAFER database backends"
 
 [dependencies]
-wafer-core = { path = "../wafer-core" }
+wafer-block = { path = "../wafer-block" }
+wafer-run = { path = "../wafer-run", default-features = false }
 sea-query = "0.32"
 serde_json = { workspace = true }
 

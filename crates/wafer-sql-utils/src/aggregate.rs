@@ -1,5 +1,5 @@
 use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
-use wafer_core::interfaces::database::service::{Filter, SortField};
+use wafer_block::db::{Filter, SortField};
 
 use crate::{
     ident::DynCol,
@@ -305,7 +305,7 @@ pub fn build_grouped_query(
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::interfaces::database::service::FilterOp;
+    use wafer_block::db::FilterOp;
 
     use super::*;
     use crate::Backend;

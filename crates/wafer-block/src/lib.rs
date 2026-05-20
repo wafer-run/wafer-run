@@ -40,6 +40,7 @@ pub mod common;
 pub mod compat;
 pub mod config;
 pub mod context;
+pub mod db;
 pub mod executor;
 pub mod hash;
 pub mod helpers;

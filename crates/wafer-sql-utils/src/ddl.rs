@@ -1,6 +1,4 @@
-use wafer_core::interfaces::database::service::{
-    Column, DataType, DefaultVal, DefaultValue, Index, Table,
-};
+use wafer_run::schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
 use crate::{ident::sanitize_ident, Backend};
 
@@ -217,7 +215,7 @@ pub fn build_drop_table(table_name: &str, _backend: Backend) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::interfaces::database::service::{col_string, pk, timestamps};
+    use wafer_run::schema::{col_string, pk, timestamps};
 
     use super::*;
 
@@ -256,7 +254,7 @@ mod tests {
     }
 
     fn fk_table(on_delete: &str, on_update: &str) -> Table {
-        use wafer_core::interfaces::database::service::Reference;
+        use wafer_run::schema::Reference;
 
         let mut author_col = col_string("author_id");
         author_col.references = Some(Reference {

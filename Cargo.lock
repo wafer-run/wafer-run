@@ -6302,6 +6302,7 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-run",
+ "wafer-sql-utils",
 ]
 
 [[package]]
@@ -6400,7 +6401,8 @@ version = "0.1.0"
 dependencies = [
  "sea-query",
  "serde_json",
- "wafer-core",
+ "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]

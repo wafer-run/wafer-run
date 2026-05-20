@@ -1,5 +1,5 @@
 use sea_query::{Asterisk, Cond, Expr, Order, Query, SelectStatement, SimpleExpr};
-use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
 use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
@@ -103,7 +103,7 @@ pub fn build_select_with_condition(
 /// ```ignore
 /// use sea_query::{Cond, Expr};
 /// use wafer_sql_utils::{ident::DynCol, query, Backend};
-/// use wafer_core::interfaces::database::service::ListOptions;
+/// use wafer_block::db::ListOptions;
 ///
 /// let or_group = Cond::any()
 ///     .add(Expr::col(DynCol("email".into())).like("%alice%".to_string()))
