@@ -243,6 +243,28 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
+        ServiceOp::DATABASE_EXECUTE => {
+            let req = decode_or_err!(body, wire::ExecuteRequest, "database.execute");
+            if let Err(e) = check_collection(msg, &req.collection) {
+                return OutputStream::error(e);
+            }
+            match service.exec_raw(&req.sql, &req.args).await {
+                Ok(rows_affected) => to_output(&wire::ExecuteResponse { rows_affected }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_QUERY => {
+            let req = decode_or_err!(body, wire::QueryRequest, "database.query");
+            if let Err(e) = check_collection(msg, &req.collection) {
+                return OutputStream::error(e);
+            }
+            match service.query_raw(&req.sql, &req.args).await {
+                Ok(records) => to_output(&wire::QueryResponse {
+                    rows: records.into_iter().map(service_record_to_wire).collect(),
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
         ServiceOp::DATABASE_DELETE_WHERE => {
             let req = decode_or_err!(body, wire::DeleteWhereRequest, "database.delete_where");
             if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
