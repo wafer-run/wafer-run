@@ -585,4 +585,56 @@ mod tests {
             "IncrementFieldWhereRequest schema changed — review consumer impact before updating this literal"
         );
     }
+
+    #[test]
+    fn schema_lock_execute_request() {
+        let req = ExecuteRequest {
+            sql: String::new(),
+            args: vec![],
+            collection: String::new(),
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "83a373716ca0a46172677390aa636f6c6c656374696f6ea0",
+            "ExecuteRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_execute_response() {
+        let r = ExecuteResponse { rows_affected: 0 };
+        let encoded = codec::encode(&r).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81ad726f77735f616666656374656400",
+            "ExecuteResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_query_request() {
+        let req = QueryRequest {
+            sql: String::new(),
+            args: vec![],
+            collection: String::new(),
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "83a373716ca0a46172677390aa636f6c6c656374696f6ea0",
+            "QueryRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_query_response() {
+        let r = QueryResponse { rows: vec![] };
+        let encoded = codec::encode(&r).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a4726f777390",
+            "QueryResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
 }
