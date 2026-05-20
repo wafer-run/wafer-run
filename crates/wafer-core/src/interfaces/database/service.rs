@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wafer_block_macro::wafer_async_trait;
-// Re-export query types from wafer-block so external callers keep their
-// existing import paths.
-pub use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+// Import query types from wafer-block for use in trait method signatures.
+use wafer_block::db::{Filter, ListOptions};
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_run::schema::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,

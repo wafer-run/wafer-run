@@ -6,6 +6,7 @@ license.workspace = true
 description = "SQLite database block for WAFER"
 
 [dependencies]
+wafer-block = { workspace = true }
 wafer-core = { path = "../wafer-core", default-features = false }
 wafer-sql-utils = { path = "../wafer-sql-utils" }
 parking_lot = { workspace = true }

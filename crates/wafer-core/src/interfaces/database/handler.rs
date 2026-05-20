@@ -11,9 +11,9 @@ use wafer_block::{
 };
 use wafer_run::schema::Table;
 
-use super::service::{
-    self, DatabaseError, DatabaseService, Filter, FilterOp, ListOptions, SortField,
-};
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+
+use super::service::{self, DatabaseError, DatabaseService};
 use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
 
 // --- Helpers ---

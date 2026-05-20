@@ -268,8 +268,9 @@ async fn crypto_random_bytes_rejects_mismatched_op() {
 
 mod db_fakes {
     use async_trait::async_trait;
+    use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        DatabaseError, DatabaseService, Filter, ListOptions, Record, RecordList,
+        DatabaseError, DatabaseService, Record, RecordList,
     };
     use wafer_run::schema::{Column, Table};
 

@@ -26,10 +26,9 @@ pub use crate::interfaces::database::service::{
     default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
     DefaultVal, DefaultValue, Index, Reference, Table,
 };
-// `Filter`, `FilterOp`, `ListOptions`, `SortField` are runtime-only ergonomic
-// wrappers (no wire-format derives); keep them on the interfaces type and
-// convert to `wire::*Def` at the wire boundary inside each fn.
-pub use crate::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+// `Filter`, `FilterOp`, `ListOptions`, `SortField` are defined in wafer_block::db;
+// import them non-pub for use in conversion helpers and method signatures.
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
 const BLOCK: &str = "wafer-run/database";
 
@@ -231,7 +230,7 @@ dual_api! {
             ServiceOp::DATABASE_EXECUTE,
             &req,
             Some(stmt.collection.as_str()),
-            false,
+            true,
             Some("db")
         )?;
         let resp: ExecuteResponse = decode(&data)?;

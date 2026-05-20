@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use wafer_block::db::ListOptions;
 use wafer_core::clients::database as db;
 use wafer_run::*;
 
@@ -96,7 +97,7 @@ impl Block for NotesHandler {
         match (action.as_str(), path.as_str()) {
             // List notes
             ("retrieve", "/api/notes") => {
-                let opts = db::ListOptions::default();
+                let opts = ListOptions::default();
                 match db::list(ctx, "notes", &opts).await {
                     Ok(result) => {
                         let body = serde_json::to_vec(&serde_json::json!({

@@ -1,8 +1,13 @@
 use std::{collections::HashMap, sync::Mutex};
 
 use rusqlite::{types::Value as SqlValue, Connection, Row};
+use wafer_block::db::{Filter, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
-use wafer_core::interfaces::database::service::*;
+#[cfg(test)]
+use wafer_core::interfaces::database::service::{pk, DataType};
+use wafer_core::interfaces::database::service::{
+    Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+};
 use wafer_sql_utils::{
     base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
 };
@@ -824,7 +829,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+    use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
     use super::*;
 
