@@ -142,66 +142,57 @@ pub struct OutputStream {
 }
 
 impl OutputStream {
-    /// Buffered helper: emits one Chunk then Complete with no trailing meta.
-    ///
-    /// Pre-fills the mpsc channel synchronously via `try_send`; no spawn needed.
-    pub fn respond(bytes: Vec<u8>) -> Self {
-        let (tx, rx) = mpsc::channel::<StreamEvent>(2);
-        let cancel = CancellationToken::new();
-        let _ = tx.try_send(StreamEvent::Chunk(bytes));
-        let _ = tx.try_send(StreamEvent::Complete { meta: vec![] });
+    /// Private helper: allocates a pre-filled channel from a fixed-size array of
+    /// events and builds an `OutputStream`. The channel capacity equals `N` exactly —
+    /// no heap allocation or `Vec` collect. Because the channel is freshly allocated,
+    /// `try_send` always has capacity and the `expect` is a protocol assertion, not a
+    /// runtime risk.
+    fn from_events<const N: usize>(events: [StreamEvent; N]) -> Self {
+        const { assert!(N >= 1, "from_events requires at least one event") }
+        let (tx, rx) = mpsc::channel::<StreamEvent>(N);
+        for ev in events {
+            tx.try_send(ev)
+                .expect("freshly-allocated channel always has capacity");
+        }
         Self {
             rx: ReceiverStream::new(rx),
-            cancel,
+            cancel: CancellationToken::new(),
         }
+    }
+
+    /// Buffered helper: emits one Chunk then Complete with no trailing meta.
+    ///
+    /// Pre-fills the mpsc channel synchronously; no spawn needed.
+    pub fn respond(bytes: Vec<u8>) -> Self {
+        Self::from_events([
+            StreamEvent::Chunk(bytes),
+            StreamEvent::Complete { meta: vec![] },
+        ])
     }
 
     /// Buffered helper: emits one Chunk (if non-empty) then Complete with the
     /// given trailing meta.
     pub fn respond_with_meta(bytes: Vec<u8>, meta: Vec<crate::core_types::MetaEntry>) -> Self {
-        let (tx, rx) = mpsc::channel::<StreamEvent>(2);
-        let cancel = CancellationToken::new();
-        if !bytes.is_empty() {
-            let _ = tx.try_send(StreamEvent::Chunk(bytes));
-        }
-        let _ = tx.try_send(StreamEvent::Complete { meta });
-        Self {
-            rx: ReceiverStream::new(rx),
-            cancel,
+        if bytes.is_empty() {
+            Self::from_events([StreamEvent::Complete { meta }])
+        } else {
+            Self::from_events([StreamEvent::Chunk(bytes), StreamEvent::Complete { meta }])
         }
     }
 
     /// Buffered helper: emits a single Error terminal event.
     pub fn error(err: WaferError) -> Self {
-        let (tx, rx) = mpsc::channel::<StreamEvent>(1);
-        let cancel = CancellationToken::new();
-        let _ = tx.try_send(StreamEvent::Error(Box::new(err)));
-        Self {
-            rx: ReceiverStream::new(rx),
-            cancel,
-        }
+        Self::from_events([StreamEvent::Error(Box::new(err))])
     }
 
     /// Buffered helper: emits a single Drop terminal event.
     pub fn drop_request() -> Self {
-        let (tx, rx) = mpsc::channel::<StreamEvent>(1);
-        let cancel = CancellationToken::new();
-        let _ = tx.try_send(StreamEvent::Drop);
-        Self {
-            rx: ReceiverStream::new(rx),
-            cancel,
-        }
+        Self::from_events([StreamEvent::Drop])
     }
 
     /// Buffered helper: emits a single Continue terminal event.
     pub fn continue_with(msg: Message) -> Self {
-        let (tx, rx) = mpsc::channel::<StreamEvent>(1);
-        let cancel = CancellationToken::new();
-        let _ = tx.try_send(StreamEvent::Continue(msg));
-        Self {
-            rx: ReceiverStream::new(rx),
-            cancel,
-        }
+        Self::from_events([StreamEvent::Continue(msg)])
     }
 
     /// Create a streaming triple `(OutputStream, OutputSink, CancellationToken)` with
