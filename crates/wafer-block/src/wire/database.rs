@@ -156,6 +156,7 @@ pub struct ExecuteRequest {
     /// Rendered SQL text.
     pub sql: String,
     /// Positional parameter values, encoded as JSON for wire transport.
+    #[serde(default)]
     pub args: Vec<serde_json::Value>,
     /// Collection (table) the statement targets. WRAP-authorized.
     pub collection: String,
@@ -167,6 +168,7 @@ pub struct QueryRequest {
     /// Rendered SQL text.
     pub sql: String,
     /// Positional parameter values, encoded as JSON for wire transport.
+    #[serde(default)]
     pub args: Vec<serde_json::Value>,
     /// Collection (table) the statement targets. WRAP-authorized.
     pub collection: String,
