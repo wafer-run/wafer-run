@@ -7,31 +7,13 @@
 use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
-    meta::META_WRAP_RESOURCE,
     streams::output::OutputStream,
     wire::config as wire,
     *,
 };
 
 use super::service::ConfigService;
-use crate::interfaces::handler_util::{decode_or_err, to_output};
-
-/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
-/// config key in the decoded payload. Empty meta = legacy path (runtime
-/// already skipped WRAP); accept.
-fn check_key(msg: &Message, expected: &str) -> Result<(), WaferError> {
-    let supplied = msg.get_meta(META_WRAP_RESOURCE);
-    if supplied.is_empty() || supplied == expected {
-        Ok(())
-    } else {
-        Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
-            format!(
-                "WRAP: wrap.resource meta '{supplied}' does not match payload config key '{expected}'"
-            ),
-        ))
-    }
-}
+use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
 
 /// Handle a config message by delegating to the given service.
 ///
@@ -56,7 +38,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
                 }
             };
 
-            if let Err(e) = check_key(msg, &key) {
+            if let Err(e) = check_wrap_resource(msg, &key, "config key") {
                 return OutputStream::error(e);
             }
             match service.get(&key) {
@@ -69,7 +51,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
         }
         ServiceOp::CONFIG_SET => {
             let req = decode_or_err!(body, wire::SetRequest, "config.set");
-            if let Err(e) = check_key(msg, &req.key) {
+            if let Err(e) = check_wrap_resource(msg, &req.key, "config key") {
                 return OutputStream::error(e);
             }
             service.set(&req.key, &req.value);

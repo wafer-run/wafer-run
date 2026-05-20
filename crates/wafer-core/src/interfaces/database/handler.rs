@@ -5,7 +5,6 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
-    meta::META_WRAP_RESOURCE,
     streams::output::OutputStream,
     wire::database as wire,
     *,
@@ -15,26 +14,7 @@ use wafer_run::schema::Table;
 use super::service::{
     self, DatabaseError, DatabaseService, Filter, FilterOp, ListOptions, SortField,
 };
-use crate::interfaces::handler_util::{decode_or_err, to_output};
-
-/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
-/// collection in the decoded payload. Empty meta = legacy path (runtime
-/// already skipped WRAP); accept. The `__raw_sql__` / `__ddl__` pseudo-
-/// resources are not checked here — they have their own admin/owner rules in
-/// `wrap::check_access` that already gate query_raw/exec_raw/ddl.
-fn check_collection(msg: &Message, expected: &str) -> Result<(), WaferError> {
-    let supplied = msg.get_meta(META_WRAP_RESOURCE);
-    if supplied.is_empty() || supplied == expected {
-        Ok(())
-    } else {
-        Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
-            format!(
-                "WRAP: wrap.resource meta '{supplied}' does not match payload collection '{expected}'"
-            ),
-        ))
-    }
-}
+use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
 
 // --- Helpers ---
 
@@ -156,7 +136,7 @@ pub async fn handle_message(
     match msg.kind.as_str() {
         ServiceOp::DATABASE_GET => {
             let req = decode_or_err!(body, wire::GetRequest, "database.get");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.get(&req.collection, &req.id).await {
@@ -166,7 +146,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_LIST => {
             let req = decode_or_err!(body, wire::ListRequest, "database.list");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -187,7 +167,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_CREATE => {
             let req = decode_or_err!(body, wire::CreateRequest, "database.create");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.create(&req.collection, req.data).await {
@@ -197,7 +177,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_UPDATE => {
             let req = decode_or_err!(body, wire::UpdateRequest, "database.update");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.update(&req.collection, &req.id, req.data).await {
@@ -207,7 +187,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_DELETE => {
             let req = decode_or_err!(body, wire::DeleteRequest, "database.delete");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             match service.delete(&req.collection, &req.id).await {
@@ -217,7 +197,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_COUNT => {
             let req = decode_or_err!(body, wire::CountRequest, "database.count");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -242,7 +222,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_SUM => {
             let req = decode_or_err!(body, wire::SumRequest, "database.sum");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -265,7 +245,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_DELETE_WHERE => {
             let req = decode_or_err!(body, wire::DeleteWhereRequest, "database.delete_where");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -283,7 +263,7 @@ pub async fn handle_message(
                 wire::DeleteWhereCountRequest,
                 "database.delete_where_count"
             );
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -297,7 +277,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_TAKE_WHERE => {
             let req = decode_or_err!(body, wire::TakeWhereRequest, "database.take_where");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -313,7 +293,7 @@ pub async fn handle_message(
         }
         ServiceOp::DATABASE_UPDATE_WHERE => {
             let req = decode_or_err!(body, wire::UpdateWhereRequest, "database.update_where");
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
@@ -334,7 +314,7 @@ pub async fn handle_message(
                 wire::IncrementFieldWhereRequest,
                 "database.increment_field_where"
             );
-            if let Err(e) = check_collection(msg, &req.collection) {
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
                 return OutputStream::error(e);
             }
             let filters = match convert_filters(req.filters) {
