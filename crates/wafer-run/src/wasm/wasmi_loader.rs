@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use tracing::{debug, warn};
 use wafer_block::streams::{input::InputStream, output::OutputStream};
+use wafer_block_macro::wafer_async_trait;
 use wasmi::{Caller, Engine, Error as WasmiError, Linker, Module, Store, TypedResumableCall, Val};
 
 use super::{
@@ -1865,8 +1865,7 @@ impl WasmiBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[wafer_async_trait]
 impl Block for WasmiBlock {
     fn info(&self) -> BlockInfo {
         // Check cache first.

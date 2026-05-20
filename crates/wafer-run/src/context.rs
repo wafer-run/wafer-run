@@ -12,6 +12,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     types::ResourceGrant,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::{block::Block, platform::Instant, types::*};
 
@@ -415,8 +416,7 @@ impl RuntimeContext {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Context for RuntimeContext {
     /// Dispatch a message to another registered block.
     ///

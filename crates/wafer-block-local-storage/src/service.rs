@@ -4,6 +4,7 @@ use std::{
 };
 
 use chrono::Utc;
+use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
 /// Lexically normalize an absolute path: resolve `.` and `..` components
@@ -108,8 +109,7 @@ impl LocalStorageService {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl StorageService for LocalStorageService {
     async fn put(
         &self,

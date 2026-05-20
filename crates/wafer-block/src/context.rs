@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use wafer_block_macro::wafer_async_trait;
+
 use crate::{
     core_types::{Attachment, Message, WaferError},
     streams::{
@@ -12,8 +14,7 @@ use crate::{
 };
 
 /// Context provides runtime capabilities to blocks.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// Call another block by name.
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream;

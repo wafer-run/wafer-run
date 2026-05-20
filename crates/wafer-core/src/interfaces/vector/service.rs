@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use wafer_block_macro::wafer_async_trait;
 
 /// A single record stored in a vector index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,8 +118,7 @@ pub enum VectorError {
 pub type Result<T> = std::result::Result<T, VectorError>;
 
 /// Vector store interface — create/destroy indexes, upsert entries, query/delete by id.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Create a new index described by `config`.
     async fn create_index(&self, config: VectorIndexConfig) -> Result<()>;
@@ -143,8 +143,7 @@ pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 }
 
 /// Embedding model interface — convert text into fixed-dimensional vectors.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Identifier of the underlying embedding model.
     fn model(&self) -> &str;
@@ -211,8 +210,7 @@ mod tests {
     #[test]
     fn default_count_tokens_is_whitespace_split() {
         struct Mock;
-        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        #[wafer_async_trait]
         impl EmbeddingService for Mock {
             fn model(&self) -> &str {
                 "mock"

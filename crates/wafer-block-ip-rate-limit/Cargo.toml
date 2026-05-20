@@ -8,6 +8,7 @@ description = "WAFER block: per-IP rate limiting"
 [dependencies]
 wafer-run = { path = "../wafer-run" }
 async-trait = { workspace = true }
+wafer-block-macro = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]

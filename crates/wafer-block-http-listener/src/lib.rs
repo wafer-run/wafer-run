@@ -19,6 +19,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode},
 };
 use parking_lot::Mutex;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::{
     block::{Block, BlockCategory, BlockInfo},
     common::ErrorCode,
@@ -335,8 +336,7 @@ impl HttpListenerBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for HttpListenerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

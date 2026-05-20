@@ -5,6 +5,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     Message,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::context::Context;
 
@@ -46,8 +47,7 @@ struct ContextWrapper(*const dyn Context);
 unsafe impl Send for ContextWrapper {}
 unsafe impl Sync for ContextWrapper {}
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Context for ContextWrapper {
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
         unsafe { &*self.0 }.call_block(block_name, msg, input).await

@@ -4,12 +4,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use wafer_block::{streams::output::OutputStream, Attachment, Context, InputStream, Message};
+use wafer_block_macro::wafer_async_trait;
 
 #[derive(Clone)]
 struct PlainContext;
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Context for PlainContext {
     async fn call_block(
         &self,

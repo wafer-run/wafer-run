@@ -22,6 +22,7 @@ use std::{
 
 use parking_lot::Mutex;
 use wafer_block::ConfigVar;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::*;
 
 /// Default routes for the stats / monitoring endpoints. Overridable via
@@ -126,8 +127,7 @@ fn is_loopback_addr(addr: &str) -> bool {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for MonitoringBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

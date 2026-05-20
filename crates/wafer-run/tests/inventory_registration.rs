@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use wafer_block::{
     block::Block,
     context::Context,
@@ -15,7 +14,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     types::BlockInfo,
 };
-use wafer_block_macro::wafer_block;
+use wafer_block_macro::{wafer_async_trait, wafer_block};
 use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 struct TestBlock;
@@ -26,8 +25,7 @@ impl TestBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[wafer_async_trait]
 impl Block for TestBlock {
     fn info(&self) -> BlockInfo {
         <TestBlock>::block_info()

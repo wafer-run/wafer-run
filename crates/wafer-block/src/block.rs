@@ -1,5 +1,7 @@
 //! The Block trait — core interface every WAFER block must implement.
 
+use wafer_block_macro::wafer_async_trait;
+
 use crate::{
     capabilities::BlockCapabilities,
     context::Context,
@@ -15,8 +17,7 @@ use crate::{
 ///
 /// On native targets, requires Send + Sync (via MaybeSend/MaybeSync).
 /// On wasm32, these bounds are dropped (single-threaded).
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     /// Static metadata describing this block (name, version, routes,
     /// declared config keys, capabilities, etc).

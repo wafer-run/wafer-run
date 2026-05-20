@@ -992,6 +992,8 @@ impl Wafer {
 
 #[cfg(test)]
 mod tests {
+    use wafer_block_macro::wafer_async_trait;
+
     use super::*;
 
     /// Minimal `Block` for unit tests that need a registered handle.
@@ -999,8 +1001,7 @@ mod tests {
         info: wafer_block::BlockInfo,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl crate::block::Block for NoopBlock {
         fn info(&self) -> wafer_block::BlockInfo {
             self.info.clone()

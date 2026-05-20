@@ -7,6 +7,7 @@
 
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
+use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
 /// S3 implementation of StorageService.
@@ -90,8 +91,7 @@ impl S3StorageService {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl StorageService for S3StorageService {
     async fn put(
         &self,

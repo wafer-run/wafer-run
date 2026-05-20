@@ -7,6 +7,7 @@ use wafer_block::{
     types::BlockInfo,
     BlockRegistry, RuntimeError, *,
 };
+use wafer_block_macro::wafer_async_trait;
 
 use crate::interfaces::logger::{handler, service::LoggerService};
 
@@ -22,8 +23,7 @@ impl LoggerBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for LoggerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(

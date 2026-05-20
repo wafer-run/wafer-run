@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use wafer_block_macro::wafer_async_trait;
 
 /// Errors returned by [`StorageService`] operations.
 #[derive(Error, Debug)]
@@ -17,8 +18,7 @@ pub enum StorageError {
 }
 
 /// Service provides file/object storage operations organized by folders.
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Put stores an object in a folder.
     async fn put(

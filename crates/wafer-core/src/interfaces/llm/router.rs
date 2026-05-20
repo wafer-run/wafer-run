@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+use wafer_block_macro::wafer_async_trait;
 
 use super::service::{
     ChatChunk, ChatRequest, LlmError, LlmService, LoadProgress, ModelInfo, ModelStatus,
@@ -53,8 +54,7 @@ impl Default for MultiBackendLlmService {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl LlmService for MultiBackendLlmService {
     async fn chat_stream(
         &self,

@@ -51,6 +51,7 @@ license = "MIT"
 [workspace.dependencies]
 # Internal crates
 wafer-block = { path = "crates/wafer-block" }
+wafer-block-macro = { path = "crates/wafer-block-macro" }
 wafer-run = { path = "crates/wafer-run", features = ["full"] }
 wafer-core = { path = "crates/wafer-core" }
 wafer-sql-utils = { path = "crates/wafer-sql-utils" }

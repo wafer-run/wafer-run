@@ -7,7 +7,7 @@
 //! without the WASM ABI overhead.
 
 use wafer_block::{types::SkillRole, Message};
-use wafer_block_macro::wafer_block;
+use wafer_block_macro::{wafer_async_trait, wafer_block};
 use wafer_sdk::core_abi::GuestResult;
 
 mod skill_block {
@@ -44,8 +44,7 @@ mod skill_block {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl wafer_block::block::Block for AddNumbers {
         fn info(&self) -> wafer_block::types::BlockInfo {
             Self::block_info()
@@ -84,8 +83,7 @@ mod non_skill_block {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[wafer_async_trait]
     impl wafer_block::block::Block for PlainBlock {
         fn info(&self) -> wafer_block::types::BlockInfo {
             Self::block_info()

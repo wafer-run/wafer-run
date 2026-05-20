@@ -32,6 +32,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use wafer_block_macro::wafer_async_trait;
 use wafer_run::{types::ConfigVar, *};
 
 /// Source of monotonic time for rate-limit windowing.
@@ -97,8 +98,7 @@ impl RateLimitBlock {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[wafer_async_trait]
 impl Block for RateLimitBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(
