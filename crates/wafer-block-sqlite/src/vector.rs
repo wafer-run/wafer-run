@@ -2,7 +2,6 @@
 //! and FTS5 for optional keyword search.
 
 use parking_lot::Mutex;
-
 use rusqlite::{params, Connection};
 use wafer_core::interfaces::vector::{
     rrf,
