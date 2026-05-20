@@ -223,14 +223,13 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        db.query_row(&sql, query_params.as_slice(), Self::row_to_record)
+        db.query_row(&stmt.sql, query_params.as_slice(), Self::row_to_record)
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
                 _ => DatabaseError::Internal(e.to_string()),
@@ -266,33 +265,32 @@ impl DatabaseService for SQLiteDatabaseService {
         let total_count: Option<i64> = if opts.skip_count {
             None
         } else {
-            let (count_sql, count_sea_vals) =
+            let count_stmt =
                 wafer_sql_utils::aggregate::build_count(collection, &opts.filters, Backend::Sqlite);
-            let count_params = sea_to_sql_params(count_sea_vals);
+            let count_params = sea_to_sql_params(count_stmt.values);
             let count_refs: Vec<&dyn rusqlite::types::ToSql> = count_params
                 .iter()
                 .map(|v| v as &dyn rusqlite::types::ToSql)
                 .collect();
             Some(
-                db.query_row(&count_sql, count_refs.as_slice(), |row| row.get(0))
+                db.query_row(&count_stmt.sql, count_refs.as_slice(), |row| row.get(0))
                     .map_err(|e| DatabaseError::Internal(e.to_string()))?,
             )
         };
 
         // Query records
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_select(collection, opts, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::query::build_select(collection, opts, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
 
-        let mut stmt = db
-            .prepare(&sql)
+        let mut prepared = db
+            .prepare(&stmt.sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
 
-        let records: Vec<Record> = stmt
+        let records: Vec<Record> = prepared
             .query_map(query_params.as_slice(), Self::row_to_record)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?
             .filter_map(|r| match r {
@@ -472,15 +470,14 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
         let rows = db
-            .execute(&sql, query_params.as_slice())
+            .execute(&stmt.sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         if rows == 0 {
             return Err(DatabaseError::NotFound);
@@ -498,14 +495,13 @@ impl DatabaseService for SQLiteDatabaseService {
             return Ok(0);
         }
         ensure_columns_for_query(&db, &table, filters, &[]);
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        db.query_row(&sql, query_params.as_slice(), |row| row.get(0))
+        db.query_row(&stmt.sql, query_params.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
@@ -520,14 +516,13 @@ impl DatabaseService for SQLiteDatabaseService {
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        db.query_row(&sql, query_params.as_slice(), |row| row.get(0))
+        db.query_row(&stmt.sql, query_params.as_slice(), |row| row.get(0))
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
@@ -600,14 +595,13 @@ impl DatabaseService for SQLiteDatabaseService {
         if !table_exists(&db, &table) {
             return Ok(());
         }
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        db.execute(&sql, query_params.as_slice())
+        db.execute(&stmt.sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(())
     }
@@ -625,15 +619,14 @@ impl DatabaseService for SQLiteDatabaseService {
         if !table_exists(&db, &table) {
             return Ok(0);
         }
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
         let affected = db
-            .execute(&sql, query_params.as_slice())
+            .execute(&stmt.sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(affected as i64)
     }
@@ -651,17 +644,17 @@ impl DatabaseService for SQLiteDatabaseService {
         if !table_exists(&db, &table) {
             return Ok(vec![]);
         }
-        let (sql, sea_vals) =
+        let stmt =
             wafer_sql_utils::query::build_delete_where_returning(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        let mut stmt = db
-            .prepare(&sql)
+        let mut prepared = db
+            .prepare(&stmt.sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let records: Vec<Record> = stmt
+        let records: Vec<Record> = prepared
             .query_map(query_params.as_slice(), Self::row_to_record)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?
             .filter_map(|r| match r {
@@ -703,18 +696,18 @@ impl DatabaseService for SQLiteDatabaseService {
         // would otherwise produce a fresh prepared statement per run).
         let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
         data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
+        let stmt = wafer_sql_utils::query::build_update_where(
             &table,
             &data_pairs,
             filters,
             Backend::Sqlite,
         );
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        db.execute(&sql, query_params.as_slice())
+        db.execute(&stmt.sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(())
     }
@@ -734,20 +727,20 @@ impl DatabaseService for SQLiteDatabaseService {
         if !table_exists(&db, &table) {
             return Ok(0);
         }
-        let (sql, sea_vals) = wafer_sql_utils::query::build_increment_field_where(
+        let stmt = wafer_sql_utils::query::build_increment_field_where(
             &table,
             col,
             delta,
             filters,
             Backend::Sqlite,
         );
-        let params = sea_to_sql_params(sea_vals);
+        let params = sea_to_sql_params(stmt.values);
         let query_params: Vec<&dyn rusqlite::types::ToSql> = params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
         let rows = db
-            .execute(&sql, query_params.as_slice())
+            .execute(&stmt.sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         Ok(rows as i64)
     }
@@ -759,10 +752,10 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = ddl::build_create_table(table, Backend::Sqlite).map_err(|e| {
+        let create_stmt = ddl::build_create_table(table, Backend::Sqlite).map_err(|e| {
             DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
         })?;
-        db.execute_batch(&sql)
+        db.execute_batch(&create_stmt.sql)
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
 
         // Add any missing columns
@@ -770,7 +763,7 @@ impl DatabaseService for SQLiteDatabaseService {
             for col in &table.columns {
                 if !existing.contains(&col.name.to_lowercase()) {
                     let alter = ddl::build_add_column(&table.name, col, Backend::Sqlite);
-                    if let Err(e) = db.execute_batch(&alter) {
+                    if let Err(e) = db.execute_batch(&alter.sql) {
                         tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
                     }
                 }
@@ -779,8 +772,8 @@ impl DatabaseService for SQLiteDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let sql = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
-            db.execute_batch(&sql)
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
+            db.execute_batch(&idx_stmt.sql)
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }
 
@@ -812,7 +805,7 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        db.execute_batch(&ddl::build_drop_table(name, Backend::Sqlite))
+        db.execute_batch(&ddl::build_drop_table(name, Backend::Sqlite).sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
@@ -821,8 +814,8 @@ impl DatabaseService for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let sql = ddl::build_add_column(table, column, Backend::Sqlite);
-        db.execute_batch(&sql)
+        let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
+        db.execute_batch(&stmt.sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 }
@@ -943,7 +936,9 @@ mod tests {
             offset: 0,
             skip_count: false,
         };
-        let (sql, sea_vals) = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("WHERE"));
         // SQLite uses ? placeholders, not $N
         assert!(sql.contains("?"), "SQLite should use ? placeholders");
@@ -971,7 +966,8 @@ mod tests {
             offset: 20,
             skip_count: false,
         };
-        let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
+        let sql = stmt.sql;
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
         assert!(sql.contains("OFFSET"));
@@ -984,8 +980,9 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!(true),
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
         let params = sea_to_sql_params(sea_vals);
@@ -999,8 +996,10 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let (sql, sea_vals) =
+        let stmt =
             wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("WHERE"));
@@ -1015,8 +1014,9 @@ mod tests {
             operator: FilterOp::In,
             value: serde_json::json!(["active", "pending"]),
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("IN"));
         let params = sea_to_sql_params(sea_vals);
@@ -1033,8 +1033,10 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("123"),
         }];
-        let (sql, sea_vals) =
+        let stmt =
             wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
@@ -1049,8 +1051,9 @@ mod tests {
             operator: FilterOp::IsNull,
             value: serde_json::Value::Null,
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("IS NULL"));
         let params = sea_to_sql_params(sea_vals);
         assert!(params.is_empty());
@@ -1063,8 +1066,9 @@ mod tests {
             operator: FilterOp::IsNotNull,
             value: serde_json::Value::Null,
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("IS NOT NULL"));
         let params = sea_to_sql_params(sea_vals);
         assert!(params.is_empty());
@@ -1077,8 +1081,8 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!("%alice%"),
         }];
-        let (sql, _sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
         assert!(sql.contains("LIKE"));
     }
 
@@ -1096,8 +1100,9 @@ mod tests {
                 value: serde_json::json!(100),
             },
         ];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains(">="));
         assert!(sql.contains("<"));
         let params = sea_to_sql_params(sea_vals);

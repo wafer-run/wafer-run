@@ -53,13 +53,13 @@ impl VectorIndexSchema {
 
     /// `CREATE VIRTUAL TABLE {vec_table} USING vec0(embedding float[{dims}]);`
     /// followed by a regular meta-table create.
-    pub fn build_create_vec_and_meta(&self, dims: u32) -> String {
+    pub fn build_create_vec_and_meta(&self, dims: u32) -> crate::Statement {
         let Self {
             vec_table,
             meta_table,
             ..
         } = self;
-        format!(
+        let sql = format!(
             "CREATE VIRTUAL TABLE {vec_table} USING vec0(embedding float[{dims}]);\n\
              CREATE TABLE {meta_table}(\n\
                 id TEXT PRIMARY KEY,\n\
@@ -67,32 +67,47 @@ impl VectorIndexSchema {
                 metadata TEXT,\n\
                 text TEXT\n\
              );"
-        )
+        );
+        crate::Statement::new(sql, vec![], meta_table.clone())
     }
 
     /// `CREATE VIRTUAL TABLE {fts_table} USING fts5(id UNINDEXED, text);`
-    pub fn build_create_fts(&self) -> String {
+    pub fn build_create_fts(&self) -> crate::Statement {
         let fts_table = &self.fts_table;
-        format!("CREATE VIRTUAL TABLE {fts_table} USING fts5(id UNINDEXED, text);")
+        let sql = format!("CREATE VIRTUAL TABLE {fts_table} USING fts5(id UNINDEXED, text);");
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// Three `DROP TABLE IF EXISTS` statements (vec / meta / fts), in
     /// the order callers should execute them. Each is returned
     /// separately so callers can run them with `Connection::execute`
     /// (which requires a single statement) rather than `execute_batch`.
-    pub fn build_drop_all(&self) -> [String; 3] {
+    pub fn build_drop_all(&self) -> [crate::Statement; 3] {
         [
-            format!("DROP TABLE IF EXISTS {};", self.vec_table),
-            format!("DROP TABLE IF EXISTS {};", self.fts_table),
-            format!("DROP TABLE IF EXISTS {};", self.meta_table),
+            crate::Statement::new(
+                format!("DROP TABLE IF EXISTS {};", self.vec_table),
+                vec![],
+                self.meta_table.clone(),
+            ),
+            crate::Statement::new(
+                format!("DROP TABLE IF EXISTS {};", self.fts_table),
+                vec![],
+                self.meta_table.clone(),
+            ),
+            crate::Statement::new(
+                format!("DROP TABLE IF EXISTS {};", self.meta_table),
+                vec![],
+                self.meta_table.clone(),
+            ),
         ]
     }
 
     // ---------- Meta-table CRUD ----------
 
     /// `SELECT rowid FROM {meta_table} WHERE id = ?1`
-    pub fn build_select_rowid_by_id(&self) -> String {
-        format!("SELECT rowid FROM {} WHERE id = ?1", self.meta_table)
+    pub fn build_select_rowid_by_id(&self) -> crate::Statement {
+        let sql = format!("SELECT rowid FROM {} WHERE id = ?1", self.meta_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `INSERT INTO {meta_table}(id, rowid, metadata, text)
@@ -101,84 +116,95 @@ impl VectorIndexSchema {
     /// The autoinc-via-subquery shape is SQLite-only (a Postgres port
     /// would use a sequence). Documented here so the SQLite-ism stays
     /// visible.
-    pub fn build_insert_meta_autoinc(&self) -> String {
+    pub fn build_insert_meta_autoinc(&self) -> crate::Statement {
         let meta_table = &self.meta_table;
-        format!(
+        let sql = format!(
             "INSERT INTO {meta_table}(id, rowid, metadata, text) \
              VALUES (?1, (SELECT COALESCE(MAX(rowid), 0) + 1 FROM {meta_table}), ?2, ?3)"
-        )
+        );
+        crate::Statement::new(sql, vec![], meta_table.clone())
     }
 
     /// `UPDATE {meta_table} SET metadata = ?1, text = ?2 WHERE id = ?3`
-    pub fn build_update_meta(&self) -> String {
-        format!(
+    pub fn build_update_meta(&self) -> crate::Statement {
+        let sql = format!(
             "UPDATE {} SET metadata = ?1, text = ?2 WHERE id = ?3",
             self.meta_table
-        )
+        );
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `SELECT COUNT(*) FROM {meta_table}`
-    pub fn build_count_meta(&self) -> String {
-        format!("SELECT COUNT(*) FROM {}", self.meta_table)
+    pub fn build_count_meta(&self) -> crate::Statement {
+        let sql = format!("SELECT COUNT(*) FROM {}", self.meta_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `SELECT id, metadata FROM {meta_table} WHERE id IN (?,?,...)`
     /// with `n_ids` placeholders. The caller is expected to bind each
     /// id via `params_from_iter`.
-    pub fn build_select_metadata_in(&self, n_ids: usize) -> String {
+    pub fn build_select_metadata_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
-        format!(
+        let sql = format!(
             "SELECT id, metadata FROM {} WHERE id IN ({in_clause})",
             self.meta_table
-        )
+        );
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `SELECT rowid FROM {meta_table} WHERE id IN (?,?,...)`
-    pub fn build_select_rowid_in(&self, n_ids: usize) -> String {
+    pub fn build_select_rowid_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
-        format!(
+        let sql = format!(
             "SELECT rowid FROM {} WHERE id IN ({in_clause})",
             self.meta_table
-        )
+        );
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `DELETE FROM {meta_table} WHERE id IN (?,?,...)`
-    pub fn build_delete_meta_in(&self, n_ids: usize) -> String {
+    pub fn build_delete_meta_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
-        format!("DELETE FROM {} WHERE id IN ({in_clause})", self.meta_table)
+        let sql = format!("DELETE FROM {} WHERE id IN ({in_clause})", self.meta_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     // ---------- Vec table CRUD ----------
 
     /// `INSERT INTO {vec_table}(rowid, embedding) VALUES (?1, ?2)`
-    pub fn build_insert_vec(&self) -> String {
-        format!(
+    pub fn build_insert_vec(&self) -> crate::Statement {
+        let sql = format!(
             "INSERT INTO {}(rowid, embedding) VALUES (?1, ?2)",
             self.vec_table
-        )
+        );
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `DELETE FROM {vec_table} WHERE rowid = ?1`
-    pub fn build_delete_vec_by_rowid(&self) -> String {
-        format!("DELETE FROM {} WHERE rowid = ?1", self.vec_table)
+    pub fn build_delete_vec_by_rowid(&self) -> crate::Statement {
+        let sql = format!("DELETE FROM {} WHERE rowid = ?1", self.vec_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     // ---------- FTS table CRUD ----------
 
     /// `INSERT INTO {fts_table}(id, text) VALUES (?1, ?2)`
-    pub fn build_insert_fts(&self) -> String {
-        format!("INSERT INTO {}(id, text) VALUES (?1, ?2)", self.fts_table)
+    pub fn build_insert_fts(&self) -> crate::Statement {
+        let sql = format!("INSERT INTO {}(id, text) VALUES (?1, ?2)", self.fts_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `DELETE FROM {fts_table} WHERE id = ?1`
-    pub fn build_delete_fts_by_id(&self) -> String {
-        format!("DELETE FROM {} WHERE id = ?1", self.fts_table)
+    pub fn build_delete_fts_by_id(&self) -> crate::Statement {
+        let sql = format!("DELETE FROM {} WHERE id = ?1", self.fts_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     /// `DELETE FROM {fts_table} WHERE id IN (?,?,...)`
-    pub fn build_delete_fts_in(&self, n_ids: usize) -> String {
+    pub fn build_delete_fts_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
-        format!("DELETE FROM {} WHERE id IN ({in_clause})", self.fts_table)
+        let sql = format!("DELETE FROM {} WHERE id IN ({in_clause})", self.fts_table);
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 
     // ---------- Search queries (SQLite-vec / FTS5 specific) ----------
@@ -187,31 +213,33 @@ impl VectorIndexSchema {
     /// project the user id. Bind `?1` to the LE-bytes-encoded query
     /// embedding and `?2` to the candidate `LIMIT`. Result columns:
     /// `(id TEXT, distance REAL)`.
-    pub fn build_vec_knn_select(&self) -> String {
+    pub fn build_vec_knn_select(&self) -> crate::Statement {
         let Self {
             vec_table,
             meta_table,
             ..
         } = self;
-        format!(
+        let sql = format!(
             "SELECT m.id, v.distance FROM (\
                  SELECT rowid, distance FROM {vec_table} \
                  WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2\
              ) v JOIN {meta_table} m ON m.rowid = v.rowid \
              ORDER BY v.distance"
-        )
+        );
+        crate::Statement::new(sql, vec![], meta_table.clone())
     }
 
     /// FTS5 keyword-rank query using bm25. Bind `?1` to the FTS5 query
     /// string and `?2` to the LIMIT. Result columns: `(id TEXT, score
     /// REAL)`.
-    pub fn build_fts_bm25_select(&self) -> String {
+    pub fn build_fts_bm25_select(&self) -> crate::Statement {
         let fts_table = &self.fts_table;
-        format!(
+        let sql = format!(
             "SELECT id, bm25({fts_table}) AS score \
              FROM {fts_table} WHERE {fts_table} MATCH ?1 \
              ORDER BY score LIMIT ?2"
-        )
+        );
+        crate::Statement::new(sql, vec![], self.meta_table.clone())
     }
 }
 
@@ -250,44 +278,55 @@ mod tests {
     #[test]
     fn create_vec_and_meta_uses_table_names() {
         let s = VectorIndexSchema::new("docs");
-        let sql = s.build_create_vec_and_meta(384);
+        let stmt = s.build_create_vec_and_meta(384);
+        let sql = stmt.sql;
         assert!(sql.contains("CREATE VIRTUAL TABLE docs_vec USING vec0(embedding float[384])"));
         assert!(sql.contains("CREATE TABLE docs_meta("));
+        assert_eq!(stmt.collection, "docs_meta");
     }
 
     #[test]
     fn drop_all_returns_three_statements_in_order() {
         let s = VectorIndexSchema::new("docs");
         let drops = s.build_drop_all();
-        assert_eq!(drops[0], "DROP TABLE IF EXISTS docs_vec;");
-        assert_eq!(drops[1], "DROP TABLE IF EXISTS docs_fts;");
-        assert_eq!(drops[2], "DROP TABLE IF EXISTS docs_meta;");
+        assert_eq!(drops[0].sql, "DROP TABLE IF EXISTS docs_vec;");
+        assert_eq!(drops[1].sql, "DROP TABLE IF EXISTS docs_fts;");
+        assert_eq!(drops[2].sql, "DROP TABLE IF EXISTS docs_meta;");
+        for d in &drops {
+            assert_eq!(d.collection, "docs_meta");
+        }
     }
 
     #[test]
     fn in_clause_select_metadata() {
         let s = VectorIndexSchema::new("docs");
+        let stmt = s.build_select_metadata_in(3);
         assert_eq!(
-            s.build_select_metadata_in(3),
+            stmt.sql,
             "SELECT id, metadata FROM docs_meta WHERE id IN (?,?,?)"
         );
+        assert_eq!(stmt.collection, "docs_meta");
     }
 
     #[test]
     fn vec_knn_select_uses_both_tables() {
         let s = VectorIndexSchema::new("docs");
-        let sql = s.build_vec_knn_select();
+        let stmt = s.build_vec_knn_select();
+        let sql = stmt.sql;
         assert!(sql.contains("FROM docs_vec"));
         assert!(sql.contains("JOIN docs_meta m"));
         assert!(sql.contains("MATCH ?1"));
         assert!(sql.contains("LIMIT ?2"));
+        assert_eq!(stmt.collection, "docs_meta");
     }
 
     #[test]
     fn fts_bm25_select_uses_fts_table() {
         let s = VectorIndexSchema::new("docs");
-        let sql = s.build_fts_bm25_select();
+        let stmt = s.build_fts_bm25_select();
+        let sql = stmt.sql;
         assert!(sql.contains("bm25(docs_fts)"));
         assert!(sql.contains("FROM docs_fts WHERE docs_fts MATCH ?1"));
+        assert_eq!(stmt.collection, "docs_meta");
     }
 }

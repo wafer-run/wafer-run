@@ -38,10 +38,9 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn get_async(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Postgres);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -79,10 +78,10 @@ impl PostgresDatabaseService {
         let total_count: Option<i64> = if opts.skip_count {
             None
         } else {
-            let (count_sql, count_sea_vals) =
+            let count_stmt =
                 wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Backend::Postgres);
-            let count_params = sea_values_to_json(count_sea_vals);
-            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            let count_params = sea_values_to_json(count_stmt.values);
+            let mut count_q = sqlx::query_scalar::<_, i64>(&count_stmt.sql);
             for p in &count_params {
                 count_q = bind_json_value(count_q, p);
             }
@@ -95,9 +94,9 @@ impl PostgresDatabaseService {
         };
 
         // Query records
-        let (sql, sea_vals) = wafer_sql_utils::query::build_select(&table, opts, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let select_stmt = wafer_sql_utils::query::build_select(&table, opts, Backend::Postgres);
+        let params = sea_values_to_json(select_stmt.values);
+        let mut q = sqlx::query(&select_stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -253,10 +252,9 @@ impl PostgresDatabaseService {
     }
 
     async fn delete_async(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let stmt = wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Postgres);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -281,10 +279,10 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (sql, sea_vals) =
+        let count_stmt =
             wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        let params = sea_values_to_json(count_stmt.values);
+        let mut q = sqlx::query_scalar::<_, i64>(&count_stmt.sql);
         for p in &params {
             q = bind_json_value(q, p);
         }
@@ -300,10 +298,10 @@ impl PostgresDatabaseService {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let table = sanitize_ident(collection);
-        let (sql, sea_vals) =
+        let sum_stmt =
             wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query_scalar::<_, f64>(&sql);
+        let params = sea_values_to_json(sum_stmt.values);
+        let mut q = sqlx::query_scalar::<_, f64>(&sum_stmt.sql);
         for p in &params {
             q = bind_json_value(q, p);
         }
@@ -360,10 +358,9 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -384,10 +381,9 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -409,13 +405,13 @@ impl PostgresDatabaseService {
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
 
-        let (sql, sea_vals) = wafer_sql_utils::query::build_delete_where_returning(
+        let stmt = wafer_sql_utils::query::build_delete_where_returning(
             &table,
             filters,
             Backend::Postgres,
         );
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -452,14 +448,14 @@ impl PostgresDatabaseService {
         // see `create_async()` above for the rationale.
         let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
         data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let (sql, sea_vals) = wafer_sql_utils::query::build_update_where(
+        let stmt = wafer_sql_utils::query::build_update_where(
             &table,
             &data_pairs,
             filters,
             Backend::Postgres,
         );
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -481,15 +477,15 @@ impl PostgresDatabaseService {
             return Ok(0);
         }
         self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let (sql, sea_vals) = wafer_sql_utils::query::build_increment_field_where(
+        let stmt = wafer_sql_utils::query::build_increment_field_where(
             &table,
             col,
             delta,
             filters,
             Backend::Postgres,
         );
-        let params = sea_values_to_json(sea_vals);
-        let mut q = sqlx::query(&sql);
+        let params = sea_values_to_json(stmt.values);
+        let mut q = sqlx::query(&stmt.sql);
         for p in &params {
             q = bind_json_value_query(q, p);
         }
@@ -505,18 +501,18 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn schema_ensure_table_async(&self, table: &Table) -> Result<(), DatabaseError> {
-        let sql = ddl::build_create_table(table, Backend::Postgres).map_err(|e| {
+        let create_stmt = ddl::build_create_table(table, Backend::Postgres).map_err(|e| {
             DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
         })?;
-        sqlx::query(&sql)
+        sqlx::query(&create_stmt.sql)
             .execute(&self.pool)
             .await
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
 
         // Ensure indexes
         for idx in &table.indexes {
-            let sql = ddl::build_create_index(&table.name, idx, Backend::Postgres);
-            sqlx::query(&sql)
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres);
+            sqlx::query(&idx_stmt.sql)
                 .execute(&self.pool)
                 .await
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
@@ -540,8 +536,8 @@ impl PostgresDatabaseService {
     }
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
-        let sql = ddl::build_drop_table(name, Backend::Postgres);
-        sqlx::query(&sql)
+        let stmt = ddl::build_drop_table(name, Backend::Postgres);
+        sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
             .map_err(|e| DatabaseError::Internal(format!("drop_table: {e}")))?;
@@ -553,8 +549,8 @@ impl PostgresDatabaseService {
         table: &str,
         column: &Column,
     ) -> Result<(), DatabaseError> {
-        let sql = ddl::build_add_column(table, column, Backend::Postgres);
-        sqlx::query(&sql)
+        let stmt = ddl::build_add_column(table, column, Backend::Postgres);
+        sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
             .map_err(|e| DatabaseError::Internal(format!("add_column: {e}")))?;
@@ -975,8 +971,9 @@ mod tests {
             offset: 0,
             skip_count: false,
         };
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
         let params = sea_values_to_json(sea_vals);
@@ -1002,7 +999,8 @@ mod tests {
             offset: 20,
             skip_count: false,
         };
-        let (sql, _) = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
+        let sql = stmt.sql;
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
         assert!(sql.contains("OFFSET"));
@@ -1022,8 +1020,9 @@ mod tests {
                 value: serde_json::json!(true),
             },
         ];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
@@ -1039,8 +1038,9 @@ mod tests {
             operator: FilterOp::In,
             value: serde_json::json!(["active", "pending", "review"]),
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("IN"));
         let params = sea_values_to_json(sea_vals);
@@ -1058,8 +1058,10 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("123"),
         }];
-        let (sql, sea_vals) =
+        let stmt =
             wafer_sql_utils::query::build_update_where("users", &data, &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
@@ -1076,8 +1078,10 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let (sql, sea_vals) =
+        let stmt =
             wafer_sql_utils::aggregate::build_sum("orders", "amount", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("WHERE"));
@@ -1093,8 +1097,9 @@ mod tests {
             operator: FilterOp::IsNull,
             value: serde_json::Value::Null,
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("IS NULL"));
         let params = sea_values_to_json(sea_vals);
         assert!(params.is_empty());
@@ -1107,8 +1112,9 @@ mod tests {
             operator: FilterOp::IsNotNull,
             value: serde_json::Value::Null,
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("IS NOT NULL"));
         let params = sea_values_to_json(sea_vals);
         assert!(params.is_empty());
@@ -1121,8 +1127,9 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!("%alice%"),
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("LIKE"));
         assert!(sql.contains("$1"));
         let params = sea_values_to_json(sea_vals);
@@ -1148,8 +1155,9 @@ mod tests {
                 value: serde_json::json!(10),
             },
         ];
-        let (sql, sea_vals) =
-            wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
         assert!(sql.contains("$3"));
@@ -1217,8 +1225,9 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let (sql, sea_vals) =
-            wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
@@ -1233,11 +1242,13 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("abc123"),
         }];
-        let (sql, sea_vals) = wafer_sql_utils::query::build_delete_where_returning(
+        let stmt = wafer_sql_utils::query::build_delete_where_returning(
             "codes",
             &filters,
             Backend::Postgres,
         );
+        let sql = stmt.sql;
+        let sea_vals = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(

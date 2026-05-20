@@ -13,7 +13,7 @@ pub fn build_upsert(
     conflict_columns: &[&str],
     update_columns: &[&str],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::insert();
     query.into_table(DynCol(table.into()));
 
@@ -32,7 +32,8 @@ pub fn build_upsert(
     }
     query.on_conflict(on_conflict);
 
-    crate::render_insert(query, backend)
+    let (sql, values) = crate::render_insert(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build the atomic rate-limit upsert for a fixed-window counter.
@@ -74,7 +75,7 @@ pub fn build_rate_limit_upsert(
     now: i64,
     window_cutoff: i64,
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     use sea_query::CaseStatement;
 
     let mut query = Query::insert();
@@ -127,7 +128,8 @@ pub fn build_rate_limit_upsert(
     on_conflict.value(DynCol("updated_at".into()), now_expr);
     query.on_conflict(on_conflict);
 
-    crate::render_insert(query, backend)
+    let (sql, values) = crate::render_insert(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 #[cfg(test)]
@@ -142,17 +144,20 @@ mod tests {
             ("plan".to_string(), serde_json::json!("pro")),
             ("status".to_string(), serde_json::json!("active")),
         ];
-        let (sql, values) = build_upsert(
+        let stmt = build_upsert(
             "subscriptions",
             &data,
             &["user_id"],
             &["plan", "status"],
             Backend::Sqlite,
         );
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("INSERT INTO"));
         assert!(sql.contains("ON CONFLICT"));
         assert!(sql.contains("DO UPDATE SET"));
         assert_eq!(values.len(), 4);
+        assert_eq!(stmt.collection, "subscriptions");
     }
 
     #[test]
@@ -161,21 +166,24 @@ mod tests {
             ("block_name".to_string(), serde_json::json!("auth")),
             ("enabled".to_string(), serde_json::json!(1)),
         ];
-        let (sql, values) = build_upsert(
+        let stmt = build_upsert(
             "block_settings",
             &data,
             &["block_name"],
             &["enabled"],
             Backend::Postgres,
         );
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("$1"));
         assert!(sql.contains("ON CONFLICT"));
         assert_eq!(values.len(), 2);
+        assert_eq!(stmt.collection, "block_settings");
     }
 
     #[test]
     fn rate_limit_upsert_sqlite_shape() {
-        let (sql, values) = build_rate_limit_upsert(
+        let stmt = build_rate_limit_upsert(
             "rate_limits",
             "rl-id-1",
             "user:42:login",
@@ -183,6 +191,8 @@ mod tests {
             1_699_999_940, // 60s window
             Backend::Sqlite,
         );
+        let sql = stmt.sql;
+        let values = stmt.values;
 
         // Insert side
         assert!(sql.contains("INSERT INTO"), "missing INSERT: {sql}");
@@ -223,11 +233,12 @@ mod tests {
             !values.is_empty(),
             "expected bound values, got empty: {sql}"
         );
+        assert_eq!(stmt.collection, "rate_limits");
     }
 
     #[test]
     fn rate_limit_upsert_postgres_uses_dollar_params() {
-        let (sql, _values) = build_rate_limit_upsert(
+        let stmt = build_rate_limit_upsert(
             "rate_limits",
             "rl-id-2",
             "user:42:signup",
@@ -235,11 +246,12 @@ mod tests {
             1_699_999_700,
             Backend::Postgres,
         );
-
+        let sql = stmt.sql;
         assert!(sql.contains("$1"), "postgres should use $-params: {sql}");
         assert!(sql.contains("CASE WHEN"));
         assert!(sql.contains("CURRENT_TIMESTAMP"));
         // sanity: postgres quote style
         assert!(sql.contains("\"rate_limits\""));
+        assert_eq!(stmt.collection, "rate_limits");
     }
 }
