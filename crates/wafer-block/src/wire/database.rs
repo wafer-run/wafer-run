@@ -150,6 +150,28 @@ pub struct ExecRawRequest {
     pub args: Vec<serde_json::Value>,
 }
 
+/// Request for `database.execute` (typed write).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteRequest {
+    /// Rendered SQL text.
+    pub sql: String,
+    /// Positional parameter values, encoded as JSON for wire transport.
+    pub args: Vec<serde_json::Value>,
+    /// Collection (table) the statement targets. WRAP-authorized.
+    pub collection: String,
+}
+
+/// Request for `database.query` (typed read).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryRequest {
+    /// Rendered SQL text.
+    pub sql: String,
+    /// Positional parameter values, encoded as JSON for wire transport.
+    pub args: Vec<serde_json::Value>,
+    /// Collection (table) the statement targets. WRAP-authorized.
+    pub collection: String,
+}
+
 /// Request for `database.delete_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereRequest {
@@ -268,6 +290,20 @@ pub struct TakeWhereResponse {
 pub struct ExecRawResponse {
     /// Number of rows affected by the statement.
     pub rows_affected: i64,
+}
+
+/// Response for `database.execute`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteResponse {
+    /// Rows affected by the statement.
+    pub rows_affected: i64,
+}
+
+/// Response for `database.query`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResponse {
+    /// Result rows.
+    pub rows: Vec<Record>,
 }
 
 #[cfg(test)]
