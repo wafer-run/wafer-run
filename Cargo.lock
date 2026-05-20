@@ -129,6 +129,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wafer-block",
  "wafer-block-inspector",
  "wafer-block-logger",
  "wafer-block-sqlite",
@@ -6160,6 +6161,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wafer-block",
  "wafer-block-macro",
  "wafer-core",
  "wafer-run",
@@ -6230,6 +6232,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wafer-block",
  "wafer-block-fastembed",
  "wafer-block-macro",
  "wafer-core",
@@ -6302,6 +6305,7 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-run",
+ "wafer-sql-utils",
 ]
 
 [[package]]
@@ -6400,7 +6404,8 @@ version = "0.1.0"
 dependencies = [
  "sea-query",
  "serde_json",
- "wafer-core",
+ "wafer-block",
+ "wafer-run",
 ]
 
 [[package]]

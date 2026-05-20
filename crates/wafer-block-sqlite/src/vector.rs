@@ -85,10 +85,10 @@ impl VectorService for SqliteVecService {
         let _ = match config.metric {
             DistanceMetric::Cosine | DistanceMetric::Euclidean | DistanceMetric::DotProduct => (),
         };
-        conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions))
+        conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions).sql)
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         if config.keyword_search {
-            conn.execute_batch(&schema.build_create_fts())
+            conn.execute_batch(&schema.build_create_fts().sql)
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         Ok(())
@@ -101,8 +101,8 @@ impl VectorService for SqliteVecService {
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(name.to_string()));
         }
-        for stmt in schema.build_drop_all() {
-            conn.execute(&stmt, [])
+        for drop_stmt in schema.build_drop_all() {
+            conn.execute(&drop_stmt.sql, [])
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         Ok(())
@@ -125,13 +125,13 @@ impl VectorService for SqliteVecService {
             }
         }
 
-        let select_rowid_sql = schema.build_select_rowid_by_id();
-        let delete_vec_sql = schema.build_delete_vec_by_rowid();
-        let insert_meta_sql = schema.build_insert_meta_autoinc();
-        let insert_vec_sql = schema.build_insert_vec();
-        let update_meta_sql = schema.build_update_meta();
-        let delete_fts_sql = schema.build_delete_fts_by_id();
-        let insert_fts_sql = schema.build_insert_fts();
+        let select_rowid_sql = schema.build_select_rowid_by_id().sql;
+        let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
+        let insert_meta_sql = schema.build_insert_meta_autoinc().sql;
+        let insert_vec_sql = schema.build_insert_vec().sql;
+        let update_meta_sql = schema.build_update_meta().sql;
+        let delete_fts_sql = schema.build_delete_fts_by_id().sql;
+        let insert_fts_sql = schema.build_insert_fts().sql;
 
         let tx = conn
             .transaction()
@@ -228,7 +228,7 @@ impl VectorService for SqliteVecService {
                 // vec0 knn requires LIMIT (or `k = ?`) in the same SELECT that has the MATCH
                 // clause, so run the knn as a subquery and join against meta outside.
                 let mut stmt = conn
-                    .prepare(&schema.build_vec_knn_select())
+                    .prepare(&schema.build_vec_knn_select().sql)
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
                 let rows = stmt
                     .query_map(params![vec_bytes, candidate_limit as i64], |row| {
@@ -246,7 +246,7 @@ impl VectorService for SqliteVecService {
             if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
                 let q = keyword_query.as_deref().unwrap();
                 let mut stmt = conn
-                    .prepare(&schema.build_fts_bm25_select())
+                    .prepare(&schema.build_fts_bm25_select().sql)
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
                 let rows = stmt
                     .query_map(params![q, candidate_limit as i64], |row| {
@@ -276,7 +276,7 @@ impl VectorService for SqliteVecService {
 
         // Metadata lookup
         let mut stmt = conn
-            .prepare(&schema.build_select_metadata_in(ids_top.len()))
+            .prepare(&schema.build_select_metadata_in(ids_top.len()).sql)
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(ids_top.iter()), |row| {
@@ -343,7 +343,7 @@ impl VectorService for SqliteVecService {
 
         // Gather rowids first so we can delete from _vec by rowid.
         let mut stmt = tx
-            .prepare(&schema.build_select_rowid_in(ids.len()))
+            .prepare(&schema.build_select_rowid_in(ids.len()).sql)
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         let rowids: Vec<i64> = stmt
             .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
@@ -354,19 +354,19 @@ impl VectorService for SqliteVecService {
             .collect();
         drop(stmt);
 
-        let delete_vec_sql = schema.build_delete_vec_by_rowid();
+        let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
         for rid in rowids {
             tx.execute(&delete_vec_sql, params![rid])
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         tx.execute(
-            &schema.build_delete_meta_in(ids.len()),
+            &schema.build_delete_meta_in(ids.len()).sql,
             rusqlite::params_from_iter(ids.iter()),
         )
         .map_err(|e| VectorError::Internal(e.to_string()))?;
         if has_kw {
             tx.execute(
-                &schema.build_delete_fts_in(ids.len()),
+                &schema.build_delete_fts_in(ids.len()).sql,
                 rusqlite::params_from_iter(ids.iter()),
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
@@ -384,7 +384,7 @@ impl VectorService for SqliteVecService {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
         let n: i64 = conn
-            .query_row(&schema.build_count_meta(), [], |r| r.get(0))
+            .query_row(&schema.build_count_meta().sql, [], |r| r.get(0))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(n as u64)
     }

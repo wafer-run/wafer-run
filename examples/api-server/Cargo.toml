@@ -9,6 +9,7 @@ edition = "2021"
 #   wafer-flow-http-server = "0.1"
 #   wafer-block-sqlite = "0.1"
 #   wafer-block-logger = "0.1"
+wafer-block = { path = "../../crates/wafer-block" }
 wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
 wafer-core = { path = "../../crates/wafer-core" }
 wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }

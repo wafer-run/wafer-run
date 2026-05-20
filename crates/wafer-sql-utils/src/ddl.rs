@@ -1,6 +1,4 @@
-use wafer_core::interfaces::database::service::{
-    Column, DataType, DefaultVal, DefaultValue, Index, Table,
-};
+use wafer_run::schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
 use crate::{ident::sanitize_ident, Backend};
 
@@ -115,7 +113,7 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
 ///
 /// Returns `Err` if any column's foreign-key referential action is outside the
 /// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT).
-pub fn build_create_table(table: &Table, backend: Backend) -> Result<String, String> {
+pub fn build_create_table(table: &Table, backend: Backend) -> Result<crate::Statement, String> {
     let qtable = quote_ident(&table.name);
     let mut sql = format!("CREATE TABLE IF NOT EXISTS {qtable} (\n");
 
@@ -165,11 +163,11 @@ pub fn build_create_table(table: &Table, backend: Backend) -> Result<String, Str
     }
 
     sql.push_str("\n)");
-    Ok(sql)
+    Ok(crate::Statement::new(sql, vec![], table.name.clone()))
 }
 
 /// Generate a CREATE INDEX IF NOT EXISTS statement.
-pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> String {
+pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> crate::Statement {
     let _ = backend; // identical across backends
     let mut sql = String::from("CREATE ");
     if idx.unique {
@@ -198,26 +196,28 @@ pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> St
     sql.push_str(&quoted_cols.join(", "));
     sql.push(')');
 
-    sql
+    crate::Statement::new(sql, vec![], table_name)
 }
 
 /// Generate an ALTER TABLE ADD COLUMN statement.
-pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> String {
-    format!(
+pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> crate::Statement {
+    let sql = format!(
         "ALTER TABLE {} ADD COLUMN {}",
         quote_ident(table_name),
         column_to_sql(col, backend)
-    )
+    );
+    crate::Statement::new(sql, vec![], table_name)
 }
 
 /// Generate a DROP TABLE IF EXISTS statement.
-pub fn build_drop_table(table_name: &str, _backend: Backend) -> String {
-    format!("DROP TABLE IF EXISTS {}", quote_ident(table_name))
+pub fn build_drop_table(table_name: &str, _backend: Backend) -> crate::Statement {
+    let sql = format!("DROP TABLE IF EXISTS {}", quote_ident(table_name));
+    crate::Statement::new(sql, vec![], table_name)
 }
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::interfaces::database::service::{col_string, pk, timestamps};
+    use wafer_run::schema::{col_string, pk, timestamps};
 
     use super::*;
 
@@ -237,26 +237,30 @@ mod tests {
 
     #[test]
     fn test_create_table_sqlite() {
-        let sql = build_create_table(&test_table(), Backend::Sqlite).expect("valid");
+        let stmt = build_create_table(&test_table(), Backend::Sqlite).expect("valid");
+        let sql = stmt.sql;
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(sql.contains("\"id\" TEXT PRIMARY KEY"));
         assert!(sql.contains("\"name\" TEXT NOT NULL"));
         assert!(sql.contains("\"created_at\" DATETIME"));
         assert!(sql.contains("CURRENT_TIMESTAMP"));
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_create_table_postgres() {
-        let sql = build_create_table(&test_table(), Backend::Postgres).expect("valid");
+        let stmt = build_create_table(&test_table(), Backend::Postgres).expect("valid");
+        let sql = stmt.sql;
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(sql.contains("\"id\" TEXT PRIMARY KEY"));
         assert!(sql.contains("\"name\" TEXT NOT NULL"));
         assert!(sql.contains("\"created_at\" TIMESTAMPTZ"));
         assert!(sql.contains("NOW()"));
+        assert_eq!(stmt.collection, "users");
     }
 
     fn fk_table(on_delete: &str, on_update: &str) -> Table {
-        use wafer_core::interfaces::database::service::Reference;
+        use wafer_run::schema::Reference;
 
         let mut author_col = col_string("author_id");
         author_col.references = Some(Reference {
@@ -277,8 +281,9 @@ mod tests {
 
     #[test]
     fn test_fk_action_set_null_survives() {
-        let sql =
+        let stmt =
             build_create_table(&fk_table("SET NULL", "CASCADE"), Backend::Sqlite).expect("valid");
+        let sql = stmt.sql;
         assert!(
             sql.contains("ON DELETE SET NULL"),
             "expected `ON DELETE SET NULL` in: {sql}"
@@ -287,12 +292,14 @@ mod tests {
             sql.contains("ON UPDATE CASCADE"),
             "expected `ON UPDATE CASCADE` in: {sql}"
         );
+        assert_eq!(stmt.collection, "posts");
     }
 
     #[test]
     fn test_fk_action_case_insensitive() {
-        let sql =
+        let stmt =
             build_create_table(&fk_table("set null", "no action"), Backend::Sqlite).expect("valid");
+        let sql = stmt.sql;
         // Output should be canonical uppercase regardless of input case.
         assert!(sql.contains("ON DELETE SET NULL"));
         assert!(sql.contains("ON UPDATE NO ACTION"));
@@ -310,8 +317,9 @@ mod tests {
 
     #[test]
     fn test_drop_table() {
-        let sql = build_drop_table("users", Backend::Sqlite);
-        assert_eq!(sql, "DROP TABLE IF EXISTS \"users\"");
+        let stmt = build_drop_table("users", Backend::Sqlite);
+        assert_eq!(stmt.sql, "DROP TABLE IF EXISTS \"users\"");
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
@@ -321,9 +329,11 @@ mod tests {
             columns: vec!["email".into()],
             unique: true,
         };
-        let sql = build_create_index("users", &idx, Backend::Sqlite);
+        let stmt = build_create_index("users", &idx, Backend::Sqlite);
+        let sql = stmt.sql;
         assert!(sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS"));
         assert!(sql.contains("idx_users_email"));
         assert!(sql.contains("ON \"users\""));
+        assert_eq!(stmt.collection, "users");
     }
 }

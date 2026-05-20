@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
+// `Filter`, `FilterOp`, `ListOptions`, `SortField` are defined in wafer_block::db;
+// import them non-pub for use in conversion helpers and method signatures.
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
 pub use wafer_block::wire::database::{Record, RecordList};
@@ -10,9 +13,10 @@ use wafer_block::{
     wire::database::{
         CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
         DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
-        FilterDef as WireFilterDef, GetRequest, IncrementFieldWhereRequest, ListRequest,
-        QueryRawRequest, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
+        ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, GetRequest,
+        IncrementFieldWhereRequest, ListRequest, QueryRawRequest, QueryRequest, QueryResponse,
+        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
+        TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
     },
     WaferError,
 };
@@ -25,10 +29,6 @@ pub use crate::interfaces::database::service::{
     default_true, default_zero, pk, pk_int, schema_soft_delete, timestamps, Column, DataType,
     DefaultVal, DefaultValue, Index, Reference, Table,
 };
-// `Filter`, `FilterOp`, `ListOptions`, `SortField` are runtime-only ergonomic
-// wrappers (no wire-format derives); keep them on the interfaces type and
-// convert to `wire::*Def` at the wire boundary inside each fn.
-pub use crate::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
 
 const BLOCK: &str = "wafer-run/database";
 
@@ -176,8 +176,10 @@ dual_api! {
         Ok(resp.sum)
     }
 
-    /// Run a raw SQL `SELECT` (or other read-only) query with positional `args`.
-    /// Admin-gated under WRAP; prefer the typed CRUD helpers above for block code.
+    /// **Admin escape hatch.** Runs raw SQL with row results; the SQL is
+    /// opaque to the runtime so authorization is by the blanket
+    /// `"__raw_sql__"` WRAP resource (admin-required). Block code MUST use
+    /// [`query`] with a `wafer-sql-utils` builder instead.
     pub fn query_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, WaferError> {
         let req = QueryRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -191,8 +193,11 @@ dual_api! {
         decode(&data)
     }
 
-    /// Run a raw SQL write/DDL `query` with positional `args`; returns `rows_affected`.
-    /// Admin-gated under WRAP — use `ddl` for block self-DDL instead.
+    /// **Admin escape hatch.** Runs raw SQL with `rows_affected` return; the
+    /// SQL is opaque to the runtime so authorization is by the blanket
+    /// `"__raw_sql__"` WRAP resource (admin-required). Block code MUST use
+    /// [`execute`] with a `wafer-sql-utils` builder instead — only the SQL
+    /// explorer and migration runners legitimately need this.
     pub fn exec_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<i64, WaferError> {
         let req = ExecRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -205,6 +210,54 @@ dual_api! {
         )?;
         let resp: ExecRawResponse = decode(&data)?;
         Ok(resp.rows_affected)
+    }
+
+    /// Execute a write (`INSERT` / `UPDATE` / `DELETE` / upsert / DDL) built
+    /// via a `wafer-sql-utils` builder.
+    ///
+    /// WRAP-authorized against `stmt.collection`. Returns rows affected.
+    ///
+    /// Block code should prefer this over [`exec_raw`], which is admin-only
+    /// and exists as an escape hatch for the SQL explorer and migration runners.
+    pub fn execute(ctx, stmt: &wafer_sql_utils::Statement) -> Result<i64, WaferError> {
+        let req = ExecuteRequest {
+            sql: stmt.sql.clone(),
+            args: wafer_sql_utils::value::sea_values_to_json(stmt.values.clone()),
+            collection: stmt.collection.clone(),
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_EXECUTE,
+            &req,
+            Some(stmt.collection.as_str()),
+            true,
+            Some("db")
+        )?;
+        let resp: ExecuteResponse = decode(&data)?;
+        Ok(resp.rows_affected)
+    }
+
+    /// Run a read (`SELECT`) built via a `wafer-sql-utils` builder.
+    ///
+    /// WRAP-authorized against `stmt.collection`. Returns result rows.
+    ///
+    /// Block code should prefer this over [`query_raw`], which is admin-only.
+    pub fn query(ctx, stmt: &wafer_sql_utils::Statement) -> Result<Vec<Record>, WaferError> {
+        let req = QueryRequest {
+            sql: stmt.sql.clone(),
+            args: wafer_sql_utils::value::sea_values_to_json(stmt.values.clone()),
+            collection: stmt.collection.clone(),
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_QUERY,
+            &req,
+            Some(stmt.collection.as_str()),
+            false,
+            Some("db")
+        )?;
+        let resp: QueryResponse = decode(&data)?;
+        Ok(resp.rows)
     }
 
     /// Execute a DDL statement (`CREATE TABLE`, `CREATE INDEX`, `DROP TABLE`, etc).

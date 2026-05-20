@@ -5,15 +5,14 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    db::{Filter, FilterOp, ListOptions, SortField},
     streams::output::OutputStream,
     wire::database as wire,
     *,
 };
 use wafer_run::schema::Table;
 
-use super::service::{
-    self, DatabaseError, DatabaseService, Filter, FilterOp, ListOptions, SortField,
-};
+use super::service::{self, DatabaseError, DatabaseService};
 use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
 
 // --- Helpers ---
@@ -239,6 +238,28 @@ pub async fn handle_message(
             match service.exec_raw(&req.query, &req.args).await {
                 Ok(rows) => to_output(&wire::ExecRawResponse {
                     rows_affected: rows,
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_EXECUTE => {
+            let req = decode_or_err!(body, wire::ExecuteRequest, "database.execute");
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
+                return OutputStream::error(e);
+            }
+            match service.exec_raw(&req.sql, &req.args).await {
+                Ok(rows_affected) => to_output(&wire::ExecuteResponse { rows_affected }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_QUERY => {
+            let req = decode_or_err!(body, wire::QueryRequest, "database.query");
+            if let Err(e) = check_wrap_resource(msg, &req.collection, "collection") {
+                return OutputStream::error(e);
+            }
+            match service.query_raw(&req.sql, &req.args).await {
+                Ok(records) => to_output(&wire::QueryResponse {
+                    rows: records.into_iter().map(service_record_to_wire).collect(),
                 }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }

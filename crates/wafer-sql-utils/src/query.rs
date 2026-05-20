@@ -1,5 +1,5 @@
 use sea_query::{Asterisk, Cond, Expr, Order, Query, SelectStatement, SimpleExpr};
-use wafer_core::interfaces::database::service::{Filter, FilterOp, ListOptions, SortField};
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 
 use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
@@ -58,11 +58,7 @@ pub fn apply_pagination(query: &mut SelectStatement, limit: i64, offset: i64) {
 }
 
 /// Build SELECT * FROM {table} with filters, sort, limit, offset.
-pub fn build_select(
-    table: &str,
-    opts: &ListOptions,
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_select(table: &str, opts: &ListOptions, backend: Backend) -> crate::Statement {
     build_select_with_condition(table, opts, None, backend)
 }
 
@@ -78,7 +74,7 @@ pub fn build_select_with_condition(
     opts: &ListOptions,
     extra_condition: Option<Cond>,
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::select();
     query.column(Asterisk).from(DynCol(table.into()));
 
@@ -91,7 +87,8 @@ pub fn build_select_with_condition(
     apply_order(&mut query, &opts.sort);
     apply_pagination(&mut query, opts.limit, opts.offset);
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build SELECT {columns} FROM {table} with filters, sort, limit, offset.
@@ -103,13 +100,13 @@ pub fn build_select_with_condition(
 /// ```ignore
 /// use sea_query::{Cond, Expr};
 /// use wafer_sql_utils::{ident::DynCol, query, Backend};
-/// use wafer_core::interfaces::database::service::ListOptions;
+/// use wafer_block::db::ListOptions;
 ///
 /// let or_group = Cond::any()
 ///     .add(Expr::col(DynCol("email".into())).like("%alice%".to_string()))
 ///     .add(Expr::col(DynCol("id".into())).like("%alice%".to_string()));
 ///
-/// let (sql, vals) = query::build_select_columns(
+/// let stmt = query::build_select_columns(
 ///     "users",
 ///     &["id", "email"],
 ///     &ListOptions::default(),
@@ -123,7 +120,7 @@ pub fn build_select_columns(
     opts: &ListOptions,
     extra_condition: Option<Cond>,
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::select();
     for col in columns {
         query.column(DynCol((*col).into()));
@@ -139,7 +136,8 @@ pub fn build_select_columns(
     apply_order(&mut query, &opts.sort);
     apply_pagination(&mut query, opts.limit, opts.offset);
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build INSERT INTO {table} (cols) VALUES (vals).
@@ -147,7 +145,7 @@ pub fn build_insert(
     table: &str,
     data: &[(String, serde_json::Value)],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::insert();
     query.into_table(DynCol(table.into()));
 
@@ -160,7 +158,8 @@ pub fn build_insert(
     query.columns(cols);
     query.values_panic(vals);
 
-    crate::render_insert(query, backend)
+    let (sql, values) = crate::render_insert(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build SELECT * FROM {table} WHERE id = {id}.
@@ -168,17 +167,14 @@ pub fn build_insert(
 /// Caller-facing replacement for the `format!("SELECT * FROM {table}
 /// WHERE id = ?1")` pattern. The placeholder syntax (`?1` for SQLite,
 /// `$1` for Postgres) is selected from `backend`.
-pub fn build_select_by_id(
-    table: &str,
-    id: &str,
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_select_by_id(table: &str, id: &str, backend: Backend) -> crate::Statement {
     let mut query = Query::select();
     query
         .column(Asterisk)
         .from(DynCol(table.into()))
         .and_where(Expr::col(DynCol("id".into())).eq(id));
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build UPDATE {table} SET ... WHERE id = {id}.
@@ -187,7 +183,7 @@ pub fn build_update_by_id(
     id: &str,
     data: &[(String, serde_json::Value)],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::update();
     query.table(DynCol(table.into()));
 
@@ -196,7 +192,8 @@ pub fn build_update_by_id(
     }
     query.and_where(Expr::col(DynCol("id".into())).eq(id));
 
-    crate::render_update(query, backend)
+    let (sql, values) = crate::render_update(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build UPDATE {table} SET ... WHERE {filters}.
@@ -205,7 +202,7 @@ pub fn build_update_where(
     data: &[(String, serde_json::Value)],
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::update();
     query.table(DynCol(table.into()));
 
@@ -216,7 +213,8 @@ pub fn build_update_where(
         query.cond_where(cond);
     }
 
-    crate::render_update(query, backend)
+    let (sql, values) = crate::render_update(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build UPDATE {table} SET {col} = {col} + {delta} WHERE {filters}.
@@ -236,7 +234,7 @@ pub fn build_increment_field_where(
     delta: i64,
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::update();
     query.table(DynCol(table.into()));
 
@@ -248,29 +246,23 @@ pub fn build_increment_field_where(
         query.cond_where(cond);
     }
 
-    crate::render_update(query, backend)
+    let (sql, values) = crate::render_update(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build DELETE FROM {table} WHERE id = {id}.
-pub fn build_delete_by_id(
-    table: &str,
-    id: &str,
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_delete_by_id(table: &str, id: &str, backend: Backend) -> crate::Statement {
     let mut query = Query::delete();
     query
         .from_table(DynCol(table.into()))
         .and_where(Expr::col(DynCol("id".into())).eq(id));
 
-    crate::render_delete(query, backend)
+    let (sql, values) = crate::render_delete(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build DELETE FROM {table} WHERE {filters}.
-pub fn build_delete_where(
-    table: &str,
-    filters: &[Filter],
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_delete_where(table: &str, filters: &[Filter], backend: Backend) -> crate::Statement {
     let mut query = Query::delete();
     query.from_table(DynCol(table.into()));
 
@@ -278,7 +270,8 @@ pub fn build_delete_where(
         query.cond_where(cond);
     }
 
-    crate::render_delete(query, backend)
+    let (sql, values) = crate::render_delete(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build DELETE FROM {table} WHERE {filters} RETURNING *.
@@ -289,7 +282,7 @@ pub fn build_delete_where_returning(
     table: &str,
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::delete();
     query.from_table(DynCol(table.into()));
 
@@ -299,7 +292,8 @@ pub fn build_delete_where_returning(
 
     query.returning_all();
 
-    crate::render_delete(query, backend)
+    let (sql, values) = crate::render_delete(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 #[cfg(test)]
@@ -326,13 +320,16 @@ mod tests {
             offset: 0,
             skip_count: false,
         };
-        let (sql, values) = build_select("users", &opts, Backend::Sqlite);
+        let stmt = build_select("users", &opts, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("FROM"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
         assert!(!values.is_empty()); // filter value + possibly limit
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
@@ -344,9 +341,12 @@ mod tests {
             offset: 0,
             skip_count: false,
         };
-        let (sql, values) = build_select("users", &opts, Backend::Postgres);
+        let stmt = build_select("users", &opts, Backend::Postgres);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("$1"));
         assert_eq!(values.len(), 1);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
@@ -355,44 +355,58 @@ mod tests {
             ("id".to_string(), serde_json::json!("abc")),
             ("name".to_string(), serde_json::json!("alice")),
         ];
-        let (sql, values) = build_insert("users", &data, Backend::Sqlite);
+        let stmt = build_insert("users", &data, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("INSERT INTO"));
         assert_eq!(values.len(), 2);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_build_update_by_id() {
         let data = vec![("name".to_string(), serde_json::json!("bob"))];
-        let (sql, values) = build_update_by_id("users", "123", &data, Backend::Sqlite);
+        let stmt = build_update_by_id("users", "123", &data, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
         assert_eq!(values.len(), 2); // name + id
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_build_delete_by_id() {
-        let (sql, values) = build_delete_by_id("users", "123", Backend::Sqlite);
+        let stmt = build_delete_by_id("users", "123", Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert_eq!(values.len(), 1);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_build_update_where() {
         let data = vec![("status".to_string(), serde_json::json!("active"))];
         let filters = vec![eq_filter("id", serde_json::json!("123"))];
-        let (sql, values) = build_update_where("users", &data, &filters, Backend::Postgres);
+        let stmt = build_update_where("users", &data, &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
         assert_eq!(values.len(), 2);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_build_delete_where_returning_sqlite() {
         let filters = vec![eq_filter("code_hash", serde_json::json!("abc123"))];
-        let (sql, values) = build_delete_where_returning("cli_codes", &filters, Backend::Sqlite);
+        let stmt = build_delete_where_returning("cli_codes", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(
@@ -400,12 +414,15 @@ mod tests {
             "should contain RETURNING clause: {sql}"
         );
         assert_eq!(values.len(), 1);
+        assert_eq!(stmt.collection, "cli_codes");
     }
 
     #[test]
     fn test_build_delete_where_returning_postgres() {
         let filters = vec![eq_filter("code_hash", serde_json::json!("abc123"))];
-        let (sql, values) = build_delete_where_returning("cli_codes", &filters, Backend::Postgres);
+        let stmt = build_delete_where_returning("cli_codes", &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("WHERE"));
         assert!(
@@ -414,23 +431,29 @@ mod tests {
         );
         assert!(sql.contains("$1"));
         assert_eq!(values.len(), 1);
+        assert_eq!(stmt.collection, "cli_codes");
     }
 
     #[test]
     fn test_build_delete_where_returning_no_filters() {
         // No filters — should delete all rows and return them
-        let (sql, values) = build_delete_where_returning("items", &[], Backend::Sqlite);
+        let stmt = build_delete_where_returning("items", &[], Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("DELETE FROM"));
         assert!(!sql.contains("WHERE"));
         assert!(sql.contains("RETURNING"));
         assert!(values.is_empty());
+        assert_eq!(stmt.collection, "items");
     }
 
     #[test]
     fn test_build_increment_field_where_sqlite() {
         let filters = vec![eq_filter("id", serde_json::json!("share-abc"))];
-        let (sql, values) =
+        let stmt =
             build_increment_field_where("shares", "access_count", 1, &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         // SET col = col + ? — the delta is parameter-bound, the column
         // expression is `col + bind` (not `col = bind` — that would clobber).
         assert!(
@@ -440,13 +463,16 @@ mod tests {
         assert!(sql.contains("WHERE"));
         // Two bindings: delta (1) + filter value.
         assert_eq!(values.len(), 2);
+        assert_eq!(stmt.collection, "shares");
     }
 
     #[test]
     fn test_build_increment_field_where_postgres() {
         let filters = vec![eq_filter("id", serde_json::json!("share-abc"))];
-        let (sql, values) =
+        let stmt =
             build_increment_field_where("shares", "access_count", 1, &filters, Backend::Postgres);
+        let sql = stmt.sql;
+        let values = stmt.values;
         // Postgres backend renders numbered placeholders.
         assert!(
             sql.contains("UPDATE \"shares\" SET \"access_count\" = \"access_count\" + $1"),
@@ -454,6 +480,7 @@ mod tests {
         );
         assert!(sql.contains("$2"), "expected second pg placeholder: {sql}");
         assert_eq!(values.len(), 2);
+        assert_eq!(stmt.collection, "shares");
     }
 
     #[test]
@@ -462,13 +489,16 @@ mod tests {
             eq_filter("org_id", serde_json::json!("o1")),
             eq_filter("share_token", serde_json::json!("tok")),
         ];
-        let (sql, values) =
+        let stmt =
             build_increment_field_where("shares", "access_count", 1, &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("SET \"access_count\" = \"access_count\" + ?"));
         // Two AND-ed filter conditions, both parameterized.
         assert!(sql.contains(" AND "), "expected AND in WHERE: {sql}");
         // delta + two filter values = three bindings.
         assert_eq!(values.len(), 3);
+        assert_eq!(stmt.collection, "shares");
     }
 
     #[test]
@@ -477,19 +507,22 @@ mod tests {
         // bound (not inlined) so the SQL text doesn't distinguish sign;
         // it's the binding value that carries it.
         let filters = vec![eq_filter("id", serde_json::json!("q1"))];
-        let (sql, values) = build_increment_field_where(
+        let stmt = build_increment_field_where(
             "quota_buckets",
             "remaining",
             -5,
             &filters,
             Backend::Sqlite,
         );
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(
             sql.contains("\"remaining\" = \"remaining\" + ?"),
             "expected atomic add expression, got: {sql}"
         );
         // First binding is the delta; verify it's the negative we passed.
         assert_eq!(values[0], sea_query::Value::BigInt(Some(-5)));
+        assert_eq!(stmt.collection, "quota_buckets");
     }
 
     #[test]
@@ -497,9 +530,12 @@ mod tests {
         // We accept delta=0 as a no-op UPDATE — callers can filter if they
         // want, but the builder doesn't reject.
         let filters = vec![eq_filter("id", serde_json::json!("x"))];
-        let (sql, values) = build_increment_field_where("t", "c", 0, &filters, Backend::Sqlite);
+        let stmt = build_increment_field_where("t", "c", 0, &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("SET \"c\" = \"c\" + ?"), "got: {sql}");
         assert_eq!(values[0], sea_query::Value::BigInt(Some(0)));
+        assert_eq!(stmt.collection, "t");
     }
 
     #[test]
@@ -508,7 +544,7 @@ mod tests {
             .add(Expr::col(DynCol("email".into())).like("%alice%".to_string()))
             .add(Expr::col(DynCol("id".into())).like("%alice%".to_string()));
 
-        let (sql, values) = build_select_with_condition(
+        let stmt = build_select_with_condition(
             "users",
             &ListOptions {
                 filters: vec![Filter {
@@ -527,6 +563,8 @@ mod tests {
             Some(or_group),
             Backend::Sqlite,
         );
+        let sql = stmt.sql;
+        let values = stmt.values;
 
         assert!(sql.starts_with("SELECT * FROM \"users\""), "got: {sql}");
         assert!(sql.contains("IS NULL"));
@@ -537,5 +575,6 @@ mod tests {
         // At least the two LIKE bindings (sea-query may also parameterize
         // LIMIT / OFFSET depending on backend — we don't pin that here).
         assert!(values.len() >= 2, "expected ≥2 bindings, got {values:?}");
+        assert_eq!(stmt.collection, "users");
     }
 }

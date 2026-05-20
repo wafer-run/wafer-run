@@ -1,5 +1,5 @@
 use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
-use wafer_core::interfaces::database::service::{Filter, SortField};
+use wafer_block::db::{Filter, SortField};
 
 use crate::{
     ident::DynCol,
@@ -8,11 +8,7 @@ use crate::{
 };
 
 /// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
-pub fn build_count(
-    table: &str,
-    filters: &[Filter],
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_count(table: &str, filters: &[Filter], backend: Backend) -> crate::Statement {
     let mut query = Query::select();
     query
         .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("cnt"))
@@ -22,7 +18,8 @@ pub fn build_count(
         query.cond_where(cond);
     }
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build SELECT COALESCE(SUM({field}), 0) FROM {table} WHERE {filters}.
@@ -31,7 +28,7 @@ pub fn build_sum(
     field: &str,
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::select();
     query
         .expr_as(
@@ -47,7 +44,8 @@ pub fn build_sum(
         query.cond_where(cond);
     }
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build a per-day count over a date window.
@@ -71,7 +69,7 @@ pub fn build_daily_count(
     date_field: &str,
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     use sea_query::SimpleExpr;
 
     // The column reference is interpolated into the raw expression text via
@@ -106,7 +104,8 @@ pub fn build_daily_count(
     query.add_group_by(vec![date_expr]);
     query.order_by(Alias::new("day"), sea_query::Order::Asc);
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Build SELECT AVG({field}) FROM {table} WHERE {filters}.
@@ -115,7 +114,7 @@ pub fn build_avg(
     field: &str,
     filters: &[Filter],
     backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+) -> crate::Statement {
     let mut query = Query::select();
     query
         .expr_as(
@@ -128,7 +127,8 @@ pub fn build_avg(
         query.cond_where(cond);
     }
 
-    crate::render_select(query, backend)
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 /// Aggregate function type.
@@ -236,10 +236,7 @@ pub struct GroupedQueryConfig {
 /// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS INTEGER) as avg_ms
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
-pub fn build_grouped_query(
-    cfg: GroupedQueryConfig,
-    backend: Backend,
-) -> (String, Vec<sea_query::Value>) {
+pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::Statement {
     let mut query = Query::select();
     query.from(DynCol(cfg.table.clone()));
 
@@ -300,12 +297,14 @@ pub fn build_grouped_query(
         }
     }
 
-    crate::render_select(query, backend)
+    let table = cfg.table.clone();
+    let (sql, values) = crate::render_select(query, backend);
+    crate::Statement::new(sql, values, table)
 }
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::interfaces::database::service::FilterOp;
+    use wafer_block::db::FilterOp;
 
     use super::*;
     use crate::Backend;
@@ -317,10 +316,13 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let (sql, values) = build_count("users", &filters, Backend::Sqlite);
+        let stmt = build_count("users", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let values = stmt.values;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
         assert_eq!(values.len(), 1);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
@@ -330,7 +332,9 @@ mod tests {
             operator: FilterOp::GreaterEqual,
             value: serde_json::json!("2026-04-01"),
         }];
-        let (sql, vals) = build_daily_count("users", "created_at", &filters, Backend::Sqlite);
+        let stmt = build_daily_count("users", "created_at", &filters, Backend::Sqlite);
+        let sql = stmt.sql;
+        let vals = stmt.values;
         eprintln!("SQL: {sql}");
         eprintln!("VALS: {vals:?}");
         assert!(sql.contains("date("));
@@ -338,14 +342,17 @@ mod tests {
         assert!(sql.contains("GROUP BY"));
         assert!(sql.contains("ORDER BY"));
         assert_eq!(vals.len(), 1);
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_build_daily_count_postgres() {
-        let (sql, _vals) = build_daily_count("users", "created_at", &[], Backend::Postgres);
+        let stmt = build_daily_count("users", "created_at", &[], Backend::Postgres);
+        let sql = stmt.sql;
         assert!(sql.contains("to_char"));
         assert!(sql.contains("CAST"));
         assert!(sql.contains("GROUP BY"));
+        assert_eq!(stmt.collection, "users");
     }
 
     #[test]
@@ -377,11 +384,13 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let (sql, _values) = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("LIMIT"));
+        assert_eq!(stmt.collection, "request_logs");
     }
 
     #[test]
@@ -401,7 +410,8 @@ mod tests {
             order_by: vec![],
             limit: None,
         };
-        let (sql, _params) = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let sql = stmt.sql;
         eprintln!("SQL: {sql}");
         assert!(
             sql.to_uppercase().contains("COALESCE"),
@@ -413,6 +423,7 @@ mod tests {
             sql.contains('0') || sql.contains('?'),
             "expected literal or placeholder in: {sql}"
         );
+        assert_eq!(stmt.collection, "items");
     }
 
     #[test]
@@ -442,7 +453,8 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let (sql, _values) = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let sql = stmt.sql;
         // Both plain aggregate and CASE-WHEN aggregate render.
         assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");
         assert!(
@@ -451,5 +463,6 @@ mod tests {
         );
         assert!(sql.contains("\"errors\""), "missing errors alias in: {sql}");
         assert!(sql.contains("GROUP BY"));
+        assert_eq!(stmt.collection, "request_logs");
     }
 }

@@ -39,6 +39,40 @@ pub mod vector;
 /// without adding sea-query as a direct dependency.
 pub use sea_query::Value as SeaValue;
 
+/// A typed SQL statement produced by a `build_*` helper, ready to hand to the
+/// database service.
+///
+/// Carries the rendered SQL, its sea-query parameter values, and the primary
+/// collection (table) the statement targets. The collection is used as the
+/// WRAP resource when the statement reaches the database service handler, so
+/// blocks declare their access at builder-construction time and the runtime
+/// enforces it on dispatch.
+///
+/// Multi-table queries (joins, catalog introspection) don't fit this shape;
+/// those callers continue to use the admin-only `exec_raw` / `query_raw`
+/// client methods.
+#[derive(Debug, Clone)]
+pub struct Statement {
+    /// Rendered SQL string in the appropriate dialect.
+    pub sql: String,
+    /// Positional parameter values, in the order the SQL references them.
+    pub values: Vec<SeaValue>,
+    /// Primary table this statement targets. Used as the WRAP resource.
+    pub collection: String,
+}
+
+impl Statement {
+    /// Construct a statement from a rendered SQL string, its parameter values,
+    /// and the collection (table) it targets.
+    pub fn new(sql: String, values: Vec<SeaValue>, collection: impl Into<String>) -> Self {
+        Self {
+            sql,
+            values,
+            collection: collection.into(),
+        }
+    }
+}
+
 /// Database backend dialect for SQL rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -70,6 +104,38 @@ render_stmt!(render_select, sea_query::SelectStatement);
 render_stmt!(render_insert, sea_query::InsertStatement);
 render_stmt!(render_update, sea_query::UpdateStatement);
 render_stmt!(render_delete, sea_query::DeleteStatement);
+
+#[cfg(test)]
+mod statement_tests {
+    use super::*;
+
+    #[test]
+    fn statement_carries_collection() {
+        let s = Statement::new("SELECT 1".into(), vec![], "users");
+        assert_eq!(s.sql, "SELECT 1");
+        assert_eq!(s.collection, "users");
+        assert!(s.values.is_empty());
+    }
+
+    #[test]
+    fn statement_collection_accepts_string_and_str() {
+        let from_str = Statement::new(String::new(), vec![], "t");
+        let from_string = Statement::new(String::new(), vec![], String::from("t"));
+        assert_eq!(from_str.collection, from_string.collection);
+    }
+
+    #[test]
+    fn statement_is_clone_and_debug() {
+        let s = Statement::new(
+            "X".into(),
+            vec![SeaValue::String(Some(Box::new("y".into())))],
+            "t",
+        );
+        let s2 = s.clone();
+        assert_eq!(s.sql, s2.sql);
+        assert!(format!("{s:?}").contains("Statement"));
+    }
+}
 
 #[cfg(test)]
 mod render_stmt_tests {

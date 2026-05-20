@@ -43,12 +43,16 @@ impl ServiceOp {
     pub const DATABASE_DELETE: &str = "database.delete";
     /// Count records matching a filter.
     pub const DATABASE_COUNT: &str = "database.count";
-    /// Execute a raw SELECT and return rows (cap-gated).
-    pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
-    /// Execute a raw mutation statement (cap-gated).
-    pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
     /// Aggregate sum of a numeric column.
     pub const DATABASE_SUM: &str = "database.sum";
+    /// Execute a raw SELECT and return rows (cap-gated).
+    pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
+    /// Typed query: WRAP-authorized against the Statement's `collection`.
+    pub const DATABASE_QUERY: &str = "database.query";
+    /// Execute a raw mutation statement (cap-gated).
+    pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
+    /// Typed execute: WRAP-authorized against the Statement's `collection`.
+    pub const DATABASE_EXECUTE: &str = "database.execute";
     /// Delete every row matching a filter.
     pub const DATABASE_DELETE_WHERE: &str = "database.delete_where";
     /// Delete every row matching a filter and return the affected count.
