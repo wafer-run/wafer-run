@@ -1,7 +1,7 @@
 //! SQLite-backed VectorService using sqlite-vec for similarity search
 //! and FTS5 for optional keyword search.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use rusqlite::{params, Connection};
 use wafer_core::interfaces::vector::{
@@ -75,7 +75,7 @@ impl SqliteVecService {
 #[async_trait::async_trait]
 impl VectorService for SqliteVecService {
     async fn create_index(&self, config: VectorIndexConfig) -> Result<(), VectorError> {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(&config.name);
         if Self::index_exists(&conn, &schema)? {
@@ -96,7 +96,7 @@ impl VectorService for SqliteVecService {
     }
 
     async fn delete_index(&self, name: &str) -> Result<(), VectorError> {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(name);
         if !Self::index_exists(&conn, &schema)? {
@@ -113,7 +113,7 @@ impl VectorService for SqliteVecService {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut conn = self.db.lock().unwrap();
+        let mut conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(index);
         if !Self::index_exists(&conn, &schema)? {
@@ -200,7 +200,7 @@ impl VectorService for SqliteVecService {
         mode: SearchMode,
         keyword_query: Option<String>,
     ) -> Result<Vec<VectorMatch>, VectorError> {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(index);
         if !Self::index_exists(&conn, &schema)? {
@@ -330,7 +330,7 @@ impl VectorService for SqliteVecService {
         if ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.db.lock().unwrap();
+        let mut conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(index);
         if !Self::index_exists(&conn, &schema)? {
@@ -378,7 +378,7 @@ impl VectorService for SqliteVecService {
     }
 
     async fn count(&self, index: &str) -> Result<u64, VectorError> {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = VectorIndexSchema::new(index);
         if !Self::index_exists(&conn, &schema)? {
@@ -428,7 +428,7 @@ mod tests {
     async fn create_index_vector_only() {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", false)).await.unwrap();
-        let conn = svc.db.lock().unwrap();
+        let conn = svc.db.lock();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('docs_vec','docs_meta')",
@@ -454,7 +454,7 @@ mod tests {
     async fn create_index_with_keyword_search() {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", true)).await.unwrap();
-        let conn = svc.db.lock().unwrap();
+        let conn = svc.db.lock();
         let fts_exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name='docs_fts'",
@@ -478,7 +478,7 @@ mod tests {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", true)).await.unwrap();
         svc.delete_index("docs").await.unwrap();
-        let conn = svc.db.lock().unwrap();
+        let conn = svc.db.lock();
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'docs_%'",
@@ -528,7 +528,7 @@ mod tests {
         .await
         .unwrap();
 
-        let conn = svc.db.lock().unwrap();
+        let conn = svc.db.lock();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
             .unwrap();
@@ -573,7 +573,7 @@ mod tests {
         svc.upsert("docs", vec![entry("a", vec![0.0, 1.0, 0.0], None)])
             .await
             .unwrap();
-        let conn = svc.db.lock().unwrap();
+        let conn = svc.db.lock();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
             .unwrap();
