@@ -6,32 +6,13 @@
 use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
-    meta::META_WRAP_RESOURCE,
     streams::output::OutputStream,
     wire::storage as wire,
     *,
 };
 
 use super::service::{StorageError, StorageService};
-use crate::interfaces::handler_util::{decode_or_err, to_output};
-
-/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
-/// resource named in the decoded payload. If the meta is absent the runtime
-/// already skipped WRAP entirely (legacy path) — accept; the client wrappers
-/// always set this meta post-SEC-014.
-fn check_resource(msg: &Message, expected: &str) -> Result<(), WaferError> {
-    let supplied = msg.get_meta(META_WRAP_RESOURCE);
-    if supplied.is_empty() || supplied == expected {
-        Ok(())
-    } else {
-        Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
-            format!(
-                "WRAP: wrap.resource meta '{supplied}' does not match payload resource '{expected}'"
-            ),
-        ))
-    }
-}
+use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
 
 // --- Helpers ---
 
@@ -90,7 +71,9 @@ pub async fn handle_message(
     match msg.kind.as_str() {
         ServiceOp::STORAGE_PUT => {
             let req = decode_or_err!(body, wire::PutRequest, "storage.put");
-            if let Err(e) = check_resource(msg, &format!("{}/{}", req.folder, req.key)) {
+            if let Err(e) =
+                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
+            {
                 return OutputStream::error(e);
             }
             match service
@@ -103,7 +86,9 @@ pub async fn handle_message(
         }
         ServiceOp::STORAGE_GET => {
             let req = decode_or_err!(body, wire::GetRequest, "storage.get");
-            if let Err(e) = check_resource(msg, &format!("{}/{}", req.folder, req.key)) {
+            if let Err(e) =
+                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
+            {
                 return OutputStream::error(e);
             }
             match service.get(&req.folder, &req.key).await {
@@ -139,7 +124,9 @@ pub async fn handle_message(
         }
         ServiceOp::STORAGE_DELETE => {
             let req = decode_or_err!(body, wire::DeleteRequest, "storage.delete");
-            if let Err(e) = check_resource(msg, &format!("{}/{}", req.folder, req.key)) {
+            if let Err(e) =
+                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
+            {
                 return OutputStream::error(e);
             }
             match service.delete(&req.folder, &req.key).await {
@@ -149,7 +136,7 @@ pub async fn handle_message(
         }
         ServiceOp::STORAGE_LIST => {
             let req = decode_or_err!(body, wire::ListRequest, "storage.list");
-            if let Err(e) = check_resource(msg, &req.folder) {
+            if let Err(e) = check_wrap_resource(msg, &req.folder, "resource") {
                 return OutputStream::error(e);
             }
             let opts = super::service::ListOptions {
@@ -164,7 +151,7 @@ pub async fn handle_message(
         }
         ServiceOp::STORAGE_CREATE_FOLDER => {
             let req = decode_or_err!(body, wire::CreateFolderRequest, "storage.create_folder");
-            if let Err(e) = check_resource(msg, &req.name) {
+            if let Err(e) = check_wrap_resource(msg, &req.name, "resource") {
                 return OutputStream::error(e);
             }
             match service.create_folder(&req.name, req.public).await {
@@ -174,7 +161,7 @@ pub async fn handle_message(
         }
         ServiceOp::STORAGE_DELETE_FOLDER => {
             let req = decode_or_err!(body, wire::DeleteFolderRequest, "storage.delete_folder");
-            if let Err(e) = check_resource(msg, &req.name) {
+            if let Err(e) = check_wrap_resource(msg, &req.name, "resource") {
                 return OutputStream::error(e);
             }
             match service.delete_folder(&req.name).await {
