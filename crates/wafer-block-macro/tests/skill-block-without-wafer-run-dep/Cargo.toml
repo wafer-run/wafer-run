@@ -4,7 +4,7 @@
 # shells out to `cargo build --target wasm32-wasip1 --release` against this crate
 # to verify that `#[wafer_block]` expands successfully on wasm32 even when the
 # consumer crate has no `wafer-run` dep in its graph (regression for the
-# `::wafer_run::register_static_block!` path-resolution bug).
+# `::wafer_block::register_static_block!` path-resolution bug).
 [workspace]
 
 [package]

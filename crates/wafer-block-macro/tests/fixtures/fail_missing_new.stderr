@@ -19,7 +19,5 @@ error[E0599]: no function or associated item named `new` found for struct `Widge
            candidate #3: `digest::VariableOutput`
            candidate #4: `digest::core_api::VariableOutputCore`
            candidate #5: `digest::digest::Digest`
-           candidate #6: `parking_lot_core::thread_parker::ThreadParkerT`
-           candidate #7: `ring::aead::BoundKey`
-           candidate #8: `typenum::marker_traits::Bit`
-   = note: this error originates in the macro `::wafer_run::register_static_block` which comes from the expansion of the attribute macro `wafer_block` (in Nightly builds, run with -Z macro-backtrace for more info)
+           candidate #6: `typenum::marker_traits::Bit`
+   = note: this error originates in the macro `::wafer_block::register_static_block` which comes from the expansion of the attribute macro `wafer_block` (in Nightly builds, run with -Z macro-backtrace for more info)

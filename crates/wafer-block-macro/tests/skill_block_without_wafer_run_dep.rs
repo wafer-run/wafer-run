@@ -1,12 +1,12 @@
-//! Regression test for the `::wafer_run::register_static_block!` path-resolution
+//! Regression test for the `::wafer_block::register_static_block!` path-resolution
 //! bug in `#[wafer_block]`.
 //!
-//! The proc macro emits a call to `::wafer_run::register_static_block!`. On
+//! The proc macro emits a call to `::wafer_block::register_static_block!`. On
 //! `wasm32-*` the macro arm is a no-op, but the absolute path lookup still
 //! fires at macro-expansion time — which fails (E0433) when the consumer crate
-//! has no `wafer-run` dep in its graph. Real skill-block crates (e.g.
-//! `gizza-ai/clock`) only depend on `wafer-sdk` + `wafer-block`, so they hit
-//! this every build.
+//! has no `wafer-block` dep in its graph. Real skill-block crates (e.g.
+//! `gizza-ai/clock`) only depend on `wafer-sdk` + `wafer-block`, so the new
+//! `::wafer_block::...` path resolves cleanly with no `wafer-run` dep needed.
 //!
 //! This test compiles a minimal skill-block fixture for `wasm32-wasip1` and
 //! asserts the build succeeds. The fixture lives in
