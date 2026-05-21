@@ -6384,6 +6384,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wafer-schema"
+version = "0.1.0"
+
+[[package]]
 name = "wafer-sdk"
 version = "0.1.0"
 dependencies = [
