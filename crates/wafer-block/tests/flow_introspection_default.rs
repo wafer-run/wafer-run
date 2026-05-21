@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
-use wafer_block::introspection::FlowIntrospection;
-use wafer_block::{streams::output::OutputStream, Context, InputStream, Message};
+use wafer_block::{
+    introspection::FlowIntrospection, streams::output::OutputStream, Context, InputStream, Message,
+};
 use wafer_block_macro::wafer_async_trait;
 
 #[derive(Clone)]
