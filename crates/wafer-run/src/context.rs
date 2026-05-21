@@ -479,12 +479,8 @@ impl Context for RuntimeContext {
         self.snapshot.blocks.clone()
     }
 
-    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
-        self.snapshot.flow_infos.clone()
-    }
-
-    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
-        self.snapshot.flow_defs.clone()
+    fn flow_introspection(&self) -> Option<&dyn wafer_block::introspection::FlowIntrospection> {
+        Some(self)
     }
 
     fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
@@ -535,5 +531,28 @@ impl Context for RuntimeContext {
         report.ok.sort();
         report.broken.sort_by(|a, b| a.block.cmp(&b.block));
         report
+    }
+}
+
+/// JSON pass-through introspection over the live startup snapshot.
+///
+/// Mirrors what the deleted `Context::flow_infos`/`flow_defs` returned, but
+/// serialized to `serde_json::Value` so `wafer-block` does not need a
+/// `wafer-flow` dependency to expose the data.
+impl wafer_block::introspection::FlowIntrospection for RuntimeContext {
+    fn flow_infos_json(&self) -> Vec<serde_json::Value> {
+        self.snapshot
+            .flow_infos
+            .iter()
+            .filter_map(|info| serde_json::to_value(info).ok())
+            .collect()
+    }
+
+    fn flow_defs_json(&self) -> Vec<serde_json::Value> {
+        self.snapshot
+            .flow_defs
+            .iter()
+            .filter_map(|def| serde_json::to_value(def).ok())
+            .collect()
     }
 }
