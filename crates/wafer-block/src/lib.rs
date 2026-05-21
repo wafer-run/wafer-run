@@ -48,6 +48,8 @@ pub mod interfaces;
 pub mod registry;
 pub mod router;
 pub mod spawn;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod static_registration;
 pub mod stream;
 pub mod streams;
 pub mod validation;
@@ -74,3 +76,56 @@ pub use streams::{
     output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };
 pub use validation::{BrokenBlock, ValidationReport};
+
+// Re-export linkme so `register_static_block!` expansions in consumer crates
+// can refer to `$crate::linkme` without adding linkme to their own Cargo.toml.
+#[cfg(not(target_arch = "wasm32"))]
+pub use linkme;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS};
+
+/// Register a block at link time via `linkme`.
+///
+/// This macro inserts a [`StaticBlockRegistration`] entry into the
+/// [`STATIC_BLOCK_REGISTRATIONS`] distributed slice. The linker includes the
+/// entry in the final binary regardless of whether any code-level symbol from
+/// the crate is otherwise referenced — the key property that makes this safe
+/// for standalone `wafer-block-*` crates (unlike `inventory::submit!`, which
+/// was silently dropped by the linker when no other symbol from the crate was
+/// reachable).
+///
+/// ## Usage
+///
+/// ```rust,ignore
+/// wafer_block::register_static_block!("my-org/my-block", MyBlockType);
+/// ```
+///
+/// The type `$ty` must implement [`Block`] and have a `fn new() -> Self`
+/// constructor.
+///
+/// This macro is a no-op on `wasm32` targets.
+#[cfg(not(target_arch = "wasm32"))]
+#[macro_export]
+macro_rules! register_static_block {
+    ($name:expr, $ty:ty) => {
+        const _: () = {
+            #[$crate::linkme::distributed_slice($crate::STATIC_BLOCK_REGISTRATIONS)]
+            #[linkme(crate = $crate::linkme)]
+            static REGISTRATION: $crate::StaticBlockRegistration =
+                $crate::StaticBlockRegistration {
+                    name: $name,
+                    factory: || {
+                        ::std::sync::Arc::new(<$ty>::new()) as ::std::sync::Arc<dyn $crate::Block>
+                    },
+                };
+        };
+    };
+}
+
+/// No-op on `wasm32` — linkme is not supported on WASM targets.
+#[cfg(target_arch = "wasm32")]
+#[macro_export]
+macro_rules! register_static_block {
+    ($name:expr, $ty:ty) => {};
+}

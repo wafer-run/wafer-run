@@ -24,6 +24,7 @@ wafer-flow = { workspace = true }
 wafer-block-macro = { workspace = true }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
+linkme = { workspace = true }
 rmp-serde = "1.3"
 
 # Async primitives — `tokio` channels (`sync` feature only, no `net`/`io` so

@@ -8,7 +8,7 @@
 use wafer_block_cors as _;
 #[allow(unused_imports)]
 use wafer_block_readonly_guard as _;
-use wafer_run::static_registration::STATIC_BLOCK_REGISTRATIONS;
+use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 /// SCREAMING_SNAKE with `{ORG}__{BLOCK}__{KEY}` form.
 /// First and last segments contain `[A-Z][A-Z0-9_]*` characters; the

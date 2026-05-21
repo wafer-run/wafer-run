@@ -973,7 +973,7 @@ impl Wafer {
     /// underlying `DuplicateBlock` so the offender is named.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn load_inventory_blocks(&mut self) -> Result<(), RuntimeError> {
-        for entry in crate::static_registration::STATIC_BLOCK_REGISTRATIONS.iter() {
+        for entry in wafer_block::static_registration::STATIC_BLOCK_REGISTRATIONS.iter() {
             let block = (entry.factory)();
             self.register_block_inner(entry.name, block)
                 .map_err(|e| RuntimeError::Inventory {
