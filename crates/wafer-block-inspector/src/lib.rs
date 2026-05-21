@@ -280,4 +280,4 @@ fn extract_segment_after(path: &str, needle: &str) -> Option<String> {
     Some(segment.to_string())
 }
 
-wafer_run::register_static_block!("wafer-run/inspector", InspectorBlock);
+wafer_block::register_static_block!("wafer-run/inspector", InspectorBlock);

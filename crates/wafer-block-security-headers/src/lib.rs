@@ -222,7 +222,7 @@ pub fn merge_csp(baseline: &str, custom: &str) -> String {
         .join("; ")
 }
 
-wafer_run::register_static_block!("wafer-run/security-headers", SecurityHeadersBlock);
+wafer_block::register_static_block!("wafer-run/security-headers", SecurityHeadersBlock);
 
 #[cfg(test)]
 mod tests {

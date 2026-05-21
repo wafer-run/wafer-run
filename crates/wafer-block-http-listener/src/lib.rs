@@ -5,7 +5,7 @@
 //! into an HTTP response.
 //!
 //! Registered as the `wafer-run/http-listener` block via
-//! [`wafer_run::register_static_block!`]. The only public entry point most
+//! [`wafer_block::register_static_block!`]. The only public entry point most
 //! consumers need is the block name itself; the [`http_to_message`] and
 //! [`wafer_output_to_response`] helpers are re-exported for embedders that
 //! bypass the listener (e.g. running a WAFER flow inside an existing axum
@@ -500,7 +500,7 @@ impl Block for HttpListenerBlock {
 // Registration
 // ---------------------------------------------------------------------------
 
-wafer_run::register_static_block!("wafer-run/http-listener", HttpListenerBlock);
+wafer_block::register_static_block!("wafer-run/http-listener", HttpListenerBlock);
 
 #[cfg(test)]
 mod url_decode_tests {

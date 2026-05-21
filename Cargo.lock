@@ -6008,7 +6008,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6067,7 +6066,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6190,7 +6188,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6216,7 +6213,6 @@ dependencies = [
  "serde_json",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6249,7 +6245,6 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
- "wafer-run",
 ]
 
 [[package]]
