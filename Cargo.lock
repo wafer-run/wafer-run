@@ -6404,7 +6404,7 @@ dependencies = [
  "sea-query",
  "serde_json",
  "wafer-block",
- "wafer-run",
+ "wafer-schema",
 ]
 
 [[package]]

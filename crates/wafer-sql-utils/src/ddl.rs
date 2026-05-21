@@ -1,4 +1,4 @@
-use wafer_run::schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
+use wafer_schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
 use crate::{ident::sanitize_ident, Backend};
 
@@ -217,7 +217,7 @@ pub fn build_drop_table(table_name: &str, _backend: Backend) -> crate::Statement
 
 #[cfg(test)]
 mod tests {
-    use wafer_run::schema::{col_string, pk, timestamps};
+    use wafer_schema::{col_string, pk, timestamps};
 
     use super::*;
 
@@ -260,7 +260,7 @@ mod tests {
     }
 
     fn fk_table(on_delete: &str, on_update: &str) -> Table {
-        use wafer_run::schema::Reference;
+        use wafer_schema::Reference;
 
         let mut author_col = col_string("author_id");
         author_col.references = Some(Reference {
