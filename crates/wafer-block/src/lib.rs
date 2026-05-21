@@ -104,6 +104,14 @@ pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATION
 /// The type `$ty` must implement [`Block`] and have a `fn new() -> Self`
 /// constructor.
 ///
+/// ## Escape hatch
+///
+/// If the block type requires a non-`new()` factory (e.g. it needs runtime
+/// config to construct), you can use the `linkme` attribute directly against
+/// `wafer_block::STATIC_BLOCK_REGISTRATIONS` with `#[linkme(crate = $crate::linkme)]`.
+/// That is an internal API — prefer wrapping the config in the block's
+/// `Block::setup` lifecycle instead.
+///
 /// This macro is a no-op on `wasm32` targets.
 #[cfg(not(target_arch = "wasm32"))]
 #[macro_export]
