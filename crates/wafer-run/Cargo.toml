@@ -26,6 +26,7 @@ spike = []
 # Shared block types
 wafer-block = { workspace = true }
 wafer-flow = { workspace = true }
+wafer-schema = { workspace = true }
 
 # Core
 serde = { workspace = true }

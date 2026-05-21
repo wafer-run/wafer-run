@@ -6363,6 +6363,7 @@ dependencies = [
  "wafer-block-macro",
  "wafer-block-readonly-guard",
  "wafer-flow",
+ "wafer-schema",
  "wafer-sdk",
  "wafer-test-support",
  "wasmi",
