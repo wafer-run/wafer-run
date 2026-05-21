@@ -80,16 +80,6 @@ pub use wafer_block::{
     },
     wrap,
 };
-// Intra-PR back-compat re-exports of items that moved to wafer-block in this
-// PR. Deleted in a follow-up commit in the same PR once in-tree callers
-// migrate to the wafer-block path.
-#[cfg(not(target_arch = "wasm32"))]
-pub use wafer_block::linkme;
-#[cfg(not(target_arch = "wasm32"))]
-pub use wafer_block::{
-    register_static_block,
-    static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS},
-};
 pub use wasm::capabilities::BlockCapabilities;
 #[cfg(feature = "wasmi")]
 pub use wasm::WasmiBlock;

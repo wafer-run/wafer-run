@@ -6344,7 +6344,6 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "getrandom 0.2.17",
- "linkme",
  "parking_lot",
  "reqwest",
  "serde",

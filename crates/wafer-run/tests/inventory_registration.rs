@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use wafer_block::STATIC_BLOCK_REGISTRATIONS;
 use wafer_block::{
     block::Block,
     context::Context,
@@ -15,7 +16,6 @@ use wafer_block::{
     types::BlockInfo,
 };
 use wafer_block_macro::{wafer_async_trait, wafer_block};
-use wafer_run::STATIC_BLOCK_REGISTRATIONS;
 
 struct TestBlock;
 
