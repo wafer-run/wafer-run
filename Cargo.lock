@@ -6299,7 +6299,7 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
+ "wafer-schema",
  "wafer-sql-utils",
 ]
 

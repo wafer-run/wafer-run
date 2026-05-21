@@ -6,7 +6,7 @@ use thiserror::Error;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
-pub use wafer_run::schema::{
+pub use wafer_schema::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
     col_text, default_empty, default_false, default_int, default_now, default_null, default_string,
     default_true, default_zero, pk, pk_int, soft_delete as schema_soft_delete, timestamps, Column,

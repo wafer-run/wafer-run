@@ -13,7 +13,7 @@ default = []
 wasm-component = []
 
 [dependencies]
-wafer-run = { path = "../wafer-run", default-features = false }
+wafer-schema = { workspace = true }
 wafer-block = { path = "../wafer-block" }
 wafer-sql-utils = { workspace = true }
 serde = { workspace = true }
