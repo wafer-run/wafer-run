@@ -141,9 +141,18 @@ impl Block for InspectorBlock {
 
         let path = msg.path().to_string();
 
+        // Flow data is exposed via the runtime's FlowIntrospection capability.
+        // The inspector is a runtime-only block (no point inspecting an empty
+        // mock), so an absent capability is a misconfiguration — panic via
+        // `expect`. Bound once for the whole handler to keep the message in
+        // one place.
+        let intro = ctx
+            .flow_introspection()
+            .expect("inspector requires the runtime to expose FlowIntrospection");
+
         // Suffix-based routing — works regardless of mount prefix
         if path.ends_with("/app") {
-            let flows = ctx.flow_defs();
+            let flows = intro.flow_defs_json();
             let configs = ctx.block_configs();
             let blocks = ctx.registered_blocks();
             let interfaces = ctx.interface_specs();
@@ -164,7 +173,7 @@ impl Block for InspectorBlock {
         }
 
         if path.ends_with("/flows") {
-            let flows = ctx.flow_infos();
+            let flows = intro.flow_infos_json();
             let json = serde_json::to_vec(&flows).unwrap_or_default();
             return json_respond(json);
         }
@@ -202,8 +211,11 @@ impl Block for InspectorBlock {
             let decoded = percent_encoding::percent_decode_str(&flow_id)
                 .decode_utf8_lossy()
                 .into_owned();
-            let defs = ctx.flow_defs();
-            if let Some(def) = defs.into_iter().find(|c| c.id == decoded) {
+            let defs = intro.flow_defs_json();
+            if let Some(def) = defs
+                .into_iter()
+                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(decoded.as_str()))
+            {
                 let json = serde_json::to_vec(&def).unwrap_or_default();
                 return json_respond(json);
             }
@@ -216,12 +228,15 @@ impl Block for InspectorBlock {
 
         // Fallback: summary
         let blocks = ctx.registered_blocks();
-        let flows = ctx.flow_infos();
+        let flows = intro.flow_infos_json();
         let summary = serde_json::json!({
             "block_count": blocks.len(),
             "flow_count": flows.len(),
             "blocks": blocks.iter().map(|b| &b.name).collect::<Vec<_>>(),
-            "flows": flows.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            "flows": flows
+                .iter()
+                .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
         });
         json_respond(serde_json::to_vec(&summary).unwrap_or_default())
     }

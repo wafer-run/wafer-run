@@ -5982,7 +5982,6 @@ dependencies = [
  "tracing",
  "url",
  "wafer-block-macro",
- "wafer-flow",
  "wasm-bindgen-futures",
 ]
 

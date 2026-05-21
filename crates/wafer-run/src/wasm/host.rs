@@ -75,11 +75,8 @@ impl Context for ContextWrapper {
     fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
         unsafe { &*self.0 }.registered_blocks()
     }
-    fn flow_infos(&self) -> Vec<wafer_flow::FlowInfo> {
-        unsafe { &*self.0 }.flow_infos()
-    }
-    fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
-        unsafe { &*self.0 }.flow_defs()
+    fn flow_introspection(&self) -> Option<&dyn wafer_block::introspection::FlowIntrospection> {
+        unsafe { &*self.0 }.flow_introspection()
     }
     fn caller_id(&self) -> Option<&str> {
         unsafe { &*self.0 }.caller_id()
