@@ -105,6 +105,14 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         Vec::new()
     }
 
+    /// Optional runtime capability: returns a handle to query live flow
+    /// state. Default returns `None`. Real runtime contexts override to
+    /// return `Some(self)` when the type also implements
+    /// [`crate::introspection::FlowIntrospection`].
+    fn flow_introspection(&self) -> Option<&dyn crate::introspection::FlowIntrospection> {
+        None
+    }
+
     /// Get expanded block configs (for inspector app view).
     fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
         std::collections::HashMap::new()
