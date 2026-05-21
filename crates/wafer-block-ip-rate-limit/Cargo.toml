@@ -6,12 +6,13 @@ license.workspace = true
 description = "WAFER block: per-IP rate limiting"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
+wafer-run = { path = "../wafer-run" }
 wafer-test-support = { path = "../wafer-test-support" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 serde_json.workspace = true

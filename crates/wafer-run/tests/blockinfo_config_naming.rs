@@ -8,6 +8,10 @@ use wafer_block::STATIC_BLOCK_REGISTRATIONS;
 #[allow(unused_imports)]
 use wafer_block_cors as _;
 #[allow(unused_imports)]
+use wafer_block_ip_rate_limit as _;
+#[allow(unused_imports)]
+use wafer_block_monitoring as _;
+#[allow(unused_imports)]
 use wafer_block_readonly_guard as _;
 
 /// SCREAMING_SNAKE with `{ORG}__{BLOCK}__{KEY}` form.

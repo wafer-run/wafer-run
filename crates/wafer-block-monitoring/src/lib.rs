@@ -13,17 +13,14 @@
 
 #![warn(missing_docs)]
 
-use std::{
-    collections::HashMap,
-    net::IpAddr,
-    sync::{Arc, RwLock},
-    time::Instant,
-};
+use std::{collections::HashMap, net::IpAddr, sync::RwLock, time::Instant};
 
 use parking_lot::Mutex;
-use wafer_block::ConfigVar;
+use wafer_block::{
+    Block, BlockCategory, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, InstanceMode,
+    LifecycleEvent, LifecycleType, Message, OutputStream, WaferError,
+};
 use wafer_block_macro::wafer_async_trait;
-use wafer_run::*;
 
 /// Default routes for the stats / monitoring endpoints. Overridable via
 /// the `stats_path` / `monitoring_path` flow_config keys (per request)
@@ -32,8 +29,8 @@ const DEFAULT_STATS_PATH: &str = "/_stats";
 const DEFAULT_MONITORING_PATH: &str = "/_monitoring";
 
 /// Middleware block that tracks per-request metrics and serves the JSON
-/// stats endpoint. Singleton per Wafer instance; instantiated by
-/// [`register`].
+/// stats endpoint. Singleton per Wafer instance; auto-registered via
+/// [`wafer_block::register_static_block!`].
 pub(crate) struct MonitoringBlock {
     start_time: Instant,
     stats: Mutex<MonitoringStats>,
@@ -233,12 +230,7 @@ impl Block for MonitoringBlock {
     }
 }
 
-/// Register the `wafer-run/monitoring` block on `w`. Idempotent per
-/// runtime — calling twice returns the duplicate-name error from
-/// [`Wafer::register_block`].
-pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/monitoring", Arc::new(MonitoringBlock::new()))
-}
+wafer_block::register_static_block!("wafer-run/monitoring", MonitoringBlock);
 
 #[cfg(test)]
 mod tests {
