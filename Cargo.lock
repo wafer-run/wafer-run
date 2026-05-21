@@ -6327,10 +6327,8 @@ dependencies = [
 name = "wafer-flow-http-server"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "wafer-block-ip-rate-limit",
  "wafer-block-monitoring",
- "wafer-run",
 ]
 
 [[package]]
