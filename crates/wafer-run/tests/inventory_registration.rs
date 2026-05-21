@@ -117,3 +117,29 @@ fn monitoring_block_registered_via_linkme() {
         "expected 'wafer-run/monitoring' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
     );
 }
+
+#[test]
+fn postgres_block_registered_via_linkme() {
+    // Pull the crate into the link graph so its STATIC_BLOCK_REGISTRATIONS entry survives.
+    #[allow(unused_imports)]
+    use wafer_block_postgres as _;
+
+    let names: Vec<&str> = STATIC_BLOCK_REGISTRATIONS.iter().map(|r| r.name).collect();
+    assert!(
+        names.contains(&"wafer-run/postgres"),
+        "expected 'wafer-run/postgres' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
+    );
+}
+
+#[test]
+fn s3_block_registered_via_linkme() {
+    // Pull the crate into the link graph so its STATIC_BLOCK_REGISTRATIONS entry survives.
+    #[allow(unused_imports)]
+    use wafer_block_s3 as _;
+
+    let names: Vec<&str> = STATIC_BLOCK_REGISTRATIONS.iter().map(|r| r.name).collect();
+    assert!(
+        names.contains(&"wafer-run/s3"),
+        "expected 'wafer-run/s3' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
+    );
+}

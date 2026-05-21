@@ -18,14 +18,15 @@ use std::{
 };
 
 use service::PostgresDatabaseService;
+use wafer_block::{
+    Block, BlockCategory, BlockConfig, BlockInfo, ConfigVar, Context, InputStream, LifecycleEvent,
+    LifecycleType, Message, OutputStream, WaferError,
+};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::DatabaseService;
-use wafer_run::{
-    block::{Block, BlockCategory, BlockInfo},
-    context::Context,
+use wafer_schema::{
     manifest::{collections_to_tables, CollectionDef},
-    schema::Table,
-    types::*,
+    Table,
 };
 
 const DATABASE_URL_ENV: &str = "WAFER_RUN__POSTGRES__DATABASE_URL";
@@ -75,12 +76,7 @@ impl Block for PostgresDatabaseBlock {
         .name("Database URL")])
     }
 
-    async fn handle(
-        &self,
-        _ctx: &dyn Context,
-        msg: Message,
-        input: wafer_run::InputStream,
-    ) -> wafer_run::OutputStream {
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let service = self
             .service
             .get()
@@ -96,7 +92,7 @@ impl Block for PostgresDatabaseBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.service.get().is_none() {
-            let config = wafer_run::BlockConfig::from_event(&event);
+            let config = BlockConfig::from_event(&event);
 
             let tables = match config.get("collections") {
                 Some(v) => {
@@ -146,7 +142,4 @@ impl Block for PostgresDatabaseBlock {
     }
 }
 
-/// Register the PostgreSQL database block with the given Wafer runtime.
-pub fn register(w: &mut wafer_run::Wafer) -> Result<(), wafer_run::RuntimeError> {
-    w.register_block("wafer-run/postgres", Arc::new(PostgresDatabaseBlock::new()))
-}
+wafer_block::register_static_block!("wafer-run/postgres", PostgresDatabaseBlock);

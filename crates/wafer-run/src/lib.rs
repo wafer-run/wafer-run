@@ -18,11 +18,6 @@ pub mod discovery;
 pub mod error;
 pub mod executor;
 pub mod helpers;
-// TODO(wave-5-pr-c): remove this re-export once wafer-block-postgres migrates
-// its `use wafer_run::manifest::*` imports to `wafer_schema::manifest::*`.
-/// Compat re-export so `wafer-block-postgres` keeps compiling until PR-C
-/// repoints its imports. Removed in PR-C. See spec §"PR sequencing".
-pub use wafer_schema::manifest;
 /// Re-exports of the canonical metadata constants defined in `wafer-block`.
 pub mod meta;
 /// Observability hooks: pluggable callbacks fired on flow/block lifecycle events.

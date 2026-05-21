@@ -12,7 +12,11 @@ use wafer_block_ip_rate_limit as _;
 #[allow(unused_imports)]
 use wafer_block_monitoring as _;
 #[allow(unused_imports)]
+use wafer_block_postgres as _;
+#[allow(unused_imports)]
 use wafer_block_readonly_guard as _;
+#[allow(unused_imports)]
+use wafer_block_s3 as _;
 
 /// SCREAMING_SNAKE with `{ORG}__{BLOCK}__{KEY}` form.
 /// First and last segments contain `[A-Z][A-Z0-9_]*` characters; the
