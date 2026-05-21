@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
-use wafer_block::STATIC_BLOCK_REGISTRATIONS;
 use wafer_block::{
     block::Block,
     context::Context,
     core_types::Message,
     streams::{input::InputStream, output::OutputStream},
     types::BlockInfo,
+    STATIC_BLOCK_REGISTRATIONS,
 };
 use wafer_block_macro::{wafer_async_trait, wafer_block};
 

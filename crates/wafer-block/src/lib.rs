@@ -67,23 +67,21 @@ pub use executor::{extract_path_vars, match_path, matches_pattern};
 pub use hash::expand_env_vars;
 pub use hash::{hex_encode, sha256, sha256_hex};
 pub use helpers::*;
+// Re-export linkme so `register_static_block!` expansions in consumer crates
+// can refer to `$crate::linkme` without adding linkme to their own Cargo.toml.
+#[cfg(not(target_arch = "wasm32"))]
+pub use linkme;
 pub use registry::BlockRegistry;
 pub use router::Router;
 pub use spawn::spawn_producer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS};
 pub use stream::StreamEvent;
 pub use streams::{
     input::InputStream,
     output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };
 pub use validation::{BrokenBlock, ValidationReport};
-
-// Re-export linkme so `register_static_block!` expansions in consumer crates
-// can refer to `$crate::linkme` without adding linkme to their own Cargo.toml.
-#[cfg(not(target_arch = "wasm32"))]
-pub use linkme;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS};
 
 /// Register a block at link time via `linkme`.
 ///
