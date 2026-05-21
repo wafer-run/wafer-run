@@ -6,6 +6,8 @@ license.workspace = true
 description = "Schema record types (Table, Column, DataType, …) used to describe a database for WAFER runtime"
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
