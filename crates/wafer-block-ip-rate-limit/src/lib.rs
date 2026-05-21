@@ -32,8 +32,11 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use wafer_block::{
+    Block, BlockCategory, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, InstanceMode,
+    LifecycleEvent, Message, OutputStream, WaferError,
+};
 use wafer_block_macro::wafer_async_trait;
-use wafer_run::{types::ConfigVar, *};
 
 /// Source of monotonic time for rate-limit windowing.
 ///
@@ -232,11 +235,7 @@ impl Block for RateLimitBlock {
     }
 }
 
-/// Registers the `wafer-run/ip-rate-limit` block on the given [`Wafer`]
-/// runtime. Returns `Err` if a block with the same name is already registered.
-pub fn register(w: &mut Wafer) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/ip-rate-limit", Arc::new(RateLimitBlock::new()))
-}
+wafer_block::register_static_block!("wafer-run/ip-rate-limit", RateLimitBlock);
 
 #[cfg(test)]
 mod clock_seam_tests {
@@ -282,6 +281,7 @@ mod rate_limit_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::json;
+    use wafer_run::streams::output::TerminalNotResponse;
     use wafer_test_support::builder::WaferBuilder;
 
     use super::*;

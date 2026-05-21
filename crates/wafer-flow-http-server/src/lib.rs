@@ -47,10 +47,10 @@ const FLOW_JSON: &str = r#"{
 
 /// Register the `wafer-run/http-server` flow with native blocks and config.
 ///
-/// The inventory-managed blocks (security-headers, cors, readonly-guard, router,
-/// http-listener) are loaded automatically by `Wafer::new()`. This function
-/// registers the two non-inventory blocks (ip-rate-limit, monitoring), adds the
-/// flow definition, and applies config.
+/// All blocks in the flow (security-headers, cors, readonly-guard, ip-rate-limit,
+/// monitoring, router, http-listener) are inventory-managed via
+/// `register_static_block!` and load automatically during `Wafer::new()`. This
+/// function adds the flow definition and applies config.
 ///
 /// ```rust,ignore
 /// wafer_flow_http_server::register(&mut wafer, json!({
@@ -62,14 +62,6 @@ pub fn register(
     w: &mut wafer_run::Wafer,
     config: serde_json::Value,
 ) -> Result<(), wafer_run::RuntimeError> {
-    // ip-rate-limit and monitoring are not inventory-managed — register explicitly.
-    if !w.has_block("wafer-run/ip-rate-limit") {
-        wafer_block_ip_rate_limit::register(w)?;
-    }
-    if !w.has_block("wafer-run/monitoring") {
-        wafer_block_monitoring::register(w)?;
-    }
-
     // Register flow
     w.add_flow_json(FLOW_JSON)?;
 

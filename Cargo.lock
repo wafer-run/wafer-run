@@ -6075,6 +6075,7 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "tokio",
+ "wafer-block",
  "wafer-block-macro",
  "wafer-run",
  "wafer-test-support",
@@ -6127,7 +6128,6 @@ dependencies = [
  "serde_json",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6361,6 +6361,7 @@ dependencies = [
  "wafer-block-cors",
  "wafer-block-ip-rate-limit",
  "wafer-block-macro",
+ "wafer-block-monitoring",
  "wafer-block-readonly-guard",
  "wafer-flow",
  "wafer-schema",

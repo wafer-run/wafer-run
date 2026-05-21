@@ -91,3 +91,29 @@ fn block_infos_includes_linkme_registered_block() {
         infos.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn ip_rate_limit_block_registered_via_linkme() {
+    // Pull the crate into the link graph so its STATIC_BLOCK_REGISTRATIONS entry survives.
+    #[allow(unused_imports)]
+    use wafer_block_ip_rate_limit as _;
+
+    let names: Vec<&str> = STATIC_BLOCK_REGISTRATIONS.iter().map(|r| r.name).collect();
+    assert!(
+        names.contains(&"wafer-run/ip-rate-limit"),
+        "expected 'wafer-run/ip-rate-limit' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
+    );
+}
+
+#[test]
+fn monitoring_block_registered_via_linkme() {
+    // Pull the crate into the link graph so its STATIC_BLOCK_REGISTRATIONS entry survives.
+    #[allow(unused_imports)]
+    use wafer_block_monitoring as _;
+
+    let names: Vec<&str> = STATIC_BLOCK_REGISTRATIONS.iter().map(|r| r.name).collect();
+    assert!(
+        names.contains(&"wafer-run/monitoring"),
+        "expected 'wafer-run/monitoring' in STATIC_BLOCK_REGISTRATIONS, got: {names:?}"
+    );
+}
