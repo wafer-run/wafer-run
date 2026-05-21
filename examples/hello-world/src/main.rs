@@ -33,14 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
     // Register the HTTP server (infra + router)
-    wafer_flow_http_server::register(
-        &mut wafer,
+    wafer
+        .add_flow_json(wafer_flow_http_server::FLOW_JSON)
+        .expect("register http server flow");
+    wafer.add_block_config(
+        wafer_flow_http_server::FLOW_ID,
         serde_json::json!({
             "listen": "0.0.0.0:8080",
             "routes": [{ "path": "/**", "block": "example/hello" }]
         }),
-    )
-    .expect("register http server");
+    );
 
     // Register a simple inline block that responds with JSON
     wafer

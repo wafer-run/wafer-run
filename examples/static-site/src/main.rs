@@ -16,14 +16,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
     // --- Register blocks ---
-    wafer_flow_http_server::register(
-        &mut wafer,
+    wafer
+        .add_flow_json(wafer_flow_http_server::FLOW_JSON)
+        .expect("register http server flow");
+    wafer.add_block_config(
+        wafer_flow_http_server::FLOW_ID,
         serde_json::json!({
             "listen": "0.0.0.0:8080",
             "routes": [{ "path": "/**", "block": "wafer-run/web" }]
         }),
-    )
-    .expect("register http server");
+    );
     // wafer-run/web is loaded automatically by Wafer::new() via inventory autoreg.
     wafer.add_block_config(
         "wafer-run/web",

@@ -1,19 +1,29 @@
 #![warn(missing_docs)]
 //! `wafer-run/http-server` — batteries-included HTTP server flow.
 //!
-//! Registers a flow that chains the standard infrastructure blocks
-//! (security-headers, CORS, readonly-guard, rate-limiting, monitoring)
-//! followed by the config-driven router. A single call sets up a
-//! fully working HTTP server:
+//! Exports the flow definition and its registration key as constants so
+//! callers wire it into a `Wafer` themselves:
 //!
 //! ```rust,ignore
-//! wafer_flow_http_server::register(&mut wafer, serde_json::json!({
-//!     "listen": "0.0.0.0:8080",
-//!     "routes": [{ "path": "/**", "block": "hello" }]
-//! }));
+//! wafer.add_flow_json(wafer_flow_http_server::FLOW_JSON)?;
+//! wafer.add_block_config(
+//!     wafer_flow_http_server::FLOW_ID,
+//!     serde_json::json!({ "listen": "0.0.0.0:8080", "routes": [...] }),
+//! );
 //! ```
+//!
+//! All blocks in the flow (security-headers, cors, readonly-guard,
+//! ip-rate-limit, monitoring, router, http-listener) self-register at
+//! link time via `register_static_block!`. `wafer-block-ip-rate-limit`
+//! and `wafer-block-monitoring` remain direct deps of this crate so
+//! they stay in any consuming binary's dep graph.
 
-const FLOW_JSON: &str = r#"{
+/// Flow id — the value `Wafer::add_block_config` keys composite config under.
+pub const FLOW_ID: &str = "wafer-run/http-server";
+
+/// Flow definition. Pair with [`FLOW_ID`] via `add_flow_json` +
+/// `add_block_config`. See crate-level docs for the full pattern.
+pub const FLOW_JSON: &str = r#"{
     "id": "wafer-run/http-server",
     "name": "HTTP Server",
     "version": "0.1.0",
@@ -44,28 +54,3 @@ const FLOW_JSON: &str = r#"{
         "wafer-run/http-listener": { "flow": "wafer-run/http-server" }
     }
 }"#;
-
-/// Register the `wafer-run/http-server` flow with native blocks and config.
-///
-/// All blocks in the flow (security-headers, cors, readonly-guard, ip-rate-limit,
-/// monitoring, router, http-listener) are inventory-managed via
-/// `register_static_block!` and load automatically during `Wafer::new()`. This
-/// function adds the flow definition and applies config.
-///
-/// ```rust,ignore
-/// wafer_flow_http_server::register(&mut wafer, json!({
-///     "listen": "0.0.0.0:8080",
-///     "routes": [{ "path": "/**", "block": "hello" }]
-/// }));
-/// ```
-pub fn register(
-    w: &mut wafer_run::Wafer,
-    config: serde_json::Value,
-) -> Result<(), wafer_run::RuntimeError> {
-    // Register flow
-    w.add_flow_json(FLOW_JSON)?;
-
-    // Set config
-    w.add_block_config("wafer-run/http-server", config);
-    Ok(())
-}

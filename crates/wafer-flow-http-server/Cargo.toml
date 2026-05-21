@@ -6,10 +6,12 @@ license.workspace = true
 description = "WAFER flow: batteries-included HTTP server with security headers, CORS, rate limiting, monitoring, and routing"
 
 [dependencies]
-wafer-run = { path = "../wafer-run" }
+# These two stay even though this crate names neither in code: their
+# presence in the dep graph keeps `register_static_block!` inventory
+# entries linked into any binary that depends on `wafer-flow-http-server`.
+# Same load-bearing-dep pattern documented in Wave 5 PR-B's body.
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 wafer-block-monitoring = { path = "../wafer-block-monitoring" }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true
