@@ -8,7 +8,7 @@
 //! The `#[wafer_block]` proc-macro emits one of these entries per annotated
 //! block, gated on `cfg(not(target_arch = "wasm32"))` so WASM guest builds
 //! don't carry the machinery. The collection is harvested at startup by
-//! `WaferBuilder`.
+//! the runtime (`wafer-run/src/builder.rs`).
 
 use std::sync::Arc;
 

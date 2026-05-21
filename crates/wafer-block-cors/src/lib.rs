@@ -246,7 +246,7 @@ impl Block for CorsBlock {
     }
 }
 
-wafer_run::register_static_block!("wafer-run/cors", CorsBlock);
+wafer_block::register_static_block!("wafer-run/cors", CorsBlock);
 
 #[cfg(test)]
 mod tests {

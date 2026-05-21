@@ -775,11 +775,11 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         // native targets. On `wasm32-*` the registry doesn't exist, and skill
         // blocks compiled for wasm32-wasip1 don't (and shouldn't) depend on
         // `wafer-run`. Cfg-gate the emission so wasm32 expansions never
-        // reference `::wafer_run::...`, which would fail path resolution at
-        // macro-expansion time when the consumer crate has no `wafer-run`
+        // reference `::wafer_block::...`, which would fail path resolution at
+        // macro-expansion time when the consumer crate has no `wafer-block`
         // dep in its graph.
         #[cfg(not(target_arch = "wasm32"))]
-        ::wafer_run::register_static_block!(#name, #struct_ty);
+        ::wafer_block::register_static_block!(#name, #struct_ty);
     };
 
     Ok(expanded.into())

@@ -5969,6 +5969,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "linkme",
  "rmp-serde",
  "schemars",
  "serde",
@@ -6007,7 +6008,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6066,7 +6066,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6189,7 +6188,6 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6215,7 +6213,6 @@ dependencies = [
  "serde_json",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
 ]
 
 [[package]]
@@ -6248,7 +6245,6 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
- "wafer-run",
 ]
 
 [[package]]
@@ -6348,7 +6344,6 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "getrandom 0.2.17",
- "linkme",
  "parking_lot",
  "reqwest",
  "serde",

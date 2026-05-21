@@ -13,7 +13,7 @@ use wafer_block::{
     types::BlockInfo,
 };
 use wafer_block_macro::wafer_block;
-use wafer_run::STATIC_BLOCK_REGISTRATIONS;
+use wafer_block::STATIC_BLOCK_REGISTRATIONS;
 
 struct Widget;
 

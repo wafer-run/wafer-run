@@ -7,11 +7,11 @@ description = "WAFER block: blocks write operations in read-only mode"
 
 [dependencies]
 wafer-block = { path = "../wafer-block" }
-wafer-run = { path = "../wafer-run", default-features = false }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 
 [dev-dependencies]
+wafer-run = { path = "../wafer-run", default-features = false }
 wafer-test-support = { path = "../wafer-test-support" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 serde_json.workspace = true

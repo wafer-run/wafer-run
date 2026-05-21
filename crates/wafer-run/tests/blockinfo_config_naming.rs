@@ -4,11 +4,11 @@
 
 // Reference each block crate that uses register_static_block! so the
 // linker keeps their linkme entries alive in this test binary.
+use wafer_block::STATIC_BLOCK_REGISTRATIONS;
 #[allow(unused_imports)]
 use wafer_block_cors as _;
 #[allow(unused_imports)]
 use wafer_block_readonly_guard as _;
-use wafer_run::static_registration::STATIC_BLOCK_REGISTRATIONS;
 
 /// SCREAMING_SNAKE with `{ORG}__{BLOCK}__{KEY}` form.
 /// First and last segments contain `[A-Z][A-Z0-9_]*` characters; the

@@ -11,7 +11,7 @@
 //! message as `req.param.*` meta. Misses return [`ErrorCode::NotFound`].
 //!
 //! Registered link-time as `wafer-run/router` via
-//! [`wafer_run::register_static_block!`]; consumers don't construct
+//! [`wafer_block::register_static_block!`]; consumers don't construct
 //! the block type directly.
 
 use std::sync::OnceLock;
@@ -186,4 +186,4 @@ impl Block for RouterBlock {
     }
 }
 
-wafer_run::register_static_block!("wafer-run/router", RouterBlock);
+wafer_block::register_static_block!("wafer-run/router", RouterBlock);

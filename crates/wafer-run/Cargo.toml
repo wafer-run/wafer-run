@@ -33,7 +33,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 dirs = "5"
-linkme = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 parking_lot = { workspace = true }

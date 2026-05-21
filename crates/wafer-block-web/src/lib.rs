@@ -3,7 +3,7 @@
 //! Provides `wafer-run/web`, an HTTP-handler block that serves assets out of
 //! a `wafer-run/storage` folder with sensible defaults for caching, clean
 //! URLs, SPA fallback, and MIME-type detection. The block is registered into
-//! the runtime at link time via [`wafer_run::register_static_block!`]; consumers
+//! the runtime at link time via [`wafer_block::register_static_block!`]; consumers
 //! enable it by depending on this crate and supplying a `wafer-run/web`
 //! block-config entry.
 
@@ -343,4 +343,4 @@ impl Block for WebBlock {
     }
 }
 
-wafer_run::register_static_block!("wafer-run/web", WebBlock);
+wafer_block::register_static_block!("wafer-run/web", WebBlock);

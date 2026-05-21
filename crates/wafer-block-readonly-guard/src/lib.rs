@@ -86,7 +86,7 @@ impl Block for ReadonlyGuardBlock {
     }
 }
 
-wafer_run::register_static_block!("wafer-run/readonly-guard", ReadonlyGuardBlock);
+wafer_block::register_static_block!("wafer-run/readonly-guard", ReadonlyGuardBlock);
 
 #[cfg(test)]
 mod tests {
