@@ -6299,7 +6299,7 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
- "wafer-run",
+ "wafer-schema",
  "wafer-sql-utils",
 ]
 
@@ -6363,6 +6363,7 @@ dependencies = [
  "wafer-block-macro",
  "wafer-block-readonly-guard",
  "wafer-flow",
+ "wafer-schema",
  "wafer-sdk",
  "wafer-test-support",
  "wasmi",
@@ -6384,6 +6385,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wafer-schema"
+version = "0.1.0"
+
+[[package]]
 name = "wafer-sdk"
 version = "0.1.0"
 dependencies = [
@@ -6399,7 +6404,7 @@ dependencies = [
  "sea-query",
  "serde_json",
  "wafer-block",
- "wafer-run",
+ "wafer-schema",
 ]
 
 [[package]]

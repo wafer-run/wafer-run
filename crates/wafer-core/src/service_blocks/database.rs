@@ -8,7 +8,7 @@ use wafer_block::{
     BlockRegistry, RuntimeError, *,
 };
 use wafer_block_macro::wafer_async_trait;
-use wafer_run::schema::Table;
+use wafer_schema::Table;
 
 use crate::interfaces::database::{handler, service::DatabaseService};
 

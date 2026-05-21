@@ -272,7 +272,7 @@ mod db_fakes {
     use wafer_core::interfaces::database::service::{
         DatabaseError, DatabaseService, Record, RecordList,
     };
-    use wafer_run::schema::{Column, Table};
+    use wafer_schema::{Column, Table};
 
     pub struct OkDb;
 

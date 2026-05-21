@@ -20,6 +20,7 @@ members = [
     "crates/wafer-block-s3",
     "crates/wafer-block-security-headers",
     "crates/wafer-block-sqlite",
+    "crates/wafer-schema",
     "crates/wafer-sql-utils",
     "crates/wafer-test-support",
     "crates/wafer-block-web",
@@ -54,6 +55,7 @@ wafer-block = { path = "crates/wafer-block" }
 wafer-block-macro = { path = "crates/wafer-block-macro" }
 wafer-run = { path = "crates/wafer-run", features = ["full"] }
 wafer-core = { path = "crates/wafer-core" }
+wafer-schema = { path = "crates/wafer-schema" }
 wafer-sql-utils = { path = "crates/wafer-sql-utils" }
 wafer-flow = { path = "crates/wafer-flow" }
 
