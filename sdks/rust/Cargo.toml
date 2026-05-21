@@ -8,7 +8,7 @@ repository = "https://github.com/wafer-run/wafer-run"
 keywords = ["wafer", "wasm", "guest", "blocks", "pipeline"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 wafer-block = { workspace = true }
