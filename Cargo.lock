@@ -6162,7 +6162,7 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
- "wafer-run",
+ "wafer-schema",
  "wafer-sql-utils",
 ]
 
@@ -6362,7 +6362,9 @@ dependencies = [
  "wafer-block-ip-rate-limit",
  "wafer-block-macro",
  "wafer-block-monitoring",
+ "wafer-block-postgres",
  "wafer-block-readonly-guard",
+ "wafer-block-s3",
  "wafer-flow",
  "wafer-schema",
  "wafer-sdk",

@@ -133,7 +133,4 @@ impl Block for S3StorageBlock {
     }
 }
 
-/// Register the S3 storage block with the given block registry.
-pub fn register(w: &mut dyn wafer_block::BlockRegistry) -> Result<(), wafer_block::RuntimeError> {
-    w.register_block("wafer-run/s3", Arc::new(S3StorageBlock::new()))
-}
+wafer_block::register_static_block!("wafer-run/s3", S3StorageBlock);
