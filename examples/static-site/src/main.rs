@@ -7,6 +7,10 @@
 
 use std::sync::Arc;
 
+// Force-link `wafer-block-web` so its `register_static_block!`
+// inventory entry survives into the binary. See Wave 7 (PR #157)
+// for the same pattern in `wafer-flow-http-server`.
+use wafer_block_web as _;
 use wafer_run::*;
 
 #[tokio::main]

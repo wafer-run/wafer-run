@@ -14,6 +14,9 @@
 
 use std::sync::Arc;
 
+// Force-link `wafer-block-inspector` so its `register_static_block!`
+// inventory entry survives into the binary.
+use wafer_block_inspector as _;
 use wafer_run::*;
 
 // ---------------------------------------------------------------------------
