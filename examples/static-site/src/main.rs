@@ -40,6 +40,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
 
+    // Register the local-filesystem storage service that backs
+    // `wafer-run/storage` (no `register_static_block!` ships with
+    // wafer-block-local-storage, so consumers must wire it up
+    // explicitly with a concrete `StorageService`). Rooted at the
+    // CWD so the `"web_root": "./public"` config above resolves to
+    // `./public/{key}` on disk.
+    wafer_core::service_blocks::storage::register_with(
+        &mut wafer,
+        std::sync::Arc::new(
+            wafer_block_local_storage::service::LocalStorageService::new(".")
+                .expect("local storage root"),
+        ),
+    )
+    .expect("register storage");
+
     // Create a public/ dir with a sample index.html if it doesn't exist
     let public = std::path::Path::new("public");
     if !public.exists() {
@@ -51,6 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok();
         tracing::info!("created public/index.html");
     }
+
+    // Example-only WRAP grant. Storage resources are file paths
+    // (`{folder}/{key}`) so they don't follow the namespace convention
+    // and there's no admin block in this example to declare a typed
+    // Storage grant from `BlockInfo::grants`. Production code should
+    // scope this to a path prefix matching `web_root` instead of "*".
+    wafer.add_wrap_grants(vec![
+        ResourceGrant::read("wafer-run/web", "*").typed(ResourceType::Storage)
+    ]);
 
     tracing::info!("serving static files from ./public on http://localhost:8080");
     let wafer = wafer.start().await?;
