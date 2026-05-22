@@ -17,8 +17,6 @@ use std::sync::{
     Arc,
 };
 
-use wafer_run::*;
-
 // Force-link every block referenced by the custom flow JSON below.
 // This example doesn't use `wafer-flow-http-server`, so it must
 // declare these force-links itself rather than inheriting them.
@@ -27,6 +25,7 @@ use wafer_block_http_listener as _;
 use wafer_block_inspector as _;
 use wafer_block_router as _;
 use wafer_block_security_headers as _;
+use wafer_run::*;
 
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 
