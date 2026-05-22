@@ -93,8 +93,13 @@ struct NotesHandler;
 #[async_trait::async_trait]
 impl Block for NotesHandler {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("api-handler", "0.0.1", "http-handler@v1", "Notes CRUD API")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/api-handler",
+            "0.0.1",
+            "http-handler@v1",
+            "Notes CRUD API",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
@@ -105,7 +110,7 @@ impl Block for NotesHandler {
             // List notes
             ("retrieve", "/api/notes") => {
                 let opts = ListOptions::default();
-                match db::list(ctx, "notes", &opts).await {
+                match db::list(ctx, "example__api_handler__notes", &opts).await {
                     Ok(result) => {
                         let body = serde_json::to_vec(&serde_json::json!({
                             "notes": result.records,
@@ -136,7 +141,7 @@ impl Block for NotesHandler {
                     body.get("body").cloned().unwrap_or_default(),
                 );
 
-                match db::create(ctx, "notes", data).await {
+                match db::create(ctx, "example__api_handler__notes", data).await {
                     Ok(record) => {
                         let resp = serde_json::to_vec(&record).unwrap_or_default();
                         OutputStream::respond(resp)
@@ -163,9 +168,26 @@ impl Block for NotesHandler {
 
     async fn lifecycle(
         &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
+        ctx: &dyn Context,
+        event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init {
+            // Ensure the namespaced table exists. `db::ddl` routes through
+            // the `__ddl__` WRAP resource which any attributable caller may
+            // use — no admin block required. The table name follows the
+            // {org}__{block}__{name} convention so WRAP Rule 3 (own resource)
+            // admits subsequent CRUD calls without a grant declaration.
+            db::ddl(
+                ctx,
+                "CREATE TABLE IF NOT EXISTS \"example__api_handler__notes\" \
+                 (id TEXT PRIMARY KEY, title TEXT, body TEXT, \
+                 created_at TEXT, updated_at TEXT)",
+            )
+            .await
+            .map_err(|e| {
+                WaferError::new(ErrorCode::Internal, format!("schema migration failed: {e}"))
+            })?;
+        }
         Ok(())
     }
 }
