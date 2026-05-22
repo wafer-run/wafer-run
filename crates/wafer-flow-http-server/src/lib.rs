@@ -14,9 +14,23 @@
 //!
 //! All blocks in the flow (security-headers, cors, readonly-guard,
 //! ip-rate-limit, monitoring, router, http-listener) self-register at
-//! link time via `register_static_block!`. `wafer-block-ip-rate-limit`
-//! and `wafer-block-monitoring` remain direct deps of this crate so
-//! they stay in any consuming binary's dep graph.
+//! link time via `register_static_block!`. This crate carries them as
+//! direct deps and force-links them via the `use … as _;` lines below,
+//! so a binary that depends on `wafer-flow-http-server` gets every
+//! block the flow needs without having to declare each one itself.
+
+// Force-link every block referenced by FLOW_JSON. `register_static_block!`
+// uses `linkme::distributed_slice` whose entries survive the linker only
+// when the producer crate's object file is pulled into the binary. A bare
+// `[dependencies]` entry isn't always enough — see the inventory tests in
+// `wafer-run/tests/inventory_registration.rs` for the same pattern.
+use wafer_block_cors as _;
+use wafer_block_http_listener as _;
+use wafer_block_ip_rate_limit as _;
+use wafer_block_monitoring as _;
+use wafer_block_readonly_guard as _;
+use wafer_block_router as _;
+use wafer_block_security_headers as _;
 
 /// Flow id — the value `Wafer::add_block_config` keys composite config under.
 pub const FLOW_ID: &str = "wafer-run/http-server";

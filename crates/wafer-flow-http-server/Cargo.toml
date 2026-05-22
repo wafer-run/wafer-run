@@ -6,12 +6,19 @@ license.workspace = true
 description = "WAFER flow: batteries-included HTTP server with security headers, CORS, rate limiting, monitoring, and routing"
 
 [dependencies]
-# These two stay even though this crate names neither in code: their
-# presence in the dep graph keeps `register_static_block!` inventory
-# entries linked into any binary that depends on `wafer-flow-http-server`.
-# Same load-bearing-dep pattern documented in Wave 5 PR-B's body.
+# All seven blocks in FLOW_JSON are direct deps so the linker keeps their
+# `register_static_block!` inventory entries in any consuming binary.
+# Without this, a binary that only depends on `wafer-flow-http-server`
+# would crash at startup with `RuntimeError::BlockNotFound` — `seal()`
+# walks every flow's steps and requires every named block to be
+# registered. See lib.rs for the matching `use … as _;` lines.
+wafer-block-cors = { path = "../wafer-block-cors" }
+wafer-block-http-listener = { path = "../wafer-block-http-listener" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 wafer-block-monitoring = { path = "../wafer-block-monitoring" }
+wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
+wafer-block-router = { path = "../wafer-block-router" }
+wafer-block-security-headers = { path = "../wafer-block-security-headers" }
 
 [lints]
 workspace = true
