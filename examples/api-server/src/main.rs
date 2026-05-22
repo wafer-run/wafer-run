@@ -14,6 +14,12 @@ use wafer_block::db::ListOptions;
 use wafer_core::clients::database as db;
 use wafer_run::*;
 
+// Force-link `wafer-block-inspector` so its `register_static_block!`
+// inventory entry survives into the binary. The `wafer-block-sqlite`
+// and `wafer-block-logger` deps don't need this — they're explicitly
+// referenced by the `register_with` calls below.
+use wafer_block_inspector as _;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
