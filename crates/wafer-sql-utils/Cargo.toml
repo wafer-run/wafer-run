@@ -11,5 +11,8 @@ wafer-schema = { workspace = true }
 sea-query = "0.32"
 serde_json = { workspace = true }
 
+[dev-dependencies]
+rusqlite = { workspace = true }
+
 [lints]
 workspace = true
