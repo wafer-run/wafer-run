@@ -4,9 +4,15 @@ use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
 /// Build INSERT ... ON CONFLICT (conflict_cols) DO UPDATE SET {update_columns} = excluded.{col}.
 ///
+/// When `update_columns` is empty, emits `ON CONFLICT (conflict_cols) DO NOTHING`
+/// — the INSERT-OR-IGNORE semantic. Without this, sea-query produces an
+/// incomplete `ON CONFLICT (...)` clause with no action, which sqlite rejects
+/// at prepare time with "incomplete input" (see gizza-ai #68 outage).
+///
 /// This is the standard upsert pattern used for:
 /// - Subscription upsert (stripe.rs)
 /// - Block settings toggle (pages.rs)
+/// - Bootstrap variable seeding (gizza-ai/config.rs) — uses the DO NOTHING form
 pub fn build_upsert(
     table: &str,
     data: &[(String, serde_json::Value)],
@@ -27,8 +33,12 @@ pub fn build_upsert(
     query.values_panic(vals);
 
     let mut on_conflict = OnConflict::columns(conflict_columns.iter().map(|c| DynCol((*c).into())));
-    for col in update_columns {
-        on_conflict.update_column(DynCol((*col).into()));
+    if update_columns.is_empty() {
+        on_conflict.do_nothing();
+    } else {
+        for col in update_columns {
+            on_conflict.update_column(DynCol((*col).into()));
+        }
     }
     query.on_conflict(on_conflict);
 
@@ -158,6 +168,65 @@ mod tests {
         assert!(sql.contains("DO UPDATE SET"));
         assert_eq!(values.len(), 4);
         assert_eq!(stmt.collection, "subscriptions");
+    }
+
+    // Regression: empty update_columns must produce valid `DO NOTHING`, not
+    // an incomplete `ON CONFLICT (key)` with no action clause. Reproduces the
+    // gizza-ai #68 bootstrap outage where every cold start failed with sqlite
+    // "incomplete input" because seed_and_load_variables relied on this
+    // pattern for INSERT-OR-IGNORE semantics.
+    #[test]
+    fn test_build_upsert_empty_update_emits_do_nothing_sqlite() {
+        let data = vec![
+            ("id".to_string(), serde_json::json!("var-1")),
+            ("key".to_string(), serde_json::json!("ADMIN_EMAIL")),
+            ("value".to_string(), serde_json::json!("admin@example.com")),
+        ];
+        let stmt = build_upsert("variables", &data, &["key"], &[], Backend::Sqlite);
+        assert!(
+            stmt.sql.contains("DO NOTHING"),
+            "empty update_columns must produce DO NOTHING, got: {}",
+            stmt.sql
+        );
+    }
+
+    #[test]
+    fn test_build_upsert_empty_update_emits_do_nothing_postgres() {
+        let data = vec![
+            ("id".to_string(), serde_json::json!("var-1")),
+            ("key".to_string(), serde_json::json!("ADMIN_EMAIL")),
+            ("value".to_string(), serde_json::json!("admin@example.com")),
+        ];
+        let stmt = build_upsert("variables", &data, &["key"], &[], Backend::Postgres);
+        assert!(
+            stmt.sql.contains("DO NOTHING"),
+            "empty update_columns must produce DO NOTHING, got: {}",
+            stmt.sql
+        );
+    }
+
+    // Defense-in-depth: prepare the generated SQL against a real sqlite engine
+    // so the malformed-output class of bug surfaces in CI, not in production
+    // after a deploy. String-level `contains("ON CONFLICT")` assertions
+    // tolerate the broken `ON CONFLICT (key)` (no action) shape that
+    // crashed gizza.ai.
+    #[test]
+    fn test_build_upsert_empty_update_parses_in_sqlite() {
+        let data = vec![
+            ("id".to_string(), serde_json::json!("var-1")),
+            ("key".to_string(), serde_json::json!("ADMIN_EMAIL")),
+            ("value".to_string(), serde_json::json!("admin@example.com")),
+        ];
+        let stmt = build_upsert("variables", &data, &["key"], &[], Backend::Sqlite);
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE variables (id TEXT PRIMARY KEY, key TEXT UNIQUE, value TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.prepare(&stmt.sql)
+            .unwrap_or_else(|e| panic!("sqlite rejected upsert sql: {e}\nsql: {}", stmt.sql));
     }
 
     #[test]

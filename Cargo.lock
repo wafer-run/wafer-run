@@ -5131,7 +5131,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wafer-block-local-storage",
  "wafer-block-web",
+ "wafer-core",
  "wafer-flow-http-server",
  "wafer-run",
 ]
@@ -6411,6 +6413,7 @@ dependencies = [
 name = "wafer-sql-utils"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "sea-query",
  "serde_json",
  "wafer-block",
