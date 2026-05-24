@@ -12,5 +12,9 @@ async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+chrono = { workspace = true }
+
 [lints]
 workspace = true

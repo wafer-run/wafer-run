@@ -78,24 +78,11 @@ impl WebBlock {
         // Storage key: strip leading slash
         let key = clean.trim_start_matches('/');
 
-        // Try the exact key first, then with .html suffix for clean URLs,
-        // then directory index (path/index.html) for sub-app entry points.
-        let result = match store::get(ctx, &config.folder, key).await {
-            Ok(r) => Ok(r),
-            Err(_) if !key.is_empty() && Path::new(key).extension().is_none() => {
-                let html_key = format!("{key}.html");
-                match store::get(ctx, &config.folder, &html_key).await {
-                    Ok(r) => Ok(r),
-                    Err(_) => {
-                        let index_key = format!("{}/{}", key, config.index_file);
-                        store::get(ctx, &config.folder, &index_key).await
-                    }
-                }
-            }
-            Err(e) => Err(e),
-        };
-
-        match result {
+        // Three-attempt fallback chain: bare key -> `<key>.html` -> `<key>/<index>`.
+        // The helper retries only on `ErrorCode::NotFound`; any other storage
+        // error (PermissionDenied, Internal, …) propagates immediately so the
+        // caller sees the real failure instead of a synthetic 404.
+        match try_serve_static(ctx, &config.folder, key, &config.index_file).await {
             Ok((data, info)) => {
                 // Use content_type from storage metadata, fall back to extension-based detection
                 let content_type = if info.content_type.is_empty()
@@ -121,17 +108,10 @@ impl WebBlock {
                     ],
                 )
             }
-            Err(_) => {
-                // File not found — if SPA mode, serve index
-                if config.spa {
-                    return serve_index_spa(ctx, config).await;
-                }
-                OutputStream::error(WaferError {
-                    code: ErrorCode::NotFound,
-                    message: "File not found".to_string(),
-                    meta: vec![],
-                })
+            Err(e) if e.code == ErrorCode::NotFound && config.spa => {
+                serve_index_spa(ctx, config).await
             }
+            Err(e) => OutputStream::error(e),
         }
     }
 }
@@ -221,6 +201,48 @@ fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
 
     // Everything else: standard cache
     format!("public, max-age={}", config.cache_max_age)
+}
+
+/// Attempts to fetch a static asset by `key` from `folder`, falling back to
+/// `<key>.html` and `<key>/<index_file>` only when the previous attempt returned
+/// `ErrorCode::NotFound`. Any other error code propagates immediately.
+///
+/// This contains the original "extension-less key fallback" logic from `handle()`
+/// but threads error-code information through the chain so callers can
+/// distinguish "file genuinely missing" from "storage refused / errored".
+async fn try_serve_static(
+    ctx: &dyn Context,
+    folder: &str,
+    key: &str,
+    index_file: &str,
+) -> Result<(Vec<u8>, store::ObjectInfo), WaferError> {
+    // First attempt: the bare key.
+    match store::get(ctx, folder, key).await {
+        Ok(r) => return Ok(r),
+        Err(e) if e.code != ErrorCode::NotFound => return Err(e),
+        Err(_) => {}
+    }
+
+    // NotFound on bare key. Only retry with `.html` / directory index if the
+    // key looks like a clean URL (no extension, non-empty).
+    if key.is_empty() || Path::new(key).extension().is_some() {
+        return Err(WaferError {
+            code: ErrorCode::NotFound,
+            message: format!("static asset not found: {key}"),
+            meta: vec![],
+        });
+    }
+
+    // Second attempt: `<key>.html`.
+    let html_key = format!("{key}.html");
+    match store::get(ctx, folder, &html_key).await {
+        Ok(r) => return Ok(r),
+        Err(e) if e.code != ErrorCode::NotFound => return Err(e),
+        Err(_) => {}
+    }
+
+    // Third attempt: `<key>/<index_file>`. Whatever this returns is final.
+    store::get(ctx, folder, &format!("{key}/{index_file}")).await
 }
 
 async fn serve_index_spa(ctx: &dyn Context, config: &WebConfig) -> OutputStream {
@@ -344,3 +366,196 @@ impl Block for WebBlock {
 }
 
 wafer_block::register_static_block!("wafer-run/web", WebBlock);
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use chrono::Utc;
+    use wafer_block::{codec, wire::storage::GetRequest};
+
+    use super::*;
+
+    /// Mock Context that returns scripted storage::get results.
+    /// `responses` is consumed front-to-back per call_block invocation.
+    /// Each entry is either `Ok(())` (respond with a two-frame ObjectInfo +
+    /// body shape) or `Err(WaferError)` (respond with an error terminal).
+    #[derive(Clone)]
+    struct ScriptedStorageCtx {
+        responses: Arc<Mutex<Vec<Result<(), WaferError>>>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ScriptedStorageCtx {
+        fn new(responses: Vec<Result<(), WaferError>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses)),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[wafer_async_trait]
+    impl Context for ScriptedStorageCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            input: InputStream,
+        ) -> OutputStream {
+            // Decode the storage GetRequest payload (lives on the InputStream,
+            // per `call_service_streaming`) to capture the key asked for.
+            let body = input.collect_to_bytes().await;
+            if let Ok(req) = codec::decode::<GetRequest>(&body) {
+                self.calls.lock().unwrap().push(req.key);
+            }
+            let next = self.responses.lock().unwrap().remove(0);
+            match next {
+                Ok(()) => {
+                    // Two-frame response: ObjectInfo header chunk + body chunk
+                    // + Complete. `store::get` consumes this via
+                    // `buffered_header_and_body`.
+                    let info = store::ObjectInfo {
+                        key: String::new(),
+                        size: 13,
+                        content_type: "text/plain".to_string(),
+                        last_modified: Utc::now(),
+                    };
+                    let header_bytes = codec::encode(&info).expect("encode ObjectInfo");
+                    OutputStream::from_producer(move |sink, _cancel| async move {
+                        sink.send_chunk(header_bytes).await.ok();
+                        sink.send_chunk(b"file contents".to_vec()).await.ok();
+                        let _ = sink.complete(vec![]).await;
+                    })
+                }
+                Err(e) => OutputStream::error(e),
+            }
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
+        }
+    }
+
+    fn err(code: ErrorCode, msg: &str) -> WaferError {
+        WaferError {
+            code,
+            message: msg.to_string(),
+            meta: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn try_serve_static_propagates_permission_denied_on_bare_key() {
+        let ctx =
+            ScriptedStorageCtx::new(vec![Err(err(ErrorCode::PermissionDenied, "WRAP denied"))]);
+        let result = try_serve_static(&ctx, "public", "page", "index.html").await;
+        let e = result.expect_err("must propagate PermissionDenied");
+        assert_eq!(e.code, ErrorCode::PermissionDenied);
+        assert_eq!(ctx.calls(), vec!["page".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn try_serve_static_retries_on_not_found_extensionless_key() {
+        let ctx = ScriptedStorageCtx::new(vec![
+            Err(err(ErrorCode::NotFound, "missing")),
+            Err(err(ErrorCode::NotFound, "missing")),
+            Ok(()),
+        ]);
+        let result = try_serve_static(&ctx, "public", "page", "index.html").await;
+        assert!(result.is_ok(), "third attempt should succeed");
+        assert_eq!(
+            ctx.calls(),
+            vec![
+                "page".to_string(),
+                "page.html".to_string(),
+                "page/index.html".to_string()
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn try_serve_static_does_not_retry_for_keys_with_extension() {
+        let ctx = ScriptedStorageCtx::new(vec![Err(err(ErrorCode::NotFound, "missing"))]);
+        let result = try_serve_static(&ctx, "public", "app.js", "index.html").await;
+        let e = result.expect_err("must propagate NotFound without retry");
+        assert_eq!(e.code, ErrorCode::NotFound);
+        assert_eq!(ctx.calls(), vec!["app.js".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn try_serve_static_propagates_internal_error_mid_chain() {
+        let ctx = ScriptedStorageCtx::new(vec![
+            Err(err(ErrorCode::NotFound, "missing")),
+            Err(err(ErrorCode::Internal, "disk read fail")),
+        ]);
+        let result = try_serve_static(&ctx, "public", "page", "index.html").await;
+        let e = result.expect_err("Internal must propagate");
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert_eq!(
+            ctx.calls(),
+            vec!["page".to_string(), "page.html".to_string()],
+        );
+    }
+
+    /// Integration-level guard on the outer match in `WebBlock::handle()`:
+    /// with SPA mode enabled, a non-`NotFound` storage error (here
+    /// `PermissionDenied`) must propagate as the real error and must NOT
+    /// trigger the `serve_index_spa` fallthrough (which would mask it as a
+    /// `NotFound` 404). Only `ErrorCode::NotFound && config.spa` may fall
+    /// through to the SPA index.
+    #[tokio::test]
+    async fn handle_falls_through_to_spa_only_on_not_found() {
+        // Configure the block with SPA mode enabled via a synthetic Init
+        // lifecycle event carrying `web_spa: "true"`.
+        let block = WebBlock::new();
+        // Inline JSON so we don't need a `serde_json` dev-dep for one literal.
+        let init_data = br#"{"web_spa":"true"}"#.to_vec();
+        block
+            .lifecycle(
+                &ScriptedStorageCtx::new(vec![]),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: init_data,
+                },
+            )
+            .await
+            .expect("Init lifecycle should succeed");
+
+        // Storage returns PermissionDenied on the very first lookup. The
+        // helper must propagate without retry, and the outer match must NOT
+        // fall through to `serve_index_spa` despite `config.spa == true`.
+        let ctx =
+            ScriptedStorageCtx::new(vec![Err(err(ErrorCode::PermissionDenied, "WRAP denied"))]);
+        let mut msg = Message::new("retrieve");
+        msg.set_meta(crate::meta::META_REQ_RESOURCE, "/private/page");
+        msg.set_meta(crate::meta::META_REQ_ACTION, "retrieve");
+
+        let out = block.handle(&ctx, msg, InputStream::empty()).await;
+        let terminal = out
+            .collect_buffered()
+            .await
+            .expect_err("PermissionDenied must surface as an error terminal");
+        let propagated: WaferError = terminal.into();
+        assert_eq!(
+            propagated.code,
+            ErrorCode::PermissionDenied,
+            "outer match must propagate the real storage error, not synthesize a NotFound via SPA fallthrough",
+        );
+        // Only one storage round-trip — the helper did not retry on
+        // non-`NotFound`, and the SPA fallthrough did not fire a second one.
+        assert_eq!(ctx.calls(), vec!["private/page".to_string()]);
+    }
+}
