@@ -6243,6 +6243,8 @@ name = "wafer-block-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-block-macro",
