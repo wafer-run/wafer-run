@@ -90,8 +90,9 @@ impl Block for CorsBlock {
         .flow_config(vec![
             ConfigVar::new(
                 "allowed_origins",
-                "Comma-separated list of origins permitted to make \
-                 cross-origin requests, or \"*\" for any origin.",
+                "Origins permitted to make cross-origin requests. Comma-separated \
+                 string (e.g. \"https://a,https://b\" or \"*\") or JSON array of \
+                 strings (e.g. [\"*\"]).",
                 "*",
             )
             .name("Allowed Origins"),
@@ -198,15 +199,51 @@ impl Block for CorsBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            // Parse block config if any was supplied.
+            // Parse block config if any was supplied. Accept either:
+            //   - string  -> use as-is (canonical comma-separated form)
+            //   - array of strings -> join with `,` (matches the internal
+            //     split-on-comma representation)
+            //   - anything else -> warn + fail closed (SEC-087)
             let cfg_origins = if event.data.is_empty() {
                 None
             } else {
                 match serde_json::from_slice::<serde_json::Value>(&event.data) {
-                    Ok(cfg) => cfg
-                        .get("allowed_origins")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                    Ok(cfg) => match cfg.get("allowed_origins") {
+                        Some(serde_json::Value::String(s)) => Some(s.clone()),
+                        Some(serde_json::Value::Array(items)) => {
+                            let strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+                            if strs.is_empty() {
+                                tracing::warn!(
+                                    "CORS: `allowed_origins` array is empty or \
+                                     contains no string entries — falling back to \
+                                     fail-closed (set a non-empty array of origin \
+                                     strings, or a comma-separated string)",
+                                );
+                                None
+                            } else {
+                                if strs.len() != items.len() {
+                                    tracing::warn!(
+                                        "CORS: `allowed_origins` array contains {} non-string \
+                                         entry/entries (out of {}) which were dropped — \
+                                         only string entries are honored",
+                                        items.len() - strs.len(),
+                                        items.len(),
+                                    );
+                                }
+                                Some(strs.join(","))
+                            }
+                        }
+                        Some(other) => {
+                            tracing::warn!(
+                                "CORS: `allowed_origins` has unsupported JSON shape \
+                                 ({:?}) — expected string or array of strings; falling \
+                                 back to fail-closed",
+                                other,
+                            );
+                            None
+                        }
+                        None => None,
+                    },
                     Err(_) => None,
                 }
             };
@@ -261,5 +298,111 @@ mod tests {
             block.cached_origins().is_none(),
             "CorsBlock must not default to a permissive allowed_origins value",
         );
+    }
+
+    #[tokio::test]
+    async fn init_with_array_origins_populates_cache() {
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({
+            "allowed_origins": ["https://a.example", "https://b.example"],
+        });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert_eq!(
+            block.cached_origins(),
+            Some("https://a.example,https://b.example".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn init_with_wildcard_array_populates_cache() {
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({ "allowed_origins": ["*"] });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert_eq!(block.cached_origins(), Some("*".to_string()));
+    }
+
+    #[tokio::test]
+    async fn init_with_empty_array_leaves_cache_unset() {
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({ "allowed_origins": [] });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert!(
+            block.cached_origins().is_none(),
+            "empty array must fall through to SEC-087 fail-closed path",
+        );
+    }
+
+    #[tokio::test]
+    async fn init_with_object_origins_leaves_cache_unset() {
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({
+            "allowed_origins": { "unexpected": "object" },
+        });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert!(block.cached_origins().is_none());
+    }
+
+    #[tokio::test]
+    async fn init_with_mixed_array_keeps_strings_and_drops_others() {
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({
+            "allowed_origins": [42, "https://a.example", true, "https://b.example"],
+        });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert_eq!(
+            block.cached_origins(),
+            Some("https://a.example,https://b.example".to_string()),
+            "string entries should be preserved when non-string entries are dropped",
+        );
+    }
+
+    // Minimal Context shim — CorsBlock's lifecycle Init doesn't touch ctx.
+    #[derive(Clone)]
+    struct TestContext;
+
+    #[wafer_async_trait]
+    impl Context for TestContext {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(b"unused".to_vec())
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+        fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+            std::sync::Arc::new(self.clone())
+        }
     }
 }

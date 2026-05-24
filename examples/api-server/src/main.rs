@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     wafer.add_block_config(
         "wafer-run/cors",
         serde_json::json!({
-            "allow_origins": ["*"]
+            "allowed_origins": ["*"]
         }),
     );
 
