@@ -189,7 +189,11 @@ impl Block for CorsBlock {
         // Handle OPTIONS preflight — respond with empty 204 + CORS headers.
         // `drop_request()` would discard `out_msg` (and the CORS meta on it),
         // leaving the browser with a bare 204 that fails preflight validation.
+        // `respond_with_meta` produces an `Ok(buf)` terminal which the HTTP
+        // listener maps to 200 by default — we set `resp.status: 204`
+        // explicitly to preserve the original wire status code.
         if out_msg.get_meta("http.method") == "OPTIONS" {
+            out_msg.set_meta("resp.status", "204");
             return OutputStream::respond_with_meta(Vec::new(), out_msg.meta);
         }
 
@@ -422,6 +426,19 @@ mod tests {
             buf.body.is_empty(),
             "OPTIONS preflight must have an empty body, got {} bytes",
             buf.body.len(),
+        );
+
+        // Status code: 204 No Content (explicit — HTTP listener defaults
+        // Ok-terminal responses to 200).
+        let status = buf
+            .meta
+            .iter()
+            .find(|e| e.key == "resp.status")
+            .map(|e| e.value.as_str());
+        assert_eq!(
+            status,
+            Some("204"),
+            "OPTIONS preflight must explicitly set resp.status: 204 (HTTP listener defaults Ok(buf) to 200 — only Drop terminals get 204 for free)",
         );
 
         // CORS headers reached the wire.
