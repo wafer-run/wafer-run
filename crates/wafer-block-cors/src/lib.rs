@@ -5,7 +5,8 @@
 //! `Origin` header, consults a configured allow-list, and sets the
 //! `Access-Control-Allow-*` response headers (plus `Vary: Origin`) on
 //! the outgoing message. OPTIONS preflight requests short-circuit with
-//! a 204 via [`OutputStream::drop_request`].
+//! an empty-body 204 via [`OutputStream::respond_with_meta`], which
+//! carries the CORS response headers through to the wire.
 //!
 //! See the [`CorsBlock`] type for the configuration contract and the
 //! fail-closed behavior introduced by SEC-087/SEC-088.
@@ -185,9 +186,11 @@ impl Block for CorsBlock {
             out_msg.set_meta("resp.header.Vary", "Origin");
         }
 
-        // Handle OPTIONS preflight — respond with empty 204
+        // Handle OPTIONS preflight — respond with empty 204 + CORS headers.
+        // `drop_request()` would discard `out_msg` (and the CORS meta on it),
+        // leaving the browser with a bare 204 that fails preflight validation.
         if out_msg.get_meta("http.method") == "OPTIONS" {
-            return OutputStream::drop_request();
+            return OutputStream::respond_with_meta(Vec::new(), out_msg.meta);
         }
 
         OutputStream::continue_with(out_msg)
@@ -378,6 +381,77 @@ mod tests {
             block.cached_origins(),
             Some("https://a.example,https://b.example".to_string()),
             "string entries should be preserved when non-string entries are dropped",
+        );
+    }
+
+    #[tokio::test]
+    async fn options_preflight_returns_cors_headers() {
+        use wafer_block::streams::output::TerminalNotResponse;
+
+        // Set up the block with an explicit allow-list (not "*", so the
+        // wildcard short-circuit doesn't apply).
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({
+            "allowed_origins": ["https://app.example.com"],
+        });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext;
+        block.lifecycle(&ctx, event).await.expect("init ok");
+
+        // Build an OPTIONS preflight: http.method = OPTIONS, Origin set,
+        // Access-Control-Request-Method present.
+        let mut msg = Message::new("http/request");
+        msg.set_meta("http.method", "OPTIONS");
+        msg.set_meta("http.header.Origin", "https://app.example.com");
+        msg.set_meta("http.header.Access-Control-Request-Method", "POST");
+
+        let out = block.handle(&ctx, msg, InputStream::empty()).await;
+        let buf = match out.collect_buffered().await {
+            Ok(b) => b,
+            Err(TerminalNotResponse::Drop) => {
+                panic!("OPTIONS preflight emitted Drop — CORS response headers were discarded",)
+            }
+            Err(other) => panic!("unexpected terminal: {other}"),
+        };
+
+        // Body is empty (204 No Content shape).
+        assert!(
+            buf.body.is_empty(),
+            "OPTIONS preflight must have an empty body, got {} bytes",
+            buf.body.len(),
+        );
+
+        // CORS headers reached the wire.
+        let header = |name: &str| -> Option<&str> {
+            buf.meta
+                .iter()
+                .find(|e| e.key == format!("resp.header.{name}"))
+                .map(|e| e.value.as_str())
+        };
+        assert_eq!(
+            header("Access-Control-Allow-Origin"),
+            Some("https://app.example.com"),
+            "Access-Control-Allow-Origin missing or wrong on OPTIONS preflight",
+        );
+        assert!(
+            header("Access-Control-Allow-Methods").is_some(),
+            "Access-Control-Allow-Methods missing on OPTIONS preflight",
+        );
+        assert!(
+            header("Access-Control-Allow-Headers").is_some(),
+            "Access-Control-Allow-Headers missing on OPTIONS preflight",
+        );
+        assert!(
+            header("Access-Control-Max-Age").is_some(),
+            "Access-Control-Max-Age missing on OPTIONS preflight",
+        );
+        assert_eq!(
+            header("Vary"),
+            Some("Origin"),
+            "Vary: Origin missing on OPTIONS preflight (SEC-088)",
         );
     }
 
