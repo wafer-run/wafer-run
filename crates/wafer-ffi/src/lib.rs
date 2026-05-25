@@ -33,7 +33,10 @@ use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 /// - For lifecycle ops (`wafer_resolve`/`wafer_start`/`wafer_stop`): `result`
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
-///   the form `{"action":"respond|drop|error|continue", ...}`.
+///   the form `{"action":"respond|drop|error|continue|halt", ...}`.
+///   Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
+///   of the `respond` action's `body` string — Halt may carry non-UTF-8 or
+///   empty bodies.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.
@@ -427,7 +430,7 @@ pub unsafe extern "C" fn wafer_register(
 ///
 /// Returns immediately; invokes `cb` with the JSON result string when the
 /// flow finishes. `cb`'s `result` is always non-NULL — a JSON object of the
-/// form `{"action":"respond|drop|error|continue", ...}`.
+/// form `{"action":"respond|drop|error|continue|halt", ...}`.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
     w: *mut WaferRuntime,

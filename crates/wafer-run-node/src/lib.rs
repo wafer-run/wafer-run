@@ -144,7 +144,11 @@ mod bindings {
         /// Run a flow with the given message (body-less).
         ///
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
-        /// `{"action":"respond|drop|error|continue","body":"...","meta":{...}}`
+        /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
+        ///
+        /// Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
+        /// of the `respond` action's `body` string — Halt may carry non-UTF-8 or
+        /// empty bodies.
         #[napi]
         pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
             let msg: Message = serde_json::from_str(&message_json)
