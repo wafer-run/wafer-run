@@ -15,6 +15,21 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
     v
 }
 
+/// Return value of [`validate_and_collect_grants_for_block`].
+///
+/// Splits accepted and rejected grants so callers can both merge accepted
+/// grants into `Wafer::wrap_grants` and push rejected grants into
+/// `Wafer::grant_validation_errors` for `start()` to surface as
+/// `RuntimeError::GrantsRejected`.
+pub(crate) struct GrantValidationOutcome {
+    /// Grants that passed validation and should be merged into `wrap_grants`.
+    pub(crate) accepted: Vec<wafer_block::types::ResourceGrant>,
+    /// Grants that were rejected — typed grant from non-admin block.
+    /// Each entry is a structured rejection that `Wafer::start()` aggregates
+    /// into `RuntimeError::GrantsRejected`.
+    pub(crate) rejected: Vec<crate::error::GrantValidationError>,
+}
+
 /// Validate a single block's WRAP grant declarations and return the subset
 /// that passed validation. Called from `register_block_inner` so grants are
 /// available immediately after registration — no init pass required, and
@@ -36,8 +51,9 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
-) -> Vec<wafer_block::types::ResourceGrant> {
-    let mut out = Vec::new();
+) -> GrantValidationOutcome {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
     for grant in &block_info.grants {
         // Network/Storage/Crypto typed grants use URLs / file-paths /
         // operation-names, not namespaced resources — skip ownership
@@ -64,7 +80,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                 continue;
             }
             if block_info.name == admin_block {
-                out.push(grant.clone());
+                accepted.push(grant.clone());
             } else {
                 tracing::error!(
                     block = %block_info.name,
@@ -73,6 +89,14 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     admin = %admin_block,
                     "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
                 );
+                rejected.push(crate::error::GrantValidationError {
+                    block: block_info.name.to_string(),
+                    grant: grant.clone(),
+                    reason: format!(
+                        "typed {:?} grants may only be declared by the admin block",
+                        grant.resource_type.clone().unwrap(),
+                    ),
+                });
             }
             continue;
         }
@@ -86,7 +110,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             wafer_block::wrap::resource_owner(&grant.resource)
         };
         match grant_owner {
-            Some(owner) if owner == block_info.name => out.push(grant.clone()),
+            Some(owner) if owner == block_info.name => accepted.push(grant.clone()),
             Some(owner) => tracing::error!(
                 block = %block_info.name, resource = %grant.resource, owner = %owner,
                 "WRAP: rejecting grant for resource not owned by declaring block"
@@ -97,7 +121,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             ),
         }
     }
-    out
+    GrantValidationOutcome { accepted, rejected }
 }
 
 impl Wafer {
@@ -195,6 +219,14 @@ impl Wafer {
         mut self,
         priority_blocks: &[&str],
     ) -> Result<Arc<Self>, RuntimeError> {
+        // Drain the grant-validation accumulator before init. If any typed
+        // grants were rejected during register_block / set_admin_block, refuse
+        // boot with all rejections listed in one error.
+        if !self.grant_validation_errors.is_empty() {
+            let errors = std::mem::take(&mut self.grant_validation_errors);
+            return Err(RuntimeError::GrantsRejected(errors));
+        }
+
         // CONTRACT: This event is consumed by `wafer dev` (in
         // `wafer-cli/src/commands/dev/summary.rs`) to detect the start of a
         // runtime spawn. The combination of target = "wafer.runtime",

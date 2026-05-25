@@ -227,6 +227,11 @@ pub struct Wafer {
     /// share a cheap clone without copying the map on every dispatch.
     /// Mutations go through `Arc::make_mut` in those two registration paths.
     pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
+    /// Accumulator for grant-validation failures from
+    /// `validate_and_collect_grants_for_block`. Drained + checked by
+    /// `Wafer::start()`; if non-empty, boot fails with
+    /// `RuntimeError::GrantsRejected`.
+    pub(crate) grant_validation_errors: Vec<crate::error::GrantValidationError>,
     /// Source of per-block env-var config, consulted on first init.
     pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
     /// Embedder-supplied env-style config snapshot. Cloned into every
@@ -301,6 +306,7 @@ impl Wafer {
             #[cfg(feature = "wasmi")]
             wasm_engine: None,
             slots: Arc::new(HashMap::new()),
+            grant_validation_errors: Vec::new(),
             config_source: Arc::new(crate::runtime::config_source::StaticConfigSource::default()),
             config_snapshot: Arc::new(HashMap::new()),
         }
@@ -371,11 +377,12 @@ impl Wafer {
         for name in names {
             let block = &self.blocks[name];
             let info = block.info();
-            let new_grants = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
+            let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
                 &info,
                 &admin_block,
             );
-            merged.extend(new_grants);
+            merged.extend(outcome.accepted);
+            self.grant_validation_errors.extend(outcome.rejected);
         }
         merged.extend(self.wrap_grants_external.iter().cloned());
         self.wrap_grants = Arc::new(merged);
@@ -887,13 +894,14 @@ impl Wafer {
         // deferred: `set_admin_block` re-scans every registered block and
         // re-collects them, so the registration order doesn't matter.
         let admin_block: String = (*self.wrap_admin_block).clone();
-        let new_grants =
+        let outcome =
             crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
-        if !new_grants.is_empty() {
+        if !outcome.accepted.is_empty() {
             let mut all = (*self.wrap_grants).clone();
-            all.extend(new_grants);
+            all.extend(outcome.accepted);
             self.wrap_grants = Arc::new(all);
         }
+        self.grant_validation_errors.extend(outcome.rejected);
 
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
@@ -943,13 +951,14 @@ impl Wafer {
     ) -> Result<(), RuntimeError> {
         let info = block.info();
         let admin_block: String = (*self.wrap_admin_block).clone();
-        let new_grants =
+        let outcome =
             crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
-        if !new_grants.is_empty() {
+        if !outcome.accepted.is_empty() {
             let mut all = (*self.wrap_grants).clone();
-            all.extend(new_grants);
+            all.extend(outcome.accepted);
             self.wrap_grants = Arc::new(all);
         }
+        self.grant_validation_errors.extend(outcome.rejected);
 
         self.blocks.insert(name.to_string(), block);
         Arc::make_mut(&mut self.slots).insert(
