@@ -136,3 +136,28 @@ async fn validator_accepts_typed_grant_from_admin_block_passes_start() {
         result.err()
     );
 }
+
+#[tokio::test]
+async fn validator_rejects_typed_grant_via_direct_seal_call() {
+    // Cloudflare and browser consumers call seal() directly without start().
+    // This test locks in that the drain fires on the seal() path, not only
+    // on start_with_priority() — fixing the C1 code-review finding on Wave 13 PR B.
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer.set_admin_block("test/admin");
+    wafer
+        .register_block("test/offender", Arc::new(OffendingBlock))
+        .expect("register_block must succeed even for rejected grants");
+
+    let result = wafer.seal().await;
+    match result {
+        Err(RuntimeError::GrantsRejected(errors)) => {
+            assert_eq!(errors.len(), 1, "expected one rejection, got: {errors:?}");
+            assert_eq!(errors[0].block, "test/offender");
+        }
+        other => panic!(
+            "expected Err(RuntimeError::GrantsRejected), got {:?}",
+            other.map(|_| "Ok(_)")
+        ),
+    }
+}

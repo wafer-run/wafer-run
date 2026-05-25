@@ -130,6 +130,14 @@ impl Wafer {
     /// separately so a later `set_admin_block` rescan does not drop them.
     /// Call this before `start()` / `seal()`, or between `seal()` and the
     /// first request.
+    ///
+    /// **Security:** Grants added here BYPASS the admin-only typed-grant
+    /// validator that gates `BlockInfo::grants` declarations. This is the
+    /// intended application-side escape hatch for grants that don't live
+    /// in any block's static declaration (e.g. operator-configured grants
+    /// loaded from a DB at boot). The caller is responsible for vetting
+    /// any typed Network/Storage/Crypto grants added through this method —
+    /// no admin-block check is applied.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
         self.wrap_grants_external.extend(grants.iter().cloned());
         let mut all = (*self.wrap_grants).clone();
@@ -219,14 +227,6 @@ impl Wafer {
         mut self,
         priority_blocks: &[&str],
     ) -> Result<Arc<Self>, RuntimeError> {
-        // Drain the grant-validation accumulator before init. If any typed
-        // grants were rejected during register_block / set_admin_block, refuse
-        // boot with all rejections listed in one error.
-        if !self.grant_validation_errors.is_empty() {
-            let errors = std::mem::take(&mut self.grant_validation_errors);
-            return Err(RuntimeError::GrantsRejected(errors));
-        }
-
         // CONTRACT: This event is consumed by `wafer dev` (in
         // `wafer-cli/src/commands/dev/summary.rs`) to detect the start of a
         // runtime spawn. The combination of target = "wafer.runtime",

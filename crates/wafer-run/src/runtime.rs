@@ -369,6 +369,7 @@ impl Wafer {
     /// (`self.wrap_grants_external`). Called by `set_admin_block` and
     /// `add_wrap_grants`.
     fn rebuild_wrap_grants(&mut self) {
+        self.grant_validation_errors.clear(); // full re-walk; old errors are stale
         let admin_block: String = (*self.wrap_admin_block).clone();
         let mut merged: Vec<wafer_block::types::ResourceGrant> = Vec::new();
         // Walk blocks in deterministic order for snapshot stability.
