@@ -6048,6 +6048,7 @@ dependencies = [
  "async-trait",
  "axum",
  "form_urlencoded",
+ "http-body-util",
  "parking_lot",
  "serde_json",
  "tokio",
@@ -6312,6 +6313,7 @@ dependencies = [
 name = "wafer-ffi"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
  "serde_json",
  "tokio",
  "tracing",
@@ -6386,6 +6388,7 @@ dependencies = [
 name = "wafer-run-node"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
  "napi",
  "napi-derive",
  "serde_json",

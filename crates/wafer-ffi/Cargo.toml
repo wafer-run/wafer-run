@@ -14,6 +14,7 @@ wafer-block = { path = "../wafer-block" }
 tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+base64ct = { workspace = true }
 
 [lints]
 workspace = true

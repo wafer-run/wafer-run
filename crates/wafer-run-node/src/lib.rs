@@ -186,7 +186,8 @@ mod bindings {
                     serde_json::json!({ "action": "drop" }).to_string()
                 }
                 Err(wafer_block::streams::output::TerminalNotResponse::Halt(buf)) => {
-                    let body_str = String::from_utf8(buf.body).unwrap_or_default();
+                    use base64ct::{Base64, Encoding};
+                    let body_b64 = Base64::encode_string(&buf.body);
                     let meta_obj: serde_json::Value = buf
                         .meta
                         .iter()
@@ -195,7 +196,7 @@ mod bindings {
                         .into();
                     serde_json::json!({
                         "action": "halt",
-                        "body": body_str,
+                        "body_base64": body_b64,
                         "meta": meta_obj,
                     })
                     .to_string()
