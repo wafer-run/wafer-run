@@ -194,6 +194,15 @@ impl StreamState {
                     self.last_error = Some(err.clone());
                     return Err(err);
                 }
+                Some(StreamEvent::Halt { .. }) => {
+                    self.response_stream = None;
+                    let err = WaferError::new(
+                        ErrorCode::INTERNAL,
+                        "unexpected Halt terminal — call_block does not bridge Halt to guest",
+                    );
+                    self.last_error = Some(err.clone());
+                    return Err(err);
+                }
                 Some(StreamEvent::Continue(next_msg)) => {
                     self.response_stream = None;
                     let err = WaferError::new(

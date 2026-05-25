@@ -266,6 +266,13 @@ where
                         ),
                     ))));
                 }
+                Poll::Ready(Some(StreamEvent::Halt { .. })) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!("{}: handler returned Halt", self.context),
+                    ))));
+                }
             }
         }
     }

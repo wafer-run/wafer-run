@@ -130,6 +130,9 @@ enum TestResult {
     Error(WaferError),
     /// The flow completed with a drop.
     Drop,
+    /// The flow halted (block short-circuited with a body+meta response).
+    #[allow(dead_code)]
+    Halt(Vec<u8>),
 }
 
 impl TestResult {
@@ -166,6 +169,7 @@ async fn run_flow(w: &Wafer, flow_id: &str, msg: Message, body: Vec<u8>) -> Test
         Err(TerminalNotResponse::Continue(_)) => TestResult::Continue,
         Err(TerminalNotResponse::Error(e)) => TestResult::Error(e),
         Err(TerminalNotResponse::Drop) => TestResult::Drop,
+        Err(TerminalNotResponse::Halt(buf)) => TestResult::Halt(buf.body),
         Err(TerminalNotResponse::Malformed) => panic!("malformed output stream"),
     }
 }

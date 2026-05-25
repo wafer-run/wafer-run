@@ -33,7 +33,10 @@ use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 /// - For lifecycle ops (`wafer_resolve`/`wafer_start`/`wafer_stop`): `result`
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
-///   the form `{"action":"respond|drop|error|continue", ...}`.
+///   the form `{"action":"respond|drop|error|continue|halt", ...}`.
+///   Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
+///   of the `respond` action's `body` string — Halt may carry non-UTF-8 or
+///   empty bodies.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.
@@ -122,6 +125,22 @@ async fn output_to_json(output: wafer_run::OutputStream) -> String {
         })
         .to_string(),
         Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
+        Err(TerminalNotResponse::Halt(buf)) => {
+            use base64ct::{Base64, Encoding};
+            let body_b64 = Base64::encode_string(&buf.body);
+            let meta_obj: serde_json::Value = buf
+                .meta
+                .iter()
+                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            serde_json::json!({
+                "action": "halt",
+                "body_base64": body_b64,
+                "meta": meta_obj,
+            })
+            .to_string()
+        }
         Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
             "action": "continue",
             "message": serde_json::to_value(&msg).unwrap_or_default(),
@@ -411,7 +430,7 @@ pub unsafe extern "C" fn wafer_register(
 ///
 /// Returns immediately; invokes `cb` with the JSON result string when the
 /// flow finishes. `cb`'s `result` is always non-NULL — a JSON object of the
-/// form `{"action":"respond|drop|error|continue", ...}`.
+/// form `{"action":"respond|drop|error|continue|halt", ...}`.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
     w: *mut WaferRuntime,

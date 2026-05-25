@@ -144,7 +144,11 @@ mod bindings {
         /// Run a flow with the given message (body-less).
         ///
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
-        /// `{"action":"respond|drop|error|continue","body":"...","meta":{...}}`
+        /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
+        ///
+        /// Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
+        /// of the `respond` action's `body` string — Halt may carry non-UTF-8 or
+        /// empty bodies.
         #[napi]
         pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
             let msg: Message = serde_json::from_str(&message_json)
@@ -184,6 +188,22 @@ mod bindings {
                 }
                 Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
                     serde_json::json!({ "action": "drop" }).to_string()
+                }
+                Err(wafer_block::streams::output::TerminalNotResponse::Halt(buf)) => {
+                    use base64ct::{Base64, Encoding};
+                    let body_b64 = Base64::encode_string(&buf.body);
+                    let meta_obj: serde_json::Value = buf
+                        .meta
+                        .iter()
+                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                    serde_json::json!({
+                        "action": "halt",
+                        "body_base64": body_b64,
+                        "meta": meta_obj,
+                    })
+                    .to_string()
                 }
                 Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
                     serde_json::json!({

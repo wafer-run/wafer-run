@@ -1,7 +1,7 @@
 //! Output side of a block invocation: an [`OutputStream`] consumer paired
 //! with an [`OutputSink`] producer handle. The producer emits zero or more
 //! [`StreamEvent::Chunk`]/[`StreamEvent::Meta`] events followed by exactly
-//! one terminal event (`Complete`/`Error`/`Drop`/`Continue`).
+//! one terminal event (`Complete`/`Error`/`Drop`/`Continue`/`Halt`).
 
 use std::{
     future::Future,
@@ -107,6 +107,22 @@ impl OutputSink {
             .await
             .map_err(|_| SinkClosed)
     }
+
+    /// Terminal. Block produced a response AND requests short-circuit.
+    /// HTTP boundary serves the supplied body+meta; flow executor halts the
+    /// step loop. The `body` parameter is the complete response body — do
+    /// not mix Halt with prior streamed Chunk events on the same sink.
+    pub async fn halt(
+        mut self,
+        body: Vec<u8>,
+        meta: Vec<crate::core_types::MetaEntry>,
+    ) -> Result<(), SinkClosed> {
+        self.terminal_sent = true;
+        self.tx
+            .send(StreamEvent::Halt { body, meta })
+            .await
+            .map_err(|_| SinkClosed)
+    }
 }
 
 impl Drop for OutputSink {
@@ -195,6 +211,24 @@ impl OutputStream {
         Self::from_events([StreamEvent::Continue(msg)])
     }
 
+    /// Buffered helper: emits a single `Halt` terminal event carrying the
+    /// supplied body + meta. Use when a block needs to short-circuit a flow
+    /// while still delivering a response to the HTTP boundary.
+    pub fn halt(body: Vec<u8>, meta: Vec<crate::core_types::MetaEntry>) -> Self {
+        Self::from_events([StreamEvent::Halt { body, meta }])
+    }
+
+    /// Rebuild an `OutputStream` from a `BufferedResponse`, emitting a single
+    /// `Halt` terminal. Used by the flow executor to forward a halted step's
+    /// response up to the outer flow / HTTP boundary while preserving the
+    /// short-circuit signal.
+    pub fn from_buffered_response(buf: BufferedResponse) -> Self {
+        Self::from_events([StreamEvent::Halt {
+            body: buf.body,
+            meta: buf.meta,
+        }])
+    }
+
     /// Create a streaming triple `(OutputStream, OutputSink, CancellationToken)` with
     /// the default channel capacity of 16.
     pub fn new_streaming() -> (Self, OutputSink, CancellationToken) {
@@ -259,6 +293,9 @@ pub enum TerminalNotResponse {
     Error(WaferError),
     /// Stream ended with [`StreamEvent::Drop`].
     Drop,
+    /// Stream ended with [`StreamEvent::Halt`] — block produced a response
+    /// AND requests short-circuit. Carries the buffered response.
+    Halt(BufferedResponse),
     /// Stream ended with [`StreamEvent::Continue`].
     Continue(Message),
     /// Stream ended without emitting any terminal event (protocol violation).
@@ -270,6 +307,12 @@ impl std::fmt::Display for TerminalNotResponse {
         match self {
             Self::Error(e) => write!(f, "block error: {e}"),
             Self::Drop => write!(f, "block dropped the request"),
+            Self::Halt(buf) => write!(
+                f,
+                "block halted the flow ({} body bytes, {} meta entries)",
+                buf.body.len(),
+                buf.meta.len(),
+            ),
             Self::Continue(msg) => write!(f, "unexpected Continue (kind: {})", msg.kind),
             Self::Malformed => write!(f, "stream ended without terminal event"),
         }
@@ -283,6 +326,15 @@ impl From<TerminalNotResponse> for WaferError {
             TerminalNotResponse::Drop => WaferError {
                 code: crate::core_types::ErrorCode::Unknown,
                 message: "block dropped the request".into(),
+                meta: vec![],
+            },
+            TerminalNotResponse::Halt(buf) => WaferError {
+                code: crate::core_types::ErrorCode::Internal,
+                message: format!(
+                    "Halt terminal converted to error — bug: callers should match Halt before this conversion ({} body bytes, {} meta entries)",
+                    buf.body.len(),
+                    buf.meta.len(),
+                ),
                 meta: vec![],
             },
             TerminalNotResponse::Continue(msg) => WaferError {
@@ -314,6 +366,18 @@ impl OutputStream {
                 StreamEvent::Complete { meta: trailing } => {
                     meta.extend(trailing);
                     return Ok(BufferedResponse { body, meta });
+                }
+                StreamEvent::Halt {
+                    body: halt_body,
+                    meta: halt_meta,
+                } => {
+                    // Halt carries a complete response; any prior Chunk/Meta
+                    // events are replaced by Halt's payload (per the sink doc
+                    // contract — do not mix Halt with streamed chunks).
+                    return Err(TerminalNotResponse::Halt(BufferedResponse {
+                        body: halt_body,
+                        meta: halt_meta,
+                    }));
                 }
                 StreamEvent::Error(e) => return Err(TerminalNotResponse::Error(*e)),
                 StreamEvent::Drop => return Err(TerminalNotResponse::Drop),
@@ -352,7 +416,10 @@ impl OutputStream {
                 StreamEvent::Chunk(bytes) => Some(Ok(bytes)),
                 StreamEvent::Error(e) => Some(Err(*e)),
                 StreamEvent::Meta(_) => None,
-                StreamEvent::Complete { .. } | StreamEvent::Drop | StreamEvent::Continue(_) => None,
+                StreamEvent::Complete { .. }
+                | StreamEvent::Drop
+                | StreamEvent::Continue(_)
+                | StreamEvent::Halt { .. } => None,
             }
         })
     }
@@ -902,5 +969,39 @@ mod tests {
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], StreamEvent::Error(Box::new(err)));
+    }
+
+    #[tokio::test]
+    async fn halt_emits_single_terminal_event() {
+        use futures::StreamExt;
+        let body = b"hello".to_vec();
+        let meta = vec![MetaEntry {
+            key: "resp.status".into(),
+            value: "204".into(),
+        }];
+        let mut stream = OutputStream::halt(body.clone(), meta.clone());
+        let evt = stream.next().await.expect("one event");
+        assert_eq!(evt, StreamEvent::Halt { body, meta });
+        assert!(
+            stream.next().await.is_none(),
+            "no more events after terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_buffered_returns_halt_for_halt_event() {
+        let body = b"abc".to_vec();
+        let meta = vec![MetaEntry {
+            key: "resp.header.X-Test".into(),
+            value: "v".into(),
+        }];
+        let stream = OutputStream::halt(body.clone(), meta.clone());
+        match stream.collect_buffered().await {
+            Err(TerminalNotResponse::Halt(buf)) => {
+                assert_eq!(buf.body, body);
+                assert_eq!(buf.meta, meta);
+            }
+            other => panic!("expected Err(Halt), got {other:?}"),
+        }
     }
 }
