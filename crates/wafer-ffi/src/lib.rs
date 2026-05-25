@@ -122,6 +122,21 @@ async fn output_to_json(output: wafer_run::OutputStream) -> String {
         })
         .to_string(),
         Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
+        Err(TerminalNotResponse::Halt(buf)) => {
+            let body_str = String::from_utf8(buf.body).unwrap_or_default();
+            let meta_obj: serde_json::Value = buf
+                .meta
+                .iter()
+                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+            serde_json::json!({
+                "action": "halt",
+                "body": body_str,
+                "meta": meta_obj,
+            })
+            .to_string()
+        }
         Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
             "action": "continue",
             "message": serde_json::to_value(&msg).unwrap_or_default(),

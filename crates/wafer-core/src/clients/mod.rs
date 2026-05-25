@@ -132,6 +132,10 @@ pub(crate) async fn call_service(
         Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
             Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
         }
+        Err(wafer_block::streams::output::TerminalNotResponse::Halt(_)) => Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            "block returned Halt (service clients do not short-circuit flows)",
+        )),
         Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
             WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
         ),
@@ -233,6 +237,10 @@ pub(crate) async fn call_service_with_msg(
         Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
             Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
         }
+        Err(wafer_block::streams::output::TerminalNotResponse::Halt(_)) => Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            "block returned Halt (service clients do not short-circuit flows)",
+        )),
         Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
             WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
         ),
@@ -308,6 +316,12 @@ where
                     ),
                 ));
             }
+            StreamEvent::Halt { .. } => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: block halted before header frame"),
+                ));
+            }
             StreamEvent::Complete { .. } => {
                 return Err(WaferError::new(
                     ErrorCode::INTERNAL,
@@ -351,6 +365,12 @@ where
                 return Err(WaferError::new(
                     ErrorCode::INTERNAL,
                     format!("{context}: block dropped"),
+                ));
+            }
+            StreamEvent::Halt { .. } => {
+                return Err(WaferError::new(
+                    ErrorCode::INTERNAL,
+                    format!("{context}: block halted"),
                 ));
             }
             StreamEvent::Continue(msg) => {

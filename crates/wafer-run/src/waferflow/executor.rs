@@ -229,6 +229,12 @@ pub async fn execute(
                 // Short-circuit: block requested drop
                 return OutputStream::drop_request();
             }
+            Err(TerminalNotResponse::Halt(buf)) => {
+                // Short-circuit: block produced a response and requests halt.
+                // Forward the buffered response as a Halt terminal so the
+                // HTTP listener can serve it while preserving the signal.
+                return OutputStream::from_buffered_response(buf);
+            }
             Err(TerminalNotResponse::Continue(next_msg)) => {
                 // Middleware block — update message but restore the original
                 // body so the next step receives it (the block didn't consume

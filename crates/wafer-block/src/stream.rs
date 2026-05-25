@@ -31,13 +31,25 @@ pub enum StreamEvent {
     /// Valid only with no preceding Chunk or Meta events.
     Drop,
 
+    /// Terminal: block produced a response AND requests the flow to short-circuit.
+    /// At the HTTP boundary this surfaces as a normal response (status from
+    /// `resp.status` meta, headers from `resp.header.*` meta, body from `body`).
+    /// At the flow-executor layer this halts the step loop — downstream steps do NOT run.
+    /// Use when a block needs to fully respond and stop the pipeline (e.g. CORS OPTIONS preflight).
+    Halt {
+        /// Response body bytes (may be empty, e.g. for 204).
+        body: Vec<u8>,
+        /// Response meta entries (status, headers, cookies).
+        meta: Vec<MetaEntry>,
+    },
+
     /// Terminal: forward to another block instead of handling.
     /// Valid only with no preceding Chunk or Meta events.
     Continue(Message),
 }
 
 impl StreamEvent {
-    /// Whether this event is a terminal (Complete/Error/Drop/Continue).
+    /// Whether this event is a terminal (Complete/Error/Drop/Continue/Halt).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -45,6 +57,7 @@ impl StreamEvent {
                 | StreamEvent::Error(_)
                 | StreamEvent::Drop
                 | StreamEvent::Continue(_)
+                | StreamEvent::Halt { .. }
         )
     }
 }
@@ -98,5 +111,22 @@ mod tests {
         }))
         .is_terminal());
         assert!(StreamEvent::Drop.is_terminal());
+    }
+
+    #[test]
+    fn halt_is_terminal() {
+        assert!(StreamEvent::Halt {
+            body: vec![],
+            meta: vec![]
+        }
+        .is_terminal());
+        assert!(StreamEvent::Halt {
+            body: vec![1, 2, 3],
+            meta: vec![MetaEntry {
+                key: "k".into(),
+                value: "v".into(),
+            }]
+        }
+        .is_terminal());
     }
 }

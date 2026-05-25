@@ -185,6 +185,21 @@ mod bindings {
                 Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
                     serde_json::json!({ "action": "drop" }).to_string()
                 }
+                Err(wafer_block::streams::output::TerminalNotResponse::Halt(buf)) => {
+                    let body_str = String::from_utf8(buf.body).unwrap_or_default();
+                    let meta_obj: serde_json::Value = buf
+                        .meta
+                        .iter()
+                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                    serde_json::json!({
+                        "action": "halt",
+                        "body": body_str,
+                        "meta": meta_obj,
+                    })
+                    .to_string()
+                }
                 Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
                     serde_json::json!({
                         "action": "continue",

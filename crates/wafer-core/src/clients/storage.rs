@@ -262,6 +262,13 @@ impl Stream for NativeStorageGetStream {
                         format!("storage handler returned Continue (kind: {})", msg.kind),
                     ))));
                 }
+                Poll::Ready(Some(StreamEvent::Halt { .. })) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        "storage handler returned Halt",
+                    ))));
+                }
             }
         }
     }

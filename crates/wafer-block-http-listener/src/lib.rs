@@ -206,6 +206,9 @@ fn get_error_status_code(error: Option<&WaferError>, meta: &[MetaEntry]) -> u16 
 ///   overridable via `META_RESP_STATUS`, body
 ///   `{"error": <code>, "message": <msg>}`.
 /// - `TerminalNotResponse::Drop` → `204 No Content`.
+/// - `TerminalNotResponse::Halt(buf)` → same as `Ok(buf)` — block produced a
+///   response and requested flow short-circuit; at the HTTP boundary the
+///   body+meta are served as-is (the halt signal was for the flow executor).
 /// - `TerminalNotResponse::Continue` → empty `200` (the HTTP boundary has
 ///   nowhere further to forward).
 /// - `TerminalNotResponse::Malformed` → `500` (stream ended without a
@@ -259,6 +262,27 @@ pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Respo
             axum::http::Response::builder()
                 .status(StatusCode::NO_CONTENT)
                 .body(Body::empty())
+                .unwrap_or_else(|_| internal_error_response())
+        }
+
+        Err(TerminalNotResponse::Halt(buf)) => {
+            // Block produced a response AND requested flow short-circuit.
+            // The HTTP boundary serves the body+meta exactly like a normal
+            // response — the halt signal was for the flow executor, not the
+            // HTTP layer.
+            let status_code = get_status_code(&buf.meta, 200);
+            let mut builder = axum::http::Response::builder()
+                .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
+
+            builder = apply_response_meta(builder, &buf.meta);
+
+            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
+            if !has_ct {
+                builder = builder.header("Content-Type", "application/json");
+            }
+
+            builder
+                .body(Body::from(buf.body))
                 .unwrap_or_else(|_| internal_error_response())
         }
 
