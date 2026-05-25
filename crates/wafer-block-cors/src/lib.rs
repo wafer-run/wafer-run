@@ -5,7 +5,7 @@
 //! `Origin` header, consults a configured allow-list, and sets the
 //! `Access-Control-Allow-*` response headers (plus `Vary: Origin`) on
 //! the outgoing message. OPTIONS preflight requests short-circuit with
-//! a 204 via [`OutputStream::drop_request`].
+//! a 204 via [`OutputStream::halt`].
 //!
 //! See the [`CorsBlock`] type for the configuration contract and the
 //! fail-closed behavior introduced by SEC-087/SEC-088.
@@ -185,9 +185,14 @@ impl Block for CorsBlock {
             out_msg.set_meta("resp.header.Vary", "Origin");
         }
 
-        // Handle OPTIONS preflight — respond with empty 204
+        // Handle OPTIONS preflight — respond with empty 204 + CORS headers.
+        // Uses Halt (not Drop) so the flow executor short-circuits AND the
+        // CORS meta we just set on out_msg actually reaches the HTTP wire.
+        // See spec
+        // docs/superpowers/specs/2026-05-25-wave-13-halt-terminal-and-validator-escalation-design.md
         if out_msg.get_meta("http.method") == "OPTIONS" {
-            return OutputStream::drop_request();
+            out_msg.set_meta("resp.status", "204");
+            return OutputStream::halt(Vec::new(), out_msg.meta);
         }
 
         OutputStream::continue_with(out_msg)
@@ -310,7 +315,7 @@ mod tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&cfg).expect("json"),
         };
-        let ctx = TestContext;
+        let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(
             block.cached_origins(),
@@ -326,7 +331,7 @@ mod tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&cfg).expect("json"),
         };
-        let ctx = TestContext;
+        let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(block.cached_origins(), Some("*".to_string()));
     }
@@ -339,7 +344,7 @@ mod tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&cfg).expect("json"),
         };
-        let ctx = TestContext;
+        let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert!(
             block.cached_origins().is_none(),
@@ -357,7 +362,7 @@ mod tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&cfg).expect("json"),
         };
-        let ctx = TestContext;
+        let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert!(block.cached_origins().is_none());
     }
@@ -372,7 +377,7 @@ mod tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&cfg).expect("json"),
         };
-        let ctx = TestContext;
+        let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(
             block.cached_origins(),
@@ -383,7 +388,23 @@ mod tests {
 
     // Minimal Context shim — CorsBlock's lifecycle Init doesn't touch ctx.
     #[derive(Clone)]
-    struct TestContext;
+    struct TestContext {
+        allowed_origins: Option<String>,
+    }
+
+    impl TestContext {
+        fn new() -> Self {
+            Self {
+                allowed_origins: None,
+            }
+        }
+
+        fn with_origin(origin: &str) -> Self {
+            Self {
+                allowed_origins: Some(origin.to_string()),
+            }
+        }
+    }
 
     #[wafer_async_trait]
     impl Context for TestContext {
@@ -398,11 +419,81 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             false
         }
-        fn config_get(&self, _key: &str) -> Option<&str> {
-            None
+        fn config_get(&self, key: &str) -> Option<&str> {
+            if key == "allowed_origins" {
+                self.allowed_origins.as_deref()
+            } else {
+                None
+            }
         }
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
             std::sync::Arc::new(self.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn options_preflight_emits_halt_with_cors_meta() {
+        use wafer_block::streams::output::TerminalNotResponse;
+
+        let ctx = TestContext::with_origin("https://example.com");
+        let block = CorsBlock::new();
+        // Init the block with an allowlist that includes our test origin.
+        block
+            .lifecycle(
+                &ctx,
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: serde_json::to_vec(&serde_json::json!({
+                        "allowed_origins": "https://example.com",
+                    }))
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut msg = Message::new("http.request");
+        msg.set_meta("http.method", "OPTIONS");
+        msg.set_meta("http.header.origin", "https://example.com");
+
+        let output = block.handle(&ctx, msg, InputStream::empty()).await;
+        let buf = output.collect_buffered().await;
+
+        match buf {
+            Err(TerminalNotResponse::Halt(resp)) => {
+                assert!(
+                    resp.body.is_empty(),
+                    "OPTIONS preflight body should be empty"
+                );
+                let meta_has =
+                    |k: &str, v: &str| resp.meta.iter().any(|m| m.key == k && m.value == v);
+                let meta_has_key = |k: &str| resp.meta.iter().any(|m| m.key == k);
+                assert!(meta_has("resp.status", "204"), "missing resp.status=204");
+                assert!(
+                    meta_has(
+                        "resp.header.Access-Control-Allow-Origin",
+                        "https://example.com"
+                    ),
+                    "missing or wrong Access-Control-Allow-Origin"
+                );
+                assert!(
+                    meta_has_key("resp.header.Access-Control-Allow-Methods"),
+                    "missing Access-Control-Allow-Methods"
+                );
+                assert!(
+                    meta_has_key("resp.header.Access-Control-Allow-Headers"),
+                    "missing Access-Control-Allow-Headers"
+                );
+                assert!(
+                    meta_has_key("resp.header.Access-Control-Max-Age"),
+                    "missing Access-Control-Max-Age"
+                );
+                assert!(
+                    meta_has("resp.header.Vary", "Origin"),
+                    "missing Vary: Origin (SEC-088)"
+                );
+            }
+            other => panic!("expected Err(Halt), got {other:?}"),
         }
     }
 }
