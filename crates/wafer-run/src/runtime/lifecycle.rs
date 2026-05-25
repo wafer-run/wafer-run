@@ -15,6 +15,21 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
     v
 }
 
+/// Return value of [`validate_and_collect_grants_for_block`].
+///
+/// Splits accepted and rejected grants so callers can both merge accepted
+/// grants into `Wafer::wrap_grants` and push rejected grants into
+/// `Wafer::grant_validation_errors` for `start()` to surface as
+/// `RuntimeError::GrantsRejected`.
+pub(crate) struct GrantValidationOutcome {
+    /// Grants that passed validation and should be merged into `wrap_grants`.
+    pub(crate) accepted: Vec<wafer_block::types::ResourceGrant>,
+    /// Grants that were rejected — typed grant from non-admin block.
+    /// Each entry is a structured rejection that `Wafer::start()` aggregates
+    /// into `RuntimeError::GrantsRejected`.
+    pub(crate) rejected: Vec<crate::error::GrantValidationError>,
+}
+
 /// Validate a single block's WRAP grant declarations and return the subset
 /// that passed validation. Called from `register_block_inner` so grants are
 /// available immediately after registration — no init pass required, and
@@ -36,8 +51,9 @@ pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
-) -> Vec<wafer_block::types::ResourceGrant> {
-    let mut out = Vec::new();
+) -> GrantValidationOutcome {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
     for grant in &block_info.grants {
         // Network/Storage/Crypto typed grants use URLs / file-paths /
         // operation-names, not namespaced resources — skip ownership
@@ -64,7 +80,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                 continue;
             }
             if block_info.name == admin_block {
-                out.push(grant.clone());
+                accepted.push(grant.clone());
             } else {
                 tracing::error!(
                     block = %block_info.name,
@@ -73,6 +89,14 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     admin = %admin_block,
                     "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
                 );
+                rejected.push(crate::error::GrantValidationError {
+                    block: block_info.name.to_string(),
+                    grant: grant.clone(),
+                    reason: format!(
+                        "typed {:?} grants may only be declared by the admin block",
+                        grant.resource_type.clone().unwrap(),
+                    ),
+                });
             }
             continue;
         }
@@ -86,7 +110,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             wafer_block::wrap::resource_owner(&grant.resource)
         };
         match grant_owner {
-            Some(owner) if owner == block_info.name => out.push(grant.clone()),
+            Some(owner) if owner == block_info.name => accepted.push(grant.clone()),
             Some(owner) => tracing::error!(
                 block = %block_info.name, resource = %grant.resource, owner = %owner,
                 "WRAP: rejecting grant for resource not owned by declaring block"
@@ -97,7 +121,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             ),
         }
     }
-    out
+    GrantValidationOutcome { accepted, rejected }
 }
 
 impl Wafer {
@@ -106,6 +130,14 @@ impl Wafer {
     /// separately so a later `set_admin_block` rescan does not drop them.
     /// Call this before `start()` / `seal()`, or between `seal()` and the
     /// first request.
+    ///
+    /// **Security:** Grants added here BYPASS the admin-only typed-grant
+    /// validator that gates `BlockInfo::grants` declarations. This is the
+    /// intended application-side escape hatch for grants that don't live
+    /// in any block's static declaration (e.g. operator-configured grants
+    /// loaded from a DB at boot). The caller is responsible for vetting
+    /// any typed Network/Storage/Crypto grants added through this method —
+    /// no admin-block check is applied.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
         self.wrap_grants_external.extend(grants.iter().cloned());
         let mut all = (*self.wrap_grants).clone();

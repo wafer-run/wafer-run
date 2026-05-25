@@ -139,6 +139,16 @@ impl Wafer {
     /// broken paths surface as 5xx on first invocation. Use
     /// [`Wafer::validate_all_block_configs`] for proactive health checks.
     pub async fn seal(&mut self) -> Result<(), RuntimeError> {
+        // Drain the grant-validation accumulator before sealing. This is the
+        // common boot funnel: both `start_with_priority()` (native) and direct
+        // `seal()` callers (Cloudflare Workers, browser WASM) pass through here.
+        // If any typed grants were rejected during register_block / set_admin_block,
+        // refuse boot with all rejections listed in one error.
+        if !self.grant_validation_errors.is_empty() {
+            let errors = std::mem::take(&mut self.grant_validation_errors);
+            return Err(RuntimeError::GrantsRejected(errors));
+        }
+
         // 1. Resolve remote entries: download .flow.json / .wasm for deferred registrations
         #[cfg(feature = "wasm")]
         self.resolve_remote_entries().await?;
