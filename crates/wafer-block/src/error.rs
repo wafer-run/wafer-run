@@ -99,10 +99,39 @@ pub enum RuntimeError {
         source: Box<RuntimeError>,
     },
 
+    // ── Grant validation ────────────────────────────────────────────────
+    /// One or more block grant declarations were rejected during validation.
+    /// `Wafer::start()` returns this instead of silently dropping the grants.
+    /// Remediation: relocate the grants to the block configured via
+    /// `Wafer::set_admin_block(...)` or remove them.
+    #[error(
+        "{} typed grant(s) rejected:\n{}",
+        .0.len(),
+        .0.iter()
+            .map(|e| format!("  - block `{}`: {}", e.block, e.reason))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )]
+    GrantsRejected(Vec<GrantValidationError>),
+
     // ── Catch-all ───────────────────────────────────────────────────────
     /// An error that doesn't fit any specific category.
     #[error("{0}")]
     Other(String),
+}
+
+/// Detail of a single grant-validation rejection from
+/// `validate_and_collect_grants_for_block`. Aggregated into
+/// `RuntimeError::GrantsRejected` so `Wafer::start()` can refuse boot
+/// with all rejections listed in one error.
+#[derive(Debug, Clone)]
+pub struct GrantValidationError {
+    /// Block that declared the rejected grant.
+    pub block: String,
+    /// The grant that was rejected.
+    pub grant: crate::types::ResourceGrant,
+    /// Human-readable reason (e.g. "typed Storage grants may only be declared by the admin block").
+    pub reason: String,
 }
 
 impl From<String> for RuntimeError {
@@ -136,5 +165,32 @@ mod tests {
             "name should appear in display: {s}"
         );
         assert!(s.contains("inventory"), "should mention inventory: {s}");
+    }
+
+    #[test]
+    fn grants_rejected_display_lists_all_blocks() {
+        use crate::types::ResourceGrant;
+
+        let err = RuntimeError::GrantsRejected(vec![
+            GrantValidationError {
+                block: "suppers-ai/files".into(),
+                grant: ResourceGrant::read_write("suppers-ai/files", "*"),
+                reason: "typed Storage grants may only be declared by the admin block".into(),
+            },
+            GrantValidationError {
+                block: "example/foo".into(),
+                grant: ResourceGrant::read_write("foo", "https://api.example.com"),
+                reason: "typed Network grants may only be declared by the admin block".into(),
+            },
+        ]);
+        let display = format!("{err}");
+        assert!(
+            display.contains("2 typed grant(s) rejected"),
+            "display: {display}"
+        );
+        assert!(display.contains("suppers-ai/files"), "display: {display}");
+        assert!(display.contains("example/foo"), "display: {display}");
+        assert!(display.contains("typed Storage"), "display: {display}");
+        assert!(display.contains("typed Network"), "display: {display}");
     }
 }
