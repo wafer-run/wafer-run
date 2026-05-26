@@ -12,7 +12,7 @@ use wafer_block::{
     types::{ResourceGrant, ResourceType},
     Block, BlockInfo,
 };
-use wafer_run::{error::RuntimeError, InstanceMode, StaticConfigSource, Wafer};
+use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -26,11 +26,9 @@ struct AdminBlock;
 #[async_trait]
 impl Block for AdminBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("example/admin", "0.0.1", "admin@v1", "Admin")
-            .instance_mode(InstanceMode::Singleton)
-            .grants(vec![
-                ResourceGrant::read("wafer-run/storage", "*").typed(ResourceType::Storage)
-            ])
+        BlockInfo::new("example/admin", "0.0.1", "admin@v1", "Admin").grants(vec![
+            ResourceGrant::read("wafer-run/storage", "*").typed(ResourceType::Storage),
+        ])
     }
 
     async fn lifecycle(
@@ -58,11 +56,9 @@ struct NonAdminBlockWithTypedStorageGrant;
 #[async_trait]
 impl Block for NonAdminBlockWithTypedStorageGrant {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("example/sneaky", "0.0.1", "http-handler@v1", "Sneaky")
-            .instance_mode(InstanceMode::Singleton)
-            .grants(vec![
-                ResourceGrant::read("wafer-run/storage", "*").typed(ResourceType::Storage)
-            ])
+        BlockInfo::new("example/sneaky", "0.0.1", "http-handler@v1", "Sneaky").grants(vec![
+            ResourceGrant::read("wafer-run/storage", "*").typed(ResourceType::Storage),
+        ])
     }
 
     async fn lifecycle(
