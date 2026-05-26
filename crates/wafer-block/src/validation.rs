@@ -7,6 +7,8 @@
 //!
 //! [`Context::validate_all_block_configs`]: crate::context::Context::validate_all_block_configs
 
+use crate::types::BlockInfo;
+
 /// Outcome of validating every registered block's declared `ConfigVar`
 /// against the active config source.
 #[derive(Debug, Clone, Default)]
@@ -50,7 +52,7 @@ pub struct BrokenBlock {
 /// Used by blocks at `lifecycle(Init)` to warn about config typos
 /// (would have caught the Wave 8/9 `allow_origins`-vs-`allowed_origins`
 /// regression at deploy time).
-pub fn unknown_flow_config_keys(info: &crate::types::BlockInfo, data: &[u8]) -> Vec<String> {
+pub fn unknown_flow_config_keys(info: &BlockInfo, data: &[u8]) -> Vec<String> {
     if data.is_empty() {
         return Vec::new();
     }
