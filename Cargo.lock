@@ -7246,7 +7246,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "wafer-block",
  "wafer-block-local-storage",
  "wafer-core",
  "wafer-flow-http-server",

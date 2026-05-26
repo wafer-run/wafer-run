@@ -8,7 +8,6 @@ edition = "2021"
 #   wafer-run = { version = "0.1", features = ["full"] }
 #   wafer-flow-http-server = "0.1"
 #   wafer-block-local-storage = "0.1"
-wafer-block = { path = "../../crates/wafer-block" }
 wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
 wafer-core = { path = "../../crates/wafer-core" }
 wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }

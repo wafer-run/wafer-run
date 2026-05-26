@@ -24,9 +24,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default()))?;
 
-    // 1. Register the admin block FIRST. Its `BlockInfo::grants`
-    //    declares the typed Storage grant that the feature block
-    //    needs at runtime.
+    // 1. Register the admin block. Its `BlockInfo::grants` declares
+    //    the typed Storage grant the feature block needs at runtime.
+    //    Call order relative to other `register_block` calls doesn't
+    //    matter — see step 2 for the load-bearing constraint.
     wafer.register_block("example/admin", Arc::new(AdminBlock))?;
 
     // 2. `set_admin_block` admits typed grants declared on the named
@@ -36,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     wafer.set_admin_block("example/admin");
 
     // 3. Register the feature block that actually consumes Storage.
-    wafer.register_block("example/file-reader", Arc::new(FileReaderBlock))?;
+    wafer.register_block("example/folder-lister", Arc::new(FolderListerBlock))?;
 
     // 4. Wire HTTP + local storage as usual.
     wafer.add_flow_json(wafer_flow_http_server::FLOW_JSON)?;
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wafer_flow_http_server::FLOW_ID,
         serde_json::json!({
             "listen": "0.0.0.0:8080",
-            "routes": [{ "path": "/", "block": "example/file-reader" }]
+            "routes": [{ "path": "/", "block": "example/folder-lister" }]
         }),
     );
     wafer_core::service_blocks::storage::register_with(
@@ -79,7 +80,7 @@ impl Block for AdminBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
-        OutputStream::respond(b"admin block: no http surface in this example".to_vec())
+        OutputStream::respond(Vec::new())
     }
 }
 
@@ -87,16 +88,16 @@ impl Block for AdminBlock {
 /// `list_folders`. The call is admitted by the admin block's grant
 /// — without `set_admin_block("example/admin")` above, this would
 /// fail at WRAP-check time.
-struct FileReaderBlock;
+struct FolderListerBlock;
 
 #[async_trait::async_trait]
-impl Block for FileReaderBlock {
+impl Block for FolderListerBlock {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(
-            "example/file-reader",
+            "example/folder-lister",
             "0.0.1",
             "http-handler@v1",
-            "File reader",
+            "Folder lister",
         )
         .instance_mode(InstanceMode::Singleton)
     }
