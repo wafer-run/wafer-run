@@ -114,6 +114,30 @@ pub enum RuntimeError {
     )]
     GrantsRejected(Vec<GrantValidationError>),
 
+    // ── Block resolution (seal-time) ────────────────────────────────────
+    /// One or more block references could not be resolved during
+    /// `seal()`. Aggregated across all flow steps and router routes;
+    /// the embedded `Vec` always has at least one entry.
+    ///
+    /// Distinct from [`BlockNotFound`]:
+    /// [`BlockNotFound`] continues to be used by single-block runtime
+    /// lookups (lazy init, flow runner); [`BlocksNotFound`] is reserved
+    /// for the seal-time aggregator and carries source information so
+    /// operators can find the link-graph cause inline.
+    #[error(
+        "{} referenced block(s) not found:\n{}",
+        .0.len(),
+        .0.iter()
+            .map(|e| format!(
+                "  - `{}`\n{}",
+                e.name,
+                e.sources.iter().map(render_source).collect::<Vec<_>>().join("\n"),
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )]
+    BlocksNotFound(Vec<BlockReferenceError>),
+
     // ── Catch-all ───────────────────────────────────────────────────────
     /// An error that doesn't fit any specific category.
     #[error("{0}")]
@@ -132,6 +156,84 @@ pub struct GrantValidationError {
     pub grant: crate::types::ResourceGrant,
     /// Human-readable reason (e.g. "typed Storage grants may only be declared by the admin block").
     pub reason: String,
+}
+
+/// Where a missing block was referenced from. One source per entry on
+/// [`BlockReferenceError::sources`]; the same missing block name can have
+/// multiple sources (e.g. both a flow step and a router route).
+///
+/// Used inside [`RuntimeError::BlocksNotFound`] so operators can see the
+/// link-graph cause of each missing block at boot time instead of having
+/// to grep config files.
+#[derive(Debug, Clone)]
+pub enum BlockReferenceSource {
+    /// Block was referenced from a flow step.
+    Flow {
+        /// Flow id (`flow.id`) that contains the step.
+        flow_id: String,
+        /// Zero-based index of the step in `flow.steps`.
+        step_index: usize,
+        /// The step's `id` field (mandatory on `wafer_flow::Step`).
+        step_id: String,
+    },
+    /// Block was referenced from a `wafer-run/router` route entry.
+    ///
+    /// Emitted by `wafer-run`'s `runtime::router_walk` module when it
+    /// detects an unresolvable `block` field on a parsed route entry.
+    /// Tracked in `wafer-block` so the variant lives next to its
+    /// container [`RuntimeError::BlocksNotFound`]; the emitter lives in
+    /// `wafer-run`.
+    RouterRoute {
+        /// Block-config key holding the routes array. Equals
+        /// `"wafer-run/router"` for the canonical router; equals the
+        /// alias name when the router was registered under an alias.
+        router_block: String,
+        /// `path` field from the route entry.
+        path: String,
+        /// `actions`/`methods` field from the route entry, stored as
+        /// the operator wrote them (no normalization). The router crate
+        /// normalizes these for matching; for diagnostics we want the
+        /// original strings so the error message matches the config.
+        /// Empty when no actions/methods were configured.
+        actions: Vec<String>,
+    },
+}
+
+/// One missing-block entry in [`RuntimeError::BlocksNotFound`].
+/// Aggregated by `Wafer::seal()` so a single error lists every missing
+/// reference.
+#[derive(Debug, Clone)]
+pub struct BlockReferenceError {
+    /// Canonical block name (post-alias-resolution) that was referenced
+    /// but not registered and not downloadable from the registry.
+    pub name: String,
+    /// Every place that referenced this missing block.
+    pub sources: Vec<BlockReferenceSource>,
+}
+
+fn render_source(src: &BlockReferenceSource) -> String {
+    match src {
+        BlockReferenceSource::Flow {
+            flow_id,
+            step_index,
+            step_id,
+        } => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
+        BlockReferenceSource::RouterRoute {
+            router_block,
+            path,
+            actions,
+        } if actions.is_empty() => {
+            format!("      \u{2022} router `{router_block}` route {path}")
+        }
+        BlockReferenceSource::RouterRoute {
+            router_block,
+            path,
+            actions,
+        } => format!(
+            "      \u{2022} router `{router_block}` route {} {path}",
+            actions.join(" ")
+        ),
+    }
 }
 
 impl From<String> for RuntimeError {
@@ -192,5 +294,50 @@ mod tests {
         assert!(display.contains("example/foo"), "display: {display}");
         assert!(display.contains("typed Storage"), "display: {display}");
         assert!(display.contains("typed Network"), "display: {display}");
+    }
+
+    #[test]
+    fn blocks_not_found_renders_aggregated_message() {
+        let err = RuntimeError::BlocksNotFound(vec![
+            BlockReferenceError {
+                name: "org/missing-a".to_string(),
+                sources: vec![
+                    BlockReferenceSource::Flow {
+                        flow_id: "my-flow".to_string(),
+                        step_index: 2,
+                        step_id: "call-thing".to_string(),
+                    },
+                    BlockReferenceSource::RouterRoute {
+                        router_block: "wafer-run/router".to_string(),
+                        path: "/users/{id}".to_string(),
+                        actions: vec!["GET".to_string()],
+                    },
+                ],
+            },
+            BlockReferenceError {
+                name: "org/missing-b".to_string(),
+                sources: vec![BlockReferenceSource::RouterRoute {
+                    router_block: "my-router".to_string(),
+                    path: "/x".to_string(),
+                    actions: vec![],
+                }],
+            },
+        ]);
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("2 referenced block(s) not found:"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("- `org/missing-a`"), "got: {msg}");
+        assert!(
+            msg.contains("flow `my-flow` step 2 (`call-thing`)"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("router `wafer-run/router` route GET /users/{id}"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("- `org/missing-b`"), "got: {msg}");
+        assert!(msg.contains("router `my-router` route /x"), "got: {msg}");
     }
 }
