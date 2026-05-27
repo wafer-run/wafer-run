@@ -1,0 +1,23 @@
+[package]
+name = "with-admin-block"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+# In your own project, use crates.io deps:
+#   wafer-run = { version = "0.1", features = ["full"] }
+#   wafer-flow-http-server = "0.1"
+#   wafer-block-local-storage = "0.1"
+wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
+wafer-core = { path = "../../crates/wafer-core" }
+wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }
+wafer-block-local-storage = { path = "../../crates/wafer-block-local-storage" }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+async-trait = "0.1"
+
+[lints]
+workspace = true

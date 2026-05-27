@@ -7238,6 +7238,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "with-admin-block"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wafer-block-local-storage",
+ "wafer-core",
+ "wafer-flow-http-server",
+ "wafer-run",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
