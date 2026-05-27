@@ -83,7 +83,7 @@ pub use streams::{
     input::InputStream,
     output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
 };
-pub use validation::{BrokenBlock, ValidationReport};
+pub use validation::{unknown_flow_config_keys, BrokenBlock, ValidationReport};
 
 /// Register a block at link time via `linkme`.
 ///

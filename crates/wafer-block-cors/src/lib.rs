@@ -204,6 +204,21 @@ impl Block for CorsBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
+            // Warn on unknown config keys before parsing. Catches typos
+            // like `allow_origins` (vs the declared `allowed_origins`)
+            // at deploy time — would have caught the Wave 8/9 regression.
+            let info = self.info();
+            let unknown = wafer_block::validation::unknown_flow_config_keys(&info, &event.data);
+            if !unknown.is_empty() {
+                let declared: Vec<&str> = info.flow_config.iter().map(|v| v.key.as_str()).collect();
+                tracing::warn!(
+                    "CORS: unknown config key(s) {:?} — declared keys are {:?}; \
+                     did you mean one of these?",
+                    unknown,
+                    declared,
+                );
+            }
+
             // Parse block config if any was supplied. Accept either:
             //   - string  -> use as-is (canonical comma-separated form)
             //   - array of strings -> join with `,` (matches the internal
@@ -383,6 +398,31 @@ mod tests {
             block.cached_origins(),
             Some("https://a.example,https://b.example".to_string()),
             "string entries should be preserved when non-string entries are dropped",
+        );
+    }
+
+    #[tokio::test]
+    async fn init_with_unknown_key_still_parses_known_keys() {
+        // The well-declared `allowed_origins` must still populate the
+        // cache; the typo'd `allow_origins` is ignored (warning is a
+        // side-effect we don't assert on directly — observed via
+        // tracing::warn!).
+        let block = CorsBlock::new();
+        let cfg = serde_json::json!({
+            "allow_origins": "https://typo.example",
+            "allowed_origins": "https://real.example",
+        });
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&cfg).expect("json"),
+        };
+        let ctx = TestContext::new();
+        block.lifecycle(&ctx, event).await.expect("init ok");
+        assert_eq!(
+            block.cached_origins(),
+            Some("https://real.example".to_string()),
+            "the correctly-declared key must still populate the cache \
+             when an unknown key is also present",
         );
     }
 
