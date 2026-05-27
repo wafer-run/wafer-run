@@ -79,6 +79,7 @@ wafer-block-monitoring = { path = "../wafer-block-monitoring" }
 wafer-block-cors = { path = "../wafer-block-cors" }
 wafer-block-postgres = { path = "../wafer-block-postgres" }
 wafer-block-s3 = { path = "../wafer-block-s3" }
+wafer-block-router = { path = "../wafer-block-router" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"

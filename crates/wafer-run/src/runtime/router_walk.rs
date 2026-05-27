@@ -59,7 +59,11 @@ pub(super) fn collect_router_route_refs(wafer: &Wafer) -> Vec<(String, BlockRefe
 }
 
 /// One parsed route entry, retained for diagnostics.
-pub(crate) struct ValidationRoute {
+///
+/// `pub` so the contract-pinning integration test in
+/// `tests/seal_router_route_resolution.rs` can read the fields without an
+/// accessor layer.
+pub struct ValidationRoute {
     /// `path` field from the route entry.
     pub path: String,
     /// Raw action/method strings as the operator wrote them. We
@@ -75,9 +79,9 @@ pub(crate) struct ValidationRoute {
 /// extraction (`path`, `block`, `actions`/`methods`); only difference
 /// is that we keep `raw_actions` un-normalized.
 ///
-/// `pub(crate)` only so the contract test can compare against the
-/// router crate's parser on identical input.
-pub(crate) fn parse_routes_for_validation(config: &serde_json::Value) -> Vec<ValidationRoute> {
+/// `pub` so the contract test in `tests/seal_router_route_resolution.rs`
+/// can compare against the router crate's parser on identical input.
+pub fn parse_routes_for_validation(config: &serde_json::Value) -> Vec<ValidationRoute> {
     config
         .get("routes")
         .and_then(|v| v.as_array())

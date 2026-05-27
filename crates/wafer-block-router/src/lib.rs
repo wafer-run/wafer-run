@@ -35,14 +35,19 @@ fn normalize_action(s: &str) -> String {
 }
 
 /// A single route entry parsed from block config.
-struct Route {
-    path: String,
-    actions: Vec<String>,
-    block: String,
+#[derive(Debug)]
+pub struct Route {
+    /// Path pattern for the route.
+    pub path: String,
+    /// Normalized action strings (HTTP methods mapped to action names).
+    pub actions: Vec<String>,
+    /// Target block name to dispatch to.
+    pub block: String,
 }
 
-/// Parse routes from block config.
-fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
+/// Parse routes from block config. Public for contract testing by
+/// `wafer-run`'s `router_walk::parse_routes_for_validation`.
+pub fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
     config
         .get("routes")
         .and_then(|v| v.as_array())
