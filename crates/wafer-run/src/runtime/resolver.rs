@@ -128,8 +128,10 @@ impl Wafer {
     /// 4. Gather `"uses"` contributions across all block configs.
     /// 5. Compute effective capabilities per block (declared ∩ config ∩ host)
     ///    and propagate them into each block.
-    /// 6. Resolve remote blocks referenced by flow steps (no Init dispatch —
-    ///    lazy init handles that on first request).
+    /// 6. Resolve remote blocks referenced by flow steps and (PR B) router
+    ///    routes. Aggregates every missing reference into one
+    ///    `RuntimeError::BlocksNotFound` so operators see the full punch
+    ///    list with each missing block's source.
     /// 7. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
     ///    every [`crate::runtime::RuntimeContext`].
     ///
@@ -216,29 +218,43 @@ impl Wafer {
             self.effective_capabilities = std::sync::Arc::new(eff);
         }
 
-        // 6. Resolve remote blocks referenced by flow steps but not yet
-        // registered. We only download here — Init lifecycle is dispatched
-        // lazily on first request via `Wafer::init_block`.
-        // Collect all referenced block names first to avoid borrow conflict.
-        let referenced_blocks: Vec<String> = self
-            .flows
-            .values()
-            .flat_map(|f| f.steps.iter())
-            .map(|step| {
-                self.aliases
+        // 6. Resolve remote blocks referenced by flow steps and router routes.
+        // Collect every reference + its source, then resolve-or-aggregate-fail.
+        //
+        // PR A lands the flow-step half of the walk. PR B (Wave 16) extends
+        // the collection to also include router routes via
+        // `router_walk::collect_router_route_refs`.
+        let mut references: std::collections::HashMap<
+            String,
+            Vec<crate::error::BlockReferenceSource>,
+        > = std::collections::HashMap::new();
+
+        for (flow_id, flow) in &self.flows {
+            for (step_index, step) in flow.steps.iter().enumerate() {
+                let canonical = self
+                    .aliases
                     .get(&step.block)
                     .cloned()
-                    .unwrap_or_else(|| step.block.clone())
-            })
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+                    .unwrap_or_else(|| step.block.clone());
+                references.entry(canonical).or_default().push(
+                    crate::error::BlockReferenceSource::Flow {
+                        flow_id: flow_id.clone(),
+                        step_index,
+                        step_id: step.id.clone(),
+                    },
+                );
+            }
+        }
+        // PR B inserts the router-route collection here:
+        //     for (canonical, source) in router_walk::collect_router_route_refs(self) {
+        //         references.entry(canonical).or_default().push(source);
+        //     }
 
-        for block_name in referenced_blocks {
-            if self.blocks.contains_key(&block_name) {
+        let mut not_found: Vec<crate::error::BlockReferenceError> = Vec::new();
+        for (canonical, sources) in references {
+            if self.blocks.contains_key(&canonical) || self.flows.contains_key(&canonical) {
                 continue;
             }
-            // Try WASM download
             #[cfg(feature = "wasm")]
             {
                 let client = reqwest::Client::builder()
@@ -247,20 +263,20 @@ impl Wafer {
                     .map_err(|e| {
                         RuntimeError::Registry(format!("failed to create HTTP client: {e}"))
                     })?;
-                match self.resolve_remote_block(&client, &block_name).await? {
-                    Some(block) => {
-                        tracing::info!(block = %block_name, "downloaded remote block");
-                        self.register_remote_block(&block_name, block)?;
-                    }
-                    None => {
-                        return Err(RuntimeError::BlockNotFound {
-                            name: block_name.clone(),
-                        });
-                    }
+                if let Some(block) = self.resolve_remote_block(&client, &canonical).await? {
+                    tracing::info!(block = %canonical, "downloaded remote block");
+                    self.register_remote_block(&canonical, block)?;
+                    continue;
                 }
             }
-            #[cfg(not(feature = "wasm"))]
-            return Err(RuntimeError::BlockNotFound { name: block_name });
+            not_found.push(crate::error::BlockReferenceError {
+                name: canonical,
+                sources,
+            });
+        }
+
+        if !not_found.is_empty() {
+            return Err(RuntimeError::BlocksNotFound(not_found));
         }
 
         // 7. Finalize the startup snapshot. Block configs survive in

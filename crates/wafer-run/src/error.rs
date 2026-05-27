@@ -1,2 +1,4 @@
 //! Re-export RuntimeError from wafer-block where the canonical definition lives.
-pub use wafer_block::error::{GrantValidationError, RuntimeError};
+pub use wafer_block::error::{
+    BlockReferenceError, BlockReferenceSource, GrantValidationError, RuntimeError,
+};
