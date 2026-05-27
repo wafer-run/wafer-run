@@ -47,7 +47,8 @@ pub(crate) struct GrantValidationOutcome {
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
 /// - Namespace grants must be owned by the declaring block (per
 ///   `wafer_block::wrap::resource_owner`). Unnamespaced or owned-by-other
-///   grants are logged and dropped.
+///   grants are pushed into `rejected` so `seal()` surfaces them via
+///   `RuntimeError::GrantsRejected`.
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
@@ -111,14 +112,34 @@ pub(crate) fn validate_and_collect_grants_for_block(
         };
         match grant_owner {
             Some(owner) if owner == block_info.name => accepted.push(grant.clone()),
-            Some(owner) => tracing::error!(
-                block = %block_info.name, resource = %grant.resource, owner = %owner,
-                "WRAP: rejecting grant for resource not owned by declaring block"
-            ),
-            None => tracing::error!(
-                block = %block_info.name, resource = %grant.resource,
-                "WRAP: rejecting grant with unnamespaced resource"
-            ),
+            Some(owner) => {
+                tracing::error!(
+                    block = %block_info.name, resource = %grant.resource, owner = %owner,
+                    "WRAP: rejecting grant for resource not owned by declaring block"
+                );
+                rejected.push(crate::error::GrantValidationError {
+                    block: block_info.name.to_string(),
+                    grant: grant.clone(),
+                    reason: format!(
+                        "resource `{}` is owned by `{owner}`, not by declaring block",
+                        grant.resource,
+                    ),
+                });
+            }
+            None => {
+                tracing::error!(
+                    block = %block_info.name, resource = %grant.resource,
+                    "WRAP: rejecting grant with unnamespaced resource"
+                );
+                rejected.push(crate::error::GrantValidationError {
+                    block: block_info.name.to_string(),
+                    grant: grant.clone(),
+                    reason: format!(
+                        "resource `{}` is unnamespaced — namespace-based grants must target `{{org}}__{{block}}__*`",
+                        grant.resource,
+                    ),
+                });
+            }
         }
     }
     GrantValidationOutcome { accepted, rejected }
