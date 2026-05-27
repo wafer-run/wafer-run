@@ -5,7 +5,7 @@ use super::Wafer;
 use super::{parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION};
 #[cfg(feature = "wasm")]
 use crate::block::Block;
-use crate::error::RuntimeError;
+use crate::error::{BlockReferenceError, BlockReferenceSource, RuntimeError};
 
 impl Wafer {
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -224,10 +224,7 @@ impl Wafer {
         // PR A lands the flow-step half of the walk. PR B (Wave 16) extends
         // the collection to also include router routes via
         // `router_walk::collect_router_route_refs`.
-        let mut references: std::collections::HashMap<
-            String,
-            Vec<crate::error::BlockReferenceSource>,
-        > = std::collections::HashMap::new();
+        let mut references: HashMap<String, Vec<BlockReferenceSource>> = HashMap::new();
 
         for (flow_id, flow) in &self.flows {
             for (step_index, step) in flow.steps.iter().enumerate() {
@@ -236,13 +233,14 @@ impl Wafer {
                     .get(&step.block)
                     .cloned()
                     .unwrap_or_else(|| step.block.clone());
-                references.entry(canonical).or_default().push(
-                    crate::error::BlockReferenceSource::Flow {
+                references
+                    .entry(canonical)
+                    .or_default()
+                    .push(BlockReferenceSource::Flow {
                         flow_id: flow_id.clone(),
                         step_index,
                         step_id: step.id.clone(),
-                    },
-                );
+                    });
             }
         }
         // PR B inserts the router-route collection here:
@@ -250,7 +248,7 @@ impl Wafer {
         //         references.entry(canonical).or_default().push(source);
         //     }
 
-        let mut not_found: Vec<crate::error::BlockReferenceError> = Vec::new();
+        let mut not_found: Vec<BlockReferenceError> = Vec::new();
         for (canonical, sources) in references {
             if self.blocks.contains_key(&canonical) || self.flows.contains_key(&canonical) {
                 continue;
@@ -269,7 +267,7 @@ impl Wafer {
                     continue;
                 }
             }
-            not_found.push(crate::error::BlockReferenceError {
+            not_found.push(BlockReferenceError {
                 name: canonical,
                 sources,
             });
