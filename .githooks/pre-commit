@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+# ── Wasm test fixtures (idempotent; no-op on warm worktrees) ──────────
+./scripts/build-fixtures.sh
+
 # ── Rust: fmt + clippy on staged .rs files ──────────────────────────
 RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
 if [ -n "$RS_FILES" ]; then
