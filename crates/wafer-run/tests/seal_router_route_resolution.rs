@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 use wafer_block::{
-    core_types::{LifecycleEvent, LifecycleType, Message, WaferError},
+    core_types::{LifecycleEvent, Message, WaferError},
     error::BlockReferenceSource,
     streams::{input::InputStream, output::OutputStream},
     Block, BlockInfo,
@@ -225,14 +225,9 @@ async fn seal_router_route_contract_match_with_block_parser() {
         .map(|r| (r.path.clone(), r.block.clone()))
         .collect();
 
-    // wafer-block-router side: parse_routes takes a BlockConfig.
-    // Construct BlockConfig via a fake LifecycleEvent (the only public constructor).
-    let event = LifecycleEvent {
-        event_type: LifecycleType::Init,
-        data: serde_json::to_vec(&cfg).expect("serialize cfg"),
-    };
-    let block_config = wafer_block::BlockConfig::from_event(&event);
-    let router_routes = wafer_block_router::parse_routes(&block_config);
+    // wafer-block-router side: parse_routes now takes &serde_json::Value
+    // directly (migrated in Wave 19 from &BlockConfig).
+    let router_routes = wafer_block_router::parse_routes(&cfg);
     let their_pairs: Vec<(String, String)> = router_routes
         .iter()
         .map(|r| (r.path.clone(), r.block.clone()))
