@@ -40,37 +40,71 @@ pub struct Route {
     /// Path pattern for the route.
     pub path: String,
     /// Normalized action strings (HTTP methods mapped to action names).
+    /// Used by the matcher.
     pub actions: Vec<String>,
+    /// Raw action strings as the operator wrote them in config (no
+    /// HTTP-method-to-action normalization). Used by diagnostic
+    /// renderers like `seal()`-time error messages so the operator sees
+    /// their original vocabulary.
+    pub raw_actions: Vec<String>,
     /// Target block name to dispatch to.
     pub block: String,
 }
 
-/// Parse routes from block config. Public for contract testing by
-/// `wafer-run`'s `router_walk::parse_routes_for_validation`.
-pub fn parse_routes(config: &wafer_block::BlockConfig) -> Vec<Route> {
+/// Parse routes from block config. Accepts the raw JSON config value
+/// (use `BlockConfig::as_value()` to extract from a `BlockConfig`).
+///
+/// Drops route entries with missing or non-string `path` or
+/// `block` fields; each dropped entry produces a `tracing::warn!` with
+/// the reason and the offending entry so operators can find malformed
+/// route definitions in logs.
+pub fn parse_routes(config: &serde_json::Value) -> Vec<Route> {
     config
         .get("routes")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|entry| {
-                    let path = entry.get("path")?.as_str()?.to_string();
-                    let block = entry.get("block")?.as_str()?.to_string();
-                    // Accept "actions" or "methods" — both are normalized
+                    let path = match entry.get("path").and_then(|v| v.as_str()) {
+                        Some(s) => s.to_string(),
+                        None => {
+                            tracing::warn!(
+                                ?entry,
+                                reason = "missing or non-string `path` field",
+                                "skipped malformed route entry"
+                            );
+                            return None;
+                        }
+                    };
+                    let block = match entry.get("block").and_then(|v| v.as_str()) {
+                        Some(s) => s.to_string(),
+                        None => {
+                            tracing::warn!(
+                                ?entry,
+                                reason = "missing or non-string `block` field",
+                                "skipped malformed route entry"
+                            );
+                            return None;
+                        }
+                    };
+                    // Accept "actions" or "methods" — both are normalized.
                     let raw = entry
                         .get("actions")
                         .or_else(|| entry.get("methods"))
                         .and_then(|m| m.as_array());
-                    let actions = raw
+                    let raw_actions: Vec<String> = raw
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|v| v.as_str().map(normalize_action))
+                                .filter_map(|v| v.as_str().map(String::from))
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let actions: Vec<String> =
+                        raw_actions.iter().map(|a| normalize_action(a)).collect();
                     Some(Route {
                         path,
                         actions,
+                        raw_actions,
                         block,
                     })
                 })
@@ -173,6 +207,21 @@ impl Block for RouterBlock {
         })
     }
 
+    fn collect_block_refs(&self, config: &serde_json::Value) -> Vec<BlockConfigRef> {
+        parse_routes(config)
+            .into_iter()
+            .map(|route| BlockConfigRef {
+                target: route.block,
+                location: format!("route {}", route.path),
+                detail: if route.raw_actions.is_empty() {
+                    None
+                } else {
+                    Some(route.raw_actions.join(" "))
+                },
+            })
+            .collect()
+    }
+
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
@@ -181,7 +230,7 @@ impl Block for RouterBlock {
         if event.event_type == LifecycleType::Init && self.routes.get().is_none() {
             let config = wafer_block::BlockConfig::from_event(&event);
 
-            let routes = parse_routes(&config);
+            let routes = parse_routes(config.as_value());
             if routes.is_empty() {
                 tracing::debug!("wafer-run/router initialized with no routes");
             }
@@ -192,3 +241,87 @@ impl Block for RouterBlock {
 }
 
 wafer_block::register_static_block!("wafer-run/router", RouterBlock);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn route_carries_raw_and_normalized_actions() {
+        use serde_json::json;
+        let cfg = json!({
+            "routes": [
+                {"path": "/a", "block": "a-block", "methods": ["GET"]},
+                {"path": "/b", "block": "b-block", "actions": ["retrieve"]},
+                {"path": "/c", "block": "c-block"}
+            ]
+        });
+        let routes = super::parse_routes(&cfg);
+        assert_eq!(routes.len(), 3);
+
+        // Route 0: methods=["GET"] -> raw=["GET"], actions=["retrieve"]
+        assert_eq!(routes[0].raw_actions, vec!["GET".to_string()]);
+        assert_eq!(routes[0].actions, vec!["retrieve".to_string()]);
+
+        // Route 1: actions=["retrieve"] -> raw=["retrieve"], actions=["retrieve"] (already normalized)
+        assert_eq!(routes[1].raw_actions, vec!["retrieve".to_string()]);
+        assert_eq!(routes[1].actions, vec!["retrieve".to_string()]);
+
+        // Route 2: no actions/methods -> both empty
+        assert!(routes[2].raw_actions.is_empty());
+        assert!(routes[2].actions.is_empty());
+    }
+
+    #[test]
+    fn router_block_collect_block_refs_smoke() {
+        use serde_json::json;
+        use wafer_block::Block;
+
+        let block = super::RouterBlock::new();
+        let cfg = json!({
+            "routes": [
+                {"path": "/a", "block": "org/a-block", "methods": ["GET"]},
+                {"path": "/b", "block": "org/b-block", "actions": ["retrieve", "list"]},
+                {"path": "/c", "block": "org/c-block"}
+            ]
+        });
+        let refs = block.collect_block_refs(&cfg);
+        assert_eq!(refs.len(), 3);
+
+        assert_eq!(refs[0].target, "org/a-block");
+        assert_eq!(refs[0].location, "route /a");
+        assert_eq!(refs[0].detail.as_deref(), Some("GET"));
+
+        assert_eq!(refs[1].target, "org/b-block");
+        assert_eq!(refs[1].location, "route /b");
+        assert_eq!(refs[1].detail.as_deref(), Some("retrieve list"));
+
+        assert_eq!(refs[2].target, "org/c-block");
+        assert_eq!(refs[2].location, "route /c");
+        assert!(
+            refs[2].detail.is_none(),
+            "expected None detail when no actions/methods"
+        );
+    }
+
+    #[test]
+    fn parse_routes_drops_malformed_entries() {
+        use serde_json::json;
+        let cfg = json!({
+            "routes": [
+                {"path": "/ok", "block": "block-a"},
+                {"path": 42, "block": "block-b"},                 // non-string path
+                {"block": "block-c"},                              // missing path
+                {"path": "/no-block"},                             // missing block
+                {"path": "/non-string-block", "block": null},     // non-string block
+                {"path": "/ok2", "block": "block-d"}
+            ]
+        });
+        let routes = super::parse_routes(&cfg);
+        assert_eq!(
+            routes.len(),
+            2,
+            "expected exactly 2 surviving routes, got: {routes:?}"
+        );
+        assert_eq!(routes[0].path, "/ok");
+        assert_eq!(routes[1].path, "/ok2");
+    }
+}

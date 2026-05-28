@@ -8,11 +8,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 use wafer_block::{
-    core_types::{LifecycleEvent, LifecycleType, Message, WaferError},
+    core_types::{LifecycleEvent, Message, WaferError},
     error::BlockReferenceSource,
     streams::{input::InputStream, output::OutputStream},
     Block, BlockInfo,
 };
+// Pull in the router crate so its `register_static_block!` entry stays in
+// the linked binary. Without this `use _`, the linker DCEs the crate and
+// the `wafer-run/router` entry never reaches `STATIC_BLOCK_REGISTRATIONS`,
+// leaving these tests with no router registered.
+use wafer_block_router as _;
 use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
 
 // ---------------------------------------------------------------------------
@@ -104,16 +109,16 @@ async fn seal_rejects_router_route_referencing_unregistered_block() {
             assert_eq!(errs[0].name, "example/missing");
             assert_eq!(errs[0].sources.len(), 1);
             match &errs[0].sources[0] {
-                BlockReferenceSource::RouterRoute {
-                    router_block,
-                    path,
-                    actions,
+                BlockReferenceSource::BlockConfig {
+                    from_block,
+                    location,
+                    detail,
                 } => {
-                    assert_eq!(router_block, "wafer-run/router");
-                    assert_eq!(path, "/x");
-                    assert_eq!(actions, &vec!["GET".to_string()]);
+                    assert_eq!(from_block, "wafer-run/router");
+                    assert_eq!(location, "route /x");
+                    assert_eq!(detail.as_deref(), Some("GET"));
                 }
-                other => panic!("expected RouterRoute source, got {other:?}"),
+                other => panic!("expected BlockConfig source, got {other:?}"),
             }
         }
         other => panic!(
@@ -146,10 +151,10 @@ async fn seal_router_route_walks_aliased_router() {
             assert_eq!(errs.len(), 1, "got: {errs:?}");
             assert_eq!(errs[0].name, "example/missing");
             match &errs[0].sources[0] {
-                BlockReferenceSource::RouterRoute { router_block, .. } => {
-                    assert_eq!(router_block, "my-router");
+                BlockReferenceSource::BlockConfig { from_block, .. } => {
+                    assert_eq!(from_block, "my-router");
                 }
-                other => panic!("expected RouterRoute source, got {other:?}"),
+                other => panic!("expected BlockConfig source, got {other:?}"),
             }
         }
         other => panic!(
@@ -196,108 +201,6 @@ async fn seal_router_route_rejects_flow_target() {
 }
 
 #[tokio::test]
-async fn seal_router_route_contract_match_with_block_parser() {
-    // Pins the duplicated `parse_routes_for_validation` shape against
-    // `wafer-block-router::parse_routes`. Action normalization differs
-    // intentionally (we keep raw strings; router normalizes for matching),
-    // so on the happy-path entries we compare (path, block) pairs and
-    // assert action-set length parity (counts unchanged by normalization).
-    //
-    // Adversarial entries (missing `block`, non-string `path`) must be
-    // dropped by both parsers — otherwise either parser tightening or
-    // loosening drifts from the contract.
-    let cfg = json!({
-        "routes": [
-            {"path": "/a", "block": "a-block", "actions": ["retrieve"]},
-            {"path": "/b", "block": "b-block", "methods": ["GET"]},
-            {"path": "/c", "block": "c-block"},
-            // adversarial: missing `block` -> both parsers must skip
-            {"path": "/d", "actions": ["retrieve"]},
-            // adversarial: non-string `path` -> both parsers must skip
-            {"path": 42, "block": "e-block"}
-        ]
-    });
-
-    // wafer-run side: parse_routes_for_validation takes a serde_json::Value
-    let validation_routes = wafer_run::runtime::router_walk::parse_routes_for_validation(&cfg);
-    let our_pairs: Vec<(String, String)> = validation_routes
-        .iter()
-        .map(|r| (r.path.clone(), r.block.clone()))
-        .collect();
-
-    // wafer-block-router side: parse_routes takes a BlockConfig.
-    // Construct BlockConfig via a fake LifecycleEvent (the only public constructor).
-    let event = LifecycleEvent {
-        event_type: LifecycleType::Init,
-        data: serde_json::to_vec(&cfg).expect("serialize cfg"),
-    };
-    let block_config = wafer_block::BlockConfig::from_event(&event);
-    let router_routes = wafer_block_router::parse_routes(&block_config);
-    let their_pairs: Vec<(String, String)> = router_routes
-        .iter()
-        .map(|r| (r.path.clone(), r.block.clone()))
-        .collect();
-
-    assert_eq!(
-        our_pairs, their_pairs,
-        "parse_routes_for_validation drift from wafer-block-router::parse_routes:\n  ours: {our_pairs:?}\n  theirs: {their_pairs:?}"
-    );
-    assert_eq!(
-        our_pairs.len(),
-        3,
-        "expected 3 surviving routes (2 malformed dropped), got: {our_pairs:?}"
-    );
-
-    // Action-set length parity: normalization may change values but
-    // never count. Any future tightening on either side surfaces here.
-    for i in 0..3 {
-        assert_eq!(
-            validation_routes[i].raw_actions.len(),
-            router_routes[i].actions.len(),
-            "action set length differs at route {i}: ours={:?}, theirs={:?}",
-            validation_routes[i].raw_actions,
-            router_routes[i].actions
-        );
-    }
-}
-
-#[tokio::test]
-async fn parse_routes_for_validation_drops_malformed_entries() {
-    // Locks the surviving-entries contract: missing `path`, non-string
-    // `path`, missing `block`, and non-string `block` are all dropped.
-    // The seal-time walker uses a key-tagged variant that additionally
-    // logs `tracing::warn!` for each drop — but operator diagnostics
-    // aren't asserted here (no log capture); this test only fixes the
-    // surviving count so future parser changes can't silently broaden
-    // or narrow the acceptance set.
-    let cfg = json!({
-        "routes": [
-            {"path": "/ok-a", "block": "block-a"},
-            {"path": "/ok-b", "block": "block-b", "methods": ["GET"]},
-            // missing block
-            {"path": "/missing-block"},
-            // missing path
-            {"block": "missing-path-block"},
-            // non-string path
-            {"path": 42, "block": "non-string-path"},
-            // non-string block
-            {"path": "/non-string-block", "block": 99}
-        ]
-    });
-
-    let routes = wafer_run::runtime::router_walk::parse_routes_for_validation(&cfg);
-    assert_eq!(
-        routes.len(),
-        2,
-        "expected 2 surviving entries, got {}: {:?}",
-        routes.len(),
-        routes.iter().map(|r| &r.path).collect::<Vec<_>>()
-    );
-    assert_eq!(routes[0].path, "/ok-a");
-    assert_eq!(routes[1].path, "/ok-b");
-}
-
-#[tokio::test]
 async fn seal_collapses_flow_and_router_refs_to_same_missing_block() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
@@ -333,11 +236,11 @@ async fn seal_collapses_flow_and_router_refs_to_same_missing_block() {
             let has_router = errs[0]
                 .sources
                 .iter()
-                .any(|s| matches!(s, BlockReferenceSource::RouterRoute { .. }));
+                .any(|s| matches!(s, BlockReferenceSource::BlockConfig { .. }));
             assert!(has_flow, "missing Flow source: {:?}", errs[0].sources);
             assert!(
                 has_router,
-                "missing RouterRoute source: {:?}",
+                "missing BlockConfig source: {:?}",
                 errs[0].sources
             );
         }

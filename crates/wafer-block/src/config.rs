@@ -39,6 +39,15 @@ impl BlockConfig {
         self.inner.as_ref().and_then(|c| c.get(key))
     }
 
+    /// Borrow the inner JSON value. Returns a static reference to
+    /// `serde_json::Value::Null` when this config has no payload —
+    /// callers that only need to read fields can treat the result as a
+    /// JSON object root.
+    pub fn as_value(&self) -> &serde_json::Value {
+        static NULL: serde_json::Value = serde_json::Value::Null;
+        self.inner.as_ref().unwrap_or(&NULL)
+    }
+
     /// Parse the standard `block` / `flow` keys into a [`DispatchTarget`].
     pub fn dispatch_target(&self) -> Option<DispatchTarget> {
         DispatchTarget::from_config(self.inner.as_ref())

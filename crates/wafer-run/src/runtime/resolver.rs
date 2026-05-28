@@ -225,8 +225,9 @@ impl Wafer {
         // Collect every reference + its source, then resolve-or-aggregate-fail.
         //
         // PR A lands the flow-step half of the walk. PR B (Wave 16) extends
-        // the collection to also include router routes via
-        // `router_walk::collect_router_route_refs`.
+        // the collection to also include router routes; Wave 19 routes that
+        // half through `Block::collect_block_refs` so every block type can
+        // declare its own config-held references via the trait.
         // BTreeMap (vs HashMap) so iteration over missing references yields
         // canonical-name-sorted order, giving stable `Display` output for
         // `BlocksNotFound` across boots. Matches the deterministic-order
@@ -236,8 +237,30 @@ impl Wafer {
         for (flow_id, flow) in &self.flows {
             collect_flow_step_refs(self, flow_id, &flow.steps, &[], &mut references);
         }
-        for (canonical, source) in super::router_walk::collect_router_route_refs(self) {
-            references.entry(canonical).or_default().push(source);
+        // Walk every block-config entry; ask the registered block what
+        // references its config holds. Default impl on `Block` returns
+        // empty Vec, so only blocks that override (router today; future
+        // composite/middleware blocks) emit anything.
+        for (block_name, config) in &self.block_configs {
+            let canonical_block = self.canonicalize(block_name).to_string();
+            let Some(block) = self.blocks.get(&canonical_block) else {
+                // Block config exists but the block isn't registered yet
+                // (will be downloaded from registry below, or flagged as
+                // not_found). Skip — we can't ask an unregistered block
+                // to walk its own config.
+                continue;
+            };
+            for r in block.collect_block_refs(config) {
+                let canonical = self.canonicalize(&r.target).to_string();
+                references
+                    .entry(canonical)
+                    .or_default()
+                    .push(BlockReferenceSource::BlockConfig {
+                        from_block: block_name.clone(),
+                        location: r.location,
+                        detail: r.detail,
+                    });
+            }
         }
 
         let mut not_found: Vec<BlockReferenceError> = Vec::new();
