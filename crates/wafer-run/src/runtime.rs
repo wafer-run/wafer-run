@@ -21,6 +21,9 @@ pub mod lifecycle;
 pub mod registry;
 /// Block-name resolver: aliases → registered native → URL → registry manifest.
 pub mod resolver;
+/// Walks `wafer-run/router` block configs to collect route→block references for
+/// `seal()`-time validation. Emits `BlockReferenceSource::RouterRoute` tuples.
+pub mod router_walk;
 /// Per-block runner with cancellation, timeout and observability hook wiring.
 pub mod runner;
 pub mod slot;

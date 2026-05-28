@@ -250,10 +250,9 @@ impl Wafer {
                     });
             }
         }
-        // PR B inserts the router-route collection here:
-        //     for (canonical, source) in router_walk::collect_router_route_refs(self) {
-        //         references.entry(canonical).or_default().push(source);
-        //     }
+        for (canonical, source) in super::router_walk::collect_router_route_refs(self) {
+            references.entry(canonical).or_default().push(source);
+        }
 
         let mut not_found: Vec<BlockReferenceError> = Vec::new();
         for (canonical, sources) in references {
