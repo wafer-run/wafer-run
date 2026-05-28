@@ -62,7 +62,7 @@ pub(super) fn collect_router_route_refs(wafer: &Wafer) -> Vec<(String, BlockRefe
         let Some(config) = wafer.block_configs.get(&key) else {
             continue;
         };
-        for route in parse_routes_for_validation(config) {
+        for route in parse_routes_for_validation_with_key(config, &key) {
             let canonical = wafer
                 .aliases
                 .get(&route.block)
@@ -105,33 +105,86 @@ pub struct ValidationRoute {
 ///
 /// `pub` so the contract test in `tests/seal_router_route_resolution.rs`
 /// can compare against the router crate's parser on identical input.
+///
+/// Malformed entries (missing `path`/`block` or non-string values) are
+/// silently dropped, matching the router's runtime parser. For operator
+/// diagnostics, prefer [`parse_routes_for_validation_with_key`] which
+/// emits a `tracing::warn!` per dropped entry tagged with the router
+/// config key.
 pub fn parse_routes_for_validation(config: &serde_json::Value) -> Vec<ValidationRoute> {
-    config
-        .get("routes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| {
-                    let path = entry.get("path")?.as_str()?.to_string();
-                    let block = entry.get("block")?.as_str()?.to_string();
-                    let raw = entry
-                        .get("actions")
-                        .or_else(|| entry.get("methods"))
-                        .and_then(|m| m.as_array());
-                    let raw_actions = raw
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Some(ValidationRoute {
-                        path,
-                        raw_actions,
-                        block,
-                    })
-                })
-                .collect()
+    parse_routes_inner(config)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Same as [`parse_routes_for_validation`] but emits a `tracing::warn!`
+/// for every dropped malformed entry, tagged with the router config
+/// key (canonical or alias) so operators can locate the bad entry in
+/// the config they wrote. seal() still accepts the rejection (matching
+/// the runtime parser's behavior — we don't fail seal() on a malformed
+/// route entry), so the only effect of this path is observability.
+fn parse_routes_for_validation_with_key(
+    config: &serde_json::Value,
+    router_block: &str,
+) -> Vec<ValidationRoute> {
+    parse_routes_inner(config)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(route) => Some(route),
+            Err((reason, raw)) => {
+                tracing::warn!(
+                    router_block = %router_block,
+                    reason = %reason,
+                    entry = %raw,
+                    "skipped malformed route entry during seal validation"
+                );
+                None
+            }
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+/// Per-entry parse result. `Err` carries `(reason, raw_entry_json)` so
+/// the caller can log a useful warning. Splitting this out keeps the
+/// shape contract test (which uses [`parse_routes_for_validation`])
+/// agnostic of the warning channel.
+fn parse_routes_inner(
+    config: &serde_json::Value,
+) -> Vec<Result<ValidationRoute, (&'static str, String)>> {
+    let Some(arr) = config.get("routes").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|entry| {
+            let Some(path_val) = entry.get("path") else {
+                return Err(("missing `path` field", entry.to_string()));
+            };
+            let Some(path) = path_val.as_str() else {
+                return Err(("`path` is not a string", entry.to_string()));
+            };
+            let Some(block_val) = entry.get("block") else {
+                return Err(("missing `block` field", entry.to_string()));
+            };
+            let Some(block) = block_val.as_str() else {
+                return Err(("`block` is not a string", entry.to_string()));
+            };
+            let raw = entry
+                .get("actions")
+                .or_else(|| entry.get("methods"))
+                .and_then(|m| m.as_array());
+            let raw_actions = raw
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(ValidationRoute {
+                path: path.to_string(),
+                raw_actions,
+                block: block.to_string(),
+            })
+        })
+        .collect()
 }

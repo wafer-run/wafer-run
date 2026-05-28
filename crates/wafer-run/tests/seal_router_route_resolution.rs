@@ -291,6 +291,42 @@ async fn seal_router_route_walks_chained_alias() {
 }
 
 #[tokio::test]
+async fn parse_routes_for_validation_drops_malformed_entries() {
+    // Locks the surviving-entries contract: missing `path`, non-string
+    // `path`, missing `block`, and non-string `block` are all dropped.
+    // The seal-time walker uses a key-tagged variant that additionally
+    // logs `tracing::warn!` for each drop — but operator diagnostics
+    // aren't asserted here (no log capture); this test only fixes the
+    // surviving count so future parser changes can't silently broaden
+    // or narrow the acceptance set.
+    let cfg = json!({
+        "routes": [
+            {"path": "/ok-a", "block": "block-a"},
+            {"path": "/ok-b", "block": "block-b", "methods": ["GET"]},
+            // missing block
+            {"path": "/missing-block"},
+            // missing path
+            {"block": "missing-path-block"},
+            // non-string path
+            {"path": 42, "block": "non-string-path"},
+            // non-string block
+            {"path": "/non-string-block", "block": 99}
+        ]
+    });
+
+    let routes = wafer_run::runtime::router_walk::parse_routes_for_validation(&cfg);
+    assert_eq!(
+        routes.len(),
+        2,
+        "expected 2 surviving entries, got {}: {:?}",
+        routes.len(),
+        routes.iter().map(|r| &r.path).collect::<Vec<_>>()
+    );
+    assert_eq!(routes[0].path, "/ok-a");
+    assert_eq!(routes[1].path, "/ok-b");
+}
+
+#[tokio::test]
 async fn seal_collapses_flow_and_router_refs_to_same_missing_block() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
