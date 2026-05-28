@@ -97,14 +97,7 @@ pub enum RuntimeError {
     /// `Wafer::start()` returns this instead of silently dropping the grants.
     /// Remediation: relocate the grants to the block configured via
     /// `Wafer::set_admin_block(...)` or remove them.
-    #[error(
-        "{} typed grant(s) rejected:\n{}",
-        .0.len(),
-        .0.iter()
-            .map(|e| format!("  - block `{}`: {}", e.block, e.reason))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )]
+    #[error("{}", render_boot_error_list("typed grant(s) rejected", .0, render_grant_rejection))]
     GrantsRejected(Vec<GrantValidationError>),
 
     // ── Block resolution (seal-time) ────────────────────────────────────
@@ -117,18 +110,7 @@ pub enum RuntimeError {
     /// `RuntimeError` variant; `BlocksNotFound` is reserved for the
     /// seal-time aggregator and carries source information so
     /// operators can find the link-graph cause inline.
-    #[error(
-        "{} referenced block(s) not found:\n{}",
-        .0.len(),
-        .0.iter()
-            .map(|e| format!(
-                "  - `{}`\n{}",
-                e.name,
-                e.sources.iter().map(render_source).collect::<Vec<_>>().join("\n"),
-            ))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )]
+    #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
 
     // ── Catch-all ───────────────────────────────────────────────────────
@@ -277,6 +259,47 @@ pub struct BlockConfigRef {
     /// Optional operator-facing detail, e.g. `"GET"` or `"GET POST"`.
     /// Provider-controlled.
     pub detail: Option<String>,
+}
+
+/// Render a count-prefix + newline-joined bulleted list of boot-error
+/// entries. Used by aggregated boot-error variants of [`RuntimeError`]
+/// (e.g. [`RuntimeError::BlocksNotFound`], [`RuntimeError::GrantsRejected`])
+/// for their `Display` output.
+///
+/// Output shape: `"{N} {label}:\n{entry_1}\n{entry_2}\n..."` where
+/// each `entry_K` is the result of calling `render_entry` on the
+/// corresponding item.
+fn render_boot_error_list<T>(
+    label: &str,
+    items: &[T],
+    render_entry: impl Fn(&T) -> String,
+) -> String {
+    format!(
+        "{} {}:\n{}",
+        items.len(),
+        label,
+        items
+            .iter()
+            .map(render_entry)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn render_grant_rejection(e: &GrantValidationError) -> String {
+    format!("  - block `{}`: {}", e.block, e.reason)
+}
+
+fn render_block_reference_error(e: &BlockReferenceError) -> String {
+    format!(
+        "  - `{}`\n{}",
+        e.name,
+        e.sources
+            .iter()
+            .map(render_source)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn render_source(src: &BlockReferenceSource) -> String {
@@ -486,5 +509,24 @@ mod tests {
             super::render_source(&no_detail),
             "      \u{2022} from block `my-router` route /x",
         );
+    }
+
+    #[test]
+    fn render_boot_error_list_shape() {
+        let items = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let rendered =
+            super::render_boot_error_list("widget(s) failed", &items, |s| format!("  - {s}"));
+        assert_eq!(
+            rendered,
+            "3 widget(s) failed:\n  - alpha\n  - beta\n  - gamma",
+        );
+    }
+
+    #[test]
+    fn render_boot_error_list_zero_items() {
+        let items: Vec<String> = Vec::new();
+        let rendered =
+            super::render_boot_error_list("nothing happened", &items, |s| format!("- {s}"));
+        assert_eq!(rendered, "0 nothing happened:\n");
     }
 }
