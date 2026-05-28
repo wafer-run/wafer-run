@@ -77,11 +77,7 @@ impl Wafer {
         input: InputStream,
     ) -> OutputStream {
         // Resolve alias
-        let resolved = self
-            .aliases
-            .get(block_name)
-            .map(|s| s.as_str())
-            .unwrap_or(block_name);
+        let resolved = self.canonicalize(block_name);
 
         let block = match self
             .all_blocks

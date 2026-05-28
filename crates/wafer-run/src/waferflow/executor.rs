@@ -119,11 +119,7 @@ pub async fn execute(
         //     resource owner is `{org}/{block}`; passing `step.id` here
         //     would attribute all WRAP calls to the (arbitrary) step name
         //     and cause false denials. ---
-        let block_name = wafer
-            .aliases
-            .get(&step.block)
-            .cloned()
-            .unwrap_or_else(|| step.block.clone());
+        let block_name = wafer.canonicalize(&step.block).to_string();
 
         // --- Build RuntimeContext with step config ---
         let step_config = step
