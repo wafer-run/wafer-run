@@ -67,7 +67,7 @@ pub(super) fn collect_router_route_refs(wafer: &Wafer) -> Vec<(String, BlockRefe
                 .aliases
                 .get(&route.block)
                 .cloned()
-                .unwrap_or(route.block.clone());
+                .unwrap_or_else(|| route.block.clone());
             refs.push((
                 canonical,
                 BlockReferenceSource::RouterRoute {
