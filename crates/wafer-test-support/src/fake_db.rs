@@ -325,7 +325,8 @@ mod tests {
             .build()
             .expect("empty wafer build is infallible");
         w.register_block("test/fake-db", db.clone()).unwrap();
-        w.add_alias("wafer-run/database", "test/fake-db");
+        w.add_alias("wafer-run/database", "test/fake-db")
+            .expect("add_alias");
         let wafer = w.start().await.unwrap();
 
         let mut msg = Message::new("database.list");
