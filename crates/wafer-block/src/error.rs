@@ -510,4 +510,23 @@ mod tests {
             "      \u{2022} from block `my-router` route /x",
         );
     }
+
+    #[test]
+    fn render_boot_error_list_shape() {
+        let items = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let rendered =
+            super::render_boot_error_list("widget(s) failed", &items, |s| format!("  - {s}"));
+        assert_eq!(
+            rendered,
+            "3 widget(s) failed:\n  - alpha\n  - beta\n  - gamma",
+        );
+    }
+
+    #[test]
+    fn render_boot_error_list_zero_items() {
+        let items: Vec<String> = Vec::new();
+        let rendered =
+            super::render_boot_error_list("nothing happened", &items, |s| format!("- {s}"));
+        assert_eq!(rendered, "0 nothing happened:\n");
+    }
 }
