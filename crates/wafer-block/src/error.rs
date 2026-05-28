@@ -268,8 +268,22 @@ fn render_source(src: &BlockReferenceSource) -> String {
             flow_id,
             step_index,
             step_id,
-            parallel_path: _,
-        } => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
+            parallel_path,
+        } => match parallel_path {
+            None => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
+            Some(path) => {
+                let mut s = format!("      \u{2022} flow `{flow_id}`");
+                for (i, &(outer, branch)) in path.iter().enumerate() {
+                    if i == 0 {
+                        s.push_str(&format!(" step {outer} → branch {branch}"));
+                    } else {
+                        s.push_str(&format!(" → step {outer} → branch {branch}"));
+                    }
+                }
+                s.push_str(&format!(" → step {step_index} (`{step_id}`)"));
+                s
+            }
+        },
         BlockReferenceSource::RouterRoute {
             router_block,
             path,
@@ -411,5 +425,30 @@ mod tests {
         );
         assert!(msg.contains("- `org/missing-b`"), "got: {msg}");
         assert!(msg.contains("router `my-router` route /x"), "got: {msg}");
+    }
+
+    #[test]
+    fn render_source_renders_parallel_path_chain() {
+        let src = super::BlockReferenceSource::Flow {
+            flow_id: "my-flow".to_string(),
+            step_index: 4,
+            step_id: "leaf".to_string(),
+            parallel_path: Some(vec![(2, 0), (3, 1)]),
+        };
+        let rendered = super::render_source(&src);
+        assert_eq!(
+            rendered,
+            "      \u{2022} flow `my-flow` step 2 → branch 0 → step 3 → branch 1 → step 4 (`leaf`)",
+        );
+    }
+
+    #[test]
+    fn render_source_renders_top_level_flow_step_unchanged() {
+        let src = super::BlockReferenceSource::flow_step("my-flow", 2, "call-thing");
+        let rendered = super::render_source(&src);
+        assert_eq!(
+            rendered,
+            "      \u{2022} flow `my-flow` step 2 (`call-thing`)",
+        );
     }
 }
