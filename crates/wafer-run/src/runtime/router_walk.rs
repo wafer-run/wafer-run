@@ -42,11 +42,7 @@ pub(super) fn collect_router_route_refs(wafer: &Wafer) -> Vec<(String, BlockRefe
             continue;
         };
         for route in parse_routes_for_validation_with_key(config, &key) {
-            let canonical = wafer
-                .aliases
-                .get(&route.block)
-                .cloned()
-                .unwrap_or_else(|| route.block.clone());
+            let canonical = wafer.canonicalize(&route.block).to_string();
             refs.push((
                 canonical,
                 BlockReferenceSource::RouterRoute {
