@@ -261,10 +261,26 @@ impl Wafer {
                     .map_err(|e| {
                         RuntimeError::Registry(format!("failed to create HTTP client: {e}"))
                     })?;
-                if let Some(block) = self.resolve_remote_block(&client, &canonical).await? {
-                    tracing::info!(block = %canonical, "downloaded remote block");
-                    self.register_remote_block(&canonical, block)?;
-                    continue;
+                match self.resolve_remote_block(&client, &canonical).await {
+                    Ok(Some(block)) => {
+                        tracing::info!(block = %canonical, "downloaded remote block");
+                        self.register_remote_block(&canonical, block)?;
+                        continue;
+                    }
+                    Ok(None) => {
+                        // Fall through to the not_found push below.
+                    }
+                    Err(e) => {
+                        // Don't abort the aggregator on a flaky registry response;
+                        // log + treat the entry as not_found so operators still see
+                        // the full punch list of missing references with their
+                        // original sources.
+                        tracing::warn!(
+                            block = %canonical,
+                            error = %e,
+                            "registry resolution failed during seal; treating as not_found"
+                        );
+                    }
                 }
             }
             not_found.push(BlockReferenceError {
