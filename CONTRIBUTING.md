@@ -37,20 +37,25 @@ cargo build --workspace
 
 This builds everything except `examples/wasmi-block` (which is a standalone workspace — see its README).
 
-### Gotcha — `crates/wafer-run/testdata/echo_block.wasm`
+### Gotcha — wasm test fixtures
 
-This fixture is `.gitignore`d (the `*.wasm` rule) and is NOT tracked. A fresh clone will lack it. `wasmi_block_test.rs` `include_bytes!`s it, so `cargo test -p wafer-run --tests` and `cargo clippy --all-targets` will fail with a missing-file error.
+Three test fixtures are `.gitignore`d (the `*.wasm` rule) and not tracked:
 
-**Two workarounds:**
+- `crates/wafer-run/testdata/echo_block.wasm` — consumed by `wasmi_block_test.rs` via `include_bytes!` (compile-error if missing).
+- `crates/wafer-run/tests/attachment_dispatch/target/wasm32-wasip1/release/attachment_dispatch_guest.wasm` — consumed by `attachment_e2e_wasmi.rs` at runtime.
+- `crates/wafer-run/tests/dispatch_guest/target/wasm32-wasip1/release/dispatch_guest.wasm` — consumed by `dispatch_streaming.rs` at runtime.
 
-1. **Use the CI-mirror test command above** — it runs only `wafer-run`'s `--lib` tests, sidestepping the integration test.
-2. **Generate the fixture** (needed if you're modifying `wafer-run`'s integration tests):
-   ```
-   (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
-   cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
-      crates/wafer-run/testdata/echo_block.wasm
-   ```
-   The pre-commit hook runs `cargo clippy --all-targets --fix`, so without this fixture the hook will fail. Generate it once after cloning and the file persists in your worktree.
+A fresh clone will lack all three; the pre-commit hook will fail clippy without `echo_block.wasm`, and `cargo test --workspace` will fail individual tests without the other two.
+
+**Fix:** run once after cloning:
+
+```
+./scripts/build-fixtures.sh
+```
+
+The pre-commit hook also calls this script, so a fresh worktree's first commit will trigger the build automatically (~30–60s one-time cost; subsequent commits skip in <100ms).
+
+The script is idempotent and safe to re-run.
 
 ## Repo layout
 
