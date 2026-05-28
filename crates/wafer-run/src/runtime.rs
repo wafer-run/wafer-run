@@ -371,6 +371,20 @@ impl Wafer {
         Ok(())
     }
 
+    /// Resolve `name` through the alias map, single-hop. Returns the
+    /// canonical block name (the alias target if `name` is an alias)
+    /// or `name` itself if `name` is not an alias.
+    ///
+    /// Single-hop is sufficient because [`Wafer::add_alias`] rejects
+    /// chained registrations. When the alias semantics change in the
+    /// future (case-folding, version-pinned aliases), this is the
+    /// one site to update — instead of the six lookup sites that
+    /// previously open-coded the same `aliases.get(...).unwrap_or(name)`
+    /// pattern.
+    pub fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+    }
+
     /// Set the admin block ID for WRAP access control.
     /// Must be set before `start()` / `seal()`.
     ///
@@ -1198,6 +1212,25 @@ mod tests {
         assert!(validate_block_name("org/-block").is_err());
         // Uppercase
         assert!(validate_block_name("Org/block").is_err());
+    }
+
+    #[tokio::test]
+    async fn canonicalize_returns_input_for_unaliased_name() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        assert_eq!(wafer.canonicalize("wafer-run/sqlite"), "wafer-run/sqlite");
+    }
+
+    #[tokio::test]
+    async fn canonicalize_returns_target_for_aliased_name() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        wafer
+            .add_alias("db", "wafer-run/database")
+            .expect("add_alias");
+        assert_eq!(wafer.canonicalize("db"), "wafer-run/database");
     }
 
     #[tokio::test]
