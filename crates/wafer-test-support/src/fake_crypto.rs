@@ -245,7 +245,8 @@ mod tests {
             .expect("empty wafer build is infallible");
         w.register_block("test/fake-crypto", crypto.clone())
             .unwrap();
-        w.add_alias("wafer-run/crypto", "test/fake-crypto");
+        w.add_alias("wafer-run/crypto", "test/fake-crypto")
+            .expect("add_alias");
         let wafer = w.start().await.unwrap();
 
         let sign_req = json!({"claims": {"sub": "u1"}});
@@ -288,7 +289,8 @@ mod tests {
             .expect("empty wafer build is infallible");
         w1.register_block("test/fake-crypto", signing.clone())
             .unwrap();
-        w1.add_alias("wafer-run/crypto", "test/fake-crypto");
+        w1.add_alias("wafer-run/crypto", "test/fake-crypto")
+            .expect("add_alias");
         let wafer1 = w1.start().await.unwrap();
         let sign_msg = Message::new("crypto.jwt_sign");
         let sign_out = wafer1
@@ -313,7 +315,8 @@ mod tests {
             .expect("empty wafer build is infallible");
         w2.register_block("test/fake-crypto", verifying.clone())
             .unwrap();
-        w2.add_alias("wafer-run/crypto", "test/fake-crypto");
+        w2.add_alias("wafer-run/crypto", "test/fake-crypto")
+            .expect("add_alias");
         let wafer2 = w2.start().await.unwrap();
         let verify_msg = Message::new("crypto.jwt_verify");
         let verify_out = wafer2

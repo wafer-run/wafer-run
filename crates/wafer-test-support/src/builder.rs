@@ -39,7 +39,9 @@ impl WaferBuilder {
         self.wafer
             .register_block("test/fake-db", db)
             .expect("register fake-db");
-        self.wafer.add_alias("wafer-run/database", "test/fake-db");
+        self.wafer
+            .add_alias("wafer-run/database", "test/fake-db")
+            .expect("add_alias");
         self
     }
 
@@ -48,7 +50,9 @@ impl WaferBuilder {
         self.wafer
             .register_block("test/fake-crypto", crypto)
             .expect("register fake-crypto");
-        self.wafer.add_alias("wafer-run/crypto", "test/fake-crypto");
+        self.wafer
+            .add_alias("wafer-run/crypto", "test/fake-crypto")
+            .expect("add_alias");
         self
     }
 

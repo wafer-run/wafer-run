@@ -115,6 +115,13 @@ impl Drop for CallDepthGuard {
 }
 
 impl RuntimeContext {
+    /// Resolve `name` through the alias map, single-hop. Mirrors
+    /// [`crate::Wafer::canonicalize`]. Single-hop is sufficient because
+    /// [`crate::Wafer::add_alias`] rejects chained registrations.
+    pub(crate) fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+    }
+
     /// Shared dispatch path used by both `call_block` and
     /// `call_block_with_attachments`. Performs the full validation pipeline
     /// (depth, cancellation, requires, WRAP, capabilities, interface action),
@@ -155,11 +162,7 @@ impl RuntimeContext {
         }
 
         // Enforce requires: if the caller declared a requires list, check it
-        let resolved_name = self
-            .aliases
-            .get(block_name)
-            .map(|s| s.as_str())
-            .unwrap_or(block_name);
+        let resolved_name = self.canonicalize(block_name);
         if let Some(ref requires) = self.caller_requires {
             if !requires
                 .iter()
@@ -244,11 +247,7 @@ impl RuntimeContext {
         }
 
         // Look up the block (try aliases then direct name)
-        let resolved_block_name = self
-            .aliases
-            .get(block_name)
-            .map(|s| s.as_str())
-            .unwrap_or(block_name);
+        let resolved_block_name = self.canonicalize(block_name);
         let block = match self
             .all_blocks
             .get(resolved_block_name)

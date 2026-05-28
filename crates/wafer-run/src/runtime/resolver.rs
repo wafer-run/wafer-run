@@ -103,7 +103,7 @@ impl Wafer {
         }
 
         for (target, contrib) in contributions {
-            let resolved_target = self.aliases.get(&target).cloned().unwrap_or(target);
+            let resolved_target = self.canonicalize(&target).to_string();
             let entry = self
                 .block_configs
                 .entry(resolved_target)
@@ -235,11 +235,7 @@ impl Wafer {
 
         for (flow_id, flow) in &self.flows {
             for (step_index, step) in flow.steps.iter().enumerate() {
-                let canonical = self
-                    .aliases
-                    .get(&step.block)
-                    .cloned()
-                    .unwrap_or_else(|| step.block.clone());
+                let canonical = self.canonicalize(&step.block).to_string();
                 references
                     .entry(canonical)
                     .or_default()

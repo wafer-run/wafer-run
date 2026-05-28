@@ -344,9 +344,45 @@ impl Wafer {
     }
 
     /// Register an alias mapping. When `call_block(alias)` is called,
-    /// it resolves to the target block name.
-    pub fn add_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
-        Arc::make_mut(&mut self.aliases).insert(alias.into(), target.into());
+    /// it resolves to the target block name single-hop.
+    ///
+    /// The alias map is constrained to a forest of depth 1 — chained
+    /// aliases are rejected at registration time so lookup is always
+    /// O(1) and the canonical-name resolution rule is the same at
+    /// `seal()` and at runtime. See [`crate::error::AliasError`] for
+    /// rejection reasons.
+    pub fn add_alias(
+        &mut self,
+        alias: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Result<(), crate::error::AliasError> {
+        let alias = alias.into();
+        let target = target.into();
+        if alias == target {
+            return Err(crate::error::AliasError::Cycle { alias });
+        }
+        if self.aliases.contains_key(&target) {
+            return Err(crate::error::AliasError::TargetIsAlias { alias, target });
+        }
+        if self.aliases.values().any(|t| t == &alias) {
+            return Err(crate::error::AliasError::AliasIsExistingTarget { alias });
+        }
+        Arc::make_mut(&mut self.aliases).insert(alias, target);
+        Ok(())
+    }
+
+    /// Resolve `name` through the alias map, single-hop. Returns the
+    /// canonical block name (the alias target if `name` is an alias)
+    /// or `name` itself if `name` is not an alias.
+    ///
+    /// Single-hop is sufficient because [`Wafer::add_alias`] rejects
+    /// chained registrations. When the alias semantics change in the
+    /// future (case-folding, version-pinned aliases), this is the
+    /// one site to update — instead of the six lookup sites that
+    /// previously open-coded the same `aliases.get(...).unwrap_or(name)`
+    /// pattern.
+    pub fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
     }
 
     /// Set the admin block ID for WRAP access control.
@@ -849,8 +885,8 @@ impl wafer_block::registry::BlockRegistry for Wafer {
         self.register_block_inner(name, block)
     }
 
-    fn add_alias(&mut self, alias: &str, target: &str) {
-        Arc::make_mut(&mut self.aliases).insert(alias.to_string(), target.to_string());
+    fn add_alias(&mut self, alias: &str, target: &str) -> Result<(), crate::error::AliasError> {
+        Wafer::add_alias(self, alias, target)
     }
 
     fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
@@ -1176,5 +1212,68 @@ mod tests {
         assert!(validate_block_name("org/-block").is_err());
         // Uppercase
         assert!(validate_block_name("Org/block").is_err());
+    }
+
+    #[tokio::test]
+    async fn canonicalize_returns_input_for_unaliased_name() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        assert_eq!(wafer.canonicalize("wafer-run/sqlite"), "wafer-run/sqlite");
+    }
+
+    #[tokio::test]
+    async fn canonicalize_returns_target_for_aliased_name() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        wafer
+            .add_alias("db", "wafer-run/database")
+            .expect("add_alias");
+        assert_eq!(wafer.canonicalize("db"), "wafer-run/database");
+    }
+
+    #[tokio::test]
+    async fn add_alias_rejects_cycle_to_self() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        match wafer.add_alias("x", "x") {
+            Err(crate::error::AliasError::Cycle { alias }) => assert_eq!(alias, "x"),
+            other => panic!("expected Cycle error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_alias_rejects_target_that_is_an_existing_alias_key() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        wafer
+            .add_alias("intermediate", "wafer-run/router")
+            .expect("first registration succeeds");
+        match wafer.add_alias("my-router", "intermediate") {
+            Err(crate::error::AliasError::TargetIsAlias { alias, target }) => {
+                assert_eq!(alias, "my-router");
+                assert_eq!(target, "intermediate");
+            }
+            other => panic!("expected TargetIsAlias error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_alias_rejects_alias_that_is_an_existing_target() {
+        let cfg_src: std::sync::Arc<dyn crate::ConfigSource> =
+            std::sync::Arc::new(crate::StaticConfigSource::default());
+        let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+        wafer
+            .add_alias("my-router", "intermediate")
+            .expect("first registration succeeds");
+        match wafer.add_alias("intermediate", "wafer-run/router") {
+            Err(crate::error::AliasError::AliasIsExistingTarget { alias }) => {
+                assert_eq!(alias, "intermediate");
+            }
+            other => panic!("expected AliasIsExistingTarget error, got {other:?}"),
+        }
     }
 }

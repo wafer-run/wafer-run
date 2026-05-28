@@ -151,6 +151,37 @@ pub struct GrantValidationError {
     pub reason: String,
 }
 
+/// Rejection reasons surfaced by [`crate::registry::BlockRegistry::add_alias`]
+/// when registering an alias would violate the depth-1 invariant on the
+/// alias map.
+#[derive(Debug, thiserror::Error)]
+pub enum AliasError {
+    /// `alias == target` — self-loop rejected.
+    #[error("alias `{alias}` cannot target itself")]
+    Cycle {
+        /// The alias name that was registered against itself.
+        alias: String,
+    },
+    /// `target` is already a key in the alias map; registering this would
+    /// chain `alias → target → existing_target`.
+    #[error("alias `{alias}` cannot target `{target}` because `{target}` is itself an alias")]
+    TargetIsAlias {
+        /// The alias name that was attempted to be registered.
+        alias: String,
+        /// The target name that is already an alias key.
+        target: String,
+    },
+    /// `alias` is already the target of some other alias; registering this
+    /// would chain `other_alias → alias → target`.
+    #[error(
+        "alias `{alias}` cannot be registered because it is already the target of another alias"
+    )]
+    AliasIsExistingTarget {
+        /// The alias name whose registration was rejected.
+        alias: String,
+    },
+}
+
 /// Where a missing block was referenced from. One source per entry on
 /// [`BlockReferenceError::sources`]; the same missing block name can have
 /// multiple sources (e.g. both a flow step and a router route).
@@ -287,6 +318,30 @@ mod tests {
         assert!(display.contains("example/foo"), "display: {display}");
         assert!(display.contains("typed Storage"), "display: {display}");
         assert!(display.contains("typed Network"), "display: {display}");
+    }
+
+    #[test]
+    fn alias_error_display_messages() {
+        let cycle = super::AliasError::Cycle {
+            alias: "x".to_string(),
+        };
+        let target_is_alias = super::AliasError::TargetIsAlias {
+            alias: "a".to_string(),
+            target: "b".to_string(),
+        };
+        let alias_is_existing_target = super::AliasError::AliasIsExistingTarget {
+            alias: "y".to_string(),
+        };
+
+        assert_eq!(cycle.to_string(), "alias `x` cannot target itself");
+        assert_eq!(
+            target_is_alias.to_string(),
+            "alias `a` cannot target `b` because `b` is itself an alias",
+        );
+        assert_eq!(
+            alias_is_existing_target.to_string(),
+            "alias `y` cannot be registered because it is already the target of another alias",
+        );
     }
 
     #[test]
