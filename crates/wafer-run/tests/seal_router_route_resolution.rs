@@ -158,11 +158,9 @@ async fn seal_router_route_walks_aliased_router() {
 }
 
 #[tokio::test]
-async fn seal_router_route_accepts_flow_target() {
+async fn seal_router_route_rejects_flow_target() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
-    // `wafer-run/router` is already registered via linkme.
-    // The route targets a flow — seal() must accept flows as valid targets.
     wafer.add_flow(flow_with_steps(
         "my-flow",
         vec![step("only", "example/present")],
@@ -179,12 +177,20 @@ async fn seal_router_route_accepts_flow_target() {
         }),
     );
 
-    let result = wafer.seal().await;
-    assert!(
-        result.is_ok(),
-        "seal() should accept router routes targeting flows, got Err: {:?}",
-        result.err()
-    );
+    // `Context::call_block` (context.rs:251) dispatches via `all_blocks`
+    // (blocks + aliases), which does not contain flows — so routing to a
+    // flow id would 404 at runtime. seal() must catch this up front, same
+    // invariant as the flow-step walk.
+    match wafer.seal().await {
+        Err(RuntimeError::BlocksNotFound(errs)) => {
+            assert_eq!(errs.len(), 1, "expected single missing entry: {errs:?}");
+            assert_eq!(errs[0].name, "my-flow");
+        }
+        other => panic!(
+            "expected Err(BlocksNotFound) for flow-targeted route, got {:?}",
+            other.as_ref().err()
+        ),
+    }
 }
 
 #[tokio::test]
