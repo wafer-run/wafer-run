@@ -54,7 +54,7 @@ pub struct Route {
 /// Parse routes from block config. Accepts the raw JSON config value
 /// (use `BlockConfig::as_value()` to extract from a `BlockConfig`).
 ///
-/// Silently drops route entries with missing or non-string `path` or
+/// Drops route entries with missing or non-string `path` or
 /// `block` fields; each dropped entry produces a `tracing::warn!` with
 /// the reason and the offending entry so operators can find malformed
 /// route definitions in logs.
