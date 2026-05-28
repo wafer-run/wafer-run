@@ -195,10 +195,18 @@ pub enum BlockReferenceSource {
     Flow {
         /// Flow id (`flow.id`) that contains the step.
         flow_id: String,
-        /// Zero-based index of the step in `flow.steps`.
+        /// Zero-based index of the step within the innermost containing
+        /// `Vec<Step>` — either `flow.steps` (if `parallel_path` is
+        /// `None`) or the leaf `ParallelBranch.steps` reached by
+        /// following `parallel_path` from the flow root.
         step_index: usize,
         /// The step's `id` field (mandatory on `wafer_flow::Step`).
         step_id: String,
+        /// Path through nested `step.parallel[].steps[]` indirection.
+        /// `None` for top-level flow steps. `Some([(outer, branch), …])`
+        /// for nested steps; each pair is `(outer_step_index,
+        /// branch_index)` from outermost to innermost.
+        parallel_path: Option<Vec<(usize, usize)>>,
     },
     /// Block was referenced from a `wafer-run/router` route entry.
     ///
@@ -223,6 +231,25 @@ pub enum BlockReferenceSource {
     },
 }
 
+impl BlockReferenceSource {
+    /// Constructor for a top-level flow-step reference. Equivalent to
+    /// `BlockReferenceSource::Flow { ..., parallel_path: None }` but
+    /// less verbose at call sites that don't need parallel-branch
+    /// context.
+    pub fn flow_step(
+        flow_id: impl Into<String>,
+        step_index: usize,
+        step_id: impl Into<String>,
+    ) -> Self {
+        BlockReferenceSource::Flow {
+            flow_id: flow_id.into(),
+            step_index,
+            step_id: step_id.into(),
+            parallel_path: None,
+        }
+    }
+}
+
 /// One missing-block entry in [`RuntimeError::BlocksNotFound`].
 /// Aggregated by `Wafer::seal()` so a single error lists every missing
 /// reference.
@@ -241,6 +268,7 @@ fn render_source(src: &BlockReferenceSource) -> String {
             flow_id,
             step_index,
             step_id,
+            parallel_path: _,
         } => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
         BlockReferenceSource::RouterRoute {
             router_block,
@@ -350,11 +378,7 @@ mod tests {
             BlockReferenceError {
                 name: "org/missing-a".to_string(),
                 sources: vec![
-                    BlockReferenceSource::Flow {
-                        flow_id: "my-flow".to_string(),
-                        step_index: 2,
-                        step_id: "call-thing".to_string(),
-                    },
+                    BlockReferenceSource::flow_step("my-flow", 2, "call-thing"),
                     BlockReferenceSource::RouterRoute {
                         router_block: "wafer-run/router".to_string(),
                         path: "/users/{id}".to_string(),
