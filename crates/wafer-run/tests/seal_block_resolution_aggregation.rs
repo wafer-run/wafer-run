@@ -77,6 +77,21 @@ fn step(id: &str, block: &str) -> wafer_flow::Step {
     }
 }
 
+fn step_with_parallel(
+    id: &str,
+    block: &str,
+    branches: Vec<Vec<wafer_flow::Step>>,
+) -> wafer_flow::Step {
+    let mut s = step(id, block);
+    s.parallel = Some(
+        branches
+            .into_iter()
+            .map(|steps| wafer_flow::types::ParallelBranch { steps })
+            .collect(),
+    );
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -186,4 +201,105 @@ async fn seal_succeeds_when_all_flow_block_refs_resolve() {
         "seal() should succeed when all flow steps reference registered blocks, got Err: {:?}",
         result.err()
     );
+}
+
+#[tokio::test]
+async fn seal_aggregates_block_refs_inside_parallel_branches() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+
+    // Outer step is fine (block registered). Inner branch step references
+    // a missing block — must surface in BlocksNotFound with parallel_path.
+    wafer
+        .register_block("example/outer", Arc::new(NoopBlock("example/outer")))
+        .expect("register_block outer");
+
+    let outer = step_with_parallel(
+        "fanout",
+        "example/outer",
+        vec![vec![step("inner-leaf", "example/missing-from-branch")]],
+    );
+    wafer.add_flow(flow_with_steps("my-flow", vec![outer]));
+
+    match wafer.seal().await {
+        Err(RuntimeError::BlocksNotFound(errs)) => {
+            assert_eq!(errs.len(), 1, "expected single missing entry: {errs:?}");
+            assert_eq!(errs[0].name, "example/missing-from-branch");
+            assert_eq!(errs[0].sources.len(), 1);
+            match &errs[0].sources[0] {
+                BlockReferenceSource::Flow {
+                    flow_id,
+                    step_index,
+                    step_id,
+                    parallel_path,
+                } => {
+                    assert_eq!(flow_id, "my-flow");
+                    assert_eq!(*step_index, 0, "inner step's local index is 0");
+                    assert_eq!(step_id, "inner-leaf");
+                    assert_eq!(
+                        parallel_path.as_deref(),
+                        Some(&[(0usize, 0usize)][..]),
+                        "expected parallel_path [(outer_step_index=0, branch_index=0)]",
+                    );
+                }
+                other => panic!("expected Flow source, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "expected Err(BlocksNotFound), got {:?}",
+            other.as_ref().err(),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn seal_aggregates_block_refs_at_depth_two() {
+    // Outer step has parallel branches. One branch contains a step
+    // whose own parallel branches contain a step referencing a missing
+    // block. Verify parallel_path length == 2.
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+
+    wafer
+        .register_block("example/outer", Arc::new(NoopBlock("example/outer")))
+        .expect("register_block outer");
+    wafer
+        .register_block("example/middle", Arc::new(NoopBlock("example/middle")))
+        .expect("register_block middle");
+
+    let inner_leaf = step("deepest", "example/missing-at-depth-2");
+    let middle = step_with_parallel(
+        "middle-with-parallel",
+        "example/middle",
+        vec![vec![inner_leaf]],
+    );
+    let outer = step_with_parallel("outer-fanout", "example/outer", vec![vec![middle]]);
+    wafer.add_flow(flow_with_steps("my-flow", vec![outer]));
+
+    match wafer.seal().await {
+        Err(RuntimeError::BlocksNotFound(errs)) => {
+            assert_eq!(errs.len(), 1, "expected single missing entry: {errs:?}");
+            assert_eq!(errs[0].name, "example/missing-at-depth-2");
+            match &errs[0].sources[0] {
+                BlockReferenceSource::Flow {
+                    parallel_path,
+                    step_id,
+                    ..
+                } => {
+                    assert_eq!(step_id, "deepest");
+                    let path = parallel_path
+                        .as_deref()
+                        .expect("parallel_path is Some at depth 2");
+                    assert_eq!(path.len(), 2, "expected depth-2 nesting, got {path:?}");
+                    assert_eq!(path[0], (0, 0), "outermost pair");
+                    assert_eq!(path[1], (0, 0), "inner pair (middle step's first branch)");
+                }
+                other => panic!("expected Flow source, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "expected Err(BlocksNotFound), got {:?}",
+            other.as_ref().err(),
+        ),
+    }
 }

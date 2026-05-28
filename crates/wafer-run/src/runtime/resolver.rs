@@ -234,17 +234,7 @@ impl Wafer {
         let mut references: BTreeMap<String, Vec<BlockReferenceSource>> = BTreeMap::new();
 
         for (flow_id, flow) in &self.flows {
-            for (step_index, step) in flow.steps.iter().enumerate() {
-                let canonical = self.canonicalize(&step.block).to_string();
-                references
-                    .entry(canonical)
-                    .or_default()
-                    .push(BlockReferenceSource::Flow {
-                        flow_id: flow_id.clone(),
-                        step_index,
-                        step_id: step.id.clone(),
-                    });
-            }
+            collect_flow_step_refs(self, flow_id, &flow.steps, &[], &mut references);
         }
         for (canonical, source) in super::router_walk::collect_router_route_refs(self) {
             references.entry(canonical).or_default().push(source);
@@ -723,6 +713,45 @@ fn log_widening_attempts(
                         "config widened capability beyond declared — narrower declaration wins"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Walks a slice of `wafer_flow::Step`s and emits one entry per
+/// (canonical_block_name, BlockReferenceSource::Flow) into
+/// `references`. Recurses through `step.parallel[].steps[]` with
+/// `parallel_path` accumulating (outer_step_index, branch_index)
+/// pairs along the way.
+///
+/// `seal()` calls this once per flow with `parallel_path = &[]`.
+fn collect_flow_step_refs(
+    wafer: &Wafer,
+    flow_id: &str,
+    steps: &[wafer_flow::Step],
+    parallel_path: &[(usize, usize)],
+    references: &mut std::collections::BTreeMap<String, Vec<BlockReferenceSource>>,
+) {
+    for (step_index, step) in steps.iter().enumerate() {
+        let canonical = wafer.canonicalize(&step.block).to_string();
+        references
+            .entry(canonical)
+            .or_default()
+            .push(BlockReferenceSource::Flow {
+                flow_id: flow_id.to_string(),
+                step_index,
+                step_id: step.id.clone(),
+                parallel_path: if parallel_path.is_empty() {
+                    None
+                } else {
+                    Some(parallel_path.to_vec())
+                },
+            });
+        if let Some(branches) = &step.parallel {
+            for (branch_index, branch) in branches.iter().enumerate() {
+                let mut nested = parallel_path.to_vec();
+                nested.push((step_index, branch_index));
+                collect_flow_step_refs(wafer, flow_id, &branch.steps, &nested, references);
             }
         }
     }
