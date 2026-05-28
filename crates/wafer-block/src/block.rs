@@ -38,6 +38,23 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
         Ok(())
     }
 
+    /// Walk this block's config and emit references to other blocks the
+    /// config declares. Called once per `block_configs` entry at
+    /// `seal()` time so the runtime can detect unresolvable references
+    /// before the first request.
+    ///
+    /// Default returns no references. Blocks whose config holds block
+    /// names (router routes, middleware chains, composite expanders)
+    /// should override.
+    ///
+    /// The `config` parameter is the raw JSON the operator wrote — use
+    /// `config.get("field")` patterns to navigate it. The runtime
+    /// passes a non-null `Value` for every registered block-config
+    /// entry.
+    fn collect_block_refs(&self, _config: &serde_json::Value) -> Vec<crate::error::BlockConfigRef> {
+        Vec::new()
+    }
+
     /// Called after the runtime starts with a handle for running flows/blocks.
     /// The handle is type-erased — downcast to `wafer_run::RuntimeHandle` if needed.
     /// Native-only: wasm32 blocks do not receive bind calls.

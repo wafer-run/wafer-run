@@ -229,6 +229,27 @@ pub enum BlockReferenceSource {
         /// Empty when no actions/methods were configured.
         actions: Vec<String>,
     },
+    /// Block was referenced from another block's config. Generic shape
+    /// emitted by [`crate::Block::collect_block_refs`]; the originating
+    /// block controls the operator-facing `location` and `detail`
+    /// strings.
+    ///
+    /// Subsumes the older `RouterRoute` variant — `RouterRoute` is
+    /// retained transiently during the Wave 19 migration and will be
+    /// removed once the router walk migrates to the trait.
+    BlockConfig {
+        /// Block-config key whose registered block emitted this
+        /// reference. Stays as the operator wrote it (alias-preserving)
+        /// so the error message points at the config entry they edited.
+        from_block: String,
+        /// Operator-facing locator inside the config (e.g.
+        /// `"route /api/v1/users"`). From the originating block's
+        /// `BlockConfigRef::location`.
+        location: String,
+        /// Optional operator-facing detail (e.g. `"GET"`). From
+        /// `BlockConfigRef::detail`.
+        detail: Option<String>,
+    },
 }
 
 impl BlockReferenceSource {
@@ -260,6 +281,27 @@ pub struct BlockReferenceError {
     pub name: String,
     /// Every place that referenced this missing block.
     pub sources: Vec<BlockReferenceSource>,
+}
+
+/// One block reference declared by a block's own config. Returned by
+/// [`crate::Block::collect_block_refs`] for each reference the
+/// implementing block finds.
+///
+/// `seal()` wraps each entry in a [`BlockReferenceSource::BlockConfig`]
+/// with the originating block-config key as `from_block`.
+#[derive(Debug, Clone)]
+pub struct BlockConfigRef {
+    /// Canonical name of the referenced block (pre-alias-resolution).
+    /// `seal()` canonicalizes this through `Wafer::canonicalize` before
+    /// using it as the not-found key.
+    pub target: String,
+    /// Operator-facing locator inside the config, e.g.
+    /// `"route /api/v1/users"`. Provider-controlled string — the
+    /// implementing block chooses the phrasing.
+    pub location: String,
+    /// Optional operator-facing detail, e.g. `"GET"` or `"GET POST"`.
+    /// Provider-controlled.
+    pub detail: Option<String>,
 }
 
 fn render_source(src: &BlockReferenceSource) -> String {
@@ -299,6 +341,14 @@ fn render_source(src: &BlockReferenceSource) -> String {
             "      \u{2022} router `{router_block}` route {} {path}",
             actions.join(" ")
         ),
+        BlockReferenceSource::BlockConfig {
+            from_block,
+            location,
+            detail,
+        } => match detail {
+            None => format!("      \u{2022} from block `{from_block}` {location}"),
+            Some(d) => format!("      \u{2022} from block `{from_block}` {location} {d}"),
+        },
     }
 }
 
@@ -449,6 +499,29 @@ mod tests {
         assert_eq!(
             rendered,
             "      \u{2022} flow `my-flow` step 2 (`call-thing`)",
+        );
+    }
+
+    #[test]
+    fn render_source_renders_block_config_variant() {
+        let with_detail = super::BlockReferenceSource::BlockConfig {
+            from_block: "wafer-run/router".to_string(),
+            location: "route /api/v1/users".to_string(),
+            detail: Some("GET".to_string()),
+        };
+        assert_eq!(
+            super::render_source(&with_detail),
+            "      \u{2022} from block `wafer-run/router` route /api/v1/users GET",
+        );
+
+        let no_detail = super::BlockReferenceSource::BlockConfig {
+            from_block: "my-router".to_string(),
+            location: "route /x".to_string(),
+            detail: None,
+        };
+        assert_eq!(
+            super::render_source(&no_detail),
+            "      \u{2022} from block `my-router` route /x",
         );
     }
 }
