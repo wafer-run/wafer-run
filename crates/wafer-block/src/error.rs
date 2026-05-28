@@ -279,6 +279,50 @@ pub struct BlockConfigRef {
     pub detail: Option<String>,
 }
 
+/// Render a count-prefix + newline-joined bulleted list of boot-error
+/// entries. Used by aggregated boot-error variants of [`RuntimeError`]
+/// (e.g. [`RuntimeError::BlocksNotFound`], [`RuntimeError::GrantsRejected`])
+/// for their `Display` output.
+///
+/// Output shape: `"{N} {label}:\n{entry_1}\n{entry_2}\n..."` where
+/// each `entry_K` is the result of calling `render_entry` on the
+/// corresponding item.
+#[allow(dead_code)]
+fn render_boot_error_list<T>(
+    label: &str,
+    items: &[T],
+    render_entry: impl Fn(&T) -> String,
+) -> String {
+    format!(
+        "{} {}:\n{}",
+        items.len(),
+        label,
+        items
+            .iter()
+            .map(render_entry)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+#[allow(dead_code)]
+fn render_grant_rejection(e: &GrantValidationError) -> String {
+    format!("  - block `{}`: {}", e.block, e.reason)
+}
+
+#[allow(dead_code)]
+fn render_block_reference_error(e: &BlockReferenceError) -> String {
+    format!(
+        "  - `{}`\n{}",
+        e.name,
+        e.sources
+            .iter()
+            .map(render_source)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 fn render_source(src: &BlockReferenceSource) -> String {
     match src {
         BlockReferenceSource::Flow {
