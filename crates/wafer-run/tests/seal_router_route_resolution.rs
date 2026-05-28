@@ -229,6 +229,43 @@ async fn seal_router_route_contract_match_with_block_parser() {
 }
 
 #[tokio::test]
+async fn seal_router_route_walks_chained_alias() {
+    // Chained alias: my-router -> intermediate -> wafer-run/router.
+    // The router config lives under the outermost alias key. seal() must
+    // follow the chain (cycle-guarded) when locating router-config keys.
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer.add_alias("intermediate", "wafer-run/router");
+    wafer.add_alias("my-router", "intermediate");
+    wafer.add_block_config(
+        "my-router",
+        json!({
+            "routes": [
+                {"path": "/x", "block": "example/missing", "methods": ["GET"]}
+            ]
+        }),
+    );
+
+    let result = wafer.seal().await;
+    match result {
+        Err(RuntimeError::BlocksNotFound(errs)) => {
+            assert_eq!(errs.len(), 1, "got: {errs:?}");
+            assert_eq!(errs[0].name, "example/missing");
+            match &errs[0].sources[0] {
+                BlockReferenceSource::RouterRoute { router_block, .. } => {
+                    assert_eq!(router_block, "my-router");
+                }
+                other => panic!("expected RouterRoute source, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "expected Err(RuntimeError::BlocksNotFound), got {:?}",
+            other.as_ref().err()
+        ),
+    }
+}
+
+#[tokio::test]
 async fn seal_collapses_flow_and_router_refs_to_same_missing_block() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");

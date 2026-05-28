@@ -17,16 +17,40 @@ use crate::error::BlockReferenceSource;
 
 const ROUTER_BLOCK: &str = "wafer-run/router";
 
+/// Returns true if `name` resolves (transitively, through aliases) to
+/// [`ROUTER_BLOCK`]. Bounded to 32 hops so a cyclic alias graph still
+/// terminates with `false` instead of looping.
+fn resolves_to_router(wafer: &Wafer, name: &str) -> bool {
+    if name == ROUTER_BLOCK {
+        return true;
+    }
+    let mut current = name;
+    for _ in 0..32 {
+        let Some(next) = wafer.aliases.get(current) else {
+            return false;
+        };
+        if next == ROUTER_BLOCK {
+            return true;
+        }
+        current = next.as_str();
+    }
+    false // alias chain too deep or cyclic
+}
+
 /// Walks every `wafer-run/router` config (canonical or aliased) and
 /// emits one `(canonical_block_name, RouterRoute source)` tuple per
 /// route entry. The `seal()` aggregator merges these into its
 /// references map alongside flow-step references.
 pub(super) fn collect_router_route_refs(wafer: &Wafer) -> Vec<(String, BlockReferenceSource)> {
     // 1. Identify every config key pointing at a wafer-run/router instance:
-    //    the canonical name itself, plus any alias that resolves to it.
+    //    the canonical name itself, plus any alias that transitively resolves
+    //    to it (alias-of-alias chains). Cycle-guarded.
     let mut router_keys: Vec<String> = vec![ROUTER_BLOCK.to_string()];
-    for (alias, target) in wafer.aliases.iter() {
-        if target == ROUTER_BLOCK {
+    for alias in wafer.aliases.keys() {
+        if alias == ROUTER_BLOCK {
+            continue; // canonical already pushed
+        }
+        if resolves_to_router(wafer, alias) {
             router_keys.push(alias.clone());
         }
     }
