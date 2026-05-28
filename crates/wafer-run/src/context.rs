@@ -543,7 +543,17 @@ impl wafer_block::introspection::FlowIntrospection for RuntimeContext {
         self.snapshot
             .flow_infos
             .iter()
-            .filter_map(|info| serde_json::to_value(info).ok())
+            .filter_map(|info| match serde_json::to_value(info) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        flow_id = %info.id,
+                        "flow info serialization failed; dropped from introspection"
+                    );
+                    None
+                }
+            })
             .collect()
     }
 
@@ -551,7 +561,17 @@ impl wafer_block::introspection::FlowIntrospection for RuntimeContext {
         self.snapshot
             .flow_defs
             .iter()
-            .filter_map(|def| serde_json::to_value(def).ok())
+            .filter_map(|def| match serde_json::to_value(def) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        flow_id = %def.id,
+                        "flow def serialization failed; dropped from introspection"
+                    );
+                    None
+                }
+            })
             .collect()
     }
 }
