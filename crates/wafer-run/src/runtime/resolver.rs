@@ -243,6 +243,7 @@ impl Wafer {
                         flow_id: flow_id.clone(),
                         step_index,
                         step_id: step.id.clone(),
+                        parallel_path: None,
                     });
             }
         }
