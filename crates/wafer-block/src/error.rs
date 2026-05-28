@@ -97,14 +97,7 @@ pub enum RuntimeError {
     /// `Wafer::start()` returns this instead of silently dropping the grants.
     /// Remediation: relocate the grants to the block configured via
     /// `Wafer::set_admin_block(...)` or remove them.
-    #[error(
-        "{} typed grant(s) rejected:\n{}",
-        .0.len(),
-        .0.iter()
-            .map(|e| format!("  - block `{}`: {}", e.block, e.reason))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )]
+    #[error("{}", render_boot_error_list("typed grant(s) rejected", .0, render_grant_rejection))]
     GrantsRejected(Vec<GrantValidationError>),
 
     // ── Block resolution (seal-time) ────────────────────────────────────
@@ -117,18 +110,7 @@ pub enum RuntimeError {
     /// `RuntimeError` variant; `BlocksNotFound` is reserved for the
     /// seal-time aggregator and carries source information so
     /// operators can find the link-graph cause inline.
-    #[error(
-        "{} referenced block(s) not found:\n{}",
-        .0.len(),
-        .0.iter()
-            .map(|e| format!(
-                "  - `{}`\n{}",
-                e.name,
-                e.sources.iter().map(render_source).collect::<Vec<_>>().join("\n"),
-            ))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )]
+    #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
 
     // ── Catch-all ───────────────────────────────────────────────────────
@@ -287,7 +269,6 @@ pub struct BlockConfigRef {
 /// Output shape: `"{N} {label}:\n{entry_1}\n{entry_2}\n..."` where
 /// each `entry_K` is the result of calling `render_entry` on the
 /// corresponding item.
-#[allow(dead_code)]
 fn render_boot_error_list<T>(
     label: &str,
     items: &[T],
@@ -305,12 +286,10 @@ fn render_boot_error_list<T>(
     )
 }
 
-#[allow(dead_code)]
 fn render_grant_rejection(e: &GrantValidationError) -> String {
     format!("  - block `{}`: {}", e.block, e.reason)
 }
 
-#[allow(dead_code)]
 fn render_block_reference_error(e: &BlockReferenceError) -> String {
     format!(
         "  - `{}`\n{}",
