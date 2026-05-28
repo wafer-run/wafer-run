@@ -7,13 +7,6 @@
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     // ── Block registration ──────────────────────────────────────────────
-    /// A referenced block was not found in the registry.
-    #[error("block '{name}' not found")]
-    BlockNotFound {
-        /// Block name that was looked up but not registered.
-        name: String,
-    },
-
     /// A block with the same name is already registered.
     #[error("block '{name}' already registered")]
     DuplicateBlock {
@@ -119,10 +112,10 @@ pub enum RuntimeError {
     /// `seal()`. Aggregated across all flow steps and router routes;
     /// the embedded `Vec` always has at least one entry.
     ///
-    /// Distinct from [`BlockNotFound`]:
-    /// [`BlockNotFound`] continues to be used by single-block runtime
-    /// lookups (lazy init, flow runner); [`BlocksNotFound`] is reserved
-    /// for the seal-time aggregator and carries source information so
+    /// Single-block runtime lookups (lazy init, flow runner) surface
+    /// missing blocks as `WaferError::NOT_FOUND` rather than a typed
+    /// `RuntimeError` variant; `BlocksNotFound` is reserved for the
+    /// seal-time aggregator and carries source information so
     /// operators can find the link-graph cause inline.
     #[error(
         "{} referenced block(s) not found:\n{}",

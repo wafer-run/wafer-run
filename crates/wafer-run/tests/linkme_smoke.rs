@@ -4,7 +4,7 @@
 //! the inventory `.init_array` entries as dead code when no reachable path
 //! read the registered statics. Verified with `nm` on a release solobase
 //! binary — zero of the 7 expected `wafer-run/*` registrations landed;
-//! runtime panicked with `BlockNotFound { name: "wafer-run/router" }`.
+//! runtime panicked with a NOT_FOUND on `wafer-run/router`.
 //!
 //! `linkme` uses a custom ELF section (`#[link_section]`). The linker merges
 //! sections by name regardless of reachability analysis, so LTO cannot
