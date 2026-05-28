@@ -207,6 +207,21 @@ impl Block for RouterBlock {
         })
     }
 
+    fn collect_block_refs(&self, config: &serde_json::Value) -> Vec<BlockConfigRef> {
+        parse_routes(config)
+            .into_iter()
+            .map(|route| BlockConfigRef {
+                target: route.block,
+                location: format!("route {}", route.path),
+                detail: if route.raw_actions.is_empty() {
+                    None
+                } else {
+                    Some(route.raw_actions.join(" "))
+                },
+            })
+            .collect()
+    }
+
     async fn lifecycle(
         &self,
         _ctx: &dyn Context,
@@ -253,6 +268,38 @@ mod tests {
         // Route 2: no actions/methods -> both empty
         assert!(routes[2].raw_actions.is_empty());
         assert!(routes[2].actions.is_empty());
+    }
+
+    #[test]
+    fn router_block_collect_block_refs_smoke() {
+        use serde_json::json;
+        use wafer_block::Block;
+
+        let block = super::RouterBlock::new();
+        let cfg = json!({
+            "routes": [
+                {"path": "/a", "block": "org/a-block", "methods": ["GET"]},
+                {"path": "/b", "block": "org/b-block", "actions": ["retrieve", "list"]},
+                {"path": "/c", "block": "org/c-block"}
+            ]
+        });
+        let refs = block.collect_block_refs(&cfg);
+        assert_eq!(refs.len(), 3);
+
+        assert_eq!(refs[0].target, "org/a-block");
+        assert_eq!(refs[0].location, "route /a");
+        assert_eq!(refs[0].detail.as_deref(), Some("GET"));
+
+        assert_eq!(refs[1].target, "org/b-block");
+        assert_eq!(refs[1].location, "route /b");
+        assert_eq!(refs[1].detail.as_deref(), Some("retrieve list"));
+
+        assert_eq!(refs[2].target, "org/c-block");
+        assert_eq!(refs[2].location, "route /c");
+        assert!(
+            refs[2].detail.is_none(),
+            "expected None detail when no actions/methods"
+        );
     }
 
     #[test]
