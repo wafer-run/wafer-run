@@ -885,8 +885,8 @@ impl wafer_block::registry::BlockRegistry for Wafer {
         self.register_block_inner(name, block)
     }
 
-    fn add_alias(&mut self, alias: &str, target: &str) {
-        Arc::make_mut(&mut self.aliases).insert(alias.to_string(), target.to_string());
+    fn add_alias(&mut self, alias: &str, target: &str) -> Result<(), crate::error::AliasError> {
+        Wafer::add_alias(self, alias, target)
     }
 
     fn add_block_config(&mut self, name: &str, config: serde_json::Value) {

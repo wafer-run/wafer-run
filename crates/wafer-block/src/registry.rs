@@ -12,8 +12,9 @@ pub trait BlockRegistry {
     /// Register a block by name. Returns an error if the name is already registered.
     fn register_block(&mut self, name: &str, block: Arc<dyn Block>) -> Result<(), RuntimeError>;
 
-    /// Add a name alias (e.g. `"db"` → `"wafer-run/database"`).
-    fn add_alias(&mut self, alias: &str, target: &str);
+    /// Add a name alias (e.g. `"db"` → `"wafer-run/database"`). Chained
+    /// aliases are rejected — see [`crate::error::AliasError`].
+    fn add_alias(&mut self, alias: &str, target: &str) -> Result<(), crate::error::AliasError>;
 
     /// Add JSON config for a block (merged during lifecycle Init).
     fn add_block_config(&mut self, name: &str, config: serde_json::Value);
