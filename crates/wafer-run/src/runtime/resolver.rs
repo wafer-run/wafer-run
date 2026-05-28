@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use super::Wafer;
 #[cfg(feature = "wasm")]
@@ -224,7 +227,11 @@ impl Wafer {
         // PR A lands the flow-step half of the walk. PR B (Wave 16) extends
         // the collection to also include router routes via
         // `router_walk::collect_router_route_refs`.
-        let mut references: HashMap<String, Vec<BlockReferenceSource>> = HashMap::new();
+        // BTreeMap (vs HashMap) so iteration over missing references yields
+        // canonical-name-sorted order, giving stable `Display` output for
+        // `BlocksNotFound` across boots. Matches the deterministic-order
+        // pattern already used by `runtime/validation.rs::format_missing_config`.
+        let mut references: BTreeMap<String, Vec<BlockReferenceSource>> = BTreeMap::new();
 
         for (flow_id, flow) in &self.flows {
             for (step_index, step) in flow.steps.iter().enumerate() {
