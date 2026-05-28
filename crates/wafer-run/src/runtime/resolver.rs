@@ -250,7 +250,7 @@ impl Wafer {
 
         let mut not_found: Vec<BlockReferenceError> = Vec::new();
         for (canonical, sources) in references {
-            if self.blocks.contains_key(&canonical) || self.flows.contains_key(&canonical) {
+            if self.blocks.contains_key(&canonical) {
                 continue;
             }
             #[cfg(feature = "wasm")]
