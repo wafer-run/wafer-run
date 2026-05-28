@@ -27,8 +27,6 @@ mod registry_loader;
 pub mod router;
 /// Top-level runtime: the `Wafer` instance, block slots, config sources and validation.
 pub mod runtime;
-/// Schema record types (`Table`, `Column`, `Index`, …) re-exported from `wafer-schema`.
-pub use wafer_schema as schema;
 /// SSRF defenses and other security helpers shared by host- and native-side fetchers.
 pub mod security;
 pub mod snapshot;

@@ -264,18 +264,24 @@ impl Wafer {
         }
 
         let mut not_found: Vec<BlockReferenceError> = Vec::new();
+
+        // Build the HTTP client once per seal() rather than per missing
+        // block — aligns with the sibling `resolve_remote_entries`
+        // function below, which already hoists. The client is short-lived
+        // (one seal() call) and reused across every remote-block
+        // resolution attempt in the loop.
+        #[cfg(feature = "wasm")]
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))?;
+
         for (canonical, sources) in references {
             if self.blocks.contains_key(&canonical) {
                 continue;
             }
             #[cfg(feature = "wasm")]
             {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .map_err(|e| {
-                        RuntimeError::Registry(format!("failed to create HTTP client: {e}"))
-                    })?;
                 match self.resolve_remote_block(&client, &canonical).await {
                     Ok(Some(block)) => {
                         tracing::info!(block = %canonical, "downloaded remote block");
