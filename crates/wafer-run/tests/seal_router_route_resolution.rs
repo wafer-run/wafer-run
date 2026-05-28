@@ -191,13 +191,22 @@ async fn seal_router_route_accepts_flow_target() {
 async fn seal_router_route_contract_match_with_block_parser() {
     // Pins the duplicated `parse_routes_for_validation` shape against
     // `wafer-block-router::parse_routes`. Action normalization differs
-    // intentionally (we keep raw strings; router normalizes for matching).
-    // Compare only (path, block) pairs.
+    // intentionally (we keep raw strings; router normalizes for matching),
+    // so on the happy-path entries we compare (path, block) pairs and
+    // assert action-set length parity (counts unchanged by normalization).
+    //
+    // Adversarial entries (missing `block`, non-string `path`) must be
+    // dropped by both parsers — otherwise either parser tightening or
+    // loosening drifts from the contract.
     let cfg = json!({
         "routes": [
             {"path": "/a", "block": "a-block", "actions": ["retrieve"]},
             {"path": "/b", "block": "b-block", "methods": ["GET"]},
-            {"path": "/c", "block": "c-block"}
+            {"path": "/c", "block": "c-block"},
+            // adversarial: missing `block` -> both parsers must skip
+            {"path": "/d", "actions": ["retrieve"]},
+            // adversarial: non-string `path` -> both parsers must skip
+            {"path": 42, "block": "e-block"}
         ]
     });
 
@@ -225,7 +234,23 @@ async fn seal_router_route_contract_match_with_block_parser() {
         our_pairs, their_pairs,
         "parse_routes_for_validation drift from wafer-block-router::parse_routes:\n  ours: {our_pairs:?}\n  theirs: {their_pairs:?}"
     );
-    assert_eq!(our_pairs.len(), 3, "expected 3 routes, got: {our_pairs:?}");
+    assert_eq!(
+        our_pairs.len(),
+        3,
+        "expected 3 surviving routes (2 malformed dropped), got: {our_pairs:?}"
+    );
+
+    // Action-set length parity: normalization may change values but
+    // never count. Any future tightening on either side surfaces here.
+    for i in 0..3 {
+        assert_eq!(
+            validation_routes[i].raw_actions.len(),
+            router_routes[i].actions.len(),
+            "action set length differs at route {i}: ours={:?}, theirs={:?}",
+            validation_routes[i].raw_actions,
+            router_routes[i].actions
+        );
+    }
 }
 
 #[tokio::test]
