@@ -89,11 +89,18 @@ pub fn typed_resource_owner(
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
-/// For Storage (slash-separated `{org}/{block}/...` paths):
-/// 1. Own-namespace self-admit (`storage_resource_owner(resource) == caller_id`) → Ok
-/// 2. Admin → Ok
-/// 3. Grant match → Ok
-/// 4. Otherwise → Err (default deny)
+/// For Storage (slash-separated paths; SolobaseStorageBlock-style intercept
+/// enforces per-block isolation):
+/// 1. Own-namespace self-admit — any non-`@` resource for an attributable
+///    caller is treated as caller's own namespace (either the path is
+///    already prefixed `{caller}/...`, or the storage block will rewrite
+///    a raw / single-segment path to `{caller}/...` before reaching the
+///    backend).
+/// 2. `@`-prefixed cross-block resources where the post-`@` owner matches
+///    the caller (degenerate `@self/...`) → Ok.
+/// 3. Admin → Ok
+/// 4. Grant match (for `@`-prefixed cross-block access) → Ok
+/// 5. Otherwise → Err (default deny)
 ///
 /// For Network and Crypto (URLs, operation names — not namespaced):
 /// 1. Admin → Ok
@@ -227,16 +234,46 @@ pub fn check_access(
     }
 
     // --- Non-namespace resources (Network, Storage, Crypto) ---
-    // Storage gets Rule 3 self-admit on `{org}/{block}/...` paths;
-    // Network + Crypto fall straight through to admin + grant matching.
+    // Storage gets Rule 3 self-admit on non-`@` resources; cross-block
+    // (`@`-prefixed) Storage access plus all Network / Crypto access
+    // fall through to admin + grant matching.
 
-    // Rule 3 (Storage only): own-namespace self-admit.
-    // Caller `{org}/{block}` accessing `{org}/{block}/...` is auto-allowed.
-    // Cross-block storage access still falls through to grant matching.
+    // Normalize the Storage resource by stripping the cross-block `@`
+    // marker. Internal checks (Rule 3 ownership, Rule 5 grant matching)
+    // operate on the canonical path so grants can be written without
+    // `@`. The original `resource` is preserved for the error message.
+    let canonical_resource: &str =
+        if matches!(resource_type, Some(crate::types::ResourceType::Storage)) {
+            resource.strip_prefix('@').unwrap_or(resource)
+        } else {
+            resource
+        };
+    let is_cross_block_storage = matches!(resource_type, Some(crate::types::ResourceType::Storage))
+        && resource.starts_with('@');
+
+    // Rule 3 (Storage only): own-namespace self-admit. Two shapes count
+    // as own-namespace under the convention SolobaseStorageBlock-style
+    // intercepts enforce:
+    //
+    //   (a) Non-`@` resource — the storage block will rewrite to
+    //       `{caller}/...` before any backend write, so the effective
+    //       path lands in the caller's namespace. Auto-allow for any
+    //       attributable caller.
+    //   (b) `@`-prefixed resource whose post-`@` owner matches the
+    //       caller (degenerate `@self/...` case). Same effective
+    //       namespace; auto-allow.
+    //
+    // All other `@`-prefixed accesses are cross-block and fall through
+    // to grant matching (Rule 5) against the canonicalized resource.
     if matches!(resource_type, Some(crate::types::ResourceType::Storage)) {
-        if let Some(owner) = storage_resource_owner(resource) {
-            if caller_id == Some(owner.as_str()) {
+        if let Some(caller) = caller_id {
+            if !is_cross_block_storage {
                 return Ok(());
+            }
+            if let Some(owner) = storage_resource_owner(canonical_resource) {
+                if owner == caller {
+                    return Ok(());
+                }
             }
         }
     }
@@ -246,13 +283,14 @@ pub fn check_access(
         return Ok(());
     }
 
-    // Rule 5: grant match
+    // Rule 5: grant match — uses the canonicalized resource so grants
+    // declared without `@` match cross-block requests with `@`.
     if let Some(caller) = caller_id {
         for grant in grants {
             if !grant_matches_grantee(&grant.grantee, caller) {
                 continue;
             }
-            if !grant_matches_resource(&grant.resource, resource) {
+            if !grant_matches_resource(&grant.resource, canonical_resource) {
                 continue;
             }
             if is_write && !grant.write {
@@ -268,7 +306,8 @@ pub fn check_access(
         }
     }
 
-    // Default deny
+    // Default deny — surface the original (possibly `@`-prefixed) resource
+    // so error messages match what callers passed in.
     Err(WaferError::new(
         ErrorCode::PERMISSION_DENIED,
         format!(
@@ -1032,10 +1071,10 @@ mod tests {
         let admin = "suppers-ai/admin";
         let storage = Some(&ResourceType::Storage);
 
-        // No grants → denied
+        // Cross-block access with `@` prefix + no grants → denied
         assert!(check_access(
             Some("suppers-ai/files"),
-            "wafer-run/web/public",
+            "@wafer-run/web/public",
             false,
             storage,
             &[],
@@ -1043,23 +1082,23 @@ mod tests {
         )
         .is_err());
 
-        // Grant for specific path
+        // Grant for specific path covers `@`-prefixed cross-block reads
         let grants =
             vec![ResourceGrant::read("suppers-ai/files", "wafer-run/web/*")
                 .typed(ResourceType::Storage)];
         assert!(check_access(
             Some("suppers-ai/files"),
-            "wafer-run/web/public",
+            "@wafer-run/web/public",
             false,
             storage,
             &grants,
             admin
         )
         .is_ok());
-        // Write denied (read-only grant)
+        // Write denied via cross-block read-only grant
         assert!(check_access(
             Some("suppers-ai/files"),
-            "wafer-run/web/public",
+            "@wafer-run/web/public",
             true,
             storage,
             &grants,
@@ -1089,7 +1128,34 @@ mod tests {
             admin
         )
         .is_ok());
-        // Cross-block storage still requires a grant
+        // Raw or single-segment paths are auto-allowed for any attributable
+        // caller — they reach the storage block raw and the block rewrites
+        // them to `{caller}/...` before any backend write. The previous
+        // `wrap.resource` was set by the client wrapper BEFORE the rewrite,
+        // so check_access has to trust the convention.
+        assert!(check_access(Some("wafer-run/web"), "photos", true, storage, &[], admin).is_ok());
+        assert!(check_access(
+            Some("suppers-ai/files"),
+            "photos/a.png",
+            true,
+            storage,
+            &[],
+            admin
+        )
+        .is_ok());
+        // Cross-block storage (explicit `@` prefix) still requires a grant
+        assert!(check_access(
+            Some("wafer-run/web"),
+            "@suppers-ai/files/photos/a.png",
+            false,
+            storage,
+            &[],
+            admin
+        )
+        .is_err());
+        // Even when the resource string happens to look like another
+        // block's namespace, if it's non-`@` it counts as own-namespace
+        // (the storage block will re-prefix to `{caller}/...`).
         assert!(check_access(
             Some("wafer-run/web"),
             "suppers-ai/files/photos/a.png",
@@ -1098,7 +1164,9 @@ mod tests {
             &[],
             admin
         )
-        .is_err());
+        .is_ok());
+        // Anonymous caller is still denied without a grant.
+        assert!(check_access(None, "photos/a.png", false, storage, &[], admin).is_err());
     }
 
     #[test]
