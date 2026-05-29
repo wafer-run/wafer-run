@@ -9,6 +9,7 @@ RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
 if [ -n "$RS_FILES" ]; then
   echo "Running cargo fmt..."
   cargo fmt --all
+  # shellcheck disable=SC2086  # RS_FILES is newline-separated; word-splitting is intentional
   git add $RS_FILES
 
   echo "Running cargo clippy --fix..."
@@ -16,6 +17,7 @@ if [ -n "$RS_FILES" ]; then
     echo "❌ clippy found warnings it couldn't auto-fix. Please fix manually and re-stage."
     exit 1
   }
+  # shellcheck disable=SC2086  # RS_FILES is newline-separated; word-splitting is intentional
   git add $RS_FILES
 fi
 
