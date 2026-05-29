@@ -56,6 +56,17 @@ impl LocalStorageService {
         let root = root.into();
         fs::create_dir_all(&root)
             .map_err(|e| StorageError::Internal(format!("create storage root {root:?}: {e}")))?;
+        // Canonicalize so the root is always absolute. Without this, a
+        // caller-supplied relative root (e.g. solobase's default
+        // `data/storage`) makes `object_path(folder, key)` return a
+        // relative path. `validate_path` then re-joins it onto the
+        // canonicalized root, producing a doubled-prefix path like
+        // `/cwd/data/storage/data/storage/folder/key` that `fs::write`
+        // can't find. `put`/`get`/`delete` use the validate_path return
+        // value directly; only `create_folder` happens to ignore it.
+        let root = root.canonicalize().map_err(|e| {
+            StorageError::Internal(format!("canonicalize storage root {root:?}: {e}"))
+        })?;
         Ok(Self { root })
     }
 
