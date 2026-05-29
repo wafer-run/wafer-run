@@ -32,6 +32,49 @@ pub fn resource_prefix(block_id: &str) -> String {
     prefix
 }
 
+/// Extract the owning block id from a storage path of the form
+/// `{org}/{block}/{rest}` (with optional leading `@` used by SolobaseStorageBlock
+/// to mark cross-block access in source code).
+///
+/// Returns `None` if the path doesn't have at least two slash-separated
+/// segments.
+///
+/// ```ignore
+/// assert_eq!(storage_resource_owner("suppers-ai/files/photos/a.png"),
+///            Some("suppers-ai/files".to_string()));
+/// assert_eq!(storage_resource_owner("@wafer-run/web/public/index.html"),
+///            Some("wafer-run/web".to_string()));
+/// assert_eq!(storage_resource_owner("just-one-segment"), None);
+/// ```
+pub fn storage_resource_owner(path: &str) -> Option<String> {
+    let path = path.strip_prefix('@').unwrap_or(path);
+    let mut parts = path.splitn(3, '/');
+    let org = parts.next()?;
+    let block = parts.next()?;
+    if org.is_empty() || block.is_empty() {
+        return None;
+    }
+    Some(format!("{org}/{block}"))
+}
+
+/// Dispatch to the right resource-owner parser for the given resource type.
+///
+/// `ResourceType::Storage` parses slash-separated `{org}/{block}/...` paths
+/// via [`storage_resource_owner`]. Everything else (Db, Config, untyped)
+/// parses double-underscore `{org}__{block}__...` names via [`resource_owner`].
+///
+/// Used by `check_access` and by the lifecycle grant validator to apply
+/// ownership rules consistently across resource types.
+pub fn typed_resource_owner(
+    resource: &str,
+    resource_type: Option<&crate::types::ResourceType>,
+) -> Option<String> {
+    match resource_type {
+        Some(crate::types::ResourceType::Storage) => storage_resource_owner(resource),
+        _ => resource_owner(resource),
+    }
+}
+
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
 /// For namespace-based resources (Db, Config, or untyped):
@@ -46,7 +89,13 @@ pub fn resource_prefix(block_id: &str) -> String {
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
-/// For non-namespace resources (Network, Storage, Crypto):
+/// For Storage (slash-separated `{org}/{block}/...` paths):
+/// 1. Own-namespace self-admit (`storage_resource_owner(resource) == caller_id`) → Ok
+/// 2. Admin → Ok
+/// 3. Grant match → Ok
+/// 4. Otherwise → Err (default deny)
+///
+/// For Network and Crypto (URLs, operation names — not namespaced):
 /// 1. Admin → Ok
 /// 2. Grant match → Ok
 /// 3. Otherwise → Err (default deny)
@@ -177,8 +226,20 @@ pub fn check_access(
         ));
     }
 
-    // --- Non-namespace resources (Network, Storage) ---
-    // Only admin check + grant matching, default deny.
+    // --- Non-namespace resources (Network, Storage, Crypto) ---
+    // Storage gets Rule 3 self-admit on `{org}/{block}/...` paths;
+    // Network + Crypto fall straight through to admin + grant matching.
+
+    // Rule 3 (Storage only): own-namespace self-admit.
+    // Caller `{org}/{block}` accessing `{org}/{block}/...` is auto-allowed.
+    // Cross-block storage access still falls through to grant matching.
+    if matches!(resource_type, Some(crate::types::ResourceType::Storage)) {
+        if let Some(owner) = storage_resource_owner(resource) {
+            if caller_id == Some(owner.as_str()) {
+                return Ok(());
+            }
+        }
+    }
 
     // Rule 4: admin block has full access
     if caller_id == Some(admin_block) {
@@ -1006,16 +1067,88 @@ mod tests {
         )
         .is_err());
 
-        // URL-like resource should NOT be treated as namespaced
-        // (no "own resource" shortcut for storage paths)
+        // Own-namespace storage access via Rule 3 (Wave 26 / c18):
+        // caller `{org}/{block}` reaching `{org}/{block}/...` is auto-allowed
+        // without any explicit grant.
         assert!(check_access(
             Some("wafer-run/web"),
             "wafer-run/web/public",
             false,
             storage,
-            &[], // no grants
+            &[],
+            admin
+        )
+        .is_ok());
+        // Including writes
+        assert!(check_access(
+            Some("wafer-run/web"),
+            "wafer-run/web/public/index.html",
+            true,
+            storage,
+            &[],
+            admin
+        )
+        .is_ok());
+        // Cross-block storage still requires a grant
+        assert!(check_access(
+            Some("wafer-run/web"),
+            "suppers-ai/files/photos/a.png",
+            false,
+            storage,
+            &[],
             admin
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_storage_resource_owner_parser() {
+        assert_eq!(
+            storage_resource_owner("suppers-ai/files/photos/a.png"),
+            Some("suppers-ai/files".to_string())
+        );
+        assert_eq!(
+            storage_resource_owner("@wafer-run/web/public/index.html"),
+            Some("wafer-run/web".to_string())
+        );
+        // Exactly two segments — owner is the whole thing
+        assert_eq!(
+            storage_resource_owner("foo/bar"),
+            Some("foo/bar".to_string())
+        );
+        // Fewer than two segments returns None
+        assert_eq!(storage_resource_owner("just-one-segment"), None);
+        assert_eq!(storage_resource_owner(""), None);
+        assert_eq!(storage_resource_owner("/leading-slash"), None);
+    }
+
+    #[test]
+    fn test_typed_resource_owner_dispatch() {
+        // Storage → slash parser
+        assert_eq!(
+            typed_resource_owner(
+                "suppers-ai/files/photos/a.png",
+                Some(&ResourceType::Storage)
+            ),
+            Some("suppers-ai/files".to_string())
+        );
+        // Db / untyped → __-parser
+        assert_eq!(
+            typed_resource_owner("suppers_ai__auth__users", Some(&ResourceType::Db)),
+            Some("suppers-ai/auth".to_string())
+        );
+        assert_eq!(
+            typed_resource_owner("suppers_ai__auth__users", None),
+            Some("suppers-ai/auth".to_string())
+        );
+        // Mismatched format returns None
+        assert_eq!(
+            typed_resource_owner("suppers-ai/files/photos", Some(&ResourceType::Db)),
+            None
+        );
+        assert_eq!(
+            typed_resource_owner("suppers_ai__auth__users", Some(&ResourceType::Storage)),
+            None
+        );
     }
 }

@@ -37,18 +37,21 @@ pub(crate) struct GrantValidationOutcome {
 /// that were registered before the admin block was known.
 ///
 /// Rules:
-/// - Typed grants (Network/Storage/Crypto) may only be declared by the
-///   admin block. If `admin_block` is empty (unset) at registration time,
-///   the typed grant is deferred (logged and dropped). `set_admin_block`
-///   re-scans all already-registered blocks and re-runs this validation,
-///   so deferred typed grants from the admin block are picked up at that
+/// - Typed Network/Crypto grants may only be declared by the admin block
+///   (their resources — URLs and operation names — aren't namespaced).
+///   If `admin_block` is empty (unset) at registration time, the typed
+///   grant is deferred (logged and dropped). `set_admin_block` re-scans
+///   all already-registered blocks and re-runs this validation, so
+///   deferred typed grants from the admin block are picked up at that
 ///   point. This accommodates the common pattern of constructing a
 ///   `Wafer` (which auto-registers linkme-collected blocks during
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
-/// - Namespace grants must be owned by the declaring block (per
-///   `wafer_block::wrap::resource_owner`). Unnamespaced or owned-by-other
-///   grants are pushed into `rejected` so `seal()` surfaces them via
-///   `RuntimeError::GrantsRejected`.
+/// - Storage grants (Wave 26 / c18) and Db / untyped grants are
+///   namespace-based: a grant must target a resource owned by the
+///   declaring block, per
+///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or
+///   owned-by-other grants are pushed into `rejected` so `seal()`
+///   surfaces them via `RuntimeError::GrantsRejected`.
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
@@ -56,16 +59,16 @@ pub(crate) fn validate_and_collect_grants_for_block(
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for grant in &block_info.grants {
-        // Network/Storage/Crypto typed grants use URLs / file-paths /
-        // operation-names, not namespaced resources — skip ownership
-        // validation, but require the declaring block to be the admin
-        // block. Without this, any block could grant `*` Network /
-        // Storage / Crypto access to all blocks and bypass default-deny
-        // on those resource types.
+        // Network and Crypto resources aren't namespace-bound (URLs,
+        // operation names), so they remain admin-only — without this,
+        // any block could grant `*` Network / Crypto access and bypass
+        // default-deny. Storage was also admin-only before Wave 26;
+        // with c18 it became namespace-bound (`{org}/{block}/...`) and
+        // routes through the shared ownership check below via
+        // `typed_resource_owner`.
         if matches!(
             grant.resource_type,
             Some(wafer_block::types::ResourceType::Network)
-                | Some(wafer_block::types::ResourceType::Storage)
                 | Some(wafer_block::types::ResourceType::Crypto)
         ) {
             if admin_block.is_empty() {
@@ -103,12 +106,17 @@ pub(crate) fn validate_and_collect_grants_for_block(
         }
 
         // SECURITY: namespace-based grants — blocks can only grant
-        // access to resources they own.
+        // access to resources they own. Dispatches to the right parser
+        // based on resource type (Storage uses `{org}/{block}/...`,
+        // Db / untyped use `{org}__{block}__...`).
         let grant_owner = if grant.resource.ends_with('*') {
             let base = grant.resource.trim_end_matches('*');
-            wafer_block::wrap::resource_owner(&format!("{base}x"))
+            wafer_block::wrap::typed_resource_owner(
+                &format!("{base}x"),
+                grant.resource_type.as_ref(),
+            )
         } else {
-            wafer_block::wrap::resource_owner(&grant.resource)
+            wafer_block::wrap::typed_resource_owner(&grant.resource, grant.resource_type.as_ref())
         };
         match grant_owner {
             Some(owner) if owner == block_info.name => accepted.push(grant.clone()),
@@ -131,11 +139,20 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     block = %block_info.name, resource = %grant.resource,
                     "WRAP: rejecting grant with unnamespaced resource"
                 );
+                // Shape the hint to the resource type. Storage grants
+                // expect `{org}/{block}/...`; Db / untyped expect
+                // `{org}__{block}__...`.
+                let expected_shape = match grant.resource_type {
+                    Some(wafer_block::types::ResourceType::Storage) => {
+                        "`{org}/{block}/*` (Storage paths)"
+                    }
+                    _ => "`{org}__{block}__*` (Db tables)",
+                };
                 rejected.push(crate::error::GrantValidationError {
                     block: block_info.name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
-                        "resource `{}` is unnamespaced — namespace-based grants must target `{{org}}__{{block}}__*`",
+                        "resource `{}` is unnamespaced — namespace-based grants must target {expected_shape}",
                         grant.resource,
                     ),
                 });
