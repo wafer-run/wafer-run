@@ -24,13 +24,15 @@
 // when the producer crate's object file is pulled into the binary. A bare
 // `[dependencies]` entry isn't always enough — see the inventory tests in
 // `wafer-run/tests/inventory_registration.rs` for the same pattern.
-use wafer_block_cors as _;
-use wafer_block_http_listener as _;
-use wafer_block_ip_rate_limit as _;
-use wafer_block_monitoring as _;
-use wafer_block_readonly_guard as _;
-use wafer_block_router as _;
-use wafer_block_security_headers as _;
+wafer_block::use_static_blocks!(
+    cors,
+    http_listener,
+    ip_rate_limit,
+    monitoring,
+    readonly_guard,
+    router,
+    security_headers,
+);
 
 /// Flow id — the value `Wafer::add_block_config` keys composite config under.
 pub const FLOW_ID: &str = "wafer-run/http-server";
