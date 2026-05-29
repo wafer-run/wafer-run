@@ -62,10 +62,14 @@ pub(crate) fn validate_and_collect_grants_for_block(
         // block. Without this, any block could grant `*` Network /
         // Storage / Crypto access to all blocks and bypass default-deny
         // on those resource types.
+        // Network and Crypto resources aren't namespace-bound (URLs,
+        // operation names), so they fall back to admin-only. Storage was
+        // also admin-only before Wave 26; with c18 it's now
+        // namespace-bound (`{org}/{block}/...`) and routes through the
+        // shared ownership check below — see typed_resource_owner.
         if matches!(
             grant.resource_type,
             Some(wafer_block::types::ResourceType::Network)
-                | Some(wafer_block::types::ResourceType::Storage)
                 | Some(wafer_block::types::ResourceType::Crypto)
         ) {
             if admin_block.is_empty() {
@@ -103,12 +107,17 @@ pub(crate) fn validate_and_collect_grants_for_block(
         }
 
         // SECURITY: namespace-based grants — blocks can only grant
-        // access to resources they own.
+        // access to resources they own. Dispatches to the right parser
+        // based on resource type (Storage uses `{org}/{block}/...`,
+        // Db / untyped use `{org}__{block}__...`).
         let grant_owner = if grant.resource.ends_with('*') {
             let base = grant.resource.trim_end_matches('*');
-            wafer_block::wrap::resource_owner(&format!("{base}x"))
+            wafer_block::wrap::typed_resource_owner(
+                &format!("{base}x"),
+                grant.resource_type.as_ref(),
+            )
         } else {
-            wafer_block::wrap::resource_owner(&grant.resource)
+            wafer_block::wrap::typed_resource_owner(&grant.resource, grant.resource_type.as_ref())
         };
         match grant_owner {
             Some(owner) if owner == block_info.name => accepted.push(grant.clone()),

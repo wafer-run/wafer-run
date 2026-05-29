@@ -1,6 +1,12 @@
 //! Integration tests for Wave 13 PR B: Wafer::start() must refuse boot
 //! when validate_and_collect_grants_for_block has rejected one or more
 //! typed grants. Replaces the prior silent tracing::error! behavior.
+//!
+//! Wave 26 (c18) changed the rejection reason for typed Storage grants
+//! from "admin-only" to "namespace ownership violation". These tests
+//! still assert the escalation path, but the fixtures now use the
+//! c18-shaped failure: a block declaring a Storage grant for a resource
+//! it doesn't own (foreign-namespace) gets rejected.
 
 use std::sync::Arc;
 
@@ -17,8 +23,9 @@ use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-/// Block that declares a typed Storage grant from a non-admin position.
-/// Will be rejected by validate_and_collect_grants_for_block.
+/// Block that declares a typed Storage grant for a resource it doesn't
+/// own (`other/block/*`). After Wave 26 the validator rejects via the
+/// ownership check.
 struct OffendingBlock;
 
 #[async_trait]
@@ -28,11 +35,13 @@ impl Block for OffendingBlock {
             "test/offender",
             "0.0.1",
             "test/iface@v1",
-            "non-admin block with typed Storage grant",
+            "block declaring Storage grant for foreign namespace",
         )
-        .grants(vec![
-            ResourceGrant::read_write("test/offender", "*").typed(ResourceType::Storage)
-        ])
+        .grants(vec![ResourceGrant::read_write(
+            "test/offender",
+            "other/block/*",
+        )
+        .typed(ResourceType::Storage)])
     }
 
     async fn lifecycle(
@@ -53,7 +62,8 @@ impl Block for OffendingBlock {
     }
 }
 
-/// Admin block declaring a typed Storage grant — the validator accepts it.
+/// Admin block declaring a typed Storage grant within its own namespace
+/// (`test/admin/...`). The validator accepts via the ownership check.
 struct AdminBlock;
 
 #[async_trait]
@@ -63,11 +73,13 @@ impl Block for AdminBlock {
             "test/admin",
             "0.0.1",
             "test/iface@v1",
-            "admin block with typed Storage grant",
+            "admin block with typed Storage grant in own namespace",
         )
-        .grants(vec![
-            ResourceGrant::read_write("test/admin", "*").typed(ResourceType::Storage)
-        ])
+        .grants(vec![ResourceGrant::read_write(
+            "test/admin",
+            "test/admin/sub/*",
+        )
+        .typed(ResourceType::Storage)])
     }
 
     async fn lifecycle(
@@ -107,9 +119,11 @@ async fn validator_rejects_typed_storage_from_non_admin_block_fails_start() {
         Err(RuntimeError::GrantsRejected(errors)) => {
             assert_eq!(errors.len(), 1, "expected one rejection, got: {errors:?}");
             assert_eq!(errors[0].block, "test/offender");
+            // After Wave 26 the rejection reason mentions ownership;
+            // the resource is `other/block/*`, owned by `other/block`.
             assert!(
-                errors[0].reason.to_lowercase().contains("storage"),
-                "reason should mention Storage: got `{}`",
+                errors[0].reason.contains("other/block"),
+                "reason should mention the owner (`other/block`): got `{}`",
                 errors[0].reason
             );
         }
