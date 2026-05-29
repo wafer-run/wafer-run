@@ -162,6 +162,28 @@ impl RuntimeHandle {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[wafer_block::wafer_async_trait]
+impl wafer_block::Runtime for RuntimeHandle {
+    async fn run(
+        &self,
+        flow_id: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run(flow_id, msg, input).await
+    }
+
+    async fn run_block(
+        &self,
+        block_name: &str,
+        msg: Message,
+        input: wafer_block::InputStream,
+    ) -> wafer_block::OutputStream {
+        self.inner.run_block(block_name, msg, input).await
+    }
+}
+
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {

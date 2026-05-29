@@ -48,6 +48,7 @@ pub mod interfaces;
 pub mod introspection;
 pub mod registry;
 pub mod router;
+pub mod runtime;
 pub mod spawn;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod static_registration;
@@ -75,6 +76,7 @@ pub use introspection::FlowIntrospection;
 pub use linkme;
 pub use registry::BlockRegistry;
 pub use router::Router;
+pub use runtime::Runtime;
 pub use spawn::spawn_producer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS};

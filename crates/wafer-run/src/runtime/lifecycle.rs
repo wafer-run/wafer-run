@@ -305,8 +305,9 @@ impl Wafer {
         let handle = super::RuntimeHandle {
             inner: arc_self.clone(),
         };
+        let trait_handle: Arc<dyn wafer_block::Runtime> = Arc::new(handle);
         for block in arc_self.blocks.values() {
-            block.bind(Box::new(handle.clone()));
+            block.bind(Box::new(trait_handle.clone()));
         }
 
         Ok(arc_self)

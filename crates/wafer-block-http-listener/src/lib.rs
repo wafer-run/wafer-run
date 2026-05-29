@@ -420,7 +420,7 @@ impl Block for HttpListenerBlock {
     }
 
     fn bind(&self, handle: Box<dyn std::any::Any + Send + Sync>) {
-        let Ok(handle) = handle.downcast::<wafer_run::runtime::RuntimeHandle>() else {
+        let Ok(handle) = handle.downcast::<std::sync::Arc<dyn wafer_block::Runtime>>() else {
             return;
         };
         let handle = *handle;
