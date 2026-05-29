@@ -1,0 +1,22 @@
+name: Shellcheck
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.githooks/**'
+      - '.github/workflows/shellcheck.yml'
+
+concurrency:
+  group: shellcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: shellcheck scripts/*.sh .githooks/*
