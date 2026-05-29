@@ -6334,6 +6334,7 @@ dependencies = [
 name = "wafer-flow-http-server"
 version = "0.1.0"
 dependencies = [
+ "wafer-block",
  "wafer-block-cors",
  "wafer-block-http-listener",
  "wafer-block-ip-rate-limit",

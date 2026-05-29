@@ -6,12 +6,16 @@ license.workspace = true
 description = "WAFER flow: batteries-included HTTP server with security headers, CORS, rate limiting, monitoring, and routing"
 
 [dependencies]
+# wafer-block provides the `use_static_blocks!` macro that emits the
+# force-link `use … as _;` lines for each battery crate below.
+wafer-block = { path = "../wafer-block" }
 # All seven blocks in FLOW_JSON are direct deps so the linker keeps their
 # `register_static_block!` inventory entries in any consuming binary.
 # Without this, a binary that only depends on `wafer-flow-http-server`
 # would crash at startup with `RuntimeError::BlockNotFound` — `seal()`
 # walks every flow's steps and requires every named block to be
-# registered. See lib.rs for the matching `use … as _;` lines.
+# registered. See lib.rs for the matching `use_static_blocks!` macro
+# invocation.
 wafer-block-cors = { path = "../wafer-block-cors" }
 wafer-block-http-listener = { path = "../wafer-block-http-listener" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
