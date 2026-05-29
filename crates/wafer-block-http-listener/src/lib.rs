@@ -19,14 +19,14 @@ use axum::{
     http::{HeaderMap, Method, StatusCode},
 };
 use parking_lot::Mutex;
-use wafer_block_macro::wafer_async_trait;
-use wafer_run::{
-    block::{Block, BlockCategory, BlockInfo},
+use wafer_block::{
     common::ErrorCode,
     meta::*,
-    types::*,
-    InputStream, OutputStream,
+    types::{ConfigVar, MetaAccess},
+    Block, BlockCategory, BlockInfo, InputStream, InstanceMode, LifecycleEvent, LifecycleType,
+    Message, MetaEntry, OutputStream, RequestAction, WaferError,
 };
+use wafer_block_macro::wafer_async_trait;
 
 // ---------------------------------------------------------------------------
 // HTTP <-> Message conversion
@@ -320,7 +320,7 @@ fn internal_error_response() -> axum::http::Response<Body> {
 // wafer-run/http-listener block
 // ---------------------------------------------------------------------------
 
-use wafer_run::config::DispatchTarget;
+use wafer_block::config::DispatchTarget;
 
 /// Block implementing the HTTP transport.
 ///
@@ -390,7 +390,7 @@ impl Block for HttpListenerBlock {
 
     async fn handle(
         &self,
-        _ctx: &dyn wafer_run::context::Context,
+        _ctx: &dyn wafer_block::context::Context,
         msg: Message,
         _input: InputStream,
     ) -> OutputStream {
@@ -399,11 +399,11 @@ impl Block for HttpListenerBlock {
 
     async fn lifecycle(
         &self,
-        _ctx: &dyn wafer_run::context::Context,
+        _ctx: &dyn wafer_block::context::Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init && self.target.get().is_none() {
-            let config = wafer_run::BlockConfig::from_event(&event);
+            let config = wafer_block::BlockConfig::from_event(&event);
 
             if let Some(t) = config.dispatch_target() {
                 self.target.set(t).ok();
