@@ -1,8 +1,8 @@
-error[E0599]: no function or associated item named `new` found for struct `Widget` in the current scope
+error[E0599]: no associated function or constant named `new` found for struct `Widget` in the current scope
   --> tests/fixtures/fail_missing_new.rs:12:1
    |
  7 |   struct Widget;
-   |   ------------- function or associated item `new` not found for this struct
+   |   ------------- associated function or constant `new` not found for this struct
 ...
 12 | / #[wafer_block(
 13 | |     name = "acme/widget",
@@ -10,7 +10,7 @@ error[E0599]: no function or associated item named `new` found for struct `Widge
 15 | |     interface = "handler@v1",
 16 | |     summary = "Test widget"
 17 | | )]
-   | |__^ function or associated item not found in `Widget`
+   | |__^ associated function or constant not found in `Widget`
    |
    = help: items from traits can only be used if the trait is implemented and in scope
    = note: the following traits define an item `new`, perhaps you need to implement one of them:
