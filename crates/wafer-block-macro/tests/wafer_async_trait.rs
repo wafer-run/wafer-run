@@ -1,9 +1,7 @@
 //! Verify that `#[wafer_async_trait]` expands to the correct cfg_attr pair
 //! on both wasm32 and native targets.
 //!
-//! The trait and impl are exercised via a blocking `futures::executor::block_on`
-//! call so that this test file needs no async runtime dep beyond what is already
-//! transitively available via `wafer-run` (which pulls in `tokio`).
+//! The trait and impl are exercised from a `#[tokio::test]` async context.
 
 use wafer_block_macro::wafer_async_trait;
 
@@ -29,12 +27,8 @@ impl Greeter for Hi {
 // Test
 // ---------------------------------------------------------------------------
 
-#[test]
-fn macro_expands_and_works() {
-    // Use the tokio runtime that wafer-run already pulls in as a dev-dep.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("tokio runtime");
-    let result = rt.block_on(async { Hi.greet().await });
+#[tokio::test]
+async fn macro_expands_and_works() {
+    let result = Hi.greet().await;
     assert_eq!(result, "hi");
 }

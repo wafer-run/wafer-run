@@ -4,15 +4,15 @@ use wafer_run::asset_loader::{
     AssetLoadError, AssetLoadStatus, LoadAssetCallback, NoopAssetLoader,
 };
 
-#[test]
-fn noop_returns_failed() {
+#[tokio::test]
+async fn noop_returns_failed() {
     let loader: Arc<dyn LoadAssetCallback> = Arc::new(NoopAssetLoader);
-    let status = futures::executor::block_on(loader.load("anything"));
+    let status = loader.load("anything").await;
     assert!(matches!(status, AssetLoadStatus::Failed(_)));
 }
 
-#[test]
-fn custom_callback_is_invoked() {
+#[tokio::test]
+async fn custom_callback_is_invoked() {
     struct Counting {
         count: std::sync::Mutex<u32>,
     }
@@ -27,7 +27,7 @@ fn custom_callback_is_invoked() {
     let loader = Arc::new(Counting {
         count: std::sync::Mutex::new(0),
     });
-    let status = futures::executor::block_on(loader.load("ffmpeg"));
+    let status = loader.load("ffmpeg").await;
     assert!(matches!(status, AssetLoadStatus::Ready));
     assert_eq!(*loader.count.lock().unwrap(), 1);
 }
