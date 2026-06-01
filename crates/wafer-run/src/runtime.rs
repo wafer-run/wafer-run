@@ -26,6 +26,8 @@ pub mod runner;
 pub mod slot;
 /// Post-registration validation of declared interfaces and block configs.
 pub mod validation;
+/// WASM runtime state (engine + asset loader), grouped out of `Wafer`.
+pub(crate) mod wasm_state;
 
 // Re-export the standalone function so external callers see it at the old path.
 pub use runner::run_block_with_recovery;
@@ -232,15 +234,9 @@ pub struct Wafer {
     /// against this; native blocks store for inspector visibility only.
     pub(crate) effective_capabilities:
         Arc<std::collections::HashMap<String, wafer_block::BlockCapabilities>>,
-    /// Host-injected async loader for external wasm/js assets referenced by
-    /// `BlockInfo::external_assets`. Defaults to `NoopAssetLoader`. Hosts
-    /// that need lazy asset loading (e.g. solobase-web fetching
-    /// ffmpeg-core.wasm from jsdelivr) call `set_asset_loader` during
-    /// startup.
-    pub(crate) asset_loader: Arc<dyn crate::asset_loader::LoadAssetCallback>,
-    /// Shared WASM engine for all WASM blocks (fuel-metered).
-    #[cfg(feature = "wasmi")]
-    pub(crate) wasm_engine: Option<Arc<wasmi::Engine>>,
+    /// WASM runtime state: shared fuel-metered engine + host-injected asset
+    /// loader. See [`WasmState`](crate::runtime::wasm_state::WasmState).
+    pub(crate) wasm: crate::runtime::wasm_state::WasmState,
     /// Per-block init slots populated by `register_block_inner` (code-registered
     /// blocks) and `register_remote_block` (blocks downloaded during `seal()`).
     /// Consulted by [`Wafer::init_block`] for lazy-once-success caching.
@@ -313,9 +309,7 @@ impl Wafer {
             wrap_grants_external: Vec::new(),
             wrap_admin_block: Arc::new(String::new()),
             effective_capabilities: Arc::new(std::collections::HashMap::new()),
-            asset_loader: Arc::new(crate::asset_loader::NoopAssetLoader),
-            #[cfg(feature = "wasmi")]
-            wasm_engine: None,
+            wasm: crate::runtime::wasm_state::WasmState::new(),
             slots: Arc::new(HashMap::new()),
             grant_validation_errors: Vec::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
@@ -453,7 +447,7 @@ impl Wafer {
     /// Propagates the new loader to all already-registered WASM blocks so that
     /// `set_asset_loader` and `register_block` can be called in any order.
     pub fn set_asset_loader(&mut self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
-        self.asset_loader = loader.clone();
+        self.wasm.asset_loader = loader.clone();
         // Forward to all WasmiBlock instances currently registered.
         #[cfg(feature = "wasmi")]
         for block in self.blocks.values() {
@@ -484,7 +478,7 @@ impl Wafer {
     /// pattern — callers who need ownership can `.clone()` themselves. This
     /// keeps the wasmi host-import hot path refcount-free.
     pub fn asset_loader(&self) -> &Arc<dyn crate::asset_loader::LoadAssetCallback> {
-        &self.asset_loader
+        &self.wasm.asset_loader
     }
 
     /// Look up the effective (declared ∩ config ∩ host) capabilities for a
@@ -959,7 +953,7 @@ impl Wafer {
             .as_any()
             .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
         {
-            wasmi_block.set_asset_loader(self.asset_loader.clone());
+            wasmi_block.set_asset_loader(self.wasm.asset_loader.clone());
         }
 
         self.blocks.insert(name.to_string(), block);
