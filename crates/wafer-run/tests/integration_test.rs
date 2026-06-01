@@ -311,8 +311,8 @@ fn test_pattern_matching_http_style() {
 // 5. Router
 // ===========================================================================
 
-#[test]
-fn test_router_basic() {
+#[tokio::test]
+async fn test_router_basic() {
     let mut router = Router::new();
 
     router.retrieve("/items", |_ctx, _msg: Message, _input: InputStream| {
@@ -337,13 +337,10 @@ fn test_router_basic() {
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/items");
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["items"], serde_json::json!([]));
 
@@ -352,12 +349,10 @@ fn test_router_basic() {
     msg.set_meta("req.action", "create");
     msg.set_meta("req.resource", "/items");
 
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["id"], "new-1");
 
@@ -366,18 +361,16 @@ fn test_router_basic() {
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/items/42");
 
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["id"], "42");
 }
 
-#[test]
-fn test_router_not_found() {
+#[tokio::test]
+async fn test_router_not_found() {
     let router = Router::new();
     let ctx = make_test_context();
 
@@ -385,21 +378,18 @@ fn test_router_not_found() {
     msg.set_meta("req.action", "retrieve");
     msg.set_meta("req.resource", "/nonexistent");
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     match result {
         Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::NotFound),
         other => panic!("expected error, got {other:?}"),
     }
 }
 
-#[test]
-fn test_router_update_delete() {
+#[tokio::test]
+async fn test_router_update_delete() {
     let mut router = Router::new();
 
     router.update("/items/{id}", |_ctx, msg: Message, _input: InputStream| {
@@ -413,19 +403,16 @@ fn test_router_update_delete() {
     });
 
     let ctx = make_test_context();
-    let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Update
     let mut msg = Message::new("http.request");
     msg.set_meta("req.action", "update");
     msg.set_meta("req.resource", "/items/99");
 
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
     assert_eq!(body["updated"], "99");
 
@@ -434,12 +421,10 @@ fn test_router_update_delete() {
     msg.set_meta("req.action", "delete");
     msg.set_meta("req.resource", "/items/99");
 
-    let result = rt.block_on(async {
-        router
-            .route(&ctx, msg, InputStream::empty())
-            .collect_buffered()
-            .await
-    });
+    let result = router
+        .route(&ctx, msg, InputStream::empty())
+        .collect_buffered()
+        .await;
     assert!(matches!(result, Err(TerminalNotResponse::Drop)));
 }
 
