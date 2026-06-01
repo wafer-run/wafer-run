@@ -88,3 +88,48 @@ impl RegistrationCore {
         }
     }
 }
+
+impl RegistrationCore {
+    /// Register an alias mapping (single-hop; chained aliases rejected so
+    /// lookup stays O(1)). See [`crate::error::AliasError`] for rejection
+    /// reasons.
+    pub(crate) fn add_alias(
+        &mut self,
+        alias: String,
+        target: String,
+    ) -> Result<(), crate::error::AliasError> {
+        if alias == target {
+            return Err(crate::error::AliasError::Cycle { alias });
+        }
+        if self.aliases.contains_key(&target) {
+            return Err(crate::error::AliasError::TargetIsAlias { alias, target });
+        }
+        if self.aliases.values().any(|t| t == &alias) {
+            return Err(crate::error::AliasError::AliasIsExistingTarget { alias });
+        }
+        Arc::make_mut(&mut self.aliases).insert(alias, target);
+        Ok(())
+    }
+
+    /// Resolve `name` through the alias map, single-hop. Returns the alias
+    /// target if `name` is an alias, else `name` itself.
+    pub(crate) fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+    }
+
+    /// Rebuild the `all_blocks` map from registered blocks + aliases. Call
+    /// after `resolve()` completes.
+    pub(crate) fn rebuild_all_blocks(&mut self) {
+        let mut map = HashMap::new();
+        for (name, block) in &self.blocks {
+            map.insert(name.clone(), block.clone());
+        }
+        // Alias names point to the same Arc<dyn Block> as their target.
+        for (alias, target) in self.aliases.as_ref() {
+            if let Some(block) = self.blocks.get(target) {
+                map.insert(alias.clone(), block.clone());
+            }
+        }
+        self.all_blocks = Arc::new(map);
+    }
+}

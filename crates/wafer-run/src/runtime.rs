@@ -298,19 +298,7 @@ impl Wafer {
         alias: impl Into<String>,
         target: impl Into<String>,
     ) -> Result<(), crate::error::AliasError> {
-        let alias = alias.into();
-        let target = target.into();
-        if alias == target {
-            return Err(crate::error::AliasError::Cycle { alias });
-        }
-        if self.registration.aliases.contains_key(&target) {
-            return Err(crate::error::AliasError::TargetIsAlias { alias, target });
-        }
-        if self.registration.aliases.values().any(|t| t == &alias) {
-            return Err(crate::error::AliasError::AliasIsExistingTarget { alias });
-        }
-        Arc::make_mut(&mut self.registration.aliases).insert(alias, target);
-        Ok(())
+        self.registration.add_alias(alias.into(), target.into())
     }
 
     /// Resolve `name` through the alias map, single-hop. Returns the
@@ -324,11 +312,7 @@ impl Wafer {
     /// previously open-coded the same `aliases.get(...).unwrap_or(name)`
     /// pattern.
     pub fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
-        self.registration
-            .aliases
-            .get(name)
-            .map(|s| s.as_str())
-            .unwrap_or(name)
+        self.registration.canonicalize(name)
     }
 
     /// Set the admin block ID for WRAP access control.
@@ -623,17 +607,7 @@ impl Wafer {
     /// Rebuild the all_blocks map from registered blocks + aliases.
     /// Call this after resolve() completes.
     pub fn rebuild_all_blocks(&mut self) {
-        let mut map = HashMap::new();
-        for (name, block) in &self.registration.blocks {
-            map.insert(name.clone(), block.clone());
-        }
-        // Insert alias entries — alias names point to the same Arc<dyn Block>
-        for (alias, target) in self.registration.aliases.as_ref() {
-            if let Some(block) = self.registration.blocks.get(target) {
-                map.insert(alias.clone(), block.clone());
-            }
-        }
-        self.registration.all_blocks = Arc::new(map);
+        self.registration.rebuild_all_blocks();
     }
 }
 
