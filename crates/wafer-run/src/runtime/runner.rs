@@ -80,9 +80,10 @@ impl Wafer {
         let resolved = self.canonicalize(block_name);
 
         let block = match self
+            .registration
             .all_blocks
             .get(resolved)
-            .or_else(|| self.all_blocks.get(block_name))
+            .or_else(|| self.registration.all_blocks.get(block_name))
         {
             Some(b) => b.clone(),
             None => {

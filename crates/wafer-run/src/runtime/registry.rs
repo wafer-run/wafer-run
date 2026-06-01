@@ -16,7 +16,9 @@ impl Wafer {
         name: impl Into<String>,
         f: impl Fn(&mut Wafer, serde_json::Value) + Send + Sync + 'static,
     ) {
-        self.registrars.insert(name.into(), Box::new(f));
+        self.registration
+            .registrars
+            .insert(name.into(), Box::new(f));
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -25,7 +27,9 @@ impl Wafer {
         name: impl Into<String>,
         f: impl Fn(&mut Wafer, serde_json::Value) + 'static,
     ) {
-        self.registrars.insert(name.into(), Box::new(f));
+        self.registration
+            .registrars
+            .insert(name.into(), Box::new(f));
     }
 
     /// Register a block or flow by name with the given config.
@@ -36,9 +40,11 @@ impl Wafer {
     /// block or flow will be resolved during [`resolve()`](Self::resolve)
     /// (downloading `.flow.json` or `.wasm` via the registry).
     pub fn register(&mut self, name: &str, config: serde_json::Value) -> Result<(), RuntimeError> {
-        if let Some(registrar) = self.registrars.remove(name) {
+        if let Some(registrar) = self.registration.registrars.remove(name) {
             registrar(self, config);
-            self.registrars.insert(name.to_string(), registrar);
+            self.registration
+                .registrars
+                .insert(name.to_string(), registrar);
             return Ok(());
         }
 
@@ -76,7 +82,7 @@ impl Wafer {
             if let Some(aliases_obj) = aliases_val.as_object() {
                 for (alias, target) in aliases_obj {
                     if let Some(target_str) = target.as_str() {
-                        Arc::make_mut(&mut self.aliases)
+                        Arc::make_mut(&mut self.registration.aliases)
                             .insert(alias.clone(), target_str.to_string());
                     }
                 }
@@ -84,7 +90,7 @@ impl Wafer {
         }
 
         for (name, config) in map {
-            self.block_configs.insert(name, config);
+            self.registration.block_configs.insert(name, config);
         }
 
         Ok(())
@@ -92,7 +98,7 @@ impl Wafer {
 
     /// Add a block configuration programmatically.
     pub fn add_block_config(&mut self, name: impl Into<String>, config: serde_json::Value) {
-        self.block_configs.insert(name.into(), config);
+        self.registration.block_configs.insert(name.into(), config);
     }
 
     /// Register a config expander that splits a composite config into
@@ -104,7 +110,8 @@ impl Wafer {
         name: impl Into<String>,
         expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync + 'static,
     ) {
-        self.config_expanders
+        self.registration
+            .config_expanders
             .insert(name.into(), Box::new(expander));
     }
 
@@ -114,13 +121,14 @@ impl Wafer {
         name: impl Into<String>,
         expander: impl Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + 'static,
     ) {
-        self.config_expanders
+        self.registration
+            .config_expanders
             .insert(name.into(), Box::new(expander));
     }
 
     /// HasBlock returns true if a block with the given type name is registered.
     pub fn has_block(&self, type_name: &str) -> bool {
-        self.blocks.contains_key(type_name)
+        self.registration.blocks.contains_key(type_name)
     }
 
     /// RegisterBlock registers a block instance under the given type name.

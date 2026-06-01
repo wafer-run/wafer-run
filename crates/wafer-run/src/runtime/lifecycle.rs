@@ -177,10 +177,13 @@ impl Wafer {
     /// any typed Network/Storage/Crypto grants added through this method —
     /// no admin-block check is applied.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
-        self.wrap_grants_external.extend(grants.iter().cloned());
-        let mut all = (*self.wrap_grants).clone();
+        self.registration
+            .wrap
+            .grants_external
+            .extend(grants.iter().cloned());
+        let mut all = (*self.registration.wrap.grants).clone();
         all.extend(grants);
-        self.wrap_grants = Arc::new(all);
+        self.registration.wrap.grants = Arc::new(all);
     }
 
     /// Eagerly run `lifecycle(Init)` on every registered block. Lazy init
@@ -206,7 +209,7 @@ impl Wafer {
     /// this method (slot caching makes the second call a no-op for any
     /// block already initialised).
     pub async fn init_all_blocks(&self) {
-        let block_names: Vec<String> = self.blocks.keys().cloned().collect();
+        let block_names: Vec<String> = self.registration.blocks.keys().cloned().collect();
         for name in &block_names {
             let stack = crate::runtime::init_stack::InitStack::new();
             if let Err(e) = self.init_block_with_stack(name, &stack).await {
@@ -274,12 +277,12 @@ impl Wafer {
         tracing::info!(
             target: "wafer.runtime",
             event = "starting",
-            blocks = self.blocks.len(),
+            blocks = self.registration.blocks.len(),
             "wafer runtime starting"
         );
         self.seal().await?;
         for name in priority_blocks {
-            if !self.blocks.contains_key(*name) {
+            if !self.registration.blocks.contains_key(*name) {
                 continue;
             }
             if let Err(e) = self.init_block(name).await {
@@ -292,7 +295,7 @@ impl Wafer {
         }
         self.init_all_blocks().await;
 
-        for (name, block) in &self.blocks {
+        for (name, block) in &self.registration.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
             // when the block accesses its own resources during startup.
             let ctx = self.make_context(
@@ -323,7 +326,7 @@ impl Wafer {
             inner: arc_self.clone(),
         };
         let trait_handle: Arc<dyn wafer_block::Runtime> = Arc::new(handle);
-        for block in arc_self.blocks.values() {
+        for block in arc_self.registration.blocks.values() {
             block.bind(Box::new(trait_handle.clone()));
         }
 
@@ -332,7 +335,7 @@ impl Wafer {
 
     /// Shut down all resolved block instances (works through `Arc`).
     pub async fn shutdown(&self) {
-        for (name, block) in &self.blocks {
+        for (name, block) in &self.registration.blocks {
             let ctx = self.make_context(
                 "shutdown",
                 name.as_str(),
@@ -366,7 +369,7 @@ impl Wafer {
             None,
             crate::runtime::init_stack::InitStack::new(),
         );
-        for (name, block) in &self.blocks {
+        for (name, block) in &self.registration.blocks {
             if let Err(e) = block
                 .lifecycle(
                     &ctx,
