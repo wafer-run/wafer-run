@@ -5,8 +5,9 @@ use wafer_block::db::{Filter, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 #[cfg(test)]
 use wafer_core::interfaces::database::service::{pk, DataType};
-use wafer_core::interfaces::database::service::{
-    Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+use wafer_core::interfaces::database::{
+    exec::DbExec,
+    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
 use wafer_sql_utils::{
     base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
@@ -94,15 +95,6 @@ impl SQLiteDatabaseService {
 
         Ok(Record { id, data })
     }
-}
-
-/// Convert sea_query::Value params (from wafer-sql-utils builders) to rusqlite params
-/// via JSON round-trip: sea_query::Value -> serde_json::Value -> rusqlite::types::Value.
-fn sea_to_sql_params(sea_vals: Vec<wafer_sql_utils::SeaValue>) -> Vec<SqlValue> {
-    sea_values_to_json(sea_vals)
-        .iter()
-        .map(json_to_sql_value)
-        .collect()
 }
 
 fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
@@ -217,79 +209,26 @@ fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], so
 }
 
 #[wafer_async_trait]
-impl DatabaseService for SQLiteDatabaseService {
-    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(&stmt.sql, query_params.as_slice(), Self::row_to_record)
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
-                _ => DatabaseError::Internal(e.to_string()),
-            })
-    }
+impl DbExec for SQLiteDatabaseService {
+    const BACKEND: Backend = Backend::Sqlite;
 
-    async fn list(
+    async fn run_fetch(
         &self,
-        collection: &str,
-        opts: &ListOptions,
-    ) -> Result<RecordList, DatabaseError> {
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
         let db = self
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let collection = &sanitize_ident(collection);
-        if !table_exists(&db, collection) {
-            return Ok(RecordList {
-                records: Vec::new(),
-                total_count: 0,
-                page: 1,
-                page_size: if opts.limit > 0 { opts.limit } else { 0 },
-            });
-        }
-
-        // Ensure filter/sort columns exist (add them if missing)
-        ensure_columns_for_query(&db, collection, &opts.filters, &opts.sort);
-
-        // Count total — skipped when opts.skip_count is set (the caller has
-        // signalled they only care about the records and will not read
-        // total_count as the full collection size). We then synthesize
-        // total_count from records.len() below.
-        let total_count: Option<i64> = if opts.skip_count {
-            None
-        } else {
-            let count_stmt =
-                wafer_sql_utils::aggregate::build_count(collection, &opts.filters, Backend::Sqlite);
-            let count_params = sea_to_sql_params(count_stmt.values);
-            let count_refs: Vec<&dyn rusqlite::types::ToSql> = count_params
-                .iter()
-                .map(|v| v as &dyn rusqlite::types::ToSql)
-                .collect();
-            Some(
-                db.query_row(&count_stmt.sql, count_refs.as_slice(), |row| row.get(0))
-                    .map_err(|e| DatabaseError::Internal(e.to_string()))?,
-            )
-        };
-
-        // Query records
-        let stmt = wafer_sql_utils::query::build_select(collection, opts, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-
         let mut prepared = db
-            .prepare(&stmt.sql)
+            .prepare(sql)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
         let records: Vec<Record> = prepared
             .query_map(query_params.as_slice(), Self::row_to_record)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?
@@ -301,24 +240,121 @@ impl DatabaseService for SQLiteDatabaseService {
                 }
             })
             .collect();
+        Ok(records)
+    }
 
-        let page = if opts.limit > 0 {
-            (opts.offset / opts.limit) + 1
-        } else {
-            1
-        };
+    async fn run_fetch_one(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Record, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        db.query_row(sql, query_params.as_slice(), Self::row_to_record)
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                _ => DatabaseError::Internal(e.to_string()),
+            })
+    }
 
-        let total_count = total_count.unwrap_or(records.len() as i64);
-        Ok(RecordList {
-            records,
-            total_count,
-            page,
-            page_size: if opts.limit > 0 {
-                opts.limit
-            } else {
-                total_count
-            },
-        })
+    async fn run_execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = db
+            .execute(sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(rows as i64)
+    }
+
+    async fn run_scalar_i64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        db.query_row(sql, query_params.as_slice(), |row| row.get(0))
+            .map_err(|e| DatabaseError::Internal(e.to_string()))
+    }
+
+    async fn run_scalar_f64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<f64, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        db.query_row(sql, query_params.as_slice(), |row| row.get(0))
+            .map_err(|e| DatabaseError::Internal(e.to_string()))
+    }
+
+    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(table_exists(&db, table))
+    }
+
+    async fn ensure_query_columns(
+        &self,
+        table: &str,
+        filters: &[Filter],
+        sort: &[SortField],
+    ) -> Result<(), DatabaseError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        ensure_columns_for_query(&db, table, filters, sort);
+        Ok(())
+    }
+}
+
+#[wafer_async_trait]
+impl DatabaseService for SQLiteDatabaseService {
+    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
+        DbExec::get(self, collection, id).await
+    }
+
+    async fn list(
+        &self,
+        collection: &str,
+        opts: &ListOptions,
+    ) -> Result<RecordList, DatabaseError> {
+        DbExec::list(self, collection, opts).await
     }
 
     async fn create(
@@ -462,47 +498,15 @@ impl DatabaseService for SQLiteDatabaseService {
         }
 
         // Fetch the updated record
-        self.get(collection, id).await
+        DatabaseService::get(self, collection, id).await
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let stmt = wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = db
-            .execute(&stmt.sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        if rows == 0 {
-            return Err(DatabaseError::NotFound);
-        }
-        Ok(())
+        DbExec::delete(self, collection, id).await
     }
 
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
-            return Ok(0);
-        }
-        ensure_columns_for_query(&db, &table, filters, &[]);
-        let stmt = wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(&stmt.sql, query_params.as_slice(), |row| row.get(0))
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        DbExec::count(self, collection, filters).await
     }
 
     async fn sum(
@@ -511,19 +515,7 @@ impl DatabaseService for SQLiteDatabaseService {
         field: &str,
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let table = sanitize_ident(collection);
-        let stmt = wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(&stmt.sql, query_params.as_slice(), |row| row.get(0))
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        DbExec::sum(self, collection, field, filters).await
     }
 
     async fn query_raw(
@@ -531,33 +523,7 @@ impl DatabaseService for SQLiteDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let params: Vec<SqlValue> = args.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let mut stmt = db
-            .prepare(query)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        let records: Vec<Record> = stmt
-            .query_map(query_params.as_slice(), Self::row_to_record)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?
-            .filter_map(|r| match r {
-                Ok(record) => Some(record),
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping row due to deserialization error");
-                    None
-                }
-            })
-            .collect();
-
-        Ok(records)
+        DbExec::query_raw(self, query, args).await
     }
 
     async fn exec_raw(
@@ -565,21 +531,7 @@ impl DatabaseService for SQLiteDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let params: Vec<SqlValue> = args.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let rows = db
-            .execute(query, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        Ok(rows as i64)
+        DbExec::exec_raw(self, query, args).await
     }
 
     async fn delete_where(
@@ -587,22 +539,13 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
+        if !self.dbx_table_exists(&table).await? {
             return Ok(());
         }
         let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.execute(&stmt.sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await?;
         Ok(())
     }
 
@@ -611,24 +554,13 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
+        if !self.dbx_table_exists(&table).await? {
             return Ok(0);
         }
         let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let affected = db
-            .execute(&stmt.sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(affected as i64)
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
     }
 
     async fn take_where(
@@ -636,36 +568,14 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
+        if !self.dbx_table_exists(&table).await? {
             return Ok(vec![]);
         }
         let stmt =
             wafer_sql_utils::query::build_delete_where_returning(&table, filters, Backend::Sqlite);
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let mut prepared = db
-            .prepare(&stmt.sql)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let records: Vec<Record> = prepared
-            .query_map(query_params.as_slice(), Self::row_to_record)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?
-            .filter_map(|r| match r {
-                Ok(record) => Some(record),
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping row due to deserialization error");
-                    None
-                }
-            })
-            .collect();
-        Ok(records)
+        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
     }
 
     async fn update_where(
@@ -674,15 +584,10 @@ impl DatabaseService for SQLiteDatabaseService {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
+        if !self.dbx_table_exists(&table).await? {
             return Err(DatabaseError::NotFound);
         }
-
         let mut data = data;
         if !data.contains_key("updated_at") {
             data.insert(
@@ -690,10 +595,6 @@ impl DatabaseService for SQLiteDatabaseService {
                 serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
             );
         }
-
-        // Sort by key so the generated SET clause is stable across runs —
-        // see `create()` above for the rationale (HashMap iteration order
-        // would otherwise produce a fresh prepared statement per run).
         let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
         data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let stmt = wafer_sql_utils::query::build_update_where(
@@ -702,13 +603,8 @@ impl DatabaseService for SQLiteDatabaseService {
             filters,
             Backend::Sqlite,
         );
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.execute(&stmt.sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await?;
         Ok(())
     }
 
@@ -719,12 +615,8 @@ impl DatabaseService for SQLiteDatabaseService {
         delta: i64,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let table = sanitize_ident(collection);
-        if !table_exists(&db, &table) {
+        if !self.dbx_table_exists(&table).await? {
             return Ok(0);
         }
         let stmt = wafer_sql_utils::query::build_increment_field_where(
@@ -734,15 +626,8 @@ impl DatabaseService for SQLiteDatabaseService {
             filters,
             Backend::Sqlite,
         );
-        let params = sea_to_sql_params(stmt.values);
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = db
-            .execute(&stmt.sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(rows as i64)
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
     }
 
     // --- Schema management ---
@@ -793,30 +678,19 @@ impl DatabaseService for SQLiteDatabaseService {
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(table_exists(&db, name))
+        DbExec::schema_table_exists(self, name).await
     }
 
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        db.execute_batch(&ddl::build_drop_table(name, Backend::Sqlite).sql)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        let stmt = ddl::build_drop_table(name, Backend::Sqlite);
+        self.run_execute(&stmt.sql, &[]).await?;
+        Ok(())
     }
 
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
-        db.execute_batch(&stmt.sql)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        self.run_execute(&stmt.sql, &[]).await?;
+        Ok(())
     }
 }
 
@@ -897,29 +771,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sea_to_sql_params bridge tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_sea_to_sql_params_mixed_types() {
-        use wafer_sql_utils::SeaValue;
-        let sea_vals = vec![
-            SeaValue::String(Some(Box::new("hello".to_string()))),
-            SeaValue::BigInt(Some(42)),
-            SeaValue::Double(Some(2.5)),
-            SeaValue::Bool(Some(true)),
-            SeaValue::String(None), // NULL
-        ];
-        let params = sea_to_sql_params(sea_vals);
-        assert_eq!(params.len(), 5);
-        assert_eq!(params[0], SqlValue::Text("hello".to_string()));
-        assert_eq!(params[1], SqlValue::Integer(42));
-        assert_eq!(params[2], SqlValue::Real(2.5));
-        assert_eq!(params[3], SqlValue::Integer(1)); // bool true → 1
-        assert_eq!(params[4], SqlValue::Null);
-    }
-
-    // -----------------------------------------------------------------------
     // Sea-query builder integration tests (SQLite dialect)
     // -----------------------------------------------------------------------
 
@@ -942,7 +793,10 @@ mod tests {
         // SQLite uses ? placeholders, not $N
         assert!(sql.contains("?"), "SQLite should use ? placeholders");
         assert!(!sql.contains("$1"), "SQLite should not use $N placeholders");
-        let params = sea_to_sql_params(stmt.values);
+        let params = sea_values_to_json(stmt.values)
+            .iter()
+            .map(json_to_sql_value)
+            .collect::<Vec<_>>();
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], SqlValue::Text("alice".to_string()));
     }
@@ -982,8 +836,7 @@ mod tests {
         let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(stmt.values);
-        assert_eq!(params.len(), 1);
+        assert_eq!(sea_values_to_json(stmt.values).len(), 1);
     }
 
     #[test]
@@ -999,8 +852,7 @@ mod tests {
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(stmt.values);
-        assert!(!params.is_empty());
+        assert!(!sea_values_to_json(stmt.values).is_empty());
     }
 
     #[test]
@@ -1014,7 +866,10 @@ mod tests {
         let sql = stmt.sql;
         assert!(sql.contains("DELETE FROM"));
         assert!(sql.contains("IN"));
-        let params = sea_to_sql_params(stmt.values);
+        let params = sea_values_to_json(stmt.values)
+            .iter()
+            .map(json_to_sql_value)
+            .collect::<Vec<_>>();
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], SqlValue::Text("active".to_string()));
         assert_eq!(params[1], SqlValue::Text("pending".to_string()));
@@ -1034,8 +889,7 @@ mod tests {
         assert!(sql.contains("UPDATE"));
         assert!(sql.contains("SET"));
         assert!(sql.contains("WHERE"));
-        let params = sea_to_sql_params(stmt.values);
-        assert_eq!(params.len(), 2);
+        assert_eq!(sea_values_to_json(stmt.values).len(), 2);
     }
 
     #[test]
@@ -1047,8 +901,7 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::query::build_delete_where("users", &filters, Backend::Sqlite);
         assert!(stmt.sql.contains("IS NULL"));
-        let params = sea_to_sql_params(stmt.values);
-        assert!(params.is_empty());
+        assert!(sea_values_to_json(stmt.values).is_empty());
     }
 
     #[test]
@@ -1060,8 +913,7 @@ mod tests {
         }];
         let stmt = wafer_sql_utils::aggregate::build_count("users", &filters, Backend::Sqlite);
         assert!(stmt.sql.contains("IS NOT NULL"));
-        let params = sea_to_sql_params(stmt.values);
-        assert!(params.is_empty());
+        assert!(sea_values_to_json(stmt.values).is_empty());
     }
 
     #[test]
@@ -1093,8 +945,7 @@ mod tests {
         let sql = stmt.sql;
         assert!(sql.contains(">="));
         assert!(sql.contains("<"));
-        let params = sea_to_sql_params(stmt.values);
-        assert_eq!(params.len(), 2);
+        assert_eq!(sea_values_to_json(stmt.values).len(), 2);
     }
 
     // -----------------------------------------------------------------------
@@ -1175,7 +1026,7 @@ mod tests {
         assert_eq!(count, 2, "should have deleted exactly 2 active rows");
 
         // Remaining row is the inactive one
-        let remaining = svc.count("items", &[]).await.unwrap();
+        let remaining = DatabaseService::count(&svc, "items", &[]).await.unwrap();
         assert_eq!(remaining, 1);
     }
 
@@ -1199,7 +1050,7 @@ mod tests {
         assert_eq!(count, 0);
 
         // Row still exists
-        let remaining = svc.count("items", &[]).await.unwrap();
+        let remaining = DatabaseService::count(&svc, "items", &[]).await.unwrap();
         assert_eq!(remaining, 1);
     }
 
@@ -1242,7 +1093,7 @@ mod tests {
         assert_eq!(taken.len(), 2, "should have taken 2 unused codes");
 
         // Verify the rows are actually deleted
-        let remaining = svc.count("codes", &[]).await.unwrap();
+        let remaining = DatabaseService::count(&svc, "codes", &[]).await.unwrap();
         assert_eq!(remaining, 1, "only 1 used code should remain");
     }
 
@@ -1266,7 +1117,7 @@ mod tests {
         assert!(taken.is_empty());
 
         // Original row still present
-        let remaining = svc.count("codes", &[]).await.unwrap();
+        let remaining = DatabaseService::count(&svc, "codes", &[]).await.unwrap();
         assert_eq!(remaining, 1);
     }
 
@@ -1327,9 +1178,9 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 1, "exactly one row should match");
 
-        let r = svc.get("shares", "a").await.unwrap();
+        let r = DatabaseService::get(&svc, "shares", "a").await.unwrap();
         assert_eq!(r.data["access_count"], serde_json::json!(1));
-        let untouched = svc.get("shares", "b").await.unwrap();
+        let untouched = DatabaseService::get(&svc, "shares", "b").await.unwrap();
         assert_eq!(untouched.data["access_count"], serde_json::json!(0));
     }
 
@@ -1370,7 +1221,9 @@ mod tests {
             skip_count: true,
             ..Default::default()
         };
-        let result = svc.list("rows", &opts_skip).await.unwrap();
+        let result = DatabaseService::list(&svc, "rows", &opts_skip)
+            .await
+            .unwrap();
         assert_eq!(result.records.len(), 2);
         assert_eq!(result.total_count, 2);
 
@@ -1380,8 +1233,41 @@ mod tests {
             skip_count: false,
             ..Default::default()
         };
-        let result = svc.list("rows", &opts_count).await.unwrap();
+        let result = DatabaseService::list(&svc, "rows", &opts_count)
+            .await
+            .unwrap();
         assert_eq!(result.records.len(), 2);
         assert_eq!(result.total_count, 5);
+    }
+
+    #[tokio::test]
+    async fn get_missing_row_returns_not_found() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+        let err = DatabaseService::get(&svc, "widgets", "no-such-id")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn count_on_missing_table_returns_zero() {
+        let svc = make_test_svc();
+        let n = DatabaseService::count(&svc, "no_such_table", &[])
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn schema_table_exists_reflects_creation() {
+        let svc = make_test_svc();
+        assert!(!DatabaseService::schema_table_exists(&svc, "widgets")
+            .await
+            .unwrap());
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+        assert!(DatabaseService::schema_table_exists(&svc, "widgets")
+            .await
+            .unwrap());
     }
 }

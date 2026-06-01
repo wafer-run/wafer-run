@@ -5,8 +5,9 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use wafer_block::db::FilterOp;
 use wafer_block::db::{Filter, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
-use wafer_core::interfaces::database::service::{
-    Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+use wafer_core::interfaces::database::{
+    exec::DbExec,
+    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
 use wafer_sql_utils::{
     base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
@@ -36,98 +37,6 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
     // Async internals
     // -----------------------------------------------------------------
-
-    async fn get_async(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Backend::Postgres);
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let row: PgRow = q.fetch_one(&self.pool).await.map_err(|e| match e {
-            sqlx::Error::RowNotFound => DatabaseError::NotFound,
-            _ => DatabaseError::Internal(e.to_string()),
-        })?;
-        row_to_record(&row)
-    }
-
-    async fn list_async(
-        &self,
-        collection: &str,
-        opts: &ListOptions,
-    ) -> Result<RecordList, DatabaseError> {
-        let table = sanitize_ident(collection);
-
-        if !self.table_exists_async(&table).await? {
-            return Ok(RecordList {
-                records: Vec::new(),
-                total_count: 0,
-                page: 1,
-                page_size: if opts.limit > 0 { opts.limit } else { 0 },
-            });
-        }
-
-        // Ensure filter/sort columns exist
-        self.ensure_columns_for_query(&table, &opts.filters, &opts.sort)
-            .await?;
-
-        // Count total — skipped when opts.skip_count is set (the caller has
-        // signalled they only care about the records and will not read
-        // total_count as the full collection size). We then synthesize
-        // total_count from records.len() below.
-        let total_count: Option<i64> = if opts.skip_count {
-            None
-        } else {
-            let count_stmt =
-                wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Backend::Postgres);
-            let count_params = sea_values_to_json(count_stmt.values);
-            let mut count_q = sqlx::query_scalar::<_, i64>(&count_stmt.sql);
-            for p in &count_params {
-                count_q = bind_json_value(count_q, p);
-            }
-            Some(
-                count_q
-                    .fetch_one(&self.pool)
-                    .await
-                    .map_err(|e| DatabaseError::Internal(e.to_string()))?,
-            )
-        };
-
-        // Query records
-        let select_stmt = wafer_sql_utils::query::build_select(&table, opts, Backend::Postgres);
-        let params = sea_values_to_json(select_stmt.values);
-        let mut q = sqlx::query(&select_stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let rows = q
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        let mut records = Vec::with_capacity(rows.len());
-        for row in &rows {
-            records.push(row_to_record(row)?);
-        }
-
-        let page = if opts.limit > 0 {
-            (opts.offset / opts.limit) + 1
-        } else {
-            1
-        };
-
-        let total_count = total_count.unwrap_or(records.len() as i64);
-        Ok(RecordList {
-            records,
-            total_count,
-            page,
-            page_size: if opts.limit > 0 {
-                opts.limit
-            } else {
-                total_count
-            },
-        })
-    }
 
     async fn create_async(
         &self,
@@ -248,252 +157,7 @@ impl PostgresDatabaseService {
         }
 
         // Fetch the updated record
-        self.get_async(collection, id).await
-    }
-
-    async fn delete_async(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_delete_by_id(collection, id, Backend::Postgres);
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        if result.rows_affected() == 0 {
-            return Err(DatabaseError::NotFound);
-        }
-        Ok(())
-    }
-
-    async fn count_async(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Ok(0);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-
-        let count_stmt =
-            wafer_sql_utils::aggregate::build_count(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(count_stmt.values);
-        let mut q = sqlx::query_scalar::<_, i64>(&count_stmt.sql);
-        for p in &params {
-            q = bind_json_value(q, p);
-        }
-        q.fetch_one(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
-    }
-
-    async fn sum_async(
-        &self,
-        collection: &str,
-        field: &str,
-        filters: &[Filter],
-    ) -> Result<f64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        let sum_stmt =
-            wafer_sql_utils::aggregate::build_sum(&table, field, filters, Backend::Postgres);
-        let params = sea_values_to_json(sum_stmt.values);
-        let mut q = sqlx::query_scalar::<_, f64>(&sum_stmt.sql);
-        for p in &params {
-            q = bind_json_value(q, p);
-        }
-        q.fetch_one(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
-    }
-
-    async fn query_raw_async(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        let mut q = sqlx::query(query);
-        for a in args {
-            q = bind_json_value_query(q, a);
-        }
-        let rows = q
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        let mut records = Vec::with_capacity(rows.len());
-        for row in &rows {
-            records.push(row_to_record(row)?);
-        }
-        Ok(records)
-    }
-
-    async fn exec_raw_async(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError> {
-        let mut q = sqlx::query(query);
-        for a in args {
-            q = bind_json_value_query(q, a);
-        }
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(result.rows_affected() as i64)
-    }
-
-    async fn delete_where_async(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Ok(());
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        q.execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn delete_where_count_async(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Ok(0);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(result.rows_affected() as i64)
-    }
-
-    async fn take_where_async(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Ok(vec![]);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-
-        let stmt = wafer_sql_utils::query::build_delete_where_returning(
-            &table,
-            filters,
-            Backend::Postgres,
-        );
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let rows: Vec<PgRow> = q
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        rows.iter().map(row_to_record).collect()
-    }
-
-    async fn update_where_async(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Err(DatabaseError::NotFound);
-        }
-
-        let mut data = data;
-        if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-            );
-        }
-
-        self.ensure_columns_from_data(&table, &data).await?;
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-
-        // Sort by key so the generated SET clause is stable across runs —
-        // see `create_async()` above for the rationale.
-        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
-        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let stmt = wafer_sql_utils::query::build_update_where(
-            &table,
-            &data_pairs,
-            filters,
-            Backend::Postgres,
-        );
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        q.execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn increment_field_where_async(
-        &self,
-        collection: &str,
-        col: &str,
-        delta: i64,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_exists_async(&table).await? {
-            return Ok(0);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let stmt = wafer_sql_utils::query::build_increment_field_where(
-            &table,
-            col,
-            delta,
-            filters,
-            Backend::Postgres,
-        );
-        let params = sea_values_to_json(stmt.values);
-        let mut q = sqlx::query(&stmt.sql);
-        for p in &params {
-            q = bind_json_value_query(q, p);
-        }
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(result.rows_affected() as i64)
+        DbExec::get(self, collection, id).await
     }
 
     // -----------------------------------------------------------------
@@ -655,9 +319,107 @@ impl PostgresDatabaseService {
 // ---------------------------------------------------------------------------
 
 #[wafer_async_trait]
+impl DbExec for PostgresDatabaseService {
+    const BACKEND: Backend = Backend::Postgres;
+
+    async fn run_fetch(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let mut q = sqlx::query(sql);
+        for p in params {
+            q = bind_json_value_query(q, p);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in &rows {
+            records.push(row_to_record(row)?);
+        }
+        Ok(records)
+    }
+
+    async fn run_fetch_one(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Record, DatabaseError> {
+        let mut q = sqlx::query(sql);
+        for p in params {
+            q = bind_json_value_query(q, p);
+        }
+        let row = q.fetch_one(&self.pool).await.map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFound,
+            _ => DatabaseError::Internal(e.to_string()),
+        })?;
+        row_to_record(&row)
+    }
+
+    async fn run_execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        let mut q = sqlx::query(sql);
+        for p in params {
+            q = bind_json_value_query(q, p);
+        }
+        let result = q
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn run_scalar_i64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        let mut q = sqlx::query_scalar::<_, i64>(sql);
+        for p in params {
+            q = bind_json_value(q, p);
+        }
+        q.fetch_one(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))
+    }
+
+    async fn run_scalar_f64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<f64, DatabaseError> {
+        let mut q = sqlx::query_scalar::<_, f64>(sql);
+        for p in params {
+            q = bind_json_value(q, p);
+        }
+        q.fetch_one(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))
+    }
+
+    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
+        self.table_exists_async(table).await
+    }
+
+    async fn ensure_query_columns(
+        &self,
+        table: &str,
+        filters: &[Filter],
+        sort: &[SortField],
+    ) -> Result<(), DatabaseError> {
+        self.ensure_columns_for_query(table, filters, sort).await
+    }
+}
+
+#[wafer_async_trait]
 impl DatabaseService for PostgresDatabaseService {
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        self.get_async(collection, id).await
+        DbExec::get(self, collection, id).await
     }
 
     async fn list(
@@ -665,7 +427,7 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         opts: &ListOptions,
     ) -> Result<RecordList, DatabaseError> {
-        self.list_async(collection, opts).await
+        DbExec::list(self, collection, opts).await
     }
 
     async fn create(
@@ -686,11 +448,11 @@ impl DatabaseService for PostgresDatabaseService {
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        self.delete_async(collection, id).await
+        DbExec::delete(self, collection, id).await
     }
 
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        self.count_async(collection, filters).await
+        DbExec::count(self, collection, filters).await
     }
 
     async fn sum(
@@ -699,7 +461,7 @@ impl DatabaseService for PostgresDatabaseService {
         field: &str,
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
-        self.sum_async(collection, field, filters).await
+        DbExec::sum(self, collection, field, filters).await
     }
 
     async fn query_raw(
@@ -707,7 +469,7 @@ impl DatabaseService for PostgresDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        self.query_raw_async(query, args).await
+        DbExec::query_raw(self, query, args).await
     }
 
     async fn exec_raw(
@@ -715,7 +477,7 @@ impl DatabaseService for PostgresDatabaseService {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        self.exec_raw_async(query, args).await
+        DbExec::exec_raw(self, query, args).await
     }
 
     // --- Schema management ---
@@ -725,7 +487,7 @@ impl DatabaseService for PostgresDatabaseService {
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        self.table_exists_async(name).await
+        DbExec::schema_table_exists(self, name).await
     }
 
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
@@ -741,7 +503,15 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
-        self.delete_where_async(collection, filters).await
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Ok(());
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await?;
+        Ok(())
     }
 
     async fn delete_where_count(
@@ -749,7 +519,14 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        self.delete_where_count_async(collection, filters).await
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Ok(0);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
     }
 
     async fn take_where(
@@ -757,7 +534,18 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        self.take_where_async(collection, filters).await
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Ok(vec![]);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let stmt = wafer_sql_utils::query::build_delete_where_returning(
+            &table,
+            filters,
+            Backend::Postgres,
+        );
+        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
     }
 
     async fn update_where(
@@ -766,7 +554,30 @@ impl DatabaseService for PostgresDatabaseService {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.update_where_async(collection, filters, data).await
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Err(DatabaseError::NotFound);
+        }
+        let mut data = data;
+        if !data.contains_key("updated_at") {
+            data.insert(
+                "updated_at".to_string(),
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+        self.ensure_columns_from_data(&table, &data).await?;
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
+        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let stmt = wafer_sql_utils::query::build_update_where(
+            &table,
+            &data_pairs,
+            filters,
+            Backend::Postgres,
+        );
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await?;
+        Ok(())
     }
 
     async fn increment_field_where(
@@ -776,7 +587,19 @@ impl DatabaseService for PostgresDatabaseService {
         delta: i64,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        self.increment_field_where_async(collection, col, delta, filters)
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Ok(0);
+        }
+        self.ensure_columns_for_query(&table, filters, &[]).await?;
+        let stmt = wafer_sql_utils::query::build_increment_field_where(
+            &table,
+            col,
+            delta,
+            filters,
+            Backend::Postgres,
+        );
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 }
