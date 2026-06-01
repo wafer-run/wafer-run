@@ -112,11 +112,6 @@ pub enum RuntimeError {
     /// operators can find the link-graph cause inline.
     #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
-
-    // ── Catch-all ───────────────────────────────────────────────────────
-    /// An error that doesn't fit any specific category.
-    #[error("{0}")]
-    Other(String),
 }
 
 /// Detail of a single grant-validation rejection from
@@ -332,18 +327,6 @@ fn render_source(src: &BlockReferenceSource) -> String {
             None => format!("      \u{2022} from block `{from_block}` {location}"),
             Some(d) => format!("      \u{2022} from block `{from_block}` {location} {d}"),
         },
-    }
-}
-
-impl From<String> for RuntimeError {
-    fn from(s: String) -> Self {
-        RuntimeError::Other(s)
-    }
-}
-
-impl From<&str> for RuntimeError {
-    fn from(s: &str) -> Self {
-        RuntimeError::Other(s.to_string())
     }
 }
 
