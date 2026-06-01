@@ -96,7 +96,7 @@ impl WaferBuilder {
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         let mut w = Wafer::empty();
-        w.config_source = self.config_source;
+        w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

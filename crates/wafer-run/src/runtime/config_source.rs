@@ -5,7 +5,7 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use thiserror::Error;
 use wafer_block::ConfigVar;
@@ -132,5 +132,46 @@ impl ConfigSource for StaticConfigSource {
             // optional == true + no value + no default: skip; caller's get() returns None
         }
         Ok(EnvBlockConfig::new(out))
+    }
+}
+
+/// The runtime's config state: the lazy per-block [`ConfigSource`] consulted
+/// on first init, plus the embedder-supplied synchronous config snapshot
+/// layered under per-call config. Bundled together because both are the
+/// runtime's configuration inputs and are cloned as a pair into every
+/// [`RuntimeContext`](crate::context::RuntimeContext).
+pub(crate) struct ConfigState {
+    /// Source of per-block env-var config, consulted on first init (async,
+    /// serves the `wafer-run/config` block's `config::get(ctx, key).await`).
+    pub(crate) source: Arc<dyn ConfigSource>,
+    /// Embedder-supplied env-style snapshot, cloned into every
+    /// [`RuntimeContext`] so `ctx.config_get(key)` resolves boot-time values
+    /// regardless of lifecycle stage. Empty until [`set_snapshot`](Self::set_snapshot).
+    pub(crate) snapshot: Arc<HashMap<String, String>>,
+}
+
+impl ConfigState {
+    /// Construct with the given source and an empty snapshot.
+    pub(crate) fn new(source: Arc<dyn ConfigSource>) -> Self {
+        Self {
+            source,
+            snapshot: Arc::new(HashMap::new()),
+        }
+    }
+
+    /// Construct with the default in-memory [`StaticConfigSource`] (used by
+    /// `Wafer::empty()` before the builder installs the real source).
+    pub(crate) fn default_static() -> Self {
+        Self::new(Arc::new(StaticConfigSource::default()))
+    }
+
+    /// Replace the snapshot. Backs `Wafer::set_config_snapshot`.
+    pub(crate) fn set_snapshot(&mut self, snapshot: HashMap<String, String>) {
+        self.snapshot = Arc::new(snapshot);
+    }
+
+    /// Borrow the snapshot Arc. Backs `Wafer::config_snapshot`.
+    pub(crate) fn snapshot(&self) -> &Arc<HashMap<String, String>> {
+        &self.snapshot
     }
 }

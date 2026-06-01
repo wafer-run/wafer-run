@@ -254,24 +254,13 @@ pub struct Wafer {
     /// `Wafer::start()`; if non-empty, boot fails with
     /// `RuntimeError::GrantsRejected`.
     pub(crate) grant_validation_errors: Vec<crate::error::GrantValidationError>,
-    /// Source of per-block env-var config, consulted on first init.
-    pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
-    /// Embedder-supplied env-style config snapshot. Cloned into every
-    /// [`RuntimeContext`] [`make_context`](Self::make_context) produces, so
-    /// blocks reach values via `ctx.config_get(key)` regardless of lifecycle
-    /// stage (Init/Start/Stop) or request handler.
-    ///
-    /// Empty by default; populate via
-    /// [`Wafer::set_config_snapshot`]. Solobase consumers wire it from the
-    /// same `env_vars` map they pass to `make_config_service`, so the
-    /// synchronous `ctx.config_get` path and the async `wafer-run/config`
-    /// block resolve to identical values.
-    ///
-    /// Distinct from [`Self::config_source`], which is queried lazily per
-    /// block on first init (and serves the `wafer-run/config` block's async
-    /// `config::get(ctx, key).await` path); the snapshot is a shared
-    /// synchronous fallback for boot-time values that every block sees.
-    pub(crate) config_snapshot: Arc<HashMap<String, String>>,
+    /// Runtime configuration inputs: the lazy per-block [`ConfigSource`]
+    /// consulted on first init, plus the embedder-supplied synchronous config
+    /// snapshot layered under per-call config (populated via
+    /// [`Wafer::set_config_snapshot`]). Both are cloned as a pair into every
+    /// [`RuntimeContext`] [`make_context`](Self::make_context) produces.
+    /// See [`ConfigState`](crate::runtime::config_source::ConfigState).
+    pub(crate) config: crate::runtime::config_source::ConfigState,
 }
 
 impl Wafer {
@@ -329,8 +318,7 @@ impl Wafer {
             wasm_engine: None,
             slots: Arc::new(HashMap::new()),
             grant_validation_errors: Vec::new(),
-            config_source: Arc::new(crate::runtime::config_source::StaticConfigSource::default()),
-            config_snapshot: Arc::new(HashMap::new()),
+            config: crate::runtime::config_source::ConfigState::default_static(),
         }
     }
 
@@ -347,14 +335,14 @@ impl Wafer {
     /// but contexts already produced (e.g. for in-flight `init_block` runs)
     /// hold the previous snapshot's `Arc` until they drop.
     pub fn set_config_snapshot(&mut self, snapshot: HashMap<String, String>) {
-        self.config_snapshot = Arc::new(snapshot);
+        self.config.set_snapshot(snapshot);
     }
 
     /// Borrow the embedder-supplied config snapshot installed via
     /// [`set_config_snapshot`](Self::set_config_snapshot). Returns an empty
     /// map if no snapshot has been installed.
     pub fn config_snapshot(&self) -> &Arc<HashMap<String, String>> {
-        &self.config_snapshot
+        self.config.snapshot()
     }
 
     /// Returns all resolved blocks as an Arc for use in contexts.
@@ -535,7 +523,7 @@ impl Wafer {
             flow_id: flow_id.into(),
             node_id: node_id.into(),
             config: Arc::new(config),
-            config_snapshot: self.config_snapshot.clone(),
+            config_snapshot: self.config.snapshot.clone(),
             cancelled,
             deadline,
             all_blocks: self.all_blocks_arc(),
@@ -551,7 +539,7 @@ impl Wafer {
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
             init_breadcrumbs,
             slots: self.slots.clone(),
-            config_source: self.config_source.clone(),
+            config_source: self.config.source.clone(),
         }
     }
 
@@ -623,7 +611,7 @@ impl Wafer {
             name,
             block,
             slot,
-            self.config_source.clone(),
+            self.config.source.clone(),
             init_ctx,
             stack,
         )
@@ -658,7 +646,8 @@ impl Wafer {
         for (name, block) in self.blocks.iter() {
             let info = block.info();
             match self
-                .config_source
+                .config
+                .source
                 .load_for_block(name, &info.config_keys)
                 .await
             {
