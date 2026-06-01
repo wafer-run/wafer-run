@@ -328,37 +328,7 @@ impl Wafer {
     /// External grants previously added via [`Wafer::add_wrap_grants`] are
     /// preserved across the rescan.
     pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
-        self.registration.wrap.admin_block = Arc::new(block_id.into());
-        self.rebuild_wrap_grants();
-    }
-
-    /// Rebuild `self.registration.wrap.grants` from scratch by walking every registered
-    /// block's declared grants (filtered through the per-block validator)
-    /// and concatenating the externally-supplied grants
-    /// (`self.registration.wrap.grants_external`). Called by `set_admin_block` and
-    /// `add_wrap_grants`.
-    fn rebuild_wrap_grants(&mut self) {
-        self.registration.wrap.validation_errors.clear(); // full re-walk; old errors are stale
-        let admin_block: String = (*self.registration.wrap.admin_block).clone();
-        let mut merged: Vec<wafer_block::types::ResourceGrant> = Vec::new();
-        // Walk blocks in deterministic order for snapshot stability.
-        let mut names: Vec<&String> = self.registration.blocks.keys().collect();
-        names.sort();
-        for name in names {
-            let block = &self.registration.blocks[name];
-            let info = block.info();
-            let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
-                &info,
-                &admin_block,
-            );
-            merged.extend(outcome.accepted);
-            self.registration
-                .wrap
-                .validation_errors
-                .extend(outcome.rejected);
-        }
-        merged.extend(self.registration.wrap.grants_external.iter().cloned());
-        self.registration.wrap.grants = Arc::new(merged);
+        self.registration.set_admin_block(block_id.into());
     }
 
     /// Get the collected WRAP grants (read-only).

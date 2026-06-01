@@ -177,13 +177,7 @@ impl Wafer {
     /// any typed Network/Storage/Crypto grants added through this method —
     /// no admin-block check is applied.
     pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
-        self.registration
-            .wrap
-            .grants_external
-            .extend(grants.iter().cloned());
-        let mut all = (*self.registration.wrap.grants).clone();
-        all.extend(grants);
-        self.registration.wrap.grants = Arc::new(all);
+        self.registration.add_wrap_grants(grants);
     }
 
     /// Eagerly run `lifecycle(Init)` on every registered block. Lazy init

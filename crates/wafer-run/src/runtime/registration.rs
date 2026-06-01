@@ -132,4 +132,48 @@ impl RegistrationCore {
         }
         self.all_blocks = Arc::new(map);
     }
+
+    /// Set the admin block ID, then re-scan every registered block's typed
+    /// WRAP grants so admin-declared grants registered before this call are
+    /// collected. External grants (via [`add_wrap_grants`](Self::add_wrap_grants))
+    /// are preserved.
+    pub(crate) fn set_admin_block(&mut self, block_id: String) {
+        self.wrap.admin_block = Arc::new(block_id);
+        self.rebuild_wrap_grants();
+    }
+
+    /// Rebuild `self.wrap.grants` from scratch: walk every registered block's
+    /// declared grants (filtered through the per-block validator) and append
+    /// the externally-supplied grants. Called by
+    /// [`set_admin_block`](Self::set_admin_block).
+    fn rebuild_wrap_grants(&mut self) {
+        self.wrap.validation_errors.clear(); // full re-walk; old errors are stale
+        let admin_block: String = (*self.wrap.admin_block).clone();
+        let mut merged: Vec<wafer_block::types::ResourceGrant> = Vec::new();
+        // Walk blocks in deterministic order for snapshot stability.
+        let mut names: Vec<&String> = self.blocks.keys().collect();
+        names.sort();
+        for name in names {
+            let block = &self.blocks[name];
+            let info = block.info();
+            let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
+                &info,
+                &admin_block,
+            );
+            merged.extend(outcome.accepted);
+            self.wrap.validation_errors.extend(outcome.rejected);
+        }
+        merged.extend(self.wrap.grants_external.iter().cloned());
+        self.wrap.grants = Arc::new(merged);
+    }
+
+    /// Add extra WRAP grants (e.g. loaded from a database). Appended to the
+    /// existing grants and tracked separately so a later
+    /// [`set_admin_block`](Self::set_admin_block) rescan does not drop them.
+    pub(crate) fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
+        self.wrap.grants_external.extend(grants.iter().cloned());
+        let mut all = (*self.wrap.grants).clone();
+        all.extend(grants);
+        self.wrap.grants = Arc::new(all);
+    }
 }
