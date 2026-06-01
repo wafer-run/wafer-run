@@ -15,17 +15,19 @@ impl Wafer {
     /// into the target infrastructure block configs.
     pub(crate) fn expand_composite_configs(&mut self) {
         let keys: Vec<String> = self
+            .registration
             .block_configs
             .keys()
-            .filter(|k| self.config_expanders.contains_key(k.as_str()))
+            .filter(|k| self.registration.config_expanders.contains_key(k.as_str()))
             .cloned()
             .collect();
 
         for key in keys {
-            if let Some(config) = self.block_configs.remove(&key) {
-                if let Some(expander) = self.config_expanders.get(&key) {
+            if let Some(config) = self.registration.block_configs.remove(&key) {
+                if let Some(expander) = self.registration.config_expanders.get(&key) {
                     for (name, val) in expander(config) {
                         let entry = self
+                            .registration
                             .block_configs
                             .entry(name)
                             .or_insert_with(|| serde_json::Value::Object(Default::default()));
@@ -50,7 +52,7 @@ impl Wafer {
             .flows
             .values()
             .filter(|f| f.config_map.as_ref().is_some_and(|m| !m.is_empty()))
-            .filter(|f| self.block_configs.contains_key(&f.id))
+            .filter(|f| self.registration.block_configs.contains_key(&f.id))
             .map(|f| {
                 (
                     f.id.clone(),
@@ -61,13 +63,14 @@ impl Wafer {
             .collect();
 
         for (flow_id, config_map, config_defaults) in eligible {
-            let Some(flow_config) = self.block_configs.remove(&flow_id) else {
+            let Some(flow_config) = self.registration.block_configs.remove(&flow_id) else {
                 continue;
             };
 
             // 1. Apply config_defaults to target blocks
             for (target, defaults) in &config_defaults {
                 let entry = self
+                    .registration
                     .block_configs
                     .entry(target.clone())
                     .or_insert_with(|| serde_json::Value::Object(Default::default()));
@@ -79,6 +82,7 @@ impl Wafer {
                 for (user_key, mapping) in &config_map {
                     if let Some(value) = obj.get(user_key) {
                         let entry = self
+                            .registration
                             .block_configs
                             .entry(mapping.target.clone())
                             .or_insert_with(|| serde_json::Value::Object(Default::default()));
@@ -94,7 +98,7 @@ impl Wafer {
     pub(crate) fn gather_uses_configs(&mut self) {
         let mut contributions: Vec<(String, serde_json::Value)> = Vec::new();
 
-        for config in self.block_configs.values() {
+        for config in self.registration.block_configs.values() {
             if let Some(uses) = config.get("uses").and_then(|v| v.as_object()) {
                 for (target, contrib) in uses {
                     contributions.push((target.clone(), contrib.clone()));
@@ -105,13 +109,14 @@ impl Wafer {
         for (target, contrib) in contributions {
             let resolved_target = self.canonicalize(&target).to_string();
             let entry = self
+                .registration
                 .block_configs
                 .entry(resolved_target)
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             super::deep_merge(entry, &contrib);
         }
 
-        for config in self.block_configs.values_mut() {
+        for config in self.registration.block_configs.values_mut() {
             if let Some(obj) = config.as_object_mut() {
                 obj.remove("uses");
             }
@@ -149,8 +154,8 @@ impl Wafer {
         // `seal()` callers (Cloudflare Workers, browser WASM) pass through here.
         // If any typed grants were rejected during register_block / set_admin_block,
         // refuse boot with all rejections listed in one error.
-        if !self.grant_validation_errors.is_empty() {
-            let errors = std::mem::take(&mut self.grant_validation_errors);
+        if !self.registration.wrap.validation_errors.is_empty() {
+            let errors = std::mem::take(&mut self.registration.wrap.validation_errors);
             return Err(RuntimeError::GrantsRejected(errors));
         }
 
@@ -171,14 +176,16 @@ impl Wafer {
         {
             let mut eff: std::collections::HashMap<String, wafer_block::BlockCapabilities> =
                 std::collections::HashMap::new();
-            for (name, block) in &self.blocks {
+            for (name, block) in &self.registration.blocks {
                 let declared = block
                     .info()
                     .capabilities
                     .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
 
                 // Strip + parse the `capabilities` subkey from block config.
-                let config_overrides = if let Some(cfg) = self.block_configs.get_mut(name) {
+                let config_overrides = if let Some(cfg) =
+                    self.registration.block_configs.get_mut(name)
+                {
                     if let Some(obj) = cfg.as_object_mut() {
                         if let Some(raw) = obj.remove("capabilities") {
                             match serde_json::from_value::<
@@ -218,7 +225,7 @@ impl Wafer {
 
                 eff.insert(name.clone(), effective);
             }
-            self.effective_capabilities = std::sync::Arc::new(eff);
+            self.registration.wrap.effective_capabilities = std::sync::Arc::new(eff);
         }
 
         // 6. Resolve remote blocks referenced by flow steps and router routes.
@@ -241,9 +248,9 @@ impl Wafer {
         // references its config holds. Default impl on `Block` returns
         // empty Vec, so only blocks that override (router today; future
         // composite/middleware blocks) emit anything.
-        for (block_name, config) in &self.block_configs {
+        for (block_name, config) in &self.registration.block_configs {
             let canonical_block = self.canonicalize(block_name).to_string();
-            let Some(block) = self.blocks.get(&canonical_block) else {
+            let Some(block) = self.registration.blocks.get(&canonical_block) else {
                 // Block config exists but the block isn't registered yet
                 // (will be downloaded from registry below, or flagged as
                 // not_found). Skip — we can't ask an unregistered block
@@ -277,7 +284,7 @@ impl Wafer {
             .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))?;
 
         for (canonical, sources) in references {
-            if self.blocks.contains_key(&canonical) {
+            if self.registration.blocks.contains_key(&canonical) {
                 continue;
             }
             #[cfg(feature = "wasm")]
@@ -315,17 +322,24 @@ impl Wafer {
         }
 
         // 7. Finalize the startup snapshot. Block configs survive in
-        // `self.block_configs` and are mirrored here for context consumers.
+        // `self.registration.block_configs` and are mirrored here for context consumers.
         // (Lazy init reads from the runtime's `ConfigSource` — not from
-        // `self.block_configs` — when dispatching `lifecycle(Init)` on
+        // `self.registration.block_configs` — when dispatching `lifecycle(Init)` on
         // first request; see `run_init_pipeline`.)
         self.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
-            blocks: super::lifecycle::sorted_snapshot(self.blocks.values().map(|b| b.info())),
+            blocks: super::lifecycle::sorted_snapshot(
+                self.registration.blocks.values().map(|b| b.info()),
+            ),
             flow_infos: self.flows_info(),
             flow_defs: self.flow_defs(),
-            block_configs: self.block_configs.clone(),
-            interface_specs: self.interface_specs.values().cloned().collect(),
+            block_configs: self.registration.block_configs.clone(),
+            interface_specs: self
+                .registration
+                .interface_specs
+                .values()
+                .cloned()
+                .collect(),
         });
 
         Ok(())
@@ -335,11 +349,12 @@ impl Wafer {
     #[cfg(feature = "wasm")]
     async fn resolve_remote_entries(&mut self) -> Result<(), RuntimeError> {
         let candidates: Vec<String> = self
+            .registration
             .block_configs
             .keys()
             .filter(|name| name.contains('/'))
             .filter(|name| !self.flows.contains_key(name.as_str()))
-            .filter(|name| !self.blocks.contains_key(name.as_str()))
+            .filter(|name| !self.registration.blocks.contains_key(name.as_str()))
             .filter(|name| {
                 parse_unversioned_block(name).is_some() || parse_versioned_block(name).is_some()
             })
@@ -430,7 +445,7 @@ impl Wafer {
                     .as_ref()
                     .map(|b| {
                         b.iter()
-                            .filter(|b| !self.blocks.contains_key(b.as_str()))
+                            .filter(|b| !self.registration.blocks.contains_key(b.as_str()))
                             .cloned()
                             .collect()
                     })
@@ -439,7 +454,7 @@ impl Wafer {
                 self.add_flow(flow);
 
                 for block_name in &blocks_to_resolve {
-                    if self.blocks.contains_key(block_name.as_str()) {
+                    if self.registration.blocks.contains_key(block_name.as_str()) {
                         continue;
                     }
                     match self.resolve_remote_block(&client, block_name).await {

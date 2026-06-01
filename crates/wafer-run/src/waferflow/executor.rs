@@ -140,9 +140,10 @@ pub async fn execute(
 
         // --- Look up block ---
         let block = match wafer
+            .registration
             .all_blocks
             .get(&block_name)
-            .or_else(|| wafer.all_blocks.get(&step.block))
+            .or_else(|| wafer.registration.all_blocks.get(&step.block))
         {
             Some(b) => b.clone(),
             None => {

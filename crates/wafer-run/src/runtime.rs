@@ -4,12 +4,8 @@ use std::{
 };
 
 use crate::{
-    block::Block,
-    context::RuntimeContext,
-    error::RuntimeError,
-    observability::ObservabilityBus,
-    platform::{ConfigExpanderFn, Instant, RegistrarFn},
-    types::*,
+    block::Block, context::RuntimeContext, error::RuntimeError, observability::ObservabilityBus,
+    platform::Instant, types::*,
 };
 
 pub mod config_source;
@@ -17,6 +13,8 @@ pub mod config_source;
 pub mod init_stack;
 /// Lifecycle orchestrator: drives `setup` → `validate_config` → `start` across all blocks.
 pub mod lifecycle;
+/// Block-registration core (registry maps + WRAP state), grouped out of `Wafer`.
+pub(crate) mod registration;
 /// Block registry — name-to-instance map populated via `Wafer::register_block`.
 pub mod registry;
 /// Block-name resolver: aliases → registered native → URL → registry manifest.
@@ -189,67 +187,25 @@ impl wafer_block::Runtime for RuntimeHandle {
 /// Wafer is the WAFER runtime. It manages block registration, flow storage,
 /// and execution.
 pub struct Wafer {
-    pub(crate) blocks: HashMap<String, Arc<dyn Block>>,
+    /// Block-registration core: the registry maps (blocks, aliases, slots,
+    /// registrars, expanders, interface specs, block configs) + nested WRAP
+    /// grant/capability state.
+    /// See [`RegistrationCore`](crate::runtime::registration::RegistrationCore).
+    pub(crate) registration: crate::runtime::registration::RegistrationCore,
+    /// Registered flows (id → flow). Read during execution.
     pub(crate) flows: HashMap<String, wafer_flow::WaferFlow>,
-    /// Block configurations loaded from blocks.json (name → config JSON).
-    pub(crate) block_configs: HashMap<String, serde_json::Value>,
-    /// All registered blocks + aliases, shared with contexts.
-    pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
     /// Observability hook bus — exposed so consumers can register flow/block callbacks.
     pub hooks: ObservabilityBus,
     /// Single immutable bundle of post-startup metadata shared with every
     /// [`RuntimeContext`]. Populated at the end of [`Wafer::seal`].
     pub(crate) snapshot: Arc<crate::snapshot::StartupSnapshot>,
-    /// Alias mappings (e.g. `"wafer-run/database"` → `"wafer-run/sqlite"`). Alias names
-    /// can be used wherever a block or flow name is expected.
-    pub(crate) aliases: Arc<HashMap<String, String>>,
-    /// Config expanders: registered functions that split a composite config
-    /// (e.g. `wafer-run/http-server`) into configs for individual blocks.
-    pub(crate) config_expanders: HashMap<String, ConfigExpanderFn>,
-    /// Named registrars: functions that register blocks/flows by name.
-    /// Populated by crate consumers (e.g. wafer-core) so that
-    /// `wafer.register("wafer-run/http-server", config)` works.
-    pub(crate) registrars: HashMap<String, RegistrarFn>,
-    /// Registered interface specifications.
-    pub(crate) interface_specs: HashMap<String, wafer_block::InterfaceSpec>,
     /// Block names that have already produced an "unknown interface" warning.
     /// Process-local; used by the call_block interface-action validator to
     /// emit the warning at most once per block.
     pub(crate) warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// WRAP: merged grant list (code-declared + external).
-    /// This is what [`RuntimeContext`] receives and what
-    /// [`Wafer::wrap_grants`] returns. Rebuilt by `set_admin_block` (so
-    /// previously-deferred typed grants get re-collected) and by
-    /// `add_wrap_grants`.
-    pub(crate) wrap_grants: Arc<Vec<wafer_block::types::ResourceGrant>>,
-    /// WRAP: extra grants supplied via [`Wafer::add_wrap_grants`] (e.g.
-    /// loaded from a database). Kept separately from block-declared
-    /// grants so `set_admin_block` can rebuild the code-declared portion
-    /// from `self.blocks` without losing externally-injected entries.
-    pub(crate) wrap_grants_external: Vec<wafer_block::types::ResourceGrant>,
-    /// WRAP: the block ID that has admin privileges (exact match).
-    pub(crate) wrap_admin_block: Arc<String>,
-    /// Effective capabilities per block after declared ∩ config ∩ host
-    /// intersection. Computed at `resolve()` time. WASM blocks enforce
-    /// against this; native blocks store for inspector visibility only.
-    pub(crate) effective_capabilities:
-        Arc<std::collections::HashMap<String, wafer_block::BlockCapabilities>>,
     /// WASM runtime state: shared fuel-metered engine + host-injected asset
     /// loader. See [`WasmState`](crate::runtime::wasm_state::WasmState).
     pub(crate) wasm: crate::runtime::wasm_state::WasmState,
-    /// Per-block init slots populated by `register_block_inner` (code-registered
-    /// blocks) and `register_remote_block` (blocks downloaded during `seal()`).
-    /// Consulted by [`Wafer::init_block`] for lazy-once-success caching.
-    ///
-    /// Wrapped in `Arc` (same shape as `aliases`) so [`RuntimeContext`] can
-    /// share a cheap clone without copying the map on every dispatch.
-    /// Mutations go through `Arc::make_mut` in those two registration paths.
-    pub(crate) slots: Arc<HashMap<String, Arc<crate::runtime::slot::BlockSlot>>>,
-    /// Accumulator for grant-validation failures from
-    /// `validate_and_collect_grants_for_block`. Drained + checked by
-    /// `Wafer::start()`; if non-empty, boot fails with
-    /// `RuntimeError::GrantsRejected`.
-    pub(crate) grant_validation_errors: Vec<crate::error::GrantValidationError>,
     /// Runtime configuration inputs: the lazy per-block [`ConfigSource`]
     /// consulted on first init, plus the embedder-supplied synchronous config
     /// snapshot layered under per-call config (populated via
@@ -291,27 +247,12 @@ impl Wafer {
     /// (linkme static registration) and Path B (lockfile) populate registrations.
     pub(crate) fn empty() -> Self {
         Self {
-            blocks: HashMap::new(),
+            registration: crate::runtime::registration::RegistrationCore::new(),
             flows: HashMap::new(),
-            block_configs: HashMap::new(),
-            all_blocks: Arc::new(HashMap::new()),
-            aliases: Arc::new(HashMap::new()),
-            config_expanders: HashMap::new(),
-            registrars: HashMap::new(),
             hooks: ObservabilityBus::new(),
             snapshot: crate::snapshot::StartupSnapshot::empty(),
-            interface_specs: wafer_block::interfaces::all()
-                .into_iter()
-                .map(|s| (s.name.clone(), s))
-                .collect(),
             warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
-            wrap_grants: Arc::new(Vec::new()),
-            wrap_grants_external: Vec::new(),
-            wrap_admin_block: Arc::new(String::new()),
-            effective_capabilities: Arc::new(std::collections::HashMap::new()),
             wasm: crate::runtime::wasm_state::WasmState::new(),
-            slots: Arc::new(HashMap::new()),
-            grant_validation_errors: Vec::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
         }
     }
@@ -341,7 +282,7 @@ impl Wafer {
 
     /// Returns all resolved blocks as an Arc for use in contexts.
     fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
-        self.all_blocks.clone()
+        self.registration.all_blocks.clone()
     }
 
     /// Register an alias mapping. When `call_block(alias)` is called,
@@ -362,13 +303,13 @@ impl Wafer {
         if alias == target {
             return Err(crate::error::AliasError::Cycle { alias });
         }
-        if self.aliases.contains_key(&target) {
+        if self.registration.aliases.contains_key(&target) {
             return Err(crate::error::AliasError::TargetIsAlias { alias, target });
         }
-        if self.aliases.values().any(|t| t == &alias) {
+        if self.registration.aliases.values().any(|t| t == &alias) {
             return Err(crate::error::AliasError::AliasIsExistingTarget { alias });
         }
-        Arc::make_mut(&mut self.aliases).insert(alias, target);
+        Arc::make_mut(&mut self.registration.aliases).insert(alias, target);
         Ok(())
     }
 
@@ -383,7 +324,11 @@ impl Wafer {
     /// previously open-coded the same `aliases.get(...).unwrap_or(name)`
     /// pattern.
     pub fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+        self.registration
+            .aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name)
     }
 
     /// Set the admin block ID for WRAP access control.
@@ -399,45 +344,48 @@ impl Wafer {
     /// External grants previously added via [`Wafer::add_wrap_grants`] are
     /// preserved across the rescan.
     pub fn set_admin_block(&mut self, block_id: impl Into<String>) {
-        self.wrap_admin_block = Arc::new(block_id.into());
+        self.registration.wrap.admin_block = Arc::new(block_id.into());
         self.rebuild_wrap_grants();
     }
 
-    /// Rebuild `self.wrap_grants` from scratch by walking every registered
+    /// Rebuild `self.registration.wrap.grants` from scratch by walking every registered
     /// block's declared grants (filtered through the per-block validator)
     /// and concatenating the externally-supplied grants
-    /// (`self.wrap_grants_external`). Called by `set_admin_block` and
+    /// (`self.registration.wrap.grants_external`). Called by `set_admin_block` and
     /// `add_wrap_grants`.
     fn rebuild_wrap_grants(&mut self) {
-        self.grant_validation_errors.clear(); // full re-walk; old errors are stale
-        let admin_block: String = (*self.wrap_admin_block).clone();
+        self.registration.wrap.validation_errors.clear(); // full re-walk; old errors are stale
+        let admin_block: String = (*self.registration.wrap.admin_block).clone();
         let mut merged: Vec<wafer_block::types::ResourceGrant> = Vec::new();
         // Walk blocks in deterministic order for snapshot stability.
-        let mut names: Vec<&String> = self.blocks.keys().collect();
+        let mut names: Vec<&String> = self.registration.blocks.keys().collect();
         names.sort();
         for name in names {
-            let block = &self.blocks[name];
+            let block = &self.registration.blocks[name];
             let info = block.info();
             let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
                 &info,
                 &admin_block,
             );
             merged.extend(outcome.accepted);
-            self.grant_validation_errors.extend(outcome.rejected);
+            self.registration
+                .wrap
+                .validation_errors
+                .extend(outcome.rejected);
         }
-        merged.extend(self.wrap_grants_external.iter().cloned());
-        self.wrap_grants = Arc::new(merged);
+        merged.extend(self.registration.wrap.grants_external.iter().cloned());
+        self.registration.wrap.grants = Arc::new(merged);
     }
 
     /// Get the collected WRAP grants (read-only).
     /// Available after `start()` / `seal()`.
     pub fn wrap_grants(&self) -> &Arc<Vec<wafer_block::types::ResourceGrant>> {
-        &self.wrap_grants
+        &self.registration.wrap.grants
     }
 
     /// Get the admin block ID (read-only).
     pub fn wrap_admin_block(&self) -> &Arc<String> {
-        &self.wrap_admin_block
+        &self.registration.wrap.admin_block
     }
 
     /// Register a host-side loader for external assets. Called during startup
@@ -450,7 +398,7 @@ impl Wafer {
         self.wasm.asset_loader = loader.clone();
         // Forward to all WasmiBlock instances currently registered.
         #[cfg(feature = "wasmi")]
-        for block in self.blocks.values() {
+        for block in self.registration.blocks.values() {
             if let Some(wasmi_block) = block
                 .as_any()
                 .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
@@ -468,7 +416,7 @@ impl Wafer {
     /// (independent of HashMap's SipHash randomisation). The returned list
     /// is a snapshot — later registrations are not reflected.
     pub fn block_infos(&self) -> Vec<crate::block::BlockInfo> {
-        lifecycle::sorted_snapshot(self.blocks.values().map(|b| b.info()))
+        lifecycle::sorted_snapshot(self.registration.blocks.values().map(|b| b.info()))
     }
 
     /// Return the currently registered asset loader. Defaults to
@@ -488,13 +436,18 @@ impl Wafer {
         &self,
         block_name: &str,
     ) -> Option<&wafer_block::BlockCapabilities> {
-        self.effective_capabilities.get(block_name)
+        self.registration
+            .wrap
+            .effective_capabilities
+            .get(block_name)
     }
 
     /// Register an interface specification. Overwrites any existing spec
     /// with the same name.
     pub fn register_interface(&mut self, spec: wafer_block::InterfaceSpec) {
-        self.interface_specs.insert(spec.name.clone(), spec);
+        self.registration
+            .interface_specs
+            .insert(spec.name.clone(), spec);
     }
 
     /// Build a RuntimeContext with shared fields pre-filled.
@@ -525,14 +478,14 @@ impl Wafer {
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
-            aliases: self.aliases.clone(),
+            aliases: self.registration.aliases.clone(),
             caller_requires: None, // unrestricted by default
             caller_id: None,       // top-level call, no caller
-            wrap_grants: self.wrap_grants.clone(),
-            wrap_admin_block: self.wrap_admin_block.clone(),
+            wrap_grants: self.registration.wrap.grants.clone(),
+            wrap_admin_block: self.registration.wrap.admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
             init_breadcrumbs,
-            slots: self.slots.clone(),
+            slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
         }
     }
@@ -572,18 +525,20 @@ impl Wafer {
         use crate::runtime::slot::InitError;
 
         let block = self
+            .registration
             .blocks
             .get(name)
             .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
             .clone();
         // Every registered block — including remote ones downloaded by
         // `seal()` — pairs registration with a slot via `register_block_inner`
-        // or `register_remote_block`. If `self.blocks` contains `name` but
-        // `self.slots` does not, that is a runtime invariant violation; the
+        // or `register_remote_block`. If `self.registration.blocks` contains `name` but
+        // `self.registration.slots` does not, that is a runtime invariant violation; the
         // panic message points at the bug rather than masking it with a
         // fresh slot (which would let concurrent first-callers each run
         // `lifecycle(Init)` independently).
         let slot = self
+            .registration
             .slots
             .get(name)
             .cloned()
@@ -637,7 +592,7 @@ impl Wafer {
             ok: Vec::new(),
             broken: Vec::new(),
         };
-        for (name, block) in self.blocks.iter() {
+        for (name, block) in self.registration.blocks.iter() {
             let info = block.info();
             match self
                 .config
@@ -669,16 +624,16 @@ impl Wafer {
     /// Call this after resolve() completes.
     pub fn rebuild_all_blocks(&mut self) {
         let mut map = HashMap::new();
-        for (name, block) in &self.blocks {
+        for (name, block) in &self.registration.blocks {
             map.insert(name.clone(), block.clone());
         }
         // Insert alias entries — alias names point to the same Arc<dyn Block>
-        for (alias, target) in self.aliases.as_ref() {
-            if let Some(block) = self.blocks.get(target) {
+        for (alias, target) in self.registration.aliases.as_ref() {
+            if let Some(block) = self.registration.blocks.get(target) {
                 map.insert(alias.clone(), block.clone());
             }
         }
-        self.all_blocks = Arc::new(map);
+        self.registration.all_blocks = Arc::new(map);
     }
 }
 
@@ -892,7 +847,9 @@ impl wafer_block::registry::BlockRegistry for Wafer {
     }
 
     fn add_block_config(&mut self, name: &str, config: serde_json::Value) {
-        self.block_configs.insert(name.to_string(), config);
+        self.registration
+            .block_configs
+            .insert(name.to_string(), config);
     }
 }
 
@@ -904,7 +861,7 @@ impl Wafer {
         name: &str,
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
-        if self.blocks.contains_key(name) {
+        if self.registration.blocks.contains_key(name) {
             return Err(RuntimeError::DuplicateBlock {
                 name: name.to_string(),
             });
@@ -935,15 +892,18 @@ impl Wafer {
         // declared by a block registered before `set_admin_block` are
         // deferred: `set_admin_block` re-scans every registered block and
         // re-collects them, so the registration order doesn't matter.
-        let admin_block: String = (*self.wrap_admin_block).clone();
+        let admin_block: String = (*self.registration.wrap.admin_block).clone();
         let outcome =
             crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
         if !outcome.accepted.is_empty() {
-            let mut all = (*self.wrap_grants).clone();
+            let mut all = (*self.registration.wrap.grants).clone();
             all.extend(outcome.accepted);
-            self.wrap_grants = Arc::new(all);
+            self.registration.wrap.grants = Arc::new(all);
         }
-        self.grant_validation_errors.extend(outcome.rejected);
+        self.registration
+            .wrap
+            .validation_errors
+            .extend(outcome.rejected);
 
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
@@ -956,13 +916,13 @@ impl Wafer {
             wasmi_block.set_asset_loader(self.wasm.asset_loader.clone());
         }
 
-        self.blocks.insert(name.to_string(), block);
+        self.registration.blocks.insert(name.to_string(), block);
         // Pair every registration with a fresh init slot so `Wafer::init_block`
         // can lazily run lifecycle(Init) once per block. Mutate through
         // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
         // Arc keep their snapshot (registration after startup is rare; the
         // copy only happens on those occasional registrations).
-        Arc::make_mut(&mut self.slots).insert(
+        Arc::make_mut(&mut self.registration.slots).insert(
             name.to_string(),
             Arc::new(crate::runtime::slot::BlockSlot::new()),
         );
@@ -984,7 +944,7 @@ impl Wafer {
     /// flow definitions or block_configs, and re-validating now would cause
     /// `seal()` to reject blocks that were already accepted by the user's
     /// configuration. Duplicate-registration is also not checked because
-    /// every remote-path call site filters `self.blocks.contains_key(name)`
+    /// every remote-path call site filters `self.registration.blocks.contains_key(name)`
     /// before invoking this helper.
     pub(crate) fn register_remote_block(
         &mut self,
@@ -992,18 +952,21 @@ impl Wafer {
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
         let info = block.info();
-        let admin_block: String = (*self.wrap_admin_block).clone();
+        let admin_block: String = (*self.registration.wrap.admin_block).clone();
         let outcome =
             crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
         if !outcome.accepted.is_empty() {
-            let mut all = (*self.wrap_grants).clone();
+            let mut all = (*self.registration.wrap.grants).clone();
             all.extend(outcome.accepted);
-            self.wrap_grants = Arc::new(all);
+            self.registration.wrap.grants = Arc::new(all);
         }
-        self.grant_validation_errors.extend(outcome.rejected);
+        self.registration
+            .wrap
+            .validation_errors
+            .extend(outcome.rejected);
 
-        self.blocks.insert(name.to_string(), block);
-        Arc::make_mut(&mut self.slots).insert(
+        self.registration.blocks.insert(name.to_string(), block);
+        Arc::make_mut(&mut self.registration.slots).insert(
             name.to_string(),
             Arc::new(crate::runtime::slot::BlockSlot::new()),
         );
@@ -1095,11 +1058,11 @@ mod tests {
             .expect("register_remote_block succeeds for valid block");
 
         assert!(
-            wafer.blocks.contains_key("some-org/remote"),
+            wafer.registration.blocks.contains_key("some-org/remote"),
             "blocks map must contain remote block"
         );
         assert!(
-            wafer.slots.contains_key("some-org/remote"),
+            wafer.registration.slots.contains_key("some-org/remote"),
             "slots map must contain a slot for every registered block — \
              missing this lets concurrent first-callers each run lifecycle(Init)"
         );
