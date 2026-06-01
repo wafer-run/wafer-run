@@ -22,33 +22,36 @@ pub struct ObservabilityContext {
     pub message: Option<Message>,
 }
 
-/// Closure invoked when a block starts executing (native target — requires `Send + Sync`).
-#[cfg(not(target_arch = "wasm32"))]
-pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext) + Send + Sync>;
-/// Closure invoked when a block starts executing (wasm32 target — single-threaded).
-#[cfg(target_arch = "wasm32")]
-pub type BlockStartHandler = Arc<dyn Fn(&ObservabilityContext)>;
+/// Declare a target-conditional observability handler alias.
+///
+/// Expands to `Arc<dyn Fn(..) + Send + Sync>` on native targets and the bare
+/// `Arc<dyn Fn(..)>` on wasm32. The `Send + Sync` bound cannot be expressed via
+/// the crate's `MaybeSend`/`MaybeSync` here: those are ordinary (not auto)
+/// traits, and Rust only permits auto traits as additional bounds on a `dyn`
+/// trait object — so the native/wasm split is written once, in this macro.
+macro_rules! handler_alias {
+    ($(#[$doc:meta])* $name:ident = dyn $($bound:tt)+) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        $(#[$doc])*
+        pub type $name = Arc<dyn $($bound)+ + Send + Sync>;
+        #[cfg(target_arch = "wasm32")]
+        $(#[$doc])*
+        pub type $name = Arc<dyn $($bound)+>;
+    };
+}
 
-/// Closure invoked when a block finishes, with its elapsed duration (native target).
-#[cfg(not(target_arch = "wasm32"))]
-pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration) + Send + Sync>;
-/// Closure invoked when a block finishes, with its elapsed duration (wasm32 target).
-#[cfg(target_arch = "wasm32")]
-pub type BlockEndHandler = Arc<dyn Fn(&ObservabilityContext, Duration)>;
-
-/// Closure invoked at the start of a flow (native target).
-#[cfg(not(target_arch = "wasm32"))]
-pub type FlowStartHandler = Arc<dyn Fn(&str, &Message) + Send + Sync>;
-/// Closure invoked at the start of a flow (wasm32 target).
-#[cfg(target_arch = "wasm32")]
-pub type FlowStartHandler = Arc<dyn Fn(&str, &Message)>;
-
-/// Closure invoked at the end of a flow with its total duration (native target).
-#[cfg(not(target_arch = "wasm32"))]
-pub type FlowEndHandler = Arc<dyn Fn(&str, Duration) + Send + Sync>;
-/// Closure invoked at the end of a flow with its total duration (wasm32 target).
-#[cfg(target_arch = "wasm32")]
-pub type FlowEndHandler = Arc<dyn Fn(&str, Duration)>;
+handler_alias!(
+    /// Closure invoked immediately before each block runs.
+    BlockStartHandler = dyn Fn(&ObservabilityContext));
+handler_alias!(
+    /// Closure invoked immediately after each block runs, with its elapsed duration.
+    BlockEndHandler = dyn Fn(&ObservabilityContext, Duration));
+handler_alias!(
+    /// Closure invoked at the start of every flow execution.
+    FlowStartHandler = dyn Fn(&str, &Message));
+handler_alias!(
+    /// Closure invoked at the end of every flow execution, with its total duration.
+    FlowEndHandler = dyn Fn(&str, Duration));
 
 /// ObservabilityBus manages multiple observability hook subscribers.
 pub struct ObservabilityBus {
