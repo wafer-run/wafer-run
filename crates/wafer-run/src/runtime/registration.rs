@@ -118,6 +118,26 @@ impl RegistrationCore {
         self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
     }
 
+    /// Resolve a dispatch target through the alias map, returning the
+    /// canonical name and the block.
+    ///
+    /// Tries the alias-resolved name first, then the original. Under the
+    /// current invariant these always agree: `rebuild_all_blocks` is the sole
+    /// writer of `all_blocks` and inserts an alias key only alongside its
+    /// registered target, so a hit on the original name implies a hit on the
+    /// resolved one. The `or_else` is therefore a cheap defensive fallback
+    /// (and preserves the pre-refactor lookup) rather than a reachable path.
+    pub(crate) fn lookup_with_alias<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> Option<(&'a str, Arc<dyn Block>)> {
+        let resolved = self.canonicalize(name);
+        self.all_blocks
+            .get(resolved)
+            .or_else(|| self.all_blocks.get(name))
+            .map(|b| (resolved, b.clone()))
+    }
+
     /// Rebuild the `all_blocks` map from registered blocks + aliases. Call
     /// after `resolve()` completes.
     pub(crate) fn rebuild_all_blocks(&mut self) {

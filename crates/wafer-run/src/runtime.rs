@@ -9,6 +9,8 @@ use crate::{
 };
 
 pub mod config_source;
+/// Flow-level execution policy (timeout resolution) for the dispatch path.
+pub(crate) mod flow_policy;
 /// Init-time call stack used to detect cycles when blocks `Init`-call each other.
 pub mod init_stack;
 /// Lifecycle orchestrator: drives `setup` → `validate_config` → `start` across all blocks.
