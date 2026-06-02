@@ -62,22 +62,12 @@ impl Wafer {
         msg: Message,
         input: InputStream,
     ) -> OutputStream {
-        // Resolve alias
-        let resolved = self.canonicalize(block_name);
-
-        let block = match self
-            .registration
-            .all_blocks
-            .get(resolved)
-            .or_else(|| self.registration.all_blocks.get(block_name))
-        {
-            Some(b) => b.clone(),
-            None => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::NOT_FOUND,
-                    format!("block not found: {block_name}"),
-                ));
-            }
+        // Resolve alias + look up the target block in one step.
+        let Some((resolved, block)) = self.registration.lookup_with_alias(block_name) else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::NOT_FOUND,
+                format!("block not found: {block_name}"),
+            ));
         };
 
         // Lazy init: ensure lifecycle(Init) has run on the target block before
@@ -98,10 +88,10 @@ impl Wafer {
             }
         };
 
-        // Look up block config and flatten to HashMap<String, String>.
-        // Mirrors the block-lookup logic above: try the alias-resolved name
-        // first, then fall back to the original. `add_block_config` is keyed
-        // by registration name (which may be either the alias or the target).
+        // Look up block config and flatten to HashMap<String, String>. Like
+        // `lookup_with_alias`, try the alias-resolved name first then the
+        // original: `add_block_config` is keyed by registration name, which
+        // may be either the alias or the target.
         let block_config = self
             .snapshot
             .block_configs
