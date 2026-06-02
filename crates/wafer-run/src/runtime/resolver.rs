@@ -292,7 +292,7 @@ impl Wafer {
                 match self.resolve_remote_block(&client, &canonical).await {
                     Ok(Some(block)) => {
                         tracing::info!(block = %canonical, "downloaded remote block");
-                        self.register_remote_block(&canonical, block)?;
+                        self.registration.register_remote_block(&canonical, block)?;
                         continue;
                     }
                     Ok(None) => {
@@ -460,7 +460,7 @@ impl Wafer {
                     match self.resolve_remote_block(&client, block_name).await {
                         Ok(Some(block)) => {
                             tracing::info!(block = %block_name, "downloaded remote block");
-                            self.register_remote_block(block_name, block)?;
+                            self.registration.register_remote_block(block_name, block)?;
                         }
                         Ok(None) => {
                             tracing::debug!(
@@ -480,7 +480,7 @@ impl Wafer {
                     .download_wasm_from_url(&client, wasm_url, &name)
                     .await?;
                 tracing::info!(block = %name, "downloaded remote WASM block from registry");
-                self.register_remote_block(&name, block)?;
+                self.registration.register_remote_block(&name, block)?;
             }
         }
 
