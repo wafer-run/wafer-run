@@ -55,13 +55,12 @@ impl Accumulator {
             .ok_or_else(|| ExprError::UnresolvedReference(format!("$.{root_key}")))?;
 
         let mut current = root;
-        for seg in &segments[1..] {
+        // `idx` is the index of `seg` within `segments`; tracking it directly
+        // avoids an O(n) `position()` rescan per traversal step.
+        for (idx, seg) in segments.iter().enumerate().skip(1) {
             current = match current {
                 Value::Object(map) => map.get(seg.as_str()).ok_or_else(|| {
-                    ExprError::UnresolvedReference(format!(
-                        "$.{}",
-                        segments[..segments.iter().position(|s| s == seg).unwrap() + 1].join(".")
-                    ))
+                    ExprError::UnresolvedReference(format!("$.{}", segments[..=idx].join(".")))
                 })?,
                 Value::Array(arr) => {
                     let idx: usize = seg.parse().map_err(|_| {

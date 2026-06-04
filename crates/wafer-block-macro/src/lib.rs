@@ -348,21 +348,51 @@ fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
     };
 
     let mut caps: Option<CapabilitiesArgs> = None;
+    let mut caps_span: Option<proc_macro2::Span> = None;
     let mut skill: Option<SkillArgs> = None;
+    let mut skill_span: Option<proc_macro2::Span> = None;
     let mut flat_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for meta in &metas {
         match meta {
             syn::Meta::List(ml) if ml.path.is_ident("capabilities") => {
+                if caps.is_some() {
+                    return Err(syn::Error::new(
+                        ml.span(),
+                        "#[wafer_block]: `capabilities(...)` may only be specified once",
+                    ));
+                }
                 caps = Some(parse_capabilities(ml)?);
+                caps_span = Some(ml.span());
             }
             syn::Meta::List(ml) if ml.path.is_ident("skill") => {
+                if skill.is_some() {
+                    return Err(syn::Error::new(
+                        ml.span(),
+                        "#[wafer_block]: `skill(...)` may only be specified once",
+                    ));
+                }
                 skill = Some(parse_skill(ml)?);
+                skill_span = Some(ml.span());
             }
             other => {
                 flat_tokens.push(other.to_token_stream());
             }
         }
+    }
+
+    // `capabilities(...)` and `skill(...)` are mutually exclusive. A skill block
+    // is an LLM-facing tool compiled for `wasm32-wasip1` with no `wafer-block`
+    // dependency in its graph, whereas `capabilities(...)` declares the runtime
+    // sandbox policy for a platform WASM block (and emits `::wafer_block::...`
+    // paths). Declaring both is a contradiction, so reject it rather than
+    // silently honoring both.
+    if let (Some(c_span), Some(_)) = (caps_span, skill_span) {
+        return Err(syn::Error::new(
+            c_span,
+            "#[wafer_block]: `capabilities(...)` and `skill(...)` are mutually exclusive; \
+             a skill block declares an LLM tool, not runtime sandbox capabilities",
+        ));
     }
 
     let flat_ts: Ts2 = if flat_tokens.is_empty() {
@@ -517,6 +547,32 @@ pub fn wafer_block(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Compile-time check that `name` has the structural `{org}/{block}` shape
+/// (exactly two non-empty segments separated by a single `/`).
+///
+/// This catches the common authoring mistake (single-segment or extra-segment
+/// names) at the macro site with a spanned error. The full naming ruleset
+/// (allowed characters, hyphen placement, etc.) is enforced authoritatively at
+/// registration time by `wafer_run::runtime::validate_block_name`; this macro
+/// guard is deliberately limited to the segment structure so the two checks
+/// cannot drift on the finer rules.
+fn validate_block_name_shape(name: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    let mut segments = name.split('/');
+    let org = segments.next().unwrap_or("");
+    let block = segments.next();
+    let extra = segments.next();
+    if block.is_none() || extra.is_some() || org.is_empty() || block == Some("") {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "#[wafer_block]: `name` must be a two-segment `{{org}}/{{block}}` identifier \
+                 (e.g. \"acme/widget\"), got {name:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Real implementation; `wafer_block` is a thin wrapper that funnels errors
 /// through `syn::Error::to_compile_error` so attribute typos surface as
 /// spanned compile errors rather than proc-macro panics.
@@ -533,6 +589,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let name = args
         .get_str("name")
         .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `name` is required"))?;
+    validate_block_name_shape(&name, impl_span)?;
     let version = args
         .get_str("version")
         .ok_or_else(|| syn::Error::new(impl_span, "#[wafer_block]: `version` is required"))?;

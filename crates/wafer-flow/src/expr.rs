@@ -315,10 +315,15 @@ fn parse_atom(s: &str) -> Result<Expr, ExprError> {
         return Ok(Expr::Path(parse_path(s)?));
     }
 
-    // String literal (double or single quotes).
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    // String literal (double or single quotes). `s.len() >= 2` is guaranteed
+    // because both the opening and closing quote are present.
+    if (s.len() >= 2 && s.starts_with('"') && s.ends_with('"'))
+        || (s.len() >= 2 && s.starts_with('\'') && s.ends_with('\''))
+    {
         let inner = &s[1..s.len() - 1];
-        return Ok(Expr::Literal(Value::String(inner.to_string())));
+        return Ok(Expr::Literal(Value::String(unescape_string_literal(
+            inner,
+        )?)));
     }
 
     // Boolean.
@@ -352,6 +357,63 @@ fn parse_atom(s: &str) -> Result<Expr, ExprError> {
     }
 
     Err(ExprError::Parse(format!("unrecognized token: '{s}'")))
+}
+
+/// Process standard JSON-style escape sequences inside a string literal's
+/// contents (the text between the surrounding quotes).
+///
+/// Recognized escapes: `\n`, `\t`, `\r`, `\"`, `\'`, `\\`, `\/`, `\b`, `\f`,
+/// and `\u{XXXX}` (four hex digits). A backslash followed by any other
+/// character is an error, so authoring typos surface instead of being silently
+/// dropped or passed through.
+fn unescape_string_literal(inner: &str) -> Result<String, ExprError> {
+    if !inner.contains('\\') {
+        return Ok(inner.to_string());
+    }
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let esc = chars
+            .next()
+            .ok_or_else(|| ExprError::Parse("trailing backslash in string literal".into()))?;
+        match esc {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000C}'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            '\\' => out.push('\\'),
+            '/' => out.push('/'),
+            'u' => {
+                let mut code = 0u32;
+                for _ in 0..4 {
+                    let h = chars.next().ok_or_else(|| {
+                        ExprError::Parse("incomplete \\u escape in string literal".into())
+                    })?;
+                    let digit = h.to_digit(16).ok_or_else(|| {
+                        ExprError::Parse(format!("invalid hex digit '{h}' in \\u escape"))
+                    })?;
+                    code = code * 16 + digit;
+                }
+                let ch = char::from_u32(code).ok_or_else(|| {
+                    ExprError::Parse(format!("invalid unicode code point U+{code:04X}"))
+                })?;
+                out.push(ch);
+            }
+            other => {
+                return Err(ExprError::Parse(format!(
+                    "unknown escape sequence '\\{other}' in string literal"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Evaluate an expression against a resolver function.
@@ -532,5 +594,54 @@ mod tests {
         assert!(parse_path("input.email").is_err());
         assert!(parse_path("$.").is_err());
         assert!(parse_path("$..foo").is_err());
+    }
+
+    #[test]
+    fn string_literal_processes_escapes() {
+        // \n must become a real newline, not a literal backslash-n.
+        let expr = parse_expr(r#""a\nb""#).unwrap();
+        assert_eq!(expr, Expr::Literal(json!("a\nb")));
+
+        let expr = parse_expr(r#""tab\there""#).unwrap();
+        assert_eq!(expr, Expr::Literal(json!("tab\there")));
+
+        // Escaped quote inside a double-quoted string.
+        let expr = parse_expr(r#""say \"hi\"""#).unwrap();
+        assert_eq!(expr, Expr::Literal(json!(r#"say "hi""#)));
+
+        // Escaped backslash collapses to a single backslash.
+        let expr = parse_expr(r#""c:\\tmp""#).unwrap();
+        assert_eq!(expr, Expr::Literal(json!(r"c:\tmp")));
+
+        // \u escape: U+0041 is 'A'. Build the input as `"A"` (with the
+        // backslash as data, not a Rust escape) via concatenation so the test
+        // source is unambiguous.
+        let u_input = format!("\"{}u0041\"", '\\');
+        let expr = parse_expr(&u_input).unwrap();
+        assert_eq!(expr, Expr::Literal(json!("A")));
+    }
+
+    #[test]
+    fn string_literal_without_escapes_is_verbatim() {
+        let expr = parse_expr(r#""plain text""#).unwrap();
+        assert_eq!(expr, Expr::Literal(json!("plain text")));
+    }
+
+    #[test]
+    fn string_literal_rejects_unknown_escape() {
+        assert!(parse_expr(r#""bad \q escape""#).is_err());
+    }
+
+    #[test]
+    fn escaped_quote_does_not_break_comparison_split() {
+        // The comparison split must treat the escaped inner quotes as content,
+        // and the resulting literal must have escapes processed.
+        let expr = parse_expr(r#"$.input.email == "a\"b""#).unwrap();
+        match expr {
+            Expr::Compare { right, .. } => {
+                assert_eq!(*right, Expr::Literal(json!(r#"a"b"#)));
+            }
+            other => panic!("expected comparison, got {other:?}"),
+        }
     }
 }

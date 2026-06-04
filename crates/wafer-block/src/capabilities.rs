@@ -221,6 +221,20 @@ impl BlockCapabilities {
     /// - Vec allowlists: set intersection.
     /// - HeaderPolicy `readable`/`writable`: intersection.
     /// - HeaderPolicy `masked`: UNION (operator can add masking).
+    ///
+    /// # `None` vs `Some(empty)`
+    ///
+    /// These two override shapes have opposite meanings and the distinction is
+    /// security-relevant:
+    ///
+    /// - `None` (field omitted) **preserves** the declared value.
+    /// - `Some(<empty set/vec>)` is an explicit, non-wildcard allowlist that
+    ///   intersects to **deny-all** for that field (`declared ∩ ∅ = ∅`). An
+    ///   operator who writes `{ "collections": [] }` is narrowing the block to
+    ///   *no* collections, not leaving it untouched.
+    ///
+    /// The `apply_overrides_empty_set_narrows_to_deny_all` unit test locks in
+    /// this behavior.
     pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
         let headers = match &o.headers {
             Some(h) => HeaderPolicy {
@@ -546,6 +560,59 @@ mod tests {
         assert!(eff.network);
         assert!(eff.collections.contains("users"));
         assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+    }
+
+    #[test]
+    fn apply_overrides_empty_set_narrows_to_deny_all() {
+        // Contrast with `apply_overrides_empty_keeps_declared`: there the
+        // override fields are `None` (omitted) and the declared values are
+        // preserved. Here the operator supplies explicit *empty* allowlists,
+        // which is a non-wildcard allowlist that intersects to deny-all.
+        let declared = BlockCapabilities {
+            collections: ["users", "sessions"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            storage_folders: ["uploads"].iter().map(|s| s.to_string()).collect(),
+            network_allow: vec!["https://a.com/".into()],
+            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            config_keys: ["ACME__WIDGET__KEY"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ..Default::default()
+        };
+        let overrides = ConfigCapabilityOverrides {
+            collections: Some(HashSet::new()),
+            storage_folders: Some(HashSet::new()),
+            network_allow: Some(Vec::new()),
+            callable_blocks: Some(HashSet::new()),
+            config_keys: Some(HashSet::new()),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&overrides);
+
+        // Every explicitly-emptied allowlist narrows to deny-all (∅).
+        assert!(
+            eff.collections.is_empty(),
+            "empty override → no collections"
+        );
+        assert!(
+            eff.storage_folders.is_empty(),
+            "empty override → no storage folders"
+        );
+        assert!(
+            eff.network_allow.is_empty(),
+            "empty override → no network allowlist entries"
+        );
+        assert!(
+            eff.callable_blocks.is_empty(),
+            "empty override → no callable blocks"
+        );
+        assert!(
+            eff.config_keys.is_empty(),
+            "empty override → no config keys"
+        );
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error: #[wafer_block]: `name` must be a two-segment `{org}/{block}` identifier (e.g. "acme/widget"), got "widget"
+  --> tests/fixtures/fail_invalid_block_name.rs:20:1
+   |
+20 | impl Widget {
+   | ^^^^
