@@ -208,6 +208,54 @@ mod tests {
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
+    // Test 7c: a guest that returns a negative i64 from `__wafer_handle`
+    // (an error sentinel where a packed (ptr, len) is expected) yields a clean
+    // error — not garbage fed to read_guest_bytes.
+    //
+    // This also exercises an error-return path through
+    // `call_guest_resumable_with_attachments`: the host must clear the borrowed
+    // Context from the store (RAII `ContextScope`) on this path or the
+    // `ContextGuard` strong-count assertion would panic and crash the host. If
+    // the guard regressed, this test would abort rather than fail cleanly.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_negative_packed_return_is_rejected() {
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              ;; Return -1: a negative error sentinel, not a packed (ptr, len).
+              (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const -1)
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT should parse");
+
+        let block =
+            WasmiBlock::load_from_bytes(&wasm_bytes).expect("negative-return module should load");
+
+        let ctx = MockContext;
+        let msg = Message::new("test.neg");
+
+        let result = block.handle(&ctx, msg, InputStream::empty()).await;
+
+        match result.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                assert!(
+                    err_msg.contains("negative"),
+                    "error should mention the negative packed value, got: {err_msg}"
+                );
+            }
+            other => panic!("negative packed return should produce an error, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Test 8: memory limit — growth beyond 256 pages is denied
     // -----------------------------------------------------------------------
 

@@ -27,10 +27,21 @@ pub(super) fn pack_ptr_len(ptr: u32, len: u32) -> i64 {
 }
 
 /// Unpack a packed i64 into (ptr, len).
-pub(super) fn unpack_ptr_len(packed: i64) -> (u32, u32) {
+///
+/// A well-formed guest packs a non-negative `ptr << 32 | len`. A negative value
+/// is a guest-side error sentinel (e.g. `error_code_to_neg_i64`) returned where
+/// a packed pointer was expected, not a real `(ptr, len)` — splitting it would
+/// hand `read_guest_bytes` a bogus offset/length. Reject it instead.
+pub(super) fn unpack_ptr_len(packed: i64) -> Result<(u32, u32), RuntimeError> {
+    if packed < 0 {
+        return Err(RuntimeError::Wasm(format!(
+            "guest returned a negative i64 ({packed}) where a packed (ptr, len) was expected \
+             — likely an error sentinel returned from an export that must return a pointer"
+        )));
+    }
     let ptr = (packed >> 32) as u32;
     let len = (packed & 0xFFFF_FFFF) as u32;
-    (ptr, len)
+    Ok((ptr, len))
 }
 
 // ---------------------------------------------------------------------------
