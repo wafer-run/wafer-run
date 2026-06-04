@@ -14,6 +14,41 @@ soon / clear design defect · **medium** = real but contained · **low** = nit/p
 
 ---
 
+## Implementation status — 2026-06-04
+
+All 16 actionable rows were implemented (each batch green: `cargo +nightly fmt` /
+`cargo clippy --all-targets -D warnings` / scoped `cargo test`). The work landed on
+nine focused branches, consolidated into **five thematic PRs** (+ this docs PR):
+
+| PR | Branch | Folds in |
+|----|--------|----------|
+| Critical correctness | `review/pr-critical` | core-dispatch, wasm-engine |
+| Error & validation | `review/pr-error-validation` | streams, core-interfaces |
+| SQL & CLI hardening | `review/pr-sql-cli` | sql-backends, cli-ffi |
+| Consistency & layering | `review/pr-consistency-layering` | small-blocks, ssrf-shared |
+| Polish | `review/pr-polish` | polish |
+| Findings record | `review/findings-doc` | this document |
+
+Notable verification outcomes during implementation:
+- **#6 WRAP block-id pattern** was already enforced by `runtime::validate_block_name`
+  (called in `register_block_inner`) — only the doc-comment invariant was added; no
+  redundant second validator.
+- **C6 reserved-prefix validation** (`BlockInfo::validate` + `RuntimeError::ReservedConfigKey`)
+  was verified safe against the real consumer: solobase defines all `SOLOBASE_SHARED__`
+  vars centrally in `solobase-core/config_vars.rs` (never via a block's `config_keys`/
+  `flow_config`), so enforcing the documented "blocks must not declare shared vars" rule
+  at registration regresses nothing and extends coverage to `flow_config`.
+- **Model-management dedup (A5/PR13)**: shared `ModelInfo`/`ModelStatus`/… extracted to
+  `interfaces/model_common.rs`; the deeper `MultiBackendRouter<S>` generalization was left
+  as a follow-up (the LLM/Image routers have genuinely different method/error shapes).
+- **s3 const-vs-config (R4)** was a non-issue — already a single source — so s3 was untouched.
+
+**Deferred (need design / re-audit, as agreed):** `common/codegen` cleanup-or-wire-up;
+WASM typed `call_service` (TODO #103); the cosmetic `BlockInfo::infrastructure` helper
+(would couple PRs through `types.rs`).
+
+---
+
 ## Proposed PRs (implementation grouping)
 
 Each PR is scoped to one concern / file-cluster so subagents don't conflict.
