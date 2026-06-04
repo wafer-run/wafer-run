@@ -209,22 +209,42 @@ fn service_load_progress_to_wire(p: service::LoadProgress) -> wire::LoadProgress
     }
 }
 
+/// Map a service-level `LlmError` onto a wire `ErrorCode` + message. Mirrors
+/// `image::handler::image_error_to_block_error` so callers surface the right
+/// status instead of collapsing everything to `INTERNAL`.
+fn llm_error_to_block_error(e: service::LlmError) -> (ErrorCode, String) {
+    match e {
+        service::LlmError::NotSupported => (ErrorCode::UNIMPLEMENTED, "not supported".to_string()),
+        service::LlmError::InvalidRequest(msg) => (ErrorCode::INVALID_ARGUMENT, msg),
+        service::LlmError::BackendError(msg) => (ErrorCode::INTERNAL, msg),
+        service::LlmError::ModelNotFound(msg) => (ErrorCode::NOT_FOUND, msg),
+        service::LlmError::RateLimited => (ErrorCode::UNAVAILABLE, "rate limited".to_string()),
+        service::LlmError::Unauthorized => (ErrorCode::UNAUTHENTICATED, "unauthorized".to_string()),
+        service::LlmError::Network(msg) => (ErrorCode::INTERNAL, format!("network: {msg}")),
+        service::LlmError::Cancelled => (ErrorCode::CANCELLED, "cancelled".to_string()),
+    }
+}
+
 // ---------- Entry point ----------
 
 /// Dispatch an `llm.*` message to the appropriate handler on `service` and
 /// return the resulting output stream. Unknown ops yield an `INVALID_ARGUMENT`
 /// error stream.
+///
+/// `service` is borrowed; the streaming ops (`chat`, `load_model`) clone the
+/// `Arc` internally because their producer closures must be `'static`. Buffered
+/// ops just borrow it.
 pub async fn handle_message(
-    service: Arc<dyn LlmService>,
+    service: &Arc<dyn LlmService>,
     msg: &Message,
-    body: Vec<u8>,
+    body: &[u8],
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::LLM_CHAT => chat(service, body),
-        ServiceOp::LLM_LIST_MODELS => list_models(service).await,
-        ServiceOp::LLM_STATUS => status(service, &body).await,
-        ServiceOp::LLM_LOAD_MODEL => load_model(service, &body),
-        ServiceOp::LLM_UNLOAD_MODEL => unload_model(service, &body).await,
+        ServiceOp::LLM_LIST_MODELS => list_models(service.as_ref()).await,
+        ServiceOp::LLM_STATUS => status(service.as_ref(), body).await,
+        ServiceOp::LLM_LOAD_MODEL => load_model(service, body),
+        ServiceOp::LLM_UNLOAD_MODEL => unload_model(service.as_ref(), body).await,
         other => OutputStream::error(WaferError::new(
             ErrorCode::INVALID_ARGUMENT,
             format!("unknown llm operation: {other}"),
@@ -234,10 +254,10 @@ pub async fn handle_message(
 
 // ---- Streaming ops ----
 
-fn chat(service: Arc<dyn LlmService>, body: Vec<u8>) -> OutputStream {
+fn chat(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
     // Decode up front — failures become an error stream rather than a malformed
     // chunk halfway through.
-    let wire_req: wire::ChatRequest = match codec::decode(&body) {
+    let wire_req: wire::ChatRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
             return OutputStream::error(WaferError::new(
@@ -248,6 +268,8 @@ fn chat(service: Arc<dyn LlmService>, body: Vec<u8>) -> OutputStream {
     };
     let req = wire_chat_request_to_service(wire_req);
 
+    // The producer closure must be `'static`; clone the `Arc` into it.
+    let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
         let mut stream = service.chat_stream(req, cancel).await;
         while let Some(item) = stream.next().await {
@@ -258,11 +280,9 @@ fn chat(service: Arc<dyn LlmService>, body: Vec<u8>) -> OutputStream {
             let chunk = match item {
                 Ok(c) => service_chat_chunk_to_wire(c),
                 Err(e) => {
+                    let (code, msg) = llm_error_to_block_error(e);
                     let _ = sink
-                        .error(WaferError::new(
-                            ErrorCode::INTERNAL,
-                            format!("llm.chat: {e}"),
-                        ))
+                        .error(WaferError::new(code, format!("llm.chat: {msg}")))
                         .await;
                     return;
                 }
@@ -289,7 +309,7 @@ fn chat(service: Arc<dyn LlmService>, body: Vec<u8>) -> OutputStream {
     })
 }
 
-fn load_model(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
+fn load_model(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
     let req: wire::LoadModelRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -300,17 +320,17 @@ fn load_model(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
         }
     };
 
+    // The producer closure must be `'static`; clone the `Arc` into it.
+    let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
         let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel);
         while let Some(item) = stream.next().await {
             let progress = match item {
                 Ok(p) => service_load_progress_to_wire(p),
                 Err(e) => {
+                    let (code, msg) = llm_error_to_block_error(e);
                     let _ = sink
-                        .error(WaferError::new(
-                            ErrorCode::INTERNAL,
-                            format!("llm.load_model: {e}"),
-                        ))
+                        .error(WaferError::new(code, format!("llm.load_model: {msg}")))
                         .await;
                     return;
                 }
@@ -336,7 +356,7 @@ fn load_model(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
 
 // ---- Buffered ops ----
 
-async fn list_models(service: Arc<dyn LlmService>) -> OutputStream {
+async fn list_models(service: &dyn LlmService) -> OutputStream {
     match service.list_models().await {
         Ok(models) => {
             let wire_models: Vec<wire::ModelInfo> =
@@ -349,14 +369,14 @@ async fn list_models(service: Arc<dyn LlmService>) -> OutputStream {
                 )),
             }
         }
-        Err(e) => OutputStream::error(WaferError::new(
-            ErrorCode::INTERNAL,
-            format!("list_models: {e}"),
-        )),
+        Err(e) => {
+            let (code, msg) = llm_error_to_block_error(e);
+            OutputStream::error(WaferError::new(code, format!("list_models: {msg}")))
+        }
     }
 }
 
-async fn status(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
+async fn status(service: &dyn LlmService, body: &[u8]) -> OutputStream {
     let req: wire::StatusRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -377,11 +397,14 @@ async fn status(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
                 )),
             }
         }
-        Err(e) => OutputStream::error(WaferError::new(ErrorCode::INTERNAL, format!("status: {e}"))),
+        Err(e) => {
+            let (code, msg) = llm_error_to_block_error(e);
+            OutputStream::error(WaferError::new(code, format!("status: {msg}")))
+        }
     }
 }
 
-async fn unload_model(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
+async fn unload_model(service: &dyn LlmService, body: &[u8]) -> OutputStream {
     let req: wire::UnloadModelRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -393,9 +416,9 @@ async fn unload_model(service: Arc<dyn LlmService>, body: &[u8]) -> OutputStream
     };
     match service.unload_model(&req.backend_id, &req.model_id).await {
         Ok(()) => OutputStream::respond(vec![]),
-        Err(e) => OutputStream::error(WaferError::new(
-            ErrorCode::INTERNAL,
-            format!("unload_model: {e}"),
-        )),
+        Err(e) => {
+            let (code, msg) = llm_error_to_block_error(e);
+            OutputStream::error(WaferError::new(code, format!("unload_model: {msg}")))
+        }
     }
 }

@@ -148,7 +148,7 @@ async fn chat_streams_chunks_then_completes() {
     let service = build_router(ScriptedLlm::new("test").with_chunks(chunks.clone()));
 
     let body = wire_chat_request_bytes();
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_CHAT), body).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
     let events: Vec<_> = stream.collect().await;
 
     // 3 Chunks + 1 Complete
@@ -174,7 +174,7 @@ async fn chat_streams_chunks_then_completes() {
 async fn chat_invalid_body_yields_error_terminal() {
     let service = build_router(ScriptedLlm::new("test"));
     let body = b"not json".to_vec();
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_CHAT), body).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
     let events: Vec<_> = stream.collect().await;
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0], StreamEvent::Error(_)));
@@ -183,7 +183,7 @@ async fn chat_invalid_body_yields_error_terminal() {
 #[tokio::test]
 async fn unknown_operation_yields_error() {
     let service = build_router(ScriptedLlm::new("test"));
-    let stream = handler::handle_message(service, &msg("llm.mystery"), vec![]).await;
+    let stream = handler::handle_message(&service, &msg("llm.mystery"), &[]).await;
     let events: Vec<_> = stream.collect().await;
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0], StreamEvent::Error(_)));
@@ -199,7 +199,7 @@ async fn list_models_buffered_payload_is_aggregated_json() {
     ];
     let service = build_router(ScriptedLlm::new("test").with_models(models.clone()));
 
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_LIST_MODELS), vec![]).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_LIST_MODELS), &[]).await;
     let buffered = stream.collect_buffered().await.unwrap();
     let decoded: Vec<wire::ModelInfo> = codec::decode(&buffered.body).unwrap();
     assert_eq!(decoded.len(), models.len());
@@ -218,7 +218,7 @@ async fn status_dispatches_and_returns_state() {
         model_id: "m1".into(),
     })
     .unwrap();
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_STATUS), body).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_STATUS), &body).await;
     let buffered = stream.collect_buffered().await.unwrap();
     let decoded: wire::ModelStatus = codec::decode(&buffered.body).unwrap();
     assert!(matches!(decoded.state, wire::ModelState::Ready));
@@ -232,7 +232,7 @@ async fn unload_model_returns_empty_complete() {
         model_id: "m1".into(),
     })
     .unwrap();
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_UNLOAD_MODEL), body).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_UNLOAD_MODEL), &body).await;
     let buffered = stream.collect_buffered().await.unwrap();
     assert!(buffered.body.is_empty());
 }
@@ -244,7 +244,7 @@ async fn dropping_chat_stream_cancels_service() {
     let service = build_router(scripted);
 
     let body = wire_chat_request_bytes();
-    let stream = handler::handle_message(service, &msg(ServiceOp::LLM_CHAT), body).await;
+    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
     // Consumer drop should cancel the service through the OutputStream cancel token.
     drop(stream);
 

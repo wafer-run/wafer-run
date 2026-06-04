@@ -8,6 +8,12 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use wafer_block_macro::wafer_async_trait;
 
+// `ModelStatus`, `ModelState`, and `LoadProgress` are field-identical with the
+// LLM interface, so they live in `interfaces::model_common` and are re-used
+// here. The capability-specific `ModelInfo` / `ModelCapabilities` below stay
+// image-specialized.
+pub use crate::interfaces::model_common::{LoadProgress, ModelState, ModelStatus};
+
 // ---------- Request side ----------
 
 /// A text-to-image generation request.
@@ -132,80 +138,6 @@ pub struct ModelCapabilities {
     pub max_steps: Option<u32>,
 }
 
-/// Current lifecycle status of a model on a backend.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[non_exhaustive]
-pub struct ModelStatus {
-    /// High-level state.
-    pub state: ModelState,
-    /// Optional progress fraction (0.0..=1.0) when `state == Loading`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<f32>,
-}
-
-/// High-level lifecycle state of a backend model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ModelState {
-    /// Model is loaded and ready to serve requests.
-    Ready,
-    /// Model is currently downloading or initializing.
-    Loading,
-    /// Model is known but not currently resident.
-    Unloaded,
-    /// Model is in a failed state.
-    Error {
-        /// Failure message.
-        message: String,
-    },
-}
-
-/// Streaming progress event emitted by [`ImageService::load_model`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct LoadProgress {
-    /// Human-readable stage label (e.g. `"downloading"`, `"warming-up"`).
-    pub stage: String,
-    /// Bytes downloaded so far, if known.
-    pub bytes_downloaded: Option<u64>,
-    /// Total bytes to download, if known.
-    pub bytes_total: Option<u64>,
-}
-
-impl ModelStatus {
-    /// A status reporting the model is ready to serve.
-    pub fn ready() -> Self {
-        Self {
-            state: ModelState::Ready,
-            progress: None,
-        }
-    }
-    /// A status reporting the model is currently loading at the given progress fraction.
-    pub fn loading(progress: f32) -> Self {
-        Self {
-            state: ModelState::Loading,
-            progress: Some(progress),
-        }
-    }
-    /// A status reporting the model is known but not currently resident.
-    pub fn unloaded() -> Self {
-        Self {
-            state: ModelState::Unloaded,
-            progress: None,
-        }
-    }
-
-    /// An errored status carrying the failure message. Progress is cleared.
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            state: ModelState::Error {
-                message: message.into(),
-            },
-            progress: None,
-        }
-    }
-}
-
 impl ModelInfo {
     /// Build a `ModelInfo` with default capabilities.
     pub fn new(
@@ -225,17 +157,6 @@ impl ModelInfo {
     pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
         self.capabilities = capabilities;
         self
-    }
-}
-
-impl LoadProgress {
-    /// Build a `LoadProgress` with the given `stage` label and no byte counts.
-    pub fn new(stage: impl Into<String>) -> Self {
-        Self {
-            stage: stage.into(),
-            bytes_downloaded: None,
-            bytes_total: None,
-        }
     }
 }
 

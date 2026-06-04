@@ -39,7 +39,7 @@ impl Block for ImageBlock {
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.clone(), &msg, body).await
+        handler::handle_message(&self.service, &msg, &body).await
     }
 }
 
