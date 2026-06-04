@@ -16,6 +16,19 @@ struct WaferTomlMin {
     package: CargoPackageRelease,
 }
 
+/// Body of a successful `POST /registry/api/publish` response.
+///
+/// All fields are required: a 2xx with a missing/invalid field is a malformed
+/// registry response and is surfaced as a decode error rather than silently
+/// rendered as empty strings.
+#[derive(serde::Deserialize)]
+struct PublishResponse {
+    package: String,
+    version: String,
+    download_url: String,
+    sha256: String,
+}
+
 pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool) -> Result<()> {
     let cwd_toml =
         std::fs::read_to_string("wafer.toml").context("wafer.toml not found in current dir")?;
@@ -76,15 +89,15 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     let resp = crate::registry_client::ensure_ok(resp, "publish").await?;
     let body = resp.text().await.unwrap_or_default();
 
-    let json: serde_json::Value =
+    let parsed: PublishResponse =
         serde_json::from_str(&body).with_context(|| format!("decode publish response: {body}"))?;
-    let package = json["package"].as_str().unwrap_or_default();
-    let version = json["version"].as_str().unwrap_or_default();
-    let download_url = json["download_url"].as_str().unwrap_or_default();
-    let sha256 = json["sha256"].as_str().unwrap_or_default();
 
-    println!("\u{2714} Published {package}@{version}");
-    println!("  download: {}{}", url.trim_end_matches('/'), download_url);
-    println!("  sha256:   {sha256}");
+    println!("\u{2714} Published {}@{}", parsed.package, parsed.version);
+    println!(
+        "  download: {}{}",
+        url.trim_end_matches('/'),
+        parsed.download_url
+    );
+    println!("  sha256:   {}", parsed.sha256);
     Ok(())
 }

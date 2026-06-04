@@ -10,7 +10,8 @@ use wafer_core::interfaces::database::{
     service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
 use wafer_sql_utils::{
-    base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
+    base64::base64_encode, ddl, ident::sanitize_ident, introspect, value::sea_values_to_json,
+    Backend,
 };
 
 /// SQLite implementation of the DatabaseService.
@@ -132,18 +133,16 @@ fn ensure_columns_from_data(
     for key in data.keys() {
         let safe_key = sanitize_ident(key);
         if !existing.contains(&safe_key.to_lowercase()) {
-            let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_key} TEXT");
-            db.execute_batch(&alter).ok();
+            let alter = ddl::build_add_text_column(&safe_table, &safe_key, Backend::Sqlite);
+            db.execute_batch(&alter.sql).ok();
         }
     }
 }
 
 /// Get list of column names for an existing table.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
-    let safe_table = sanitize_ident(table);
-    let mut stmt = db
-        .prepare(&format!("PRAGMA table_info({safe_table})"))
-        .map_err(|_| ())?;
+    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let mut stmt = db.prepare(&sql).map_err(|_| ())?;
     let cols: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
         .map_err(|_| ())?
@@ -155,8 +154,8 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
 
 /// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
 fn has_integer_pk(db: &Connection, table: &str) -> bool {
-    let safe_table = sanitize_ident(table);
-    let Ok(mut stmt) = db.prepare(&format!("PRAGMA table_info(\"{safe_table}\")")) else {
+    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let Ok(mut stmt) = db.prepare(&sql) else {
         return false;
     };
     let result = stmt.query_map([], |row| {
@@ -194,15 +193,15 @@ fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], so
         for f in filters {
             let safe_field = sanitize_ident(&f.field);
             if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_field} TEXT");
-                db.execute_batch(&alter).ok();
+                let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
+                db.execute_batch(&alter.sql).ok();
             }
         }
         for s in sort {
             let safe_field = sanitize_ident(&s.field);
             if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = format!("ALTER TABLE {safe_table} ADD COLUMN {safe_field} TEXT");
-                db.execute_batch(&alter).ok();
+                let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
+                db.execute_batch(&alter.sql).ok();
             }
         }
     }

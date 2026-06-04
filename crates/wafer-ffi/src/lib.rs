@@ -441,12 +441,16 @@ pub unsafe extern "C" fn wafer_run(
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let internal_err = |code: &str, msg: &str| {
-            CString::new(format!(
-                r#"{{"action":"error","error":{{"code":"{}","message":"{}"}}}}"#,
-                code,
-                msg.replace('"', "\\\"")
-            ))
-            .unwrap_or_else(|_| CString::new("{}").unwrap())
+            // Build with serde_json so the code/message are escaped as valid
+            // JSON — control chars, backslashes, and quotes included. Mirrors
+            // `error_cstring`/`error_json`; the previous hand-rolled escape
+            // only handled `"` and emitted invalid JSON for `\n`/`\t`/`\\`.
+            let json = serde_json::to_string(&serde_json::json!({
+                "action": "error",
+                "error": { "code": code, "message": msg },
+            }))
+            .unwrap_or_else(|_| String::from("{}"));
+            CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap())
         };
 
         let Some(runtime) = deref_ref(w) else {
