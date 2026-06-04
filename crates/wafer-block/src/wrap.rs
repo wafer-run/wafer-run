@@ -193,8 +193,10 @@ pub fn check_access(
         // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
         // callers (None) are denied — shared config may carry secrets and
         // there is no reason an unauthenticated context should read them.
-        let lower = resource.to_lowercase();
-        if lower.starts_with(&crate::types::SOLOBASE_SHARED_PREFIX.to_lowercase()) {
+        if resource
+            .get(..crate::types::SOLOBASE_SHARED_PREFIX.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(crate::types::SOLOBASE_SHARED_PREFIX))
+        {
             if is_write {
                 return match caller_id {
                     Some(c) if c == admin_block => Ok(()),

@@ -182,9 +182,10 @@ fn instantiate(
 /// clear would crash the host.
 struct ContextScope<'s> {
     store: &'s mut Store<WasmiHostState>,
-    // Dropped *after* `store`'s context Arc is cleared (struct fields drop in
-    // declaration order), so the strong-count assertion in `ContextGuard::drop`
-    // sees a count of 1.
+    // The store's `context` Arc is cleared in `ContextScope::drop` (below),
+    // which runs before any field is dropped — so by the time this
+    // `ContextGuard` drops and asserts its strong count is 1, the store's clone
+    // is already gone. Field order is not load-bearing for that invariant.
     _guard: ContextGuard,
 }
 
