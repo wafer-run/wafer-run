@@ -17,6 +17,10 @@ pub mod discovery;
 pub mod interfaces;
 /// MIME-type detection helper used by the storage and image interfaces.
 pub mod mime;
+/// SSRF defenses (blocked-IP / blocked-URL predicates) shared by host- and
+/// native-side fetchers. Lives here so leaf blocks can use it without
+/// depending on the `wafer-run` runtime crate.
+pub mod security;
 /// Adapters that wrap a plain `Arc<dyn …Service>` so it can be registered with the runtime as
 /// a native WAFER block implementing the matching interface.
 pub mod service_blocks;

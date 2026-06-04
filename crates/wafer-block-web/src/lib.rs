@@ -277,9 +277,8 @@ impl Block for WebBlock {
             "http-handler@v1",
             "Static file server with caching and SPA support",
         )
-        .instance_mode(InstanceMode::Singleton)
+        .infrastructure()
         .requires(vec!["wafer-run/storage".into()])
-        .category(BlockCategory::Infrastructure)
         .flow_config(vec![
             ConfigVar::new(
                 "web_root",

@@ -23,7 +23,7 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
 /// Handle a network message by delegating to the given service.
 ///
 /// SSRF protection is NOT included here — it is platform-specific.
-/// Native callers should check `wafer_run::security::is_blocked_url` before
+/// Native callers should check `wafer_core::security::is_blocked_url` before
 /// calling the service. CF Workers are sandboxed by the runtime.
 ///
 /// Wire protocol: the request is a single MessagePack-encoded

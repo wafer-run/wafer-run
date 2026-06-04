@@ -10,9 +10,17 @@
 //! See the [`CorsBlock`] type for the configuration contract and the
 //! fail-closed behavior introduced by SEC-087/SEC-088.
 
-use std::sync::RwLock;
+use std::sync::OnceLock;
 
 use wafer_block::*;
+
+/// Default `Access-Control-Max-Age` (seconds) — how long a browser may cache
+/// a CORS preflight result. 86400 = 24 hours.
+///
+/// Single source of truth for the `max_age` default: rendered into the
+/// `max_age` [`ConfigVar`] and used as the per-request fallback in
+/// [`CorsBlock::handle`].
+const DEFAULT_MAX_AGE_SECONDS: u32 = 86_400;
 
 /// CorsBlock handles CORS preflight and sets CORS headers.
 ///
@@ -39,12 +47,11 @@ use wafer_block::*;
 /// targeted at Origin A to a request from Origin B — see SEC-088.
 pub struct CorsBlock {
     /// Allow-list resolved at `Init` lifecycle, used as fallback when the
-    /// per-request context does not supply `allowed_origins`. `None` until
-    /// Init succeeds.
-    allowed_origins: RwLock<Option<String>>,
+    /// per-request context does not supply `allowed_origins`. Unset until
+    /// Init parses a non-empty value (write-once).
+    allowed_origins: OnceLock<String>,
     allowed_methods: String,
     allowed_headers: String,
-    max_age: String,
 }
 
 impl Default for CorsBlock {
@@ -57,22 +64,22 @@ impl CorsBlock {
     /// Construct a `CorsBlock` with no allow-list resolved and the standard
     /// header defaults (`GET, POST, PUT, PATCH, DELETE, OPTIONS` for
     /// `Access-Control-Allow-Methods`; `Content-Type, Authorization,
-    /// X-Requested-With` for `Access-Control-Allow-Headers`; 24-hour
-    /// `Access-Control-Max-Age`). The allow-list stays `None` — and the
-    /// block therefore fails closed on cross-origin requests — until
+    /// X-Requested-With` for `Access-Control-Allow-Headers`). `Access-Control-
+    /// Max-Age` defaults to [`DEFAULT_MAX_AGE_SECONDS`] and is overridable via
+    /// the `max_age` config. The allow-list stays unset — and the block
+    /// therefore fails closed on cross-origin requests — until
     /// `lifecycle(Init)` parses block config or per-request `ctx.config_get`
     /// supplies one. See SEC-087 for the rationale.
     pub fn new() -> Self {
         Self {
-            allowed_origins: RwLock::new(None),
+            allowed_origins: OnceLock::new(),
             allowed_methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
             allowed_headers: "Content-Type, Authorization, X-Requested-With".to_string(),
-            max_age: "86400".to_string(),
         }
     }
 
     fn cached_origins(&self) -> Option<String> {
-        self.allowed_origins.read().ok().and_then(|g| g.clone())
+        self.allowed_origins.get().cloned()
     }
 }
 
@@ -85,8 +92,7 @@ impl Block for CorsBlock {
             "middleware@v1",
             "CORS preflight handler and header injection",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "allowed_origins",
@@ -110,6 +116,13 @@ impl Block for CorsBlock {
                 "Content-Type,Authorization",
             )
             .name("Allowed Headers"),
+            ConfigVar::new(
+                "max_age",
+                "Seconds a browser may cache the CORS preflight result, \
+                 returned in Access-Control-Max-Age.",
+                &DEFAULT_MAX_AGE_SECONDS.to_string(),
+            )
+            .name("Max Age (seconds)"),
         ])
     }
 
@@ -129,6 +142,10 @@ impl Block for CorsBlock {
             .config_get("allowed_headers")
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.allowed_headers.clone());
+        let max_age = ctx
+            .config_get("max_age")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string());
 
         let mut out_msg = msg;
 
@@ -175,7 +192,7 @@ impl Block for CorsBlock {
         if credentials {
             out_msg.set_meta("resp.header.Access-Control-Allow-Credentials", "true");
         }
-        out_msg.set_meta("resp.header.Access-Control-Max-Age", &self.max_age);
+        out_msg.set_meta("resp.header.Access-Control-Max-Age", &max_age);
 
         // SEC-088: emit `Vary: Origin` whenever the response includes a
         // reflected `Access-Control-Allow-Origin`. Required so intermediary
@@ -203,7 +220,7 @@ impl Block for CorsBlock {
         _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if let LifecycleType::Init = event.event_type {
+        if event.event_type == LifecycleType::Init {
             // Warn on unknown config keys before parsing. Catches typos
             // like `allow_origins` (vs the declared `allowed_origins`)
             // at deploy time — would have caught the Wave 8/9 regression.
@@ -270,9 +287,8 @@ impl Block for CorsBlock {
 
             match cfg_origins {
                 Some(v) if !v.trim().is_empty() => {
-                    if let Ok(mut guard) = self.allowed_origins.write() {
-                        *guard = Some(v);
-                    }
+                    // Write-once: Init fires a single time per registration.
+                    let _ = self.allowed_origins.set(v);
                     Ok(())
                 }
                 _ => {

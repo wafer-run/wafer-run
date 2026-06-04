@@ -41,8 +41,7 @@ impl Block for ReadonlyGuardBlock {
             "middleware@v1",
             "Blocks write operations in read-only mode",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![ConfigVar::new(
             "readonly",
             "When true, the guard rejects create/update/delete actions.",

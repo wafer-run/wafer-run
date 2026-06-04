@@ -412,6 +412,17 @@ impl BlockInfo {
         self
     }
 
+    /// Mark this block as singleton infrastructure — shorthand for
+    /// `.instance_mode(InstanceMode::Singleton).category(BlockCategory::Infrastructure)`.
+    ///
+    /// Used by the runtime's infra blocks (CORS, security-headers, router,
+    /// rate-limit, monitoring, …) that hold one shared instance per node and
+    /// are surfaced under the Infrastructure admin category.
+    pub fn infrastructure(self) -> Self {
+        self.instance_mode(crate::InstanceMode::Singleton)
+            .category(BlockCategory::Infrastructure)
+    }
+
     /// Set the runtime kind (native vs WASM).
     pub fn runtime(mut self, runtime: BlockRuntime) -> Self {
         self.runtime = runtime;

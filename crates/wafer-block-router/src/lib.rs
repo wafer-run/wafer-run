@@ -164,8 +164,7 @@ impl Block for RouterBlock {
             "router@v1",
             "Config-driven router that dispatches to handler blocks",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![ConfigVar::new(
             "routes",
             "JSON array of route entries; each entry is dispatched to a \

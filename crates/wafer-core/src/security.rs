@@ -1,3 +1,11 @@
+//! SSRF defenses shared by host- and native-side fetchers.
+//!
+//! Lives in `wafer-core` (not `wafer-run`) so that leaf blocks such as
+//! `wafer-block-network` can apply the same SSRF predicates without taking a
+//! dependency on the runtime crate. `wafer-block-network` is currently the sole
+//! consumer; `wafer-run` no longer references these predicates (the module was
+//! moved here, not re-exported).
+
 /// SSRF defense-in-depth: block private/internal IPs and non-HTTP schemes.
 ///
 /// This is the single shared implementation used by both the WASM host path

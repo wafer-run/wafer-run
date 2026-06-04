@@ -27,8 +27,6 @@ mod registry_loader;
 pub mod router;
 /// Top-level runtime: the `Wafer` instance, block slots, config sources and validation.
 pub mod runtime;
-/// SSRF defenses and other security helpers shared by host- and native-side fetchers.
-pub mod security;
 pub mod snapshot;
 /// Re-exports of the core runtime value types (`Message`, `MetaEntry`, `WaferError`, …) from `wafer-block`.
 pub mod types;

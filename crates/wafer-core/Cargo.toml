@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

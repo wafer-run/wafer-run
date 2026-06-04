@@ -23,8 +23,8 @@ use wafer_block::{
     common::ErrorCode,
     meta::*,
     types::{ConfigVar, MetaAccess},
-    Block, BlockCategory, BlockInfo, InputStream, InstanceMode, LifecycleEvent, LifecycleType,
-    Message, MetaEntry, OutputStream, RequestAction, WaferError,
+    Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputStream,
+    RequestAction, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -322,15 +322,21 @@ fn internal_error_response() -> axum::http::Response<Body> {
 
 use wafer_block::config::DispatchTarget;
 
+/// Default cap on request-body bytes buffered before dispatch — 10 MiB.
+///
+/// Single source of truth for the `max_body_bytes` default: rendered into the
+/// `max_body_bytes` [`ConfigVar`] and used as the fallback when Init parses no
+/// value.
+const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
 /// Block implementing the HTTP transport.
 ///
 /// Singleton infrastructure block (one listener per registration). On
-/// `LifecycleType::Init` it caches the `listen` socket address and the
-/// `dispatch_target` (flow id or block name) from its [`BlockInfo`]
-/// config. The actual TCP bind + axum server is spawned in
-/// [`Block::bind`] once the runtime hands over a `RuntimeHandle`, and is
-/// shut down via a `tokio::sync::oneshot` channel on
-/// `LifecycleType::Stop`.
+/// `LifecycleType::Init` it caches the `listen` socket address, the
+/// `dispatch_target` (flow id or block name), and the `max_body_bytes` cap
+/// from its [`BlockInfo`] config. The actual TCP bind + axum server is spawned
+/// in [`Block::bind`] once the runtime hands over a `RuntimeHandle`, and is
+/// shut down via a `tokio::sync::oneshot` channel on `LifecycleType::Stop`.
 ///
 /// The `handle` method itself only returns `OutputStream::continue_with(msg)`;
 /// real request handling happens inside the spawned axum task, not in the
@@ -338,6 +344,7 @@ use wafer_block::config::DispatchTarget;
 pub(crate) struct HttpListenerBlock {
     target: OnceLock<DispatchTarget>,
     listen: OnceLock<String>,
+    max_body_bytes: OnceLock<usize>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -355,6 +362,7 @@ impl HttpListenerBlock {
         Self {
             target: OnceLock::new(),
             listen: OnceLock::new(),
+            max_body_bytes: OnceLock::new(),
             shutdown_tx: Mutex::new(None),
         }
     }
@@ -369,8 +377,7 @@ impl Block for HttpListenerBlock {
             "http-listener@v1",
             "HTTP transport — listens for HTTP requests and converts to messages",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "listen",
@@ -385,6 +392,13 @@ impl Block for HttpListenerBlock {
                 "",
             )
             .name("Dispatch Target"),
+            ConfigVar::new(
+                "max_body_bytes",
+                "Maximum request-body size in bytes buffered before dispatch. \
+                 Larger bodies are truncated to empty.",
+                &DEFAULT_MAX_BODY_BYTES.to_string(),
+            )
+            .name("Max Body Bytes"),
         ])
     }
 
@@ -409,6 +423,11 @@ impl Block for HttpListenerBlock {
                 self.target.set(t).ok();
             }
             self.listen.set(config.str("listen").to_string()).ok();
+            let max_body = config
+                .str("max_body_bytes")
+                .parse::<usize>()
+                .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+            self.max_body_bytes.set(max_body).ok();
         }
 
         if event.event_type == LifecycleType::Stop {
@@ -431,6 +450,11 @@ impl Block for HttpListenerBlock {
         if listen.is_empty() {
             return;
         }
+        let max_body_bytes = self
+            .max_body_bytes
+            .get()
+            .copied()
+            .unwrap_or(DEFAULT_MAX_BODY_BYTES);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.lock() = Some(tx);
@@ -444,8 +468,7 @@ impl Block for HttpListenerBlock {
                     let target = target.clone();
                     async move {
                         let (parts, body) = req.into_parts();
-                        const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-                        let body_bytes = axum::body::to_bytes(body, MAX_BODY_SIZE)
+                        let body_bytes = axum::body::to_bytes(body, max_body_bytes)
                             .await
                             .unwrap_or_default()
                             .to_vec();
