@@ -219,9 +219,15 @@ impl RegistrationCore {
         // Validate block name format.
         crate::runtime::validate_block_name(name)?;
 
+        // Reject declared config keys under platform-reserved prefixes
+        // (e.g. SOLOBASE_SHARED__): those keys are platform-owned, not
+        // block-owned. Fails boot loudly rather than silently accepting a
+        // key the block can never legitimately write.
+        let info = block.info();
+        info.validate().map_err(RuntimeError::ReservedConfigKey)?;
+
         // Validate that all config_keys use the block's own prefix.
         // Block "suppers-ai/auth" may only declare keys starting with "SUPPERS_AI__AUTH__".
-        let info = block.info();
         if !info.config_keys.is_empty() {
             let expected_prefix = crate::runtime::block_name_to_var_prefix(name);
             for var in &info.config_keys {
@@ -287,6 +293,10 @@ impl RegistrationCore {
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
         let info = block.info();
+        // Reserved-prefix declaration is a platform-ownership invariant, not a
+        // naming-convention nicety, so it applies to remote blocks too (unlike
+        // the block-name / config-prefix checks this helper skips).
+        info.validate().map_err(RuntimeError::ReservedConfigKey)?;
         let admin_block: String = (*self.wrap.admin_block).clone();
         let outcome =
             crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);

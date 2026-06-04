@@ -34,6 +34,12 @@ pub enum RuntimeError {
         prefix: String,
     },
 
+    /// A block declared a config var under a platform-reserved prefix (e.g.
+    /// `SOLOBASE_SHARED__`). Surfaces the message produced by
+    /// [`crate::BlockInfo::validate`].
+    #[error("{0}")]
+    ReservedConfigKey(String),
+
     // ── Block lifecycle ─────────────────────────────────────────────────
     /// A block failed during initialization (lifecycle start).
     #[error("block '{name}' init failed: {reason}")]

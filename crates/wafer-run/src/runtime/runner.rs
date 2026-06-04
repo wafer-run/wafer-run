@@ -114,7 +114,7 @@ impl Wafer {
             flow_id: String::new(),
             node_path: resolved.to_string(),
             block_name: block_name.to_string(),
-            trace_id: msg.get_meta("trace_id").to_string(),
+            trace_id: msg.get_meta(wafer_block::meta::META_TRACE_ID).to_string(),
             message: Some(msg.clone()),
         };
         self.hooks.fire_block_start(&obs_ctx);

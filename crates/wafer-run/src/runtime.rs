@@ -204,7 +204,8 @@ pub struct Wafer {
     /// Block names that have already produced an "unknown interface" warning.
     /// Process-local; used by the call_block interface-action validator to
     /// emit the warning at most once per block.
-    pub(crate) warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub(crate) warned_unknown_interfaces:
+        Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
     /// WASM runtime state: shared fuel-metered engine + host-injected asset
     /// loader. See [`WasmState`](crate::runtime::wasm_state::WasmState).
     pub(crate) wasm: crate::runtime::wasm_state::WasmState,
@@ -253,7 +254,7 @@ impl Wafer {
             flows: HashMap::new(),
             hooks: ObservabilityBus::new(),
             snapshot: crate::snapshot::StartupSnapshot::empty(),
-            warned_unknown_interfaces: Arc::new(std::sync::Mutex::new(Default::default())),
+            warned_unknown_interfaces: Arc::new(parking_lot::Mutex::new(Default::default())),
             wasm: crate::runtime::wasm_state::WasmState::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
         }
@@ -285,6 +286,17 @@ impl Wafer {
     /// Returns all resolved blocks as an Arc for use in contexts.
     fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
         self.registration.all_blocks.clone()
+    }
+
+    /// Resolve a dispatch target through the alias map, returning the
+    /// canonical name and a handle to the block.
+    ///
+    /// Tries the alias-resolved name first, then the raw name (the same
+    /// canonicalize-then-fallback the flow runner and `RuntimeContext`
+    /// dispatch use). This is the single accessor for block lookup so callers
+    /// don't reach into `registration.all_blocks` directly.
+    pub fn lookup_block<'a>(&'a self, name: &'a str) -> Option<(&'a str, Arc<dyn Block>)> {
+        self.registration.lookup_with_alias(name)
     }
 
     /// Register an alias mapping. When `call_block(alias)` is called,

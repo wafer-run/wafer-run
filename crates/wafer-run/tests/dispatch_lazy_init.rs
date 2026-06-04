@@ -238,6 +238,135 @@ async fn call_block_initializes_callee_lazily() {
     );
 }
 
+/// When a callee is reached through an alias, its sub-context `node_id`
+/// (the identity downstream WRAP checks attribute resource access to) must
+/// be the *resolved* canonical block name, not the raw alias the caller
+/// wrote. Before the fix, `dispatch_call` set `node_id` to the alias, so an
+/// aliased callee making its own `call_block` was attributed to the alias —
+/// observable here as the grandchild's `caller_id`.
+#[tokio::test]
+async fn aliased_callee_node_id_is_resolved_canonical_name() {
+    use std::sync::Mutex;
+
+    /// Calls `@callee-alias` and returns its output.
+    struct ViaAliasCaller;
+
+    #[async_trait]
+    impl Block for ViaAliasCaller {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/caller", "0.1.0", "test/iface@v1", "test")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            ctx.call_block("@callee-alias", Message::new(""), InputStream::empty())
+                .await
+        }
+    }
+
+    /// Reached via the alias; calls a grandchild so we can observe the
+    /// `caller_id` it propagates (which is this block's own `node_id`).
+    struct MiddleCallee;
+
+    #[async_trait]
+    impl Block for MiddleCallee {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/callee", "0.1.0", "test/iface@v1", "test")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            ctx.call_block("test/grandchild", Message::new(""), InputStream::empty())
+                .await
+        }
+    }
+
+    /// Records the `caller_id` it observes — equals the middle callee's
+    /// `node_id`.
+    struct RecordingGrandchild {
+        seen_caller: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl Block for RecordingGrandchild {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/grandchild", "0.1.0", "test/iface@v1", "test")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            *self.seen_caller.lock().unwrap() = ctx.caller_id().map(str::to_string);
+            OutputStream::respond(Vec::new())
+        }
+    }
+
+    let seen_caller = Arc::new(Mutex::new(None));
+
+    let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block("test/caller", Arc::new(ViaAliasCaller))
+        .expect("register caller");
+    wafer
+        .register_block("test/callee", Arc::new(MiddleCallee))
+        .expect("register callee");
+    wafer
+        .register_block(
+            "test/grandchild",
+            Arc::new(RecordingGrandchild {
+                seen_caller: seen_caller.clone(),
+            }),
+        )
+        .expect("register grandchild");
+    wafer
+        .add_alias("@callee-alias", "test/callee")
+        .expect("alias");
+    wafer.rebuild_all_blocks();
+    let wafer = Arc::new(wafer);
+
+    let _out = wafer
+        .run_block("test/caller", Message::new(""), InputStream::empty())
+        .await;
+
+    let observed = seen_caller.lock().unwrap().clone();
+    assert_eq!(
+        observed.as_deref(),
+        Some("test/callee"),
+        "callee reached via alias must attribute downstream calls to its \
+         resolved canonical name, not the alias"
+    );
+}
+
 /// Transitive init cycle (A.init → B.init → A) must surface as
 /// `InitError::Cycle` (mapped to `FAILED_PRECONDITION`) on the top-level
 /// output stream — without ever running `handle` on either block.
