@@ -43,9 +43,20 @@ Notable verification outcomes during implementation:
   as a follow-up (the LLM/Image routers have genuinely different method/error shapes).
 - **s3 const-vs-config (R4)** was a non-issue — already a single source — so s3 was untouched.
 
-**Deferred (need design / re-audit, as agreed):** `common/codegen` cleanup-or-wire-up;
-WASM typed `call_service` (TODO #103); the cosmetic `BlockInfo::infrastructure` helper
-(would couple PRs through `types.rs`).
+**Follow-up round (post-review, 2026-06-04):**
+- **`BlockInfo::infrastructure()` helper** — DONE (folded into PR #203): the
+  `.instance_mode(Singleton).category(Infrastructure)` pair collapsed across 9 infra blocks.
+- **`common/codegen` cleanup** — DONE via PR #205 (cleanup route): the dead/stale generated
+  Rust/Go was removed and the generator trimmed to its live TypeScript-only path; Rust/Go
+  constants documented as hand-maintained in `wafer-block`. (Re-audit showed wiring TOML up
+  as the Rust source would re-introduce removed indirection for ~85 rarely-changing strings.)
+- **#200 review nits** — DONE (folded into PR #200): producer-side `__raw_sql__`/`__ddl__`
+  const dedup, zero-alloc WRAP prefix check, corrected `ContextScope` comment.
+
+**Deferred (design done, implementation pending):** WASM typed `call_service` (TODO #103) —
+design spec at `docs/design/2026-06-04-wasm-call-service-103.md`; implementation is a phased
+~4–6 week follow-up. The `MultiBackendRouter<S>` router generalization (A5) also remains a
+follow-up.
 
 ---
 
