@@ -70,10 +70,23 @@ pub fn resolve<'a>(cf: &'a CredentialsFile, registry_url: &str) -> Option<&'a En
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
+
+    /// Serializes tests that mutate the process-wide `HOME` env var so parallel
+    /// test threads don't race each other (one test reading `HOME` while
+    /// another removes it). Mirrors the guard in `cache.rs`.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn roundtrip() {
+        let _guard = env_guard();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("HOME", tmp.path());
@@ -139,6 +152,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn path_with_home_unset_errors() {
+        let _guard = env_guard();
         let old_home = std::env::var("HOME").ok();
         std::env::remove_var("HOME");
         let result = path();

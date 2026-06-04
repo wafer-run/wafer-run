@@ -278,7 +278,10 @@ pub(crate) async fn ensure_ok(
         return Ok(resp);
     }
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
     Err(crate::registry_error::RegistryError::new(op, status, body).into())
 }
 
