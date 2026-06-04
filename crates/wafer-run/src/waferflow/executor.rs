@@ -113,13 +113,22 @@ pub async fn execute(
             }
         }
 
-        // --- Resolve the block name first (alias → target) so the
-        //     RuntimeContext carries the *block* identity, not the flow's
-        //     step id. WRAP keys access decisions off `node_id` and the
-        //     resource owner is `{org}/{block}`; passing `step.id` here
-        //     would attribute all WRAP calls to the (arbitrary) step name
-        //     and cause false denials. ---
-        let block_name = wafer.canonicalize(&step.block).to_string();
+        // --- Resolve the block (alias → target) first so the RuntimeContext
+        //     carries the *block* identity, not the flow's step id. WRAP keys
+        //     access decisions off `node_id` and the resource owner is
+        //     `{org}/{block}`; passing `step.id` here would attribute all WRAP
+        //     calls to the (arbitrary) step name and cause false denials.
+        //     `lookup_block` is the single canonicalize-then-fallback accessor
+        //     shared with the runner and `RuntimeContext` dispatch. ---
+        let (block_name, block) = match wafer.lookup_block(&step.block) {
+            Some((resolved, block)) => (resolved.to_string(), block),
+            None => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::NOT_FOUND,
+                    format!("block '{}' not found in step '{}'", step.block, step.id),
+                ));
+            }
+        };
 
         // --- Build RuntimeContext with step config ---
         let step_config = step
@@ -138,22 +147,6 @@ pub async fn execute(
             step_init_stack.clone(),
         );
 
-        // --- Look up block ---
-        let block = match wafer
-            .registration
-            .all_blocks
-            .get(&block_name)
-            .or_else(|| wafer.registration.all_blocks.get(&step.block))
-        {
-            Some(b) => b.clone(),
-            None => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::NOT_FOUND,
-                    format!("block '{}' not found in step '{}'", step.block, step.id),
-                ));
-            }
-        };
-
         // Lazy init: ensure the step's target block has had lifecycle(Init)
         // run before dispatching `handle`. Surface init failure as an error
         // event so the flow short-circuits via the standard error path.
@@ -169,7 +162,9 @@ pub async fn execute(
             flow_id: flow.id.clone(),
             node_path: step.id.clone(),
             block_name: step.block.clone(),
-            trace_id: current_msg.get_meta("trace_id").to_string(),
+            trace_id: current_msg
+                .get_meta(wafer_block::meta::META_TRACE_ID)
+                .to_string(),
             message: Some(current_msg.clone()),
         };
         wafer.hooks.fire_block_start(&obs_ctx);

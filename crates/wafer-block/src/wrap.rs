@@ -6,6 +6,21 @@
 
 use crate::{types::ResourceGrant, ErrorCode, WaferError};
 
+/// Sentinel `wrap.resource` value for raw-SQL access. Admin-only.
+///
+/// Set by the client wrapper when a block issues a raw SQL statement and
+/// matched here (and in the runtime's capability check) to gate the
+/// privilege. Same literal on both sides — no translation.
+pub const RAW_SQL_RESOURCE: &str = "__raw_sql__";
+
+/// Sentinel `wrap.resource` value for DDL access. Open to any attributable
+/// caller (convention: blocks DDL only their own tables; enforced by review +
+/// the WRAP-grant audit script, not by parsing SQL).
+///
+/// Set by the client wrapper for `CREATE TABLE` / `ALTER TABLE` and matched
+/// here (and in the runtime's capability check). Same literal on both sides.
+pub const DDL_RESOURCE: &str = "__ddl__";
+
 /// Extract the owning block ID from a namespaced resource name.
 ///
 /// Convention: `suppers_ai__auth__users` → `suppers-ai/auth`
@@ -13,6 +28,16 @@ use crate::{types::ResourceGrant, ErrorCode, WaferError};
 /// Splits on the first two `__` segments, lowercases, converts `__` → `/`
 /// and `_` → `-`. Returns `None` if the name doesn't have at least two `__`
 /// separators (i.e. `{org}__{block}__{resource}`).
+///
+/// # Invariant
+///
+/// The `__ ↔ /` and `_ ↔ -` round-trip with [`resource_prefix`] is only
+/// lossless when each block-id segment matches `^[a-z0-9]+(?:-[a-z0-9]+)*$`
+/// (lowercase alphanumeric, single internal hyphens). That pattern is
+/// enforced at registration by `wafer_run::runtime::validate_block_name`, so
+/// any block reaching this code already satisfies it. A segment containing a
+/// literal `_` would collide with the separator encoding and break the
+/// round-trip — registration rejects such names before they get here.
 pub fn resource_owner(name: &str) -> Option<String> {
     let lower = name.to_lowercase();
     let first = lower.find("__")?;
@@ -26,6 +51,15 @@ pub fn resource_owner(name: &str) -> Option<String> {
 /// Convert a block ID to its resource name prefix.
 ///
 /// `suppers-ai/auth` → `suppers_ai__auth__`
+///
+/// # Invariant
+///
+/// Inverse of [`resource_owner`]; the round-trip is lossless only for block
+/// ids whose segments match `^[a-z0-9]+(?:-[a-z0-9]+)*$`. That pattern is
+/// enforced at registration by `wafer_run::runtime::validate_block_name`
+/// (exactly two `/`-separated segments, lowercase alphanumeric, single
+/// internal hyphens, no underscores), so callers never pass an id that would
+/// produce an ambiguous prefix.
 pub fn resource_prefix(block_id: &str) -> String {
     let mut prefix = block_id.replace('/', "__").replace('-', "_");
     prefix.push_str("__");
@@ -126,7 +160,7 @@ pub fn check_access(
 
     if namespace_based {
         // Rule 1: raw SQL is admin-only
-        if resource == "__raw_sql__" {
+        if resource == RAW_SQL_RESOURCE {
             return match caller_id {
                 Some(c) if c == admin_block => Ok(()),
                 _ => Err(WaferError::new(
@@ -143,7 +177,7 @@ pub fn check_access(
         // DDL is a misuse caught by code review + the WRAP-grant audit script,
         // not by parsing SQL here. Anonymous callers (no `caller_id`) are still
         // denied — DDL needs an attributable owner.
-        if resource == "__ddl__" {
+        if resource == DDL_RESOURCE {
             return match caller_id {
                 Some(_) => Ok(()),
                 None => Err(WaferError::new(
@@ -159,8 +193,10 @@ pub fn check_access(
         // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
         // callers (None) are denied — shared config may carry secrets and
         // there is no reason an unauthenticated context should read them.
-        let lower = resource.to_lowercase();
-        if lower.starts_with("solobase_shared__") {
+        if resource
+            .get(..crate::types::SOLOBASE_SHARED_PREFIX.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(crate::types::SOLOBASE_SHARED_PREFIX))
+        {
             if is_write {
                 return match caller_id {
                     Some(c) if c == admin_block => Ok(()),

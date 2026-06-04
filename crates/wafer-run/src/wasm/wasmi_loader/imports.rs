@@ -10,6 +10,24 @@ use super::abi::*;
 use crate::{error::RuntimeError, types::*, wasm::stream::StreamState};
 
 // ---------------------------------------------------------------------------
+// WASI errno constants (wasi_snapshot_preview1)
+// ---------------------------------------------------------------------------
+
+/// `__WASI_ERRNO_SUCCESS` — the WASI call completed without error.
+const WASI_ERRNO_SUCCESS: i32 = 0;
+
+/// `__WASI_ERRNO_FAULT` — a bad address was passed to the WASI call (e.g. a
+/// guest pointer that does not map into the exported linear memory). Returned
+/// from the WASI shims when a `memory.read`/`memory.write` fails so the guest
+/// sees a real failure instead of "success" plus uninitialised memory.
+const WASI_ERRNO_FAULT: i32 = 21;
+
+/// `__WASI_ERRNO_IO` — an I/O error occurred. Returned from `random_get` when
+/// the host RNG fails, so the guest never observes a "success" return paired
+/// with a non-random (zero-filled) buffer.
+const WASI_ERRNO_IO: i32 = 29;
+
+// ---------------------------------------------------------------------------
 // Linker setup
 // ---------------------------------------------------------------------------
 
@@ -439,11 +457,17 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
              _iovs_len: i32,
              nwritten_ptr: i32|
              -> i32 {
-                // Discard output. Write 0 to nwritten.
+                // Discard output. Write 0 to nwritten. A bad nwritten pointer is
+                // a guest bug — report it instead of claiming success.
                 if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, nwritten_ptr as usize, &0u32.to_le_bytes());
+                    if memory
+                        .write(&mut caller, nwritten_ptr as usize, &0u32.to_le_bytes())
+                        .is_err()
+                    {
+                        return WASI_ERRNO_FAULT;
+                    }
                 }
-                0 // __WASI_ERRNO_SUCCESS
+                WASI_ERRNO_SUCCESS
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking fd_write stub: {e}")))?;
@@ -465,12 +489,19 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "wasi_snapshot_preview1",
             "environ_sizes_get",
             |mut caller: Caller<WasmiHostState>, argc_ptr: i32, argv_buf_size_ptr: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes());
-                    let _ =
-                        memory.write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes());
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return WASI_ERRNO_FAULT;
+                };
+                if memory
+                    .write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes())
+                    .is_err()
+                    || memory
+                        .write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes())
+                        .is_err()
+                {
+                    return WASI_ERRNO_FAULT;
                 }
-                0
+                WASI_ERRNO_SUCCESS
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking environ_sizes_get stub: {e}")))?;
@@ -480,7 +511,10 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
         .func_wrap(
             "wasi_snapshot_preview1",
             "environ_get",
-            |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
+            |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 {
+                // Zero environment variables — nothing to write, always succeeds.
+                WASI_ERRNO_SUCCESS
+            },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking environ_get stub: {e}")))?;
 
@@ -492,12 +526,19 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "wasi_snapshot_preview1",
             "args_sizes_get",
             |mut caller: Caller<WasmiHostState>, argc_ptr: i32, argv_buf_size_ptr: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes());
-                    let _ =
-                        memory.write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes());
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return WASI_ERRNO_FAULT;
+                };
+                if memory
+                    .write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes())
+                    .is_err()
+                    || memory
+                        .write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes())
+                        .is_err()
+                {
+                    return WASI_ERRNO_FAULT;
                 }
-                0
+                WASI_ERRNO_SUCCESS
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking args_sizes_get stub: {e}")))?;
@@ -509,7 +550,10 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
         .func_wrap(
             "wasi_snapshot_preview1",
             "args_get",
-            |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
+            |_caller: Caller<WasmiHostState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 {
+                // Zero command-line arguments — nothing to write, always succeeds.
+                WASI_ERRNO_SUCCESS
+            },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking args_get stub: {e}")))?;
 
@@ -542,10 +586,16 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     let start = START.get_or_init(web_time::Instant::now);
                     web_time::Instant::now().duration_since(*start).as_nanos() as u64
                 };
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, time_ptr as usize, &nanos.to_le_bytes());
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return WASI_ERRNO_FAULT;
+                };
+                if memory
+                    .write(&mut caller, time_ptr as usize, &nanos.to_le_bytes())
+                    .is_err()
+                {
+                    return WASI_ERRNO_FAULT;
                 }
-                0
+                WASI_ERRNO_SUCCESS
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking clock_time_get stub: {e}")))?;
@@ -558,15 +608,21 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "wasi_snapshot_preview1",
             "random_get",
             |mut caller: Caller<WasmiHostState>, buf_ptr: i32, buf_len: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let mut buf = vec![0u8; buf_len as usize];
-                    if getrandom::getrandom(&mut buf).is_err() {
-                        // RNG failure should not happen; fall back to zeros.
-                        warn!("getrandom failed in WASI random_get, falling back to zeros");
-                    }
-                    let _ = memory.write(&mut caller, buf_ptr as usize, &buf);
+                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return WASI_ERRNO_FAULT;
+                };
+                let mut buf = vec![0u8; buf_len as usize];
+                if getrandom::getrandom(&mut buf).is_err() {
+                    // RNG failure: never hand the guest a zero-filled buffer with
+                    // a success errno — that would silently produce non-random
+                    // seeds. Report the failure so the guest can react.
+                    warn!("getrandom failed in WASI random_get");
+                    return WASI_ERRNO_IO;
                 }
-                0
+                if memory.write(&mut caller, buf_ptr as usize, &buf).is_err() {
+                    return WASI_ERRNO_FAULT;
+                }
+                WASI_ERRNO_SUCCESS
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking random_get stub: {e}")))?;

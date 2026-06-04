@@ -164,6 +164,69 @@ fn instantiate(
 }
 
 // ---------------------------------------------------------------------------
+// ContextScope — RAII install/clear of the borrowed Context in the store
+// ---------------------------------------------------------------------------
+
+/// RAII guard that installs a borrowed [`Context`] into the wasmi store's
+/// `context` slot for the duration of a single guest invocation and clears it
+/// on drop — on *every* exit path (`?`, early `return Err`, the unhandled-trap
+/// branch, or success).
+///
+/// The slot holds a cloned `Arc` produced from a [`ContextGuard`] that
+/// `transmute`s a non-`'static` `&dyn Context`. If that `Arc` outlives the
+/// guard it dereferences freed memory, so `ContextGuard::drop` asserts its
+/// strong count is exactly 1. Clearing the slot here (which drops the store's
+/// `Arc` clone) before the inner `ContextGuard` drops is what keeps that
+/// assertion satisfiable. Doing it via `Drop` removes the need for manual
+/// `store.data_mut().context = None` on each return path — a single missed
+/// clear would crash the host.
+struct ContextScope<'s> {
+    store: &'s mut Store<WasmiHostState>,
+    // The store's `context` Arc is cleared in `ContextScope::drop` (below),
+    // which runs before any field is dropped — so by the time this
+    // `ContextGuard` drops and asserts its strong count is 1, the store's clone
+    // is already gone. Field order is not load-bearing for that invariant.
+    _guard: ContextGuard,
+}
+
+impl<'s> ContextScope<'s> {
+    /// Install `ctx` into the store's `context` slot and seed the per-call
+    /// `current_attachments`. The slot is cleared when the returned scope is
+    /// dropped.
+    fn new(
+        store: &'s mut Store<WasmiHostState>,
+        ctx: &dyn Context,
+        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+    ) -> Self {
+        let guard = ContextGuard::new(ctx);
+        store.data_mut().context = Some(guard.as_arc());
+        store.data_mut().current_attachments = attachments;
+        Self {
+            store,
+            _guard: guard,
+        }
+    }
+
+    /// Shared access to the underlying store.
+    fn store(&self) -> &Store<WasmiHostState> {
+        self.store
+    }
+
+    /// Mutable access to the underlying store.
+    fn store_mut(&mut self) -> &mut Store<WasmiHostState> {
+        self.store
+    }
+}
+
+impl Drop for ContextScope<'_> {
+    fn drop(&mut self) {
+        // Clear the store's Arc clone before `_guard` drops so the strong-count
+        // assertion in `ContextGuard::drop` holds on every exit path.
+        self.store.data_mut().context = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WasmiBlock
 // ---------------------------------------------------------------------------
 
@@ -434,30 +497,32 @@ impl WasmiBlock {
         )
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
-        let guard = ContextGuard::new(ctx);
         let caps_snapshot = self.capabilities.read().clone();
         let (mut store, instance) =
             instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
-        store.data_mut().context = Some(guard.as_arc());
-        store.data_mut().current_attachments = attachments;
 
-        let (func, arg0, arg1) = setup(&mut store, instance)?;
+        // Install the borrowed context (and inbound attachments) for the
+        // duration of this call. `ContextScope::drop` clears the store's
+        // `context` slot on *every* exit path — `?`, early `return Err`, the
+        // unhandled-trap branch, or success — so the strong-count assertion in
+        // `ContextGuard::drop` always holds. From here on the store is reached
+        // through `scope`.
+        let mut scope = ContextScope::new(&mut store, ctx, attachments);
+
+        let (func, arg0, arg1) = setup(scope.store_mut(), instance)?;
 
         let memory = instance
-            .get_memory(&store, "memory")
+            .get_memory(scope.store(), "memory")
             .ok_or_else(|| RuntimeError::Wasm("guest has no exported memory".to_string()))?;
 
         // Initial call (resumable).
         let mut resumable = match func
-            .call_resumable(&mut store, (arg0, arg1))
+            .call_resumable(scope.store_mut(), (arg0, arg1))
             .map_err(|e| RuntimeError::Wasm(format!("guest call failed: {e}")))?
         {
             TypedResumableCall::Finished(packed) => {
-                let (ptr, len) = unpack_ptr_len(packed);
-                let result = read_guest_bytes(&store, memory, ptr, len)?;
-                // Drop context ref before guard.
-                store.data_mut().context = None;
-                return Ok(result);
+                let (ptr, len) = unpack_ptr_len(packed)?;
+                return read_guest_bytes(scope.store(), memory, ptr, len);
             }
             TypedResumableCall::Resumable(inv) => inv,
         };
@@ -465,7 +530,7 @@ impl WasmiBlock {
         // Resolve pending calls in a loop.
         loop {
             // Dispatch based on which pending field is set by the host import.
-            if let Some(handle) = store.data_mut().pending_stream_finish.take() {
+            if let Some(handle) = scope.store_mut().data_mut().pending_stream_finish.take() {
                 // Pull the request out of the StreamState, dispatch via
                 // Context::call_block, install the resulting OutputStream on
                 // the StreamState. Resume with i32 0 on success, negative
@@ -476,7 +541,7 @@ impl WasmiBlock {
                 // await the dispatch (we don't want to keep `&mut store`
                 // borrowed across an await).
                 let take_result = {
-                    let data = store.data_mut();
+                    let data = scope.store_mut().data_mut();
                     let state = data.streams.get_mut(handle);
                     state.map(|s| {
                         let req = s.take_finish_request();
@@ -503,14 +568,14 @@ impl WasmiBlock {
                             ctx.call_block_with_attachments(&target, msg, input, attachments)
                                 .await
                         };
-                        if let Some(state) = store.data_mut().streams.get_mut(handle) {
+                        if let Some(state) = scope.store_mut().data_mut().streams.get_mut(handle) {
                             state.finish_with_stream(out);
                         }
                         0
                     }
                     Some((Err(e), _attachments)) => {
                         let code = e.code;
-                        if let Some(state) = store.data_mut().streams.get_mut(handle) {
+                        if let Some(state) = scope.store_mut().data_mut().streams.get_mut(handle) {
                             state.record_error_and_close(e);
                         }
                         error_code_to_neg_i32(code)
@@ -519,27 +584,25 @@ impl WasmiBlock {
                 };
 
                 match resumable
-                    .resume(&mut store, &[Val::I32(resume_code)])
+                    .resume(scope.store_mut(), &[Val::I32(resume_code)])
                     .map_err(|e| {
                         RuntimeError::Wasm(format!("resuming guest after stream_finish: {e}"))
                     })? {
                     TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed);
-                        let result = read_guest_bytes(&store, memory, ptr, len)?;
-                        store.data_mut().context = None;
-                        return Ok(result);
+                        let (ptr, len) = unpack_ptr_len(packed)?;
+                        return read_guest_bytes(scope.store(), memory, ptr, len);
                     }
                     TypedResumableCall::Resumable(next) => {
                         resumable = next;
                     }
                 }
-            } else if let Some(handle) = store.data_mut().pending_stream_read.take() {
+            } else if let Some(handle) = scope.store_mut().data_mut().pending_stream_read.take() {
                 // Drive the response stream's next frame. On Chunk: allocate
                 // guest memory + write bytes, resume with packed (ptr, len).
                 // On end-of-stream: resume with 0. On error: resume with
                 // negative ErrorCode sentinel (the guest can call take_error
                 // for full details).
-                let next = match store.data_mut().streams.get_mut(handle) {
+                let next = match scope.store_mut().data_mut().streams.get_mut(handle) {
                     Some(s) => s.next_chunk().await,
                     None => Err(WaferError::new(
                         ErrorCode::NotFound,
@@ -550,13 +613,13 @@ impl WasmiBlock {
                 let resume_packed: i64 = match next {
                     Ok(Some(bytes)) => {
                         let alloc_fn = instance
-                            .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
+                            .get_typed_func::<i32, i32>(scope.store(), "__wafer_alloc")
                             .map_err(|e| {
                                 RuntimeError::Wasm(format!(
                                     "getting __wafer_alloc for stream_read resume: {e}"
                                 ))
                             })?;
-                        let ptr = write_guest_bytes(&mut store, alloc_fn, memory, &bytes)?;
+                        let ptr = write_guest_bytes(scope.store_mut(), alloc_fn, memory, &bytes)?;
                         pack_ptr_len(ptr, bytes.len() as u32)
                     }
                     Ok(None) => 0,
@@ -564,25 +627,29 @@ impl WasmiBlock {
                 };
 
                 match resumable
-                    .resume(&mut store, &[Val::I64(resume_packed)])
+                    .resume(scope.store_mut(), &[Val::I64(resume_packed)])
                     .map_err(|e| {
                         RuntimeError::Wasm(format!("resuming guest after stream_read: {e}"))
                     })? {
                     TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed);
-                        let result = read_guest_bytes(&store, memory, ptr, len)?;
-                        store.data_mut().context = None;
-                        return Ok(result);
+                        let (ptr, len) = unpack_ptr_len(packed)?;
+                        return read_guest_bytes(scope.store(), memory, ptr, len);
                     }
                     TypedResumableCall::Resumable(next) => {
                         resumable = next;
                     }
                 }
-            } else if let Some(handle) = store.data_mut().pending_stream_take_error.take() {
+            } else if let Some(handle) = scope
+                .store_mut()
+                .data_mut()
+                .pending_stream_take_error
+                .take()
+            {
                 // Pop the StreamState's last_error, encode via rmp-serde,
                 // allocate guest memory + write bytes, resume with packed
                 // (ptr, len). Resume with 0 if no error is present.
-                let err_opt = store
+                let err_opt = scope
+                    .store_mut()
                     .data_mut()
                     .streams
                     .get_mut(handle)
@@ -596,34 +663,32 @@ impl WasmiBlock {
                             ))
                         })?;
                         let alloc_fn = instance
-                            .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
+                            .get_typed_func::<i32, i32>(scope.store(), "__wafer_alloc")
                             .map_err(|e| {
                                 RuntimeError::Wasm(format!(
                                     "getting __wafer_alloc for stream_take_error resume: {e}"
                                 ))
                             })?;
-                        let ptr = write_guest_bytes(&mut store, alloc_fn, memory, &bytes)?;
+                        let ptr = write_guest_bytes(scope.store_mut(), alloc_fn, memory, &bytes)?;
                         pack_ptr_len(ptr, bytes.len() as u32)
                     }
                     None => 0,
                 };
 
                 match resumable
-                    .resume(&mut store, &[Val::I64(resume_packed)])
+                    .resume(scope.store_mut(), &[Val::I64(resume_packed)])
                     .map_err(|e| {
                         RuntimeError::Wasm(format!("resuming guest after stream_take_error: {e}"))
                     })? {
                     TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed);
-                        let result = read_guest_bytes(&store, memory, ptr, len)?;
-                        store.data_mut().context = None;
-                        return Ok(result);
+                        let (ptr, len) = unpack_ptr_len(packed)?;
+                        return read_guest_bytes(scope.store(), memory, ptr, len);
                     }
                     TypedResumableCall::Resumable(next) => {
                         resumable = next;
                     }
                 }
-            } else if let Some(asset_id) = store.data_mut().pending_load_asset.take() {
+            } else if let Some(asset_id) = scope.store_mut().data_mut().pending_load_asset.take() {
                 debug!(asset = asset_id, "resolving load_asset from WASM guest");
 
                 let loader = self.asset_loader.read().clone();
@@ -638,15 +703,13 @@ impl WasmiBlock {
                 // trapped host function. wasmi's resumable.resume value IS
                 // the return value — no re-entry into the host fn.
                 match resumable
-                    .resume(&mut store, &[Val::I32(code)])
+                    .resume(scope.store_mut(), &[Val::I32(code)])
                     .map_err(|e| {
                         RuntimeError::Wasm(format!("resuming guest after load_asset: {e}"))
                     })? {
                     TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed);
-                        let result = read_guest_bytes(&store, memory, ptr, len)?;
-                        store.data_mut().context = None;
-                        return Ok(result);
+                        let (ptr, len) = unpack_ptr_len(packed)?;
+                        return read_guest_bytes(scope.store(), memory, ptr, len);
                     }
                     TypedResumableCall::Resumable(next) => {
                         resumable = next;
@@ -716,7 +779,7 @@ impl Block for WasmiBlock {
                 .call(&mut store, ())
                 .map_err(|e| RuntimeError::Wasm(format!("calling __wafer_info: {e}")))?;
 
-            let (ptr, len) = unpack_ptr_len(packed);
+            let (ptr, len) = unpack_ptr_len(packed)?;
             let bytes = read_guest_bytes(&store, memory, ptr, len)?;
             let info: BlockInfo = serde_json::from_slice(&bytes)
                 .map_err(|e| RuntimeError::Wasm(format!("deserializing BlockInfo: {e}")))?;

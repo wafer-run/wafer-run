@@ -58,7 +58,7 @@ pub struct RuntimeContext {
     /// flow infos/defs, expanded block configs, interface specs.
     pub snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Warn-once tracking for unknown interfaces. Shared Arc with the Wafer.
-    pub warned_unknown_interfaces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub warned_unknown_interfaces: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
     /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
@@ -161,12 +161,21 @@ impl RuntimeContext {
             return err_output(ErrorCode::CANCELLED, "execution cancelled");
         }
 
-        // Enforce requires: if the caller declared a requires list, check it
-        let resolved_name = self.canonicalize(block_name);
+        // Resolve the alias once up front. This canonical name is the caller
+        // identity used for every downstream decision: the callee's sub-context
+        // `node_id` (WRAP attribution), the capability `allows_call_block`
+        // membership check, and the block lookup. Computing it once avoids the
+        // earlier bug where some sites compared/attributed against the raw
+        // alias and others against the resolved name.
+        let resolved_block_name = self.canonicalize(block_name);
+
+        // Enforce requires: if the caller declared a requires list, check it.
+        // Match against BOTH the raw alias the caller wrote and the resolved
+        // canonical name, so a `requires` entry written either way is honored.
         if let Some(ref requires) = self.caller_requires {
             if !requires
                 .iter()
-                .any(|r| r == block_name || r == resolved_name)
+                .any(|r| r == block_name || r == resolved_block_name)
             {
                 return err_output(
                     ErrorCode::PERMISSION_DENIED,
@@ -206,39 +215,47 @@ impl RuntimeContext {
         // capabilities, verify it has permission for this service call.
         if let Some(caller_block) = self.all_blocks.get(&self.node_id) {
             if let Some(caps) = caller_block.block_capabilities() {
-                // Check call_block capability
-                if !caps.allows_call_block(block_name) {
+                // Check call_block capability. `allows_call_block` does exact
+                // membership against the canonical names a block declares in
+                // its capabilities, so it must see the resolved name — an alias
+                // would never match and produce a false denial.
+                if !caps.allows_call_block(resolved_block_name) {
                     return err_output(
                         ErrorCode::PERMISSION_DENIED,
                         format!("block capability denies call to '{block_name}'"),
                     );
                 }
 
-                // Check resource-specific capabilities based on resource_type meta
+                // Check resource-specific capabilities based on resource_type
+                // meta. Parse the type string into `ResourceType` once and match
+                // on the enum variants — same approach as the WRAP check above,
+                // instead of re-matching hardcoded type strings here.
                 let wrap_rt_str = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE_TYPE);
-                if !wrap_rt_str.is_empty() {
+                if let Some(wrap_rt) = wafer_block::types::ResourceType::parse(wrap_rt_str) {
+                    use wafer_block::types::ResourceType;
                     let wrap_resource = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE);
-                    let allowed = match wrap_rt_str {
-                        "db" => {
-                            if wrap_resource == "__raw_sql__" {
+                    let allowed = match wrap_rt {
+                        ResourceType::Db => {
+                            if wrap_resource == wafer_block::wrap::RAW_SQL_RESOURCE {
                                 caps.raw_sql
-                            } else if wrap_resource == "__ddl__" {
+                            } else if wrap_resource == wafer_block::wrap::DDL_RESOURCE {
                                 caps.ddl
                             } else {
                                 caps.allows_collection(wrap_resource)
                             }
                         }
-                        "storage" => caps.allows_storage_folder(wrap_resource),
-                        "config" => caps.config && caps.allows_config_key(wrap_resource),
-                        "crypto" => caps.crypto,
-                        "network" => caps.allows_network_url(wrap_resource),
-                        _ => true,
+                        ResourceType::Storage => caps.allows_storage_folder(wrap_resource),
+                        ResourceType::Config => {
+                            caps.config && caps.allows_config_key(wrap_resource)
+                        }
+                        ResourceType::Crypto => caps.crypto,
+                        ResourceType::Network => caps.allows_network_url(wrap_resource),
                     };
                     if !allowed {
                         return err_output(
                             ErrorCode::PERMISSION_DENIED,
                             format!(
-                                "block capability denies access to {wrap_rt_str} '{wrap_resource}'"
+                                "block capability denies access to {wrap_rt} '{wrap_resource}'"
                             ),
                         );
                     }
@@ -246,8 +263,10 @@ impl RuntimeContext {
             }
         }
 
-        // Look up the block (try aliases then direct name)
-        let resolved_block_name = self.canonicalize(block_name);
+        // Look up the block (resolved canonical name first, then the raw name
+        // as a defensive fallback — the same canonicalize-then-fallback the
+        // flow runner and `Wafer::lookup_block` use). `resolved_block_name` was
+        // computed once near the top of this fn.
         let block = match self
             .all_blocks
             .get(resolved_block_name)
@@ -338,7 +357,12 @@ impl RuntimeContext {
 
         let sub_ctx = RuntimeContext {
             flow_id: self.flow_id.clone(),
-            node_id: block_name.to_string(),
+            // node_id is the callee's identity for downstream WRAP attribution
+            // (resource owner is `{org}/{block}`). It must be the resolved
+            // canonical name, not the raw alias the caller wrote — otherwise an
+            // aliased callee performing its own resource access would be
+            // attributed to the alias and falsely denied.
+            node_id: resolved_block_name.to_string(),
             config: self.config.clone(),
             config_snapshot: self.config_snapshot.clone(),
             cancelled: self.cancelled.clone(),

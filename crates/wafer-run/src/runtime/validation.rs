@@ -3,8 +3,9 @@
 //! Pure functions — no mutation of runtime state. Called from `Wafer::resolve()`
 //! (config presence) and `RuntimeContext::call_block()` (interface action).
 
-use std::{collections::HashSet, sync::Mutex};
+use std::collections::HashSet;
 
+use parking_lot::Mutex;
 use wafer_block::types::{BlockInfo, InterfaceSpec};
 
 /// A single `(block, key)` pair whose required config value was not provided.
@@ -127,7 +128,7 @@ pub fn warn_once_unknown_interface(
     block_name: &str,
     interface_name: &str,
 ) {
-    let mut guard = warned.lock().expect("warn-once mutex poisoned");
+    let mut guard = warned.lock();
     if guard.insert(block_name.to_string()) {
         tracing::warn!(
             block = %block_name,

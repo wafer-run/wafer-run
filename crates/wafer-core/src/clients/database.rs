@@ -18,6 +18,7 @@ use wafer_block::{
         SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
         TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
     },
+    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
 };
 
@@ -186,7 +187,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::DATABASE_QUERY_RAW,
             &req,
-            Some("__raw_sql__"),
+            Some(RAW_SQL_RESOURCE),
             false,
             Some("db")
         )?;
@@ -204,7 +205,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::DATABASE_EXEC_RAW,
             &req,
-            Some("__raw_sql__"),
+            Some(RAW_SQL_RESOURCE),
             true,
             Some("db")
         )?;
@@ -281,7 +282,7 @@ dual_api! {
             ctx, BLOCK,
             ServiceOp::DATABASE_EXEC_RAW,
             &req,
-            Some("__ddl__"),
+            Some(DDL_RESOURCE),
             true,
             Some("db")
         )?;

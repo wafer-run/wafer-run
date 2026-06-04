@@ -27,6 +27,12 @@ pub const META_AUTH_USER_EMAIL: &str = "auth.user_email";
 /// Comma-separated list of roles for the authenticated user.
 pub const META_AUTH_USER_ROLES: &str = "auth.user_roles";
 
+// Trace correlation (set by the bridge/listener, read by observability hooks).
+
+/// Distributed-trace correlation id carried on the message meta and copied
+/// into [`crate`]-level observability contexts.
+pub const META_TRACE_ID: &str = "trace_id";
+
 // WRAP meta keys (set by client wrappers, read by runtime in call_block()).
 
 /// Name of the resource being accessed (table/key/object name).

@@ -9,6 +9,19 @@
 
 use std::collections::HashMap;
 
+/// Reserved prefix for cross-block shared config variables.
+///
+/// Keys with this prefix are special-cased throughout the runtime:
+/// - [`ConfigVar::is_deletable`] returns `false` (admins can't delete them).
+/// - WRAP (`wafer_block::wrap::check_access`) treats reads as readable by any
+///   attributable caller but writes as admin-only.
+/// - [`BlockInfo::validate`] rejects blocks that try to *declare* a key under
+///   this prefix (the prefix is owned by the platform, not any one block).
+///
+/// Same literal everywhere — env vars, D1, and the config API all use this
+/// exact string with no translation.
+pub const SOLOBASE_SHARED_PREFIX: &str = "SOLOBASE_SHARED__";
+
 // ---------------------------------------------------------------------------
 // Runtime-only types (not part of WIT)
 // ---------------------------------------------------------------------------
@@ -334,6 +347,28 @@ impl BlockInfo {
         }
     }
 
+    /// Validate declared config keys against platform-reserved prefixes.
+    ///
+    /// A block may not *declare* a `config_keys` or `flow_config` entry whose
+    /// name starts with [`SOLOBASE_SHARED_PREFIX`]. That prefix is owned by the
+    /// platform — shared variables are seeded and write-gated centrally (see
+    /// [`ConfigVar::is_deletable`] and `wafer_block::wrap::check_access`), so a
+    /// block declaring one would create a key it cannot legitimately own.
+    ///
+    /// Called at block registration time by the runtime; returns the first
+    /// offending key with a clear message so boot fails loudly.
+    pub fn validate(&self) -> Result<(), String> {
+        for var in self.config_keys.iter().chain(self.flow_config.iter()) {
+            if var.key.starts_with(SOLOBASE_SHARED_PREFIX) {
+                return Err(format!(
+                    "block '{}' declares reserved config key '{}': keys starting with '{}' are platform-owned and cannot be declared by a block",
+                    self.name, var.key, SOLOBASE_SHARED_PREFIX
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Set the [`crate::InstanceMode`] (default: `PerNode`).
     pub fn instance_mode(mut self, mode: crate::InstanceMode) -> Self {
         self.instance_mode = mode;
@@ -360,7 +395,7 @@ impl BlockInfo {
     }
 
     /// Set the process env-var-style config keys this block declares.
-    pub fn config_keys(mut self, config_keys: Vec<BlockConfigKey>) -> Self {
+    pub fn config_keys(mut self, config_keys: Vec<ConfigVar>) -> Self {
         self.config_keys = config_keys;
         self
     }
@@ -756,7 +791,7 @@ impl ConfigVar {
     /// Whether this variable can be deleted by an admin.
     /// Shared system vars cannot be deleted.
     pub fn is_deletable(&self) -> bool {
-        !self.key.starts_with("SOLOBASE_SHARED__")
+        !self.key.starts_with(SOLOBASE_SHARED_PREFIX)
     }
 
     /// Whether this variable can be set to an empty value.
@@ -765,9 +800,6 @@ impl ConfigVar {
         !self.is_sensitive()
     }
 }
-
-/// Backward-compatible alias for `ConfigVar`.
-pub type BlockConfigKey = ConfigVar;
 
 // ---------------------------------------------------------------------------
 // Interface specs
@@ -1417,6 +1449,33 @@ mod block_info_tests {
             !j.contains("\"capabilities\""),
             "json should omit the field when None: {j}"
         );
+    }
+
+    #[test]
+    fn validate_accepts_block_with_no_reserved_keys() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
+            .config_keys(vec![ConfigVar::new("ORG__B__SOMETHING", "desc", "")]);
+        assert!(info.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_reserved_prefix_in_config_keys() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").config_keys(vec![
+            ConfigVar::new(&format!("{SOLOBASE_SHARED_PREFIX}APP_NAME"), "desc", ""),
+        ]);
+        let err = info
+            .validate()
+            .expect_err("reserved prefix must be rejected");
+        assert!(err.contains(SOLOBASE_SHARED_PREFIX), "message: {err}");
+        assert!(err.contains("org/b"), "message: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_reserved_prefix_in_flow_config() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").flow_config(vec![
+            ConfigVar::new(&format!("{SOLOBASE_SHARED_PREFIX}feature_flag"), "desc", ""),
+        ]);
+        assert!(info.validate().is_err());
     }
 }
 
