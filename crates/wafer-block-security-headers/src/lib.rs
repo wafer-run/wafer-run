@@ -72,8 +72,7 @@ impl Block for SecurityHeadersBlock {
             "middleware@v1",
             "Adds standard security headers to HTTP responses",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![ConfigVar::new(
             "csp",
             "Operator-supplied Content-Security-Policy directives, merged \

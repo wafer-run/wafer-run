@@ -23,8 +23,8 @@ use wafer_block::{
     common::ErrorCode,
     meta::*,
     types::{ConfigVar, MetaAccess},
-    Block, BlockCategory, BlockInfo, InputStream, InstanceMode, LifecycleEvent, LifecycleType,
-    Message, MetaEntry, OutputStream, RequestAction, WaferError,
+    Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputStream,
+    RequestAction, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -377,8 +377,7 @@ impl Block for HttpListenerBlock {
             "http-listener@v1",
             "HTTP transport — listens for HTTP requests and converts to messages",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "listen",

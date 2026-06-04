@@ -33,8 +33,8 @@ use std::{
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockCategory, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, InstanceMode,
-    LifecycleEvent, Message, OutputStream, WaferError,
+    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, LifecycleEvent, Message,
+    OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -124,8 +124,7 @@ impl Block for RateLimitBlock {
             "middleware@v1",
             "Per-IP rate limiting",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "max_requests",

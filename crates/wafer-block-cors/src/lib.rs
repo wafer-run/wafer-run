@@ -92,8 +92,7 @@ impl Block for CorsBlock {
             "middleware@v1",
             "CORS preflight handler and header injection",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "allowed_origins",

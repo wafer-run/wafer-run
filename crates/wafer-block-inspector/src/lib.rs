@@ -82,8 +82,7 @@ impl Block for InspectorBlock {
             "http-handler@v1",
             "Runtime introspection — blocks, flows, and visual UI",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

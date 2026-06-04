@@ -17,8 +17,8 @@ use std::{collections::HashMap, net::IpAddr, sync::OnceLock, time::Instant};
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockCategory, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, InstanceMode,
-    LifecycleEvent, LifecycleType, Message, OutputStream, WaferError,
+    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, LifecycleEvent, LifecycleType,
+    Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -131,8 +131,7 @@ impl Block for MonitoringBlock {
             "middleware@v1",
             "Request metrics and monitoring",
         )
-        .instance_mode(InstanceMode::Singleton)
-        .category(BlockCategory::Infrastructure)
+        .infrastructure()
         .flow_config(vec![
             ConfigVar::new(
                 "stats_path",
