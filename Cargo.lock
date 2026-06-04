@@ -6147,7 +6147,6 @@ dependencies = [
  "tracing",
  "wafer-block-macro",
  "wafer-core",
- "wafer-run",
 ]
 
 [[package]]
@@ -6303,6 +6302,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "wafer-block",
  "wafer-block-macro",
  "wafer-schema",
@@ -6367,7 +6367,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
- "url",
  "wafer-block",
  "wafer-block-cors",
  "wafer-block-ip-rate-limit",

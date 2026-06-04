@@ -26,7 +26,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 
 /// `reqwest::dns::Resolve` impl that performs the system DNS lookup and then
 /// drops any resolved socket whose IP would be blocked by
-/// [`wafer_run::security::is_blocked_ip`]. Defends against DNS rebinding
+/// [`wafer_core::security::is_blocked_ip`]. Defends against DNS rebinding
 /// (SEC-019): a public-looking hostname that resolves to `127.0.0.1` (or
 /// any private/loopback/link-local IP) is rejected here, before the TCP
 /// connection is established.
@@ -71,7 +71,7 @@ impl Resolve for SsrfFilteringResolver {
             {
                 let filtered: Vec<SocketAddr> = resolved
                     .into_iter()
-                    .filter(|s| !wafer_run::security::is_blocked_ip(s.ip()))
+                    .filter(|s| !wafer_core::security::is_blocked_ip(s.ip()))
                     .collect();
 
                 if filtered.is_empty() {
@@ -161,7 +161,7 @@ impl NetworkService for HttpNetworkService {
         // checks happen in `SsrfFilteringResolver` and defend against DNS
         // rebinding (SEC-019).
         #[cfg(not(feature = "allow-private-network"))]
-        if wafer_run::security::is_blocked_url(&req.url) {
+        if wafer_core::security::is_blocked_url(&req.url) {
             return Err(NetworkError::RequestError(
                 "request to private/internal address is not allowed".to_string(),
             ));
@@ -260,7 +260,7 @@ mod tests {
 
     /// End-to-end DNS rebinding case: the public-looking caller-supplied
     /// URL host resolves to `127.0.0.1`. The URL-level
-    /// [`wafer_run::security::is_blocked_url`] check passes (host is a
+    /// [`wafer_core::security::is_blocked_url`] check passes (host is a
     /// plain domain), so the only line of defense is the
     /// [`SsrfFilteringResolver`].
     ///
