@@ -251,22 +251,26 @@ impl PostgresDatabaseService {
     }
 
     /// Add any columns that exist in `data` but not yet in the table.
+    ///
+    /// Sanitises the table name itself (defence in depth — callers must not
+    /// rely on having pre-sanitised it).
     async fn ensure_columns_from_data(
         &self,
         table: &str,
         data: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let existing = self.get_columns(table).await?;
+        let safe_table = sanitize_ident(table);
+        let existing = self.get_columns(&safe_table).await?;
         for (key, value) in data {
             if !existing.contains(&key.to_lowercase()) {
                 let pg_type = pg_type_for_json_value(value);
-                let alter = format!(
-                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
-                    table,
-                    sanitize_ident(key),
-                    pg_type
+                let alter = ddl::build_add_column_with_type(
+                    &safe_table,
+                    &sanitize_ident(key),
+                    pg_type,
+                    Backend::Postgres,
                 );
-                sqlx::query(&alter)
+                sqlx::query(&alter.sql)
                     .execute(&self.pool)
                     .await
                     .map_err(|e| DatabaseError::Internal(format!("add column {key}: {e}")))?;
@@ -277,35 +281,45 @@ impl PostgresDatabaseService {
 
     /// Ensure columns referenced in filters and sorts exist (adds them as TEXT
     /// if missing, so they default to NULL).
+    ///
+    /// Sanitises the table name itself (defence in depth — callers must not
+    /// rely on having pre-sanitised it).
     async fn ensure_columns_for_query(
         &self,
         table: &str,
         filters: &[Filter],
         sort: &[SortField],
     ) -> Result<(), DatabaseError> {
-        let existing = self.get_columns(table).await?;
+        let safe_table = sanitize_ident(table);
+        let existing = self.get_columns(&safe_table).await?;
         for f in filters {
             if !existing.contains(&f.field.to_lowercase()) {
-                let alter = format!(
-                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table,
-                    sanitize_ident(&f.field)
+                let alter = ddl::build_add_text_column(
+                    &safe_table,
+                    &sanitize_ident(&f.field),
+                    Backend::Postgres,
                 );
-                sqlx::query(&alter).execute(&self.pool).await.map_err(|e| {
-                    DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
-                })?;
+                sqlx::query(&alter.sql)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| {
+                        DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
+                    })?;
             }
         }
         for s in sort {
             if !existing.contains(&s.field.to_lowercase()) {
-                let alter = format!(
-                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
-                    table,
-                    sanitize_ident(&s.field)
+                let alter = ddl::build_add_text_column(
+                    &safe_table,
+                    &sanitize_ident(&s.field),
+                    Backend::Postgres,
                 );
-                sqlx::query(&alter).execute(&self.pool).await.map_err(|e| {
-                    DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
-                })?;
+                sqlx::query(&alter.sql)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| {
+                        DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
+                    })?;
             }
         }
         Ok(())

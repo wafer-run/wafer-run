@@ -209,6 +209,48 @@ pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> cra
     crate::Statement::new(sql, vec![], table_name)
 }
 
+/// Generate an `ALTER TABLE <table> ADD COLUMN <column> <type_sql>` statement.
+///
+/// Both `table_name` and `column_name` are quoted as identifiers. `type_sql`
+/// is a dialect column type produced by [`data_type_to_sql`] (or, for the
+/// lazy column-add path that maps from a `serde_json::Value`, the column type
+/// the backend chose); it is spliced verbatim and must therefore be a trusted
+/// type literal, never untrusted input.
+///
+/// This is the primitive the backends' lazy column-add paths use when they
+/// know only a column name and a target type — not a full [`Column`] (which
+/// [`build_add_column`] requires).
+pub fn build_add_column_with_type(
+    table_name: &str,
+    column_name: &str,
+    type_sql: &str,
+    _backend: Backend,
+) -> crate::Statement {
+    let sql = format!(
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        quote_ident(table_name),
+        quote_ident(column_name),
+        type_sql
+    );
+    crate::Statement::new(sql, vec![], table_name)
+}
+
+/// Generate an `ALTER TABLE <table> ADD COLUMN <column> TEXT` statement.
+///
+/// Convenience wrapper over [`build_add_column_with_type`] for the lazy
+/// column-add path, where filter/sort/data columns absent from the table are
+/// synthesised as a TEXT column (defaulting to NULL). The TEXT type name is
+/// identical across SQLite and Postgres, so it is shared via
+/// [`data_type_to_sql`].
+pub fn build_add_text_column(
+    table_name: &str,
+    column_name: &str,
+    backend: Backend,
+) -> crate::Statement {
+    let type_sql = data_type_to_sql(DataType::Text, backend);
+    build_add_column_with_type(table_name, column_name, type_sql, backend)
+}
+
 /// Generate a DROP TABLE IF EXISTS statement.
 pub fn build_drop_table(table_name: &str, _backend: Backend) -> crate::Statement {
     let sql = format!("DROP TABLE IF EXISTS {}", quote_ident(table_name));
@@ -320,6 +362,49 @@ mod tests {
         let stmt = build_drop_table("users", Backend::Sqlite);
         assert_eq!(stmt.sql, "DROP TABLE IF EXISTS \"users\"");
         assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn test_add_text_column_sqlite() {
+        let stmt = build_add_text_column("users", "nickname", Backend::Sqlite);
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT"
+        );
+        assert_eq!(stmt.collection, "users");
+        assert!(stmt.values.is_empty());
+    }
+
+    #[test]
+    fn test_add_text_column_postgres() {
+        let stmt = build_add_text_column("users", "nickname", Backend::Postgres);
+        // TEXT is identical across dialects; identifiers are quoted.
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT"
+        );
+        assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn test_add_text_column_quotes_identifiers() {
+        // A column name containing a double quote must be escaped, not
+        // splatted into the DDL where it could break out of the identifier.
+        let stmt = build_add_text_column("posts", "weird\"name", Backend::Sqlite);
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"posts\" ADD COLUMN \"weird\"\"name\" TEXT"
+        );
+    }
+
+    #[test]
+    fn test_add_column_with_type_postgres_typed() {
+        let stmt = build_add_column_with_type("orders", "amount", "BIGINT", Backend::Postgres);
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"orders\" ADD COLUMN \"amount\" BIGINT"
+        );
+        assert_eq!(stmt.collection, "orders");
     }
 
     #[test]
