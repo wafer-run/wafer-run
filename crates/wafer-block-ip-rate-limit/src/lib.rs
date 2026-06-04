@@ -38,6 +38,22 @@ use wafer_block::{
 };
 use wafer_block_macro::wafer_async_trait;
 
+/// Default maximum requests permitted per IP within one window before the
+/// block returns [`ErrorCode::ResourceExhausted`].
+///
+/// This is the single source of truth for the `max_requests` default: it is
+/// rendered into the `max_requests` [`ConfigVar`] (so it shows up in the flow
+/// editor) and used as the parse fallback in [`RateLimitBlock::handle`]. There
+/// is no separate struct-field default.
+const DEFAULT_MAX_REQUESTS: u32 = 1000;
+
+/// Default rate-limit window length in seconds.
+///
+/// Single source of truth for the `window_seconds` default: rendered into the
+/// `window_seconds` [`ConfigVar`] and used as the parse fallback in
+/// [`RateLimitBlock::handle`].
+const DEFAULT_WINDOW_SECONDS: u64 = 60;
+
 /// Source of monotonic time for rate-limit windowing.
 ///
 /// Production uses [`SystemClock`] (wrapping [`Instant::now`]); tests inject a
@@ -59,15 +75,15 @@ impl Clock for SystemClock {
 /// Per-IP fixed-window rate-limiter block.
 ///
 /// Maintains an in-memory `HashMap<client_ip, RateBucket>` guarded by a
-/// [`parking_lot::Mutex`]. Each bucket counts requests within a fixed window
-/// (defaults: 1000 requests per 60-second window, overridable per-flow via the
-/// `max_requests` / `window_seconds` config). On overflow the block emits a
+/// [`parking_lot::Mutex`]. Each bucket counts requests within a fixed window.
+/// The limit and window are read exclusively from the `max_requests` /
+/// `window_seconds` flow config (defaulting to [`DEFAULT_MAX_REQUESTS`]
+/// requests per [`DEFAULT_WINDOW_SECONDS`]-second window when unset) — the
+/// block holds no duplicate struct-level defaults. On overflow it emits a
 /// [`WaferError`] with [`ErrorCode::ResourceExhausted`] and `Retry-After` /
 /// `X-RateLimit-*` response-header meta; on allow it forwards the message with
 /// `X-RateLimit-Remaining` set. Single-process / native-only — see crate docs.
 pub(crate) struct RateLimitBlock {
-    max_requests: u32,
-    window: Duration,
     buckets: Mutex<HashMap<String, RateBucket>>,
     clock: Arc<dyn Clock>,
 }
@@ -93,8 +109,6 @@ impl RateLimitBlock {
     /// window-reset behaviour deterministically.
     pub(crate) fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
-            max_requests: 1000,
-            window: Duration::from_secs(60),
             buckets: Mutex::new(HashMap::new()),
             clock,
         }
@@ -116,15 +130,15 @@ impl Block for RateLimitBlock {
             ConfigVar::new(
                 "max_requests",
                 "Maximum requests per IP within the window before \
-                 returning ResourceExhausted.",
-                "60",
+                 returning ResourceExhausted. Set to 0 to disable.",
+                &DEFAULT_MAX_REQUESTS.to_string(),
             )
             .name("Max Requests"),
             ConfigVar::new(
                 "window_seconds",
-                "Sliding window length in seconds for the per-IP \
+                "Fixed window length in seconds for the per-IP \
                  request count.",
-                "60",
+                &DEFAULT_WINDOW_SECONDS.to_string(),
             )
             .name("Window (seconds)"),
         ])
@@ -148,10 +162,13 @@ impl Block for RateLimitBlock {
             return OutputStream::continue_with(msg);
         }
 
+        // Single read path: flow config is the sole source of truth. When a
+        // key is unset (or unparseable) we fall back to the same constant the
+        // flow_config ConfigVar advertises as its default.
         let max = ctx
             .config_get("max_requests")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(self.max_requests);
+            .unwrap_or(DEFAULT_MAX_REQUESTS);
 
         if max == 0 {
             return OutputStream::continue_with(msg);
@@ -160,7 +177,7 @@ impl Block for RateLimitBlock {
         let window_secs = ctx
             .config_get("window_seconds")
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(self.window.as_secs());
+            .unwrap_or(DEFAULT_WINDOW_SECONDS);
         let window = Duration::from_secs(window_secs);
 
         let client_ip = msg.remote_addr().to_string();

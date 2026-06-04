@@ -13,7 +13,7 @@
 
 #![warn(missing_docs)]
 
-use std::{collections::HashMap, net::IpAddr, sync::RwLock, time::Instant};
+use std::{collections::HashMap, net::IpAddr, sync::OnceLock, time::Instant};
 
 use parking_lot::Mutex;
 use wafer_block::{
@@ -34,9 +34,10 @@ const DEFAULT_MONITORING_PATH: &str = "/_monitoring";
 pub(crate) struct MonitoringBlock {
     start_time: Instant,
     stats: Mutex<MonitoringStats>,
-    /// Init-cached endpoint paths. `handle()` prefers per-request
-    /// `ctx.config_get` and falls back to these.
-    paths: RwLock<EndpointPaths>,
+    /// Init-cached endpoint paths (write-once). `handle()` prefers per-request
+    /// `ctx.config_get` and falls back to these, or to
+    /// [`EndpointPaths::default`] when Init supplied no config.
+    paths: OnceLock<EndpointPaths>,
 }
 
 #[derive(Clone)]
@@ -75,18 +76,15 @@ impl MonitoringBlock {
                 total_requests: 0,
                 path_counts: HashMap::new(),
             }),
-            paths: RwLock::new(EndpointPaths::default()),
+            paths: OnceLock::new(),
         }
     }
 
     /// Resolve `(stats_path, monitoring_path)` from the per-request
-    /// context (preferred) or the Init-cached defaults.
+    /// context (preferred) or the Init-cached paths (or their defaults when
+    /// Init supplied no config).
     fn resolved_paths(&self, ctx: &dyn Context) -> (String, String) {
-        let cached = self
-            .paths
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| EndpointPaths::default());
+        let cached = self.paths.get().cloned().unwrap_or_default();
         let stats = ctx
             .config_get("stats_path")
             .map(|s| s.to_string())
@@ -208,22 +206,21 @@ impl Block for MonitoringBlock {
         _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if let LifecycleType::Init = event.event_type {
-            if !event.data.is_empty() {
-                if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
-                    if let Ok(mut guard) = self.paths.write() {
-                        if let Some(v) = cfg.get("stats_path").and_then(|v| v.as_str()) {
-                            if !v.is_empty() {
-                                guard.stats = v.to_string();
-                            }
-                        }
-                        if let Some(v) = cfg.get("monitoring_path").and_then(|v| v.as_str()) {
-                            if !v.is_empty() {
-                                guard.monitoring = v.to_string();
-                            }
-                        }
-                    }
-                }
+        if event.event_type == LifecycleType::Init && !event.data.is_empty() {
+            if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
+                let read = |key: &str, default: &str| {
+                    cfg.get(key)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(default)
+                        .to_string()
+                };
+                let paths = EndpointPaths {
+                    stats: read("stats_path", DEFAULT_STATS_PATH),
+                    monitoring: read("monitoring_path", DEFAULT_MONITORING_PATH),
+                };
+                // Write-once: Init fires a single time per registration.
+                let _ = self.paths.set(paths);
             }
         }
         Ok(())

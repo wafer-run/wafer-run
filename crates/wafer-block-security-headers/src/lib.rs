@@ -8,7 +8,7 @@
 
 #![warn(missing_docs)]
 
-use std::sync::RwLock;
+use std::sync::OnceLock;
 
 use wafer_block::*;
 
@@ -23,9 +23,9 @@ const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'
 ///
 /// CSP is configurable via `block_config` — the runtime serializes the
 /// config JSON to bytes and passes them in at `lifecycle(Init)`. Until
-/// Init runs, the block uses the restrictive `DEFAULT_CSP`. Store via
-/// `RwLock<String>` because `handle` takes `&self` and the config is
-/// written once at Init, read on every request.
+/// Init sets a value, the block uses the restrictive [`DEFAULT_CSP`]. Stored
+/// via `OnceLock<String>` because `handle` takes `&self` and the config is
+/// written once at Init, then read on every request.
 ///
 /// The CSP applied at request time is `merge_csp(DEFAULT_CSP, cfg.csp)`,
 /// which guarantees:
@@ -34,7 +34,7 @@ const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'
 ///
 /// regardless of what the operator puts in `cfg.csp`. See `merge_csp`.
 pub struct SecurityHeadersBlock {
-    csp: RwLock<String>,
+    csp: OnceLock<String>,
 }
 
 impl Default for SecurityHeadersBlock {
@@ -44,15 +44,22 @@ impl Default for SecurityHeadersBlock {
 }
 
 impl SecurityHeadersBlock {
-    /// Build a new block seeded with the restrictive [`DEFAULT_CSP`].
+    /// Build a new block. The effective CSP defaults to the restrictive
+    /// [`DEFAULT_CSP`] until `lifecycle(Init)` sets a merged operator policy.
     ///
-    /// Any operator-supplied `csp` config will replace the seeded value
-    /// (after merging through [`merge_csp`]) the first time the runtime
-    /// fires the `Init` lifecycle event.
+    /// Any operator-supplied `csp` config replaces the default (after merging
+    /// through [`merge_csp`]) the first time the runtime fires the `Init`
+    /// lifecycle event.
     pub fn new() -> Self {
         Self {
-            csp: RwLock::new(DEFAULT_CSP.to_string()),
+            csp: OnceLock::new(),
         }
+    }
+
+    /// The CSP applied to responses: the Init-set merged value, or
+    /// [`DEFAULT_CSP`] when Init has not (yet) supplied one.
+    fn effective_csp(&self) -> &str {
+        self.csp.get().map(String::as_str).unwrap_or(DEFAULT_CSP)
     }
 }
 
@@ -77,11 +84,7 @@ impl Block for SecurityHeadersBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
-        let csp = self
-            .csp
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| DEFAULT_CSP.to_string());
+        let csp = self.effective_csp();
 
         let mut out_msg = msg;
         out_msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
@@ -94,7 +97,7 @@ impl Block for SecurityHeadersBlock {
             "resp.header.Referrer-Policy",
             "strict-origin-when-cross-origin",
         );
-        out_msg.set_meta("resp.header.Content-Security-Policy", &csp);
+        out_msg.set_meta("resp.header.Content-Security-Policy", csp);
         // SEC-086: include `preload` so the policy is eligible for the
         // HSTS preload list (https://hstspreload.org). Submission to the
         // list is a separate manual step; emitting the directive is the
@@ -116,13 +119,12 @@ impl Block for SecurityHeadersBlock {
         _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if let LifecycleType::Init = event.event_type {
+        if event.event_type == LifecycleType::Init {
             if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
                 if let Some(custom_csp) = cfg.get("csp").and_then(|v| v.as_str()) {
                     let merged = merge_csp(DEFAULT_CSP, custom_csp);
-                    if let Ok(mut guard) = self.csp.write() {
-                        *guard = merged;
-                    }
+                    // Write-once: Init fires a single time per registration.
+                    let _ = self.csp.set(merged);
                 }
             }
         }
