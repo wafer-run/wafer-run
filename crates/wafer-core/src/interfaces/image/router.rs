@@ -68,11 +68,15 @@ impl ImageService for MultiBackendImageService {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ImageError> {
         let mut all = Vec::new();
-        for (_label, svc) in &self.impls {
-            // Tolerate per-backend failures; one bad backend shouldn't poison
-            // the aggregate.
-            if let Ok(models) = svc.list_models().await {
-                all.extend(models);
+        for (label, svc) in &self.impls {
+            match svc.list_models().await {
+                Ok(models) => all.extend(models),
+                Err(e) => {
+                    // Tolerate per-backend failures; one bad backend shouldn't
+                    // poison the aggregate. Log so a misconfigured / down
+                    // backend is diagnosable rather than silently dropped.
+                    tracing::warn!(backend = %label, error = %e, "list_models failed");
+                }
             }
         }
         Ok(all)

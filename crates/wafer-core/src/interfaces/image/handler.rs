@@ -117,17 +117,21 @@ fn image_error_to_block_error(e: service::ImageError) -> (ErrorCode, String) {
 /// Dispatch an `image.*` message to the appropriate handler on `service` and
 /// return the resulting output stream. Unknown ops yield an `INVALID_ARGUMENT`
 /// error stream.
+///
+/// `service` is borrowed; the streaming op (`load_model`) clones the `Arc`
+/// internally because its producer closure must be `'static`. Buffered ops
+/// just borrow it.
 pub async fn handle_message(
-    service: Arc<dyn ImageService>,
+    service: &Arc<dyn ImageService>,
     msg: &Message,
-    body: Vec<u8>,
+    body: &[u8],
 ) -> OutputStream {
     match msg.kind.as_str() {
-        ServiceOp::IMAGE_GENERATE => generate(service, body).await,
-        ServiceOp::IMAGE_LIST_MODELS => list_models(service).await,
-        ServiceOp::IMAGE_STATUS => status(service, &body).await,
-        ServiceOp::IMAGE_LOAD_MODEL => load_model(service, &body),
-        ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service, &body).await,
+        ServiceOp::IMAGE_GENERATE => generate(service.as_ref(), body).await,
+        ServiceOp::IMAGE_LIST_MODELS => list_models(service.as_ref()).await,
+        ServiceOp::IMAGE_STATUS => status(service.as_ref(), body).await,
+        ServiceOp::IMAGE_LOAD_MODEL => load_model(service, body),
+        ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service.as_ref(), body).await,
         other => OutputStream::error(WaferError::new(
             ErrorCode::INVALID_ARGUMENT,
             format!("unknown image operation: {other}"),
@@ -137,8 +141,8 @@ pub async fn handle_message(
 
 // ---- Buffered ops ----
 
-async fn generate(service: Arc<dyn ImageService>, body: Vec<u8>) -> OutputStream {
-    let wire_req: wire::ImageRequest = match codec::decode(&body) {
+async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
+    let wire_req: wire::ImageRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
             return OutputStream::error(WaferError::new(
@@ -170,7 +174,7 @@ async fn generate(service: Arc<dyn ImageService>, body: Vec<u8>) -> OutputStream
     }
 }
 
-async fn list_models(service: Arc<dyn ImageService>) -> OutputStream {
+async fn list_models(service: &dyn ImageService) -> OutputStream {
     match service.list_models().await {
         Ok(models) => {
             let wire_models: Vec<wire::ModelInfo> =
@@ -190,7 +194,7 @@ async fn list_models(service: Arc<dyn ImageService>) -> OutputStream {
     }
 }
 
-async fn status(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
+async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
     let req: wire::StatusRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -218,7 +222,7 @@ async fn status(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
     }
 }
 
-async fn unload_model(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
+async fn unload_model(service: &dyn ImageService, body: &[u8]) -> OutputStream {
     let req: wire::UnloadModelRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -239,7 +243,7 @@ async fn unload_model(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStre
 
 // ---- Streaming ops ----
 
-fn load_model(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
+fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
     let req: wire::LoadModelRequest = match codec::decode(body) {
         Ok(r) => r,
         Err(e) => {
@@ -250,6 +254,8 @@ fn load_model(service: Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
         }
     };
 
+    // The producer closure must be `'static`; clone the `Arc` into it.
+    let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
         let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel);
         while let Some(item) = stream.next().await {

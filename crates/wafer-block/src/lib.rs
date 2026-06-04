@@ -83,7 +83,9 @@ pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATION
 pub use stream::StreamEvent;
 pub use streams::{
     input::InputStream,
-    output::{BufferedResponse, OutputSink, OutputStream, SinkClosed, TerminalNotResponse},
+    output::{
+        BufferedResponse, OutputSink, OutputStream, SinkClosed, SinkSendError, TerminalNotResponse,
+    },
 };
 pub use validation::{unknown_flow_config_keys, BrokenBlock, ValidationReport};
 
