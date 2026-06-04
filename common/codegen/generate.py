@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Generate language-specific constant files from WAFER TOML definitions.
+"""Generate the TypeScript constant files for the wafer-client-js SDK.
 
 Usage:
     python wafer-common/codegen/generate.py
 
-Reads TOML definitions from wafer-common/definitions/ and emits Rust, Go,
-and TypeScript files into wafer-common/generated/.
+Reads TOML definitions from wafer-common/definitions/ and emits TypeScript
+files into wafer-common/generated/typescript/, mirrored into the
+wafer-client-js SDK.
+
+NOTE: the Rust and Go constants are NOT generated — they are hand-maintained
+(Rust in the `wafer-block` crate's `common`/`meta`/`core_types` modules). This
+generator drives the TypeScript SDK only.
 """
 
 import os
@@ -26,7 +31,7 @@ except ModuleNotFoundError:
         print("ERROR: Python 3.11+ required (for tomllib), or install tomli: pip install tomli")
         sys.exit(1)
 
-from templates import rust, go, typescript
+from templates import typescript
 
 
 DEFINITIONS_DIR = os.path.join(ROOT_DIR, "definitions")
@@ -70,19 +75,6 @@ def main() -> None:
                     meta_flat.setdefault(section, {})[sub_key] = sub_val
         else:
             meta_flat[section] = entries
-
-    # --- Rust ---
-    print("generating Rust...")
-    write_file("rust", "error_codes.rs", rust.generate_error_codes(codes))
-    write_file("rust", "meta_keys.rs", rust.generate_meta_keys(meta_flat))
-    write_file("rust", "service_names.rs", rust.generate_service_names(service_names_data))
-    write_file("rust", "constants.rs", rust.generate_constants(True, True, True))
-
-    # --- Go ---
-    print("generating Go...")
-    write_file("go", "error_codes.go", go.generate_error_codes(codes))
-    write_file("go", "meta_keys.go", go.generate_meta_keys(meta_flat))
-    write_file("go", "service_names.go", go.generate_service_names(service_names_data))
 
     # --- TypeScript ---
     print("generating TypeScript...")
