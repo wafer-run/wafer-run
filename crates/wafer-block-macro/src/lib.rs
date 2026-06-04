@@ -490,7 +490,7 @@ pub fn wafer_async_trait(
 /// depend on `wafer-sdk-rs` (package name `wafer-sdk`).
 ///
 /// # Required attributes
-/// - `name` — block name (e.g. `"my-block"`)
+/// - `name` — block name, two segments `{org}/{block}` (e.g. `"acme/my-block"`)
 /// - `version` — semantic version (e.g. `"0.1.0"`)
 /// - `interface` — interface name (e.g. `"transform"`)
 /// - `summary` — human-readable description
@@ -522,7 +522,7 @@ pub fn wafer_async_trait(
 /// struct MyBlock;
 ///
 /// #[wafer_block(
-///     name = "my-block",
+///     name = "acme/my-block",
 ///     version = "0.1.0",
 ///     interface = "http-handler@v1",
 ///     summary = "My block",

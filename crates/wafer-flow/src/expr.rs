@@ -363,7 +363,8 @@ fn parse_atom(s: &str) -> Result<Expr, ExprError> {
 /// contents (the text between the surrounding quotes).
 ///
 /// Recognized escapes: `\n`, `\t`, `\r`, `\"`, `\'`, `\\`, `\/`, `\b`, `\f`,
-/// and `\u{XXXX}` (four hex digits). A backslash followed by any other
+/// and `\uXXXX` (JSON-style: exactly four hex digits, no braces). A backslash
+/// followed by any other
 /// character is an error, so authoring typos surface instead of being silently
 /// dropped or passed through.
 fn unescape_string_literal(inner: &str) -> Result<String, ExprError> {
