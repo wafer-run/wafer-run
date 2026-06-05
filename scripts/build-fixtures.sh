@@ -65,3 +65,11 @@ build_if_missing \
     crates/wafer-run/tests/dispatch_guest/target/wasm32-wasip1/release/dispatch_guest.wasm \
     crates/wafer-run/tests/dispatch_guest/Cargo.toml \
     crates/wafer-run/tests/dispatch_guest/target/wasm32-wasip1/release/dispatch_guest.wasm
+
+# service_client_guest.wasm — consumed by service_client_e2e.rs at runtime
+# via Path. The first fixture built against `wafer-core --features
+# wasm-component`, exercising TODO #103's call_service. Built in place.
+build_if_missing \
+    crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm \
+    crates/wafer-run/tests/service_client_guest/Cargo.toml \
+    crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm

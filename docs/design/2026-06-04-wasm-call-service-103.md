@@ -1,8 +1,24 @@
 # Design: WASM typed service clients (`call_service`) — TODO #103
 
-**Status:** **PR 1 implemented (2026-06-05).** Phased follow-up to the 2026-06-04 code review
-(see `docs/reviews/2026-06-04-code-review.md`, item **R1**). PR 2 (integration fixture +
-test) and PR 3 (Go SDK) remain.
+**Status:** **PR 1 + PR 2 implemented (2026-06-05).** Phased follow-up to the 2026-06-04 code
+review (see `docs/reviews/2026-06-04-code-review.md`, item **R1**). PR 3 (Go SDK) remains.
+
+## PR 2 — integration fixture + test (2026-06-05)
+
+Proved the PR 1 implementation runs end-to-end. New compiled-guest fixture
+`crates/wafer-run/tests/service_client_guest/` — the **first** fixture built against
+`wafer-core --features wasm-component` (validated that wafer-core *links* into a wasm32 guest
+cdylib, not just `cargo check`s). Its `__wafer_handle` calls
+`wafer_core::clients::config::get(key)`; the integration test
+(`tests/service_client_e2e.rs`) registers a `FakeConfigBlock` stand-in for `wafer-run/config`,
+runs the guest, and asserts the resolved value round-trips:
+
+  guest → `config::get` → `call_service` → host streaming ABI → FakeConfigBlock → codec → guest
+
+WRAP: the guest reads a key it **owns** (`test__service_client_guest__greeting` →
+`resource_owner` = `test/service-client-guest`), so the access passes WRAP's own-resource rule
+with no admin/grant setup — keeping the test about `call_service`, not WRAP. Fixture wired into
+`scripts/build-fixtures.sh` + both CI `test` jobs.
 
 ## PR 1 — implementation notes (2026-06-05)
 
