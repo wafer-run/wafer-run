@@ -329,29 +329,38 @@ fn render_source(src: &BlockReferenceSource) -> String {
             step_index,
             step_id,
             parallel_path,
-        } => match parallel_path {
-            None => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
-            Some(path) => {
-                let mut s = format!("      \u{2022} flow `{flow_id}`");
-                for (i, &(outer, branch)) in path.iter().enumerate() {
-                    if i == 0 {
-                        s.push_str(&format!(" step {outer} → branch {branch}"));
-                    } else {
-                        s.push_str(&format!(" → step {outer} → branch {branch}"));
-                    }
+        } =>
+        {
+            #[expect(
+                clippy::option_if_let_else,
+                reason = "Some arm builds the string via a loop over path entries; map_or_else would be less readable"
+            )]
+            match parallel_path {
+                None => {
+                    format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)")
                 }
-                s.push_str(&format!(" → step {step_index} (`{step_id}`)"));
-                s
+                Some(path) => {
+                    let mut s = format!("      \u{2022} flow `{flow_id}`");
+                    for (i, &(outer, branch)) in path.iter().enumerate() {
+                        if i == 0 {
+                            s.push_str(&format!(" step {outer} → branch {branch}"));
+                        } else {
+                            s.push_str(&format!(" → step {outer} → branch {branch}"));
+                        }
+                    }
+                    s.push_str(&format!(" → step {step_index} (`{step_id}`)"));
+                    s
+                }
             }
-        },
+        }
         BlockReferenceSource::BlockConfig {
             from_block,
             location,
             detail,
-        } => match detail {
-            None => format!("      \u{2022} from block `{from_block}` {location}"),
-            Some(d) => format!("      \u{2022} from block `{from_block}` {location} {d}"),
-        },
+        } => detail.as_ref().map_or_else(
+            || format!("      \u{2022} from block `{from_block}` {location}"),
+            |d| format!("      \u{2022} from block `{from_block}` {location} {d}"),
+        ),
     }
 }
 

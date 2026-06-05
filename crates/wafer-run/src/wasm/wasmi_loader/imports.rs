@@ -43,15 +43,10 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "__wafer_host_is_cancelled",
             |caller: Caller<WasmiHostState>| -> i32 {
                 let state = caller.data();
-                if let Some(ref ctx) = state.context {
-                    if ctx.is_cancelled() {
-                        1
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
+                state
+                    .context
+                    .as_ref()
+                    .map_or(0, |ctx| i32::from(ctx.is_cancelled()))
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_is_cancelled: {e}")))?;

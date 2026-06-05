@@ -214,9 +214,14 @@ fn find_wasm_in_dir(dir: &Path, block_name: &str) -> anyhow::Result<std::path::P
             let want = normalize_stem(block_name);
             let matched = found.iter().find(|p| {
                 p.file_stem()
-                    .map(|s| normalize_stem(&s.to_string_lossy()) == want)
-                    .unwrap_or(false)
+                    .is_some_and(|s| normalize_stem(&s.to_string_lossy()) == want)
             });
+            #[expect(
+                clippy::option_if_let_else,
+                reason = "None arm has a side effect (eprintln! ambiguity warning) and consumes \
+                          `found` via into_iter, while `matched` still borrows `found`; a map_or_else \
+                          closure capturing `found` by move would conflict with that borrow"
+            )]
             match matched {
                 Some(path) => Ok(path.clone()),
                 None => {

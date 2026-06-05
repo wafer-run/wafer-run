@@ -32,7 +32,8 @@ async fn wafer_can_register_loader() {
         .disable_lockfile()
         .build()
         .expect("empty wafer build is infallible");
-    wafer.set_asset_loader(Arc::new(TestLoader));
+    let loader: Arc<dyn LoadAssetCallback> = Arc::new(TestLoader);
+    wafer.set_asset_loader(&loader);
     let status = wafer.asset_loader().load("ffmpeg").await;
     assert!(matches!(status, AssetLoadStatus::Ready));
 }

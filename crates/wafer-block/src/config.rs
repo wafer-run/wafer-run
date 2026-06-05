@@ -81,6 +81,10 @@ pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap
 /// Parse a duration string of the form `"30s"`, `"500ms"`, `"5m"`, `"2h"`
 /// (or a bare integer = seconds). Returns [`Duration::ZERO`] on empty or
 /// malformed input (logged as a warning).
+#[expect(
+    clippy::option_if_let_else,
+    reason = "strip-suffix dispatch chain (ms/s/m/h) reads clearer as if-let/else-if-let than nested map_or_else; handbook ch1.3 prefers match for inner-type matching"
+)]
 pub fn parse_duration(s: &str) -> Duration {
     if s.is_empty() {
         return Duration::ZERO;

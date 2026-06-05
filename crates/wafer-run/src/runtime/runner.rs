@@ -163,6 +163,10 @@ pub async fn run_block_with_recovery(
         match result {
             Ok(out) => out,
             Err(panic_info) => {
+                #[expect(
+                    clippy::option_if_let_else,
+                    reason = "if-let chain over two distinct downcast_ref types (&str then String) reads clearer than nested map_or_else"
+                )]
                 let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     s.to_string()
                 } else if let Some(s) = panic_info.downcast_ref::<String>() {

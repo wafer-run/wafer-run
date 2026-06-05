@@ -93,6 +93,7 @@ mod bindings {
                     .add_flow_json(&json)
                     .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {e}")))?;
             }
+            drop(inner);
             Ok(())
         }
 
@@ -262,6 +263,12 @@ mod bindings {
     /// Returns `null` on success, or a string describing validation errors.
     /// CPU-only; stays sync.
     #[napi]
+    // `#[allow]` (not `#[expect]`): the `#[napi]` macro marshals the JS argument
+    // into an owned `String`, so the binding requires an owned parameter and
+    // `&str` is not an option here. The lint fires inside the macro expansion,
+    // where an `#[expect]` on this fn is reported unfulfilled, so `allow` is the
+    // only attribute that reliably suppresses it.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn validate_waferflow(json: String) -> Result<Option<String>> {
         let flow = match wafer_flow::parse(&json) {
             Ok(f) => f,

@@ -25,6 +25,10 @@ pub fn sea_value_to_json(v: Value) -> serde_json::Value {
 }
 
 /// Convert a serde_json::Value to a sea_query::Value for use as a query parameter.
+#[expect(
+    clippy::option_if_let_else,
+    reason = "i64-then-f64-then-string numeric coercion chain reads clearer as if-let/else-if-let; nesting the as_f64 fallback into a map_or_else closure would obscure the priority ordering"
+)]
 pub fn json_to_sea_value(v: &serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::String(None),

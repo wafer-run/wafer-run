@@ -1056,7 +1056,7 @@ impl UiRoute {
 /// emit actions (`http-listener`, `router`) or filter on them
 /// (`readonly-guard`) reference these constants instead of duplicating
 /// the string literals — same name, same place.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestAction {
     /// Read (GET).
     Retrieve,
@@ -1195,8 +1195,7 @@ impl crate::Message {
         self.meta
             .iter()
             .find(|entry| entry.key == key)
-            .map(|entry| entry.value.as_str())
-            .unwrap_or("")
+            .map_or("", |entry| entry.value.as_str())
     }
 
     /// Set a meta value, updating an existing entry or appending a new one.

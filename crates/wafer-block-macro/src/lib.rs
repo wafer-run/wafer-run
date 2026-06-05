@@ -660,6 +660,10 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let handle_block = &handle_fn.block;
     let handle_attrs = &handle_fn.attrs;
 
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "Some arm binds sig/block/attrs before building the quote; a closure form would be less readable"
+    )]
     let lifecycle_impl = match &lifecycle_fn {
         Some(lf) => {
             let sig = &lf.sig;
@@ -688,6 +692,10 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     };
 
     // Build the capabilities expression for `__wafer_info`.
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "Some arm builds a large multi-field quote! token stream; map_or_else would be far less readable"
+    )]
     let capabilities_expr = if let Some(c) = &capabilities_args {
         let crypto = c.crypto;
         let network = c.network;
@@ -742,6 +750,10 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     };
 
     // Build the optional SkillTool expression for `block_info()`.
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "Some arm builds a quote! token stream; map_or_else would be less readable"
+    )]
     let skill_tool_expr = if let Some(skill) = &skill_args {
         let description = &skill.description;
         let parameters_json = &skill.parameters;

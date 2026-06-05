@@ -33,8 +33,7 @@ impl FastembedService {
             other => return Err(VectorError::UnknownModel(other.to_string())),
         };
         let cache_dir = std::env::var("WAFER_RUN__FASTEMBED__CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("data/models"));
+            .map_or_else(|_| PathBuf::from("data/models"), PathBuf::from);
         let embedding =
             TextEmbedding::try_new(TextInitOptions::new(fb_model).with_cache_dir(cache_dir))
                 .map_err(|e| VectorError::Internal(format!("fastembed init: {e}")))?;
@@ -82,10 +81,10 @@ impl EmbeddingService for FastembedService {
         let Ok(guard) = self.inner.lock() else {
             return text.split_whitespace().count();
         };
-        match guard.tokenizer.encode(text, true) {
-            Ok(enc) => enc.get_ids().len(),
-            Err(_) => text.split_whitespace().count(),
-        }
+        guard.tokenizer.encode(text, true).map_or_else(
+            |_| text.split_whitespace().count(),
+            |enc| enc.get_ids().len(),
+        )
     }
 }
 

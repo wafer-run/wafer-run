@@ -362,7 +362,7 @@ impl Wafer {
     ///
     /// Propagates the new loader to all already-registered WASM blocks so that
     /// `set_asset_loader` and `register_block` can be called in any order.
-    pub fn set_asset_loader(&mut self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
+    pub fn set_asset_loader(&mut self, loader: &Arc<dyn crate::asset_loader::LoadAssetCallback>) {
         self.wasm.asset_loader = loader.clone();
         // Forward to all WasmiBlock instances currently registered.
         #[cfg(feature = "wasmi")]

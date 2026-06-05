@@ -21,15 +21,13 @@ fn json_fields_to_service_fields(fields: &HashMap<String, serde_json::Value>) ->
             key: k.clone(),
             value: match v {
                 serde_json::Value::String(s) => FieldValue::String(s.clone()),
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        FieldValue::Int(i)
-                    } else if let Some(f) = n.as_f64() {
-                        FieldValue::Float(f)
-                    } else {
-                        FieldValue::Any(n.to_string())
-                    }
-                }
+                serde_json::Value::Number(n) => n.as_i64().map_or_else(
+                    || {
+                        n.as_f64()
+                            .map_or_else(|| FieldValue::Any(n.to_string()), FieldValue::Float)
+                    },
+                    FieldValue::Int,
+                ),
                 serde_json::Value::Bool(b) => FieldValue::Bool(*b),
                 other => FieldValue::Any(other.to_string()),
             },

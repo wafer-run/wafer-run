@@ -112,11 +112,7 @@ fn is_loopback_addr(addr: &str) -> bool {
     match addr.parse::<IpAddr>() {
         Ok(IpAddr::V4(v4)) => v4.is_loopback(),
         Ok(IpAddr::V6(v6)) => {
-            v6.is_loopback()
-                || v6
-                    .to_ipv4_mapped()
-                    .map(|v4| v4.is_loopback())
-                    .unwrap_or(false)
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
         }
         Err(_) => false,
     }

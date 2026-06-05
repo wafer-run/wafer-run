@@ -136,16 +136,13 @@ impl Block for CorsBlock {
 
         let methods = ctx
             .config_get("allowed_methods")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.allowed_methods.clone());
+            .map_or_else(|| self.allowed_methods.clone(), |s| s.to_string());
         let headers = ctx
             .config_get("allowed_headers")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.allowed_headers.clone());
+            .map_or_else(|| self.allowed_headers.clone(), |s| s.to_string());
         let max_age = ctx
             .config_get("max_age")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string());
+            .map_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string(), |s| s.to_string());
 
         let mut out_msg = msg;
 
@@ -241,6 +238,13 @@ impl Block for CorsBlock {
             //   - array of strings -> join with `,` (matches the internal
             //     split-on-comma representation)
             //   - anything else -> warn + fail closed (SEC-087)
+            #[expect(
+                clippy::option_if_let_else,
+                reason = "the Ok/Err match deserializes config and emits tracing::warn! \
+                          on every fail-closed fallback path; folding it into map_or/\
+                          map_or_else would bury those warnings inside closures and \
+                          hurt readability of the SEC-087 fail-closed logic"
+            )]
             let cfg_origins = if event.data.is_empty() {
                 None
             } else {

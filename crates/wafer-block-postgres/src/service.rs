@@ -689,9 +689,8 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                 }
             },
             "FLOAT4" => match row.try_get::<Option<f32>, _>(col.ordinal()) {
-                Ok(Some(f)) => serde_json::Number::from_f64(f as f64)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                Ok(Some(f)) => serde_json::Number::from_f64(f64::from(f))
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     warn_decode(&e);
@@ -701,8 +700,7 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
             "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => {
                 match row.try_get::<Option<f64>, _>(col.ordinal()) {
                     Ok(Some(f)) => serde_json::Number::from_f64(f)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::Null),
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => {
                         warn_decode(&e);

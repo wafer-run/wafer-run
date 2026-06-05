@@ -297,10 +297,7 @@ fn extract_segment_after(path: &str, needle: &str) -> Option<String> {
         return None;
     }
     // Take everything up to the next slash (or end)
-    let segment = match rest.find('/') {
-        Some(i) => &rest[..i],
-        None => rest,
-    };
+    let segment = rest.find('/').map_or(rest, |i| &rest[..i]);
     if segment.is_empty() {
         return None;
     }

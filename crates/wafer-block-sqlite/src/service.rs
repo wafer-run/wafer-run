@@ -64,8 +64,7 @@ impl SQLiteDatabaseService {
                 Ok(rusqlite::types::ValueRef::Null) => serde_json::Value::Null,
                 Ok(rusqlite::types::ValueRef::Integer(n)) => serde_json::Value::Number(n.into()),
                 Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::Number::from_f64(f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null),
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
                 Ok(rusqlite::types::ValueRef::Text(s)) => {
                     let text = String::from_utf8_lossy(s).to_string();
                     // Try to parse as JSON if it looks like JSON
@@ -102,15 +101,13 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::Null => SqlValue::Null,
         serde_json::Value::Bool(b) => SqlValue::Integer(if *b { 1 } else { 0 }),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                SqlValue::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                SqlValue::Real(f)
-            } else {
-                SqlValue::Text(n.to_string())
-            }
-        }
+        serde_json::Value::Number(n) => n.as_i64().map_or_else(
+            || {
+                n.as_f64()
+                    .map_or_else(|| SqlValue::Text(n.to_string()), SqlValue::Real)
+            },
+            SqlValue::Integer,
+        ),
         serde_json::Value::String(s) => SqlValue::Text(s.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => SqlValue::Text(v.to_string()),
     }
@@ -232,34 +229,45 @@ fn ensure_columns_for_query(
 impl DbExec for SQLiteDatabaseService {
     const BACKEND: Backend = Backend::Sqlite;
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "guard must span prepare→query_map→collect; the prepared statement and MappedRows iterator both borrow the guard, so it cannot drop until rows is collected. Scope is already minimized to the inner block whose tail is the owned Vec."
+    )]
     async fn run_fetch(
         &self,
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
         let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
             .iter()
             .map(|v| v as &dyn rusqlite::types::ToSql)
             .collect();
-        let mut prepared = db
-            .prepare(sql)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let records: Vec<Record> = prepared
-            .query_map(query_params.as_slice(), Self::row_to_record)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?
-            .filter_map(|r| match r {
-                Ok(record) => Some(record),
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping row due to deserialization error");
-                    None
-                }
-            })
-            .collect();
+        let records: Vec<Record> = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            let mut prepared = db
+                .prepare(sql)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            // Bind to a `let` (rather than letting this be the block's tail
+            // expression) so the `MappedRows` iterator temporary — which borrows
+            // `prepared`/`db` — is dropped at the `;` before the guard goes out
+            // of scope, while still keeping the lock held only for this block.
+            let rows: Vec<Record> = prepared
+                .query_map(query_params.as_slice(), Self::row_to_record)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?
+                .filter_map(|r| match r {
+                    Ok(record) => Some(record),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "skipping row due to deserialization error");
+                        None
+                    }
+                })
+                .collect();
+            rows
+        };
         Ok(records)
     }
 
@@ -301,6 +309,7 @@ impl DbExec for SQLiteDatabaseService {
         let rows = db
             .execute(sql, query_params.as_slice())
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        drop(db);
         Ok(rows as i64)
     }
 
@@ -457,6 +466,7 @@ impl DatabaseService for SQLiteDatabaseService {
                 id_str
             }
         };
+        drop(db);
 
         Ok(Record { id, data })
     }
@@ -518,6 +528,7 @@ impl DatabaseService for SQLiteDatabaseService {
             let rows = db
                 .execute(&sql, params.as_slice())
                 .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            drop(db);
 
             if rows == 0 {
                 return Err(DatabaseError::NotFound);
@@ -703,6 +714,7 @@ impl DatabaseService for SQLiteDatabaseService {
                     .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
             }
         }
+        drop(db);
 
         Ok(())
     }

@@ -103,6 +103,10 @@ impl LlmService for MultiBackendLlmService {
         model_id: &str,
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LoadProgress, LlmError>> {
+        #[expect(
+            clippy::option_if_let_else,
+            reason = "None arm is multi-statement (owns backend_id into an async stream); match reads clearer than map_or_else"
+        )]
         match self.find(backend_id) {
             Some(svc) => svc.load_model(backend_id, model_id, cancel),
             None => {
@@ -188,14 +192,13 @@ mod tests {
             _cancel: CancellationToken,
         ) -> BoxStream<'static, Result<ChatChunk, LlmError>> {
             let text = self.text.clone();
-            Box::pin(futures::stream::iter(match text {
-                Some(t) => vec![Ok(ChatChunk {
+            Box::pin(futures::stream::iter(text.map_or_else(Vec::new, |t| {
+                vec![Ok(ChatChunk {
                     delta: ChunkDelta::Text(t),
                     finish_reason: None,
                     usage: None,
-                })],
-                None => vec![],
-            }))
+                })]
+            })))
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
@@ -263,12 +266,11 @@ mod tests {
         let chunks: Vec<_> = stream.collect().await;
         let got: Vec<_> = chunks
             .iter()
-            .filter_map(|r| match r {
-                Ok(c) => match &c.delta {
+            .filter_map(|r| {
+                r.as_ref().ok().and_then(|c| match &c.delta {
                     ChunkDelta::Text(s) => Some(s.as_str()),
                     _ => None,
-                },
-                Err(_) => None,
+                })
             })
             .collect();
         assert_eq!(got, vec!["from-b"]);

@@ -119,18 +119,19 @@ pub fn generate_openapi(
             }
 
             // responses
-            let response_200 = if let Some(output) = &ep.output_schema {
-                json!({
-                    "description": "Successful response",
-                    "content": {
-                        "application/json": {
-                            "schema": output
+            let response_200 = ep.output_schema.as_ref().map_or_else(
+                || json!({ "description": "Successful response" }),
+                |output| {
+                    json!({
+                        "description": "Successful response",
+                        "content": {
+                            "application/json": {
+                                "schema": output
+                            }
                         }
-                    }
-                })
-            } else {
-                json!({ "description": "Successful response" })
-            };
+                    })
+                },
+            );
             operation.insert("responses".into(), json!({ "200": response_200 }));
 
             // security

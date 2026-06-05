@@ -114,8 +114,7 @@ mod tests {
             "Ready should map to i32 status 0; body was {body}"
         );
 
-        let calls = loader.calls.lock().unwrap();
-        assert_eq!(*calls, vec!["ffmpeg".to_string()]);
+        assert_eq!(*loader.calls.lock().unwrap(), vec!["ffmpeg".to_string()]);
     }
 
     #[tokio::test]
@@ -131,7 +130,6 @@ mod tests {
             "Failed should map to i32 status 2; body was {body}"
         );
 
-        let calls = loader.calls.lock().unwrap();
-        assert_eq!(*calls, vec!["ffmpeg".to_string()]);
+        assert_eq!(*loader.calls.lock().unwrap(), vec!["ffmpeg".to_string()]);
     }
 }

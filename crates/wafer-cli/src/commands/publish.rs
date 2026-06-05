@@ -67,10 +67,10 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     let entry = credentials::resolve(&cf, &url)
         .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;
 
-    let file_name = tarball_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "package.wafer".to_string());
+    let file_name = tarball_path.file_name().map_or_else(
+        || "package.wafer".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
 
     let form = reqwest::multipart::Form::new().part(
         "tarball",

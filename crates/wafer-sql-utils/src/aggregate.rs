@@ -243,7 +243,7 @@ pub struct GroupedQueryConfig {
 /// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS INTEGER) as avg_ms
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
-pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::Statement {
+pub fn build_grouped_query(cfg: &GroupedQueryConfig, backend: Backend) -> crate::Statement {
     let mut query = Query::select();
     query.from(DynCol(cfg.table.clone()));
 
@@ -406,7 +406,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
         let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
@@ -432,7 +432,7 @@ mod tests {
             order_by: vec![],
             limit: None,
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
         let sql = stmt.sql;
         eprintln!("SQL: {sql}");
         assert!(
@@ -475,7 +475,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
         let sql = stmt.sql;
         // Both plain aggregate and CASE-WHEN aggregate render.
         assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");

@@ -204,10 +204,9 @@ fn to_struct_name(s: &str) -> String {
     s.split('-')
         .map(|part| {
             let mut chars = part.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            }
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
         })
         .collect()
 }

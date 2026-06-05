@@ -252,10 +252,10 @@ pub async fn execute(
         if let Some(next_entries) = &step.next {
             let mut jumped = false;
             for entry in next_entries {
-                let should_take = match &entry.when {
-                    Some(condition) => acc.eval_condition(condition).unwrap_or(false),
-                    None => true,
-                };
+                let should_take = entry
+                    .when
+                    .as_ref()
+                    .is_none_or(|condition| acc.eval_condition(condition).unwrap_or(false));
                 if should_take {
                     if let Some(target_step) = &entry.step {
                         match steps.iter().position(|s| s.id == *target_step) {

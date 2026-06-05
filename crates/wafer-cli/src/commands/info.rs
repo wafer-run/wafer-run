@@ -33,9 +33,10 @@ pub(crate) fn parse_target(target: &str) -> Result<(String, String, Option<Strin
 /// Format a unix-epoch seconds timestamp as ISO date (`YYYY-MM-DD`).
 /// Invalid values (negative / far future) fall back to the raw number.
 pub(crate) fn format_date(epoch_secs: i64) -> String {
-    chrono::DateTime::from_timestamp(epoch_secs, 0)
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| epoch_secs.to_string())
+    chrono::DateTime::from_timestamp(epoch_secs, 0).map_or_else(
+        || epoch_secs.to_string(),
+        |dt| dt.format("%Y-%m-%d").to_string(),
+    )
 }
 
 /// Format a byte count as an IEC-style string: `1023`, `1.0 KiB`, `1.2 MiB`.
@@ -67,8 +68,7 @@ pub(crate) fn render_package(pkg: &PackageDetail, all: bool) -> String {
     let latest = versions
         .iter()
         .find(|v| v.yanked == 0)
-        .map(|v| v.version.as_str())
-        .unwrap_or("-");
+        .map_or("-", |v| v.version.as_str());
 
     let mut out = String::new();
     out.push_str(&format!("{}/{}\n", pkg.org, pkg.name));
