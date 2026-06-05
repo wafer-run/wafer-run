@@ -4,6 +4,25 @@
 //! that callers can match on programmatically.
 
 /// Errors that can occur during WAFER runtime operations.
+///
+/// The variants fall into three domains, marked by the section comments below:
+///
+/// - **Registration** (`DuplicateBlock`, `InvalidBlockName`, `ConfigVarPrefix`,
+///   `Inventory`): raised while blocks are being added to a [`crate`]-level
+///   registry, before the runtime is sealed. They name the offending block so
+///   the misconfiguration can be fixed at its source.
+/// - **Boot / seal-time** (`GrantsRejected`, `BlocksNotFound`): raised once,
+///   during `Wafer::start()` / `seal()`, after all blocks are registered and
+///   the link graph is validated as a whole. These are the *aggregating*
+///   variants: each wraps a `Vec` and renders every item through
+///   [`render_boot_error_list`] so an operator sees all rejections /
+///   unresolved references in a single error rather than fixing them one at a
+///   time. (`BlockInit` is boot-adjacent — it fires per block during the
+///   lifecycle-start pass and is not aggregated.)
+/// - **Operational** (`Config`, `Flow`, `Wasm`, `Registry`, `Lockfile`,
+///   `AbiMismatch`, `BlockInit`): raised while loading/compiling block assets
+///   or executing flows. They wrap a single failure with enough context to
+///   trace the subsystem (config, flow engine, WASM loader, registry, etc.).
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     // ── Block registration ──────────────────────────────────────────────
