@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "service-client-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The point of this fixture: a guest that calls a *wafer-core* typed service
+# client (TODO #103). wafer-core is compiled with `wasm-component` so its
+# `clients::*` resolve to the sync `call_service` streaming-ABI driver.
+wafer-core = { path = "../../../../crates/wafer-core", features = ["wasm-component"] }
+wafer-sdk = { path = "../../../../sdks/rust" }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+panic = "abort"
