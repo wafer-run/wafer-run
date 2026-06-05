@@ -7,10 +7,15 @@
 
 #![warn(missing_docs)]
 
+/// Errors raised when converting block-manifest collection definitions into
+/// runtime schema [`Table`] types.
+pub mod error;
+
 /// Schema record types (`Table`, `Column`, `Index`, …) used to describe a database.
 pub mod types;
 
 /// Manifest record types and helpers (`CollectionDef`, `collections_to_tables`).
 pub mod manifest;
 
+pub use error::SchemaError;
 pub use types::*;
