@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Single definition of "green" for wafer-run — run this before opening a PR.
 #
-# Mirrors .github/workflows/ci.yml (the `check` and `test` jobs). If CI
-# changes, this script must change too, and vice versa.
+# Mirrors .github/workflows/ci.yml (the `check`, `test`, and `wasm` jobs).
+# If CI changes, this script must change too, and vice versa.
 #
 # The `audit` job is advisory: CI runs `cargo audit` with
 # continue-on-error, so a failure here warns but does not fail the script.
@@ -23,6 +23,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> Tests"
 cargo test --workspace
+
+echo "==> Guest SDK builds to wasm32-wasip1"
+cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
+
+echo "==> Runtime builds with --no-default-features (wasmi off)"
+cargo check -p wafer-run --no-default-features
 
 echo "==> Security audit (advisory — CI runs this continue-on-error)"
 if ! cargo audit; then

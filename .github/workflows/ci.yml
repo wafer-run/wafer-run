@@ -82,6 +82,35 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  wasm:
+    name: Wasm & Feature Builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm
+
+      # Guest-facing SDK must keep compiling to wasm — every compiled block
+      # depends on these two crates. Today this is only proven *incidentally*
+      # by the echo-fixture build (a separate workspace); assert it directly so
+      # the coverage can't silently disappear if the fixtures change.
+      - name: Guest SDK builds to wasm32-wasip1
+        run: cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
+
+      # The wasmi-off code path (wafer-run without its default `wasm` feature)
+      # is otherwise never compiled in CI — clippy/test run with default
+      # features on. Catches `#[cfg(feature = "wasmi")]` gating regressions.
+      - name: Runtime builds with --no-default-features (wasmi off)
+        run: cargo check -p wafer-run --no-default-features
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
