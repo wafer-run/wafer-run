@@ -175,42 +175,16 @@ impl wasmi::core::HostError for LoadAssetTrap {}
 // ---------------------------------------------------------------------------
 
 /// Map a `WaferError` to a negative `i32` sentinel suitable for returning from
-/// host imports declared as `... -> i32`. The low byte carries an opaque
-/// numeric code corresponding to the `ErrorCode` discriminant; `-1` is the
-/// generic fallback. The guest unpacks via `take_error` for full details.
+/// host imports declared as `... -> i32`. The low byte carries the
+/// `ErrorCode`'s stable ordinal (see [`ErrorCode::to_ordinal`]); the guest
+/// unpacks via `take_error` for full details.
 pub(super) fn error_code_to_neg_i32(code: ErrorCode) -> i32 {
-    -(error_code_ordinal(code) as i32)
+    -(code.to_ordinal() as i32)
 }
 
 /// Negative-i64 variant. Same encoding as `error_code_to_neg_i32` but widened.
 pub(super) fn error_code_to_neg_i64(code: ErrorCode) -> i64 {
-    -(error_code_ordinal(code) as i64)
-}
-
-/// Stable opaque numeric tag for an `ErrorCode`. We hand-roll this rather than
-/// using `as i32` on the enum so the wire mapping is independent of source
-/// ordering. Values are 1..=17 (skipping 0 which means "ok / no error"); the
-/// guest's `take_error` is the source of truth for full structured details.
-pub(super) fn error_code_ordinal(code: ErrorCode) -> u8 {
-    match code {
-        ErrorCode::Ok => 0,
-        ErrorCode::Cancelled => 1,
-        ErrorCode::Unknown => 2,
-        ErrorCode::InvalidArgument => 3,
-        ErrorCode::DeadlineExceeded => 4,
-        ErrorCode::NotFound => 5,
-        ErrorCode::AlreadyExists => 6,
-        ErrorCode::PermissionDenied => 7,
-        ErrorCode::ResourceExhausted => 8,
-        ErrorCode::FailedPrecondition => 9,
-        ErrorCode::Aborted => 10,
-        ErrorCode::OutOfRange => 11,
-        ErrorCode::Unimplemented => 12,
-        ErrorCode::Internal => 13,
-        ErrorCode::Unavailable => 14,
-        ErrorCode::DataLoss => 15,
-        ErrorCode::Unauthenticated => 16,
-    }
+    -(code.to_ordinal() as i64)
 }
 
 // ---------------------------------------------------------------------------

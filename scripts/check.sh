@@ -30,6 +30,9 @@ cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
 echo "==> Runtime builds with --no-default-features (wasmi off)"
 cargo check -p wafer-run --no-default-features
 
+echo "==> Guest service-client path (wafer-core wasm-component → wasm32)"
+cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
+
 echo "==> Security audit (advisory — CI runs this continue-on-error)"
 if ! cargo audit; then
     echo "warning: cargo audit reported issues (non-blocking, matches CI)" >&2

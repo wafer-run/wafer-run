@@ -72,6 +72,67 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+impl ErrorCode {
+    /// Stable numeric tag for the streaming-ABI error sentinel wire format.
+    ///
+    /// This is the **single source of truth** for the `ErrorCode` ↔ ordinal
+    /// mapping used by the negative-sentinel encoding on the streaming ABI:
+    /// the host encodes a failure as `-(code.to_ordinal())` (see
+    /// `wafer-run`'s `error_code_to_neg_i32`/`_i64`), and guests decode it via
+    /// [`ErrorCode::from_ordinal`] (see `wafer-sdk`'s stream driver and
+    /// `wafer-core`'s wasm-component `call_service`). It is hand-rolled rather
+    /// than derived from `as u8` so the wire mapping is independent of source
+    /// ordering. `0` means "ok / no error"; values run `1..=16`.
+    pub fn to_ordinal(self) -> u8 {
+        match self {
+            ErrorCode::Ok => 0,
+            ErrorCode::Cancelled => 1,
+            ErrorCode::Unknown => 2,
+            ErrorCode::InvalidArgument => 3,
+            ErrorCode::DeadlineExceeded => 4,
+            ErrorCode::NotFound => 5,
+            ErrorCode::AlreadyExists => 6,
+            ErrorCode::PermissionDenied => 7,
+            ErrorCode::ResourceExhausted => 8,
+            ErrorCode::FailedPrecondition => 9,
+            ErrorCode::Aborted => 10,
+            ErrorCode::OutOfRange => 11,
+            ErrorCode::Unimplemented => 12,
+            ErrorCode::Internal => 13,
+            ErrorCode::Unavailable => 14,
+            ErrorCode::DataLoss => 15,
+            ErrorCode::Unauthenticated => 16,
+        }
+    }
+
+    /// Inverse of [`ErrorCode::to_ordinal`]. Unknown ordinals fall back to
+    /// [`ErrorCode::Internal`] (the streaming ABI guarantees full structured
+    /// detail is still retrievable via `take_error`, so an unrecognised tag
+    /// degrades gracefully rather than panicking).
+    pub fn from_ordinal(ordinal: u8) -> ErrorCode {
+        match ordinal {
+            0 => ErrorCode::Ok,
+            1 => ErrorCode::Cancelled,
+            2 => ErrorCode::Unknown,
+            3 => ErrorCode::InvalidArgument,
+            4 => ErrorCode::DeadlineExceeded,
+            5 => ErrorCode::NotFound,
+            6 => ErrorCode::AlreadyExists,
+            7 => ErrorCode::PermissionDenied,
+            8 => ErrorCode::ResourceExhausted,
+            9 => ErrorCode::FailedPrecondition,
+            10 => ErrorCode::Aborted,
+            11 => ErrorCode::OutOfRange,
+            12 => ErrorCode::Unimplemented,
+            13 => ErrorCode::Internal,
+            14 => ErrorCode::Unavailable,
+            15 => ErrorCode::DataLoss,
+            16 => ErrorCode::Unauthenticated,
+            _ => ErrorCode::Internal,
+        }
+    }
+}
+
 /// A structured error returned by a block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WaferError {
@@ -152,6 +213,51 @@ mod tests {
 
         let code: ErrorCode = serde_json::from_str("\"InvalidArgument\"").unwrap();
         assert_eq!(code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn error_code_ordinal_round_trips_every_variant() {
+        // Every variant must survive to_ordinal → from_ordinal unchanged.
+        // This is the contract the host (encode) and guests (decode) rely on.
+        for code in [
+            ErrorCode::Ok,
+            ErrorCode::Cancelled,
+            ErrorCode::Unknown,
+            ErrorCode::InvalidArgument,
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::NotFound,
+            ErrorCode::AlreadyExists,
+            ErrorCode::PermissionDenied,
+            ErrorCode::ResourceExhausted,
+            ErrorCode::FailedPrecondition,
+            ErrorCode::Aborted,
+            ErrorCode::OutOfRange,
+            ErrorCode::Unimplemented,
+            ErrorCode::Internal,
+            ErrorCode::Unauthenticated,
+            ErrorCode::Unavailable,
+            ErrorCode::DataLoss,
+        ] {
+            assert_eq!(ErrorCode::from_ordinal(code.to_ordinal()), code);
+        }
+    }
+
+    #[test]
+    fn error_code_from_ordinal_pins_wire_values() {
+        // Pin the exact wire numbers — changing any of these is a breaking
+        // ABI change for already-compiled guests.
+        assert_eq!(ErrorCode::Ok.to_ordinal(), 0);
+        assert_eq!(ErrorCode::NotFound.to_ordinal(), 5);
+        assert_eq!(ErrorCode::Unimplemented.to_ordinal(), 12);
+        assert_eq!(ErrorCode::Internal.to_ordinal(), 13);
+        assert_eq!(ErrorCode::Unauthenticated.to_ordinal(), 16);
+    }
+
+    #[test]
+    fn error_code_from_ordinal_unknown_falls_back_to_internal() {
+        assert_eq!(ErrorCode::from_ordinal(17), ErrorCode::Internal);
+        assert_eq!(ErrorCode::from_ordinal(99), ErrorCode::Internal);
+        assert_eq!(ErrorCode::from_ordinal(255), ErrorCode::Internal);
     }
 
     #[test]

@@ -21,7 +21,8 @@ pub mod vector;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-#[cfg(not(feature = "wasm-component"))]
+// Used by the shared `build_service_message`/`apply_wrap_meta` helpers, which
+// run on both the native-async and wasm-component paths.
 use wafer_block::meta::{
     META_REQ_ACTION, META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE,
 };
@@ -30,6 +31,41 @@ use wafer_block::streams::input::InputStream;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
 use wafer_block::{codec, common::ErrorCode, Message, WaferError};
+
+/// Apply the WRAP access-control meta to `msg` when a `resource` is supplied,
+/// so the runtime can enforce access control. `resource_type` scopes the grant
+/// check to a specific service (e.g. `Some("db")`). Shared by the native and
+/// wasm-component service-call paths so the emitted meta is byte-identical.
+fn apply_wrap_meta(
+    msg: &mut Message,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) {
+    if let Some(res) = resource {
+        msg.set_meta(META_WRAP_RESOURCE, res);
+        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
+        if let Some(rt) = resource_type {
+            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
+        }
+    }
+}
+
+/// Build the request `Message` for a `kind`-based service call: sets
+/// `META_REQ_ACTION` to `kind` and (when `resource` is set) the WRAP meta.
+/// Shared by the native [`call_service_streaming`] and the wasm-component
+/// [`call_service`] so both construct the identical request message.
+fn build_service_message(
+    kind: &str,
+    resource: Option<&str>,
+    is_write: bool,
+    resource_type: Option<&str>,
+) -> Message {
+    let mut msg = Message::new(kind);
+    msg.set_meta(META_REQ_ACTION, kind);
+    apply_wrap_meta(&mut msg, resource, is_write, resource_type);
+    msg
+}
 
 // ---------------------------------------------------------------------------
 // Macros for generating cfg-gated native-async / wasm-sync function pairs.
@@ -160,13 +196,10 @@ pub(crate) fn call_service(
     is_write: bool,
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
-    let _ = (block, kind, data, resource, is_write, resource_type);
-    // TODO(#103): implement WASM sync call_block via ABI host import when
-    // redesigning the WASM component path for the streaming protocol.
-    Err(WaferError::new(
-        ErrorCode::UNIMPLEMENTED,
-        "wasm-component call_service not yet implemented for streaming protocol",
-    ))
+    let body = codec::encode(data)?;
+    let msg = build_service_message(kind, resource, is_write, resource_type);
+    let msg_bytes = codec::encode(&msg)?;
+    wasm_streaming::run(block, &msg_bytes, &body)
 }
 
 /// Native: call a block and return the raw `OutputStream` without buffering.
@@ -187,15 +220,7 @@ pub(crate) async fn call_service_streaming(
     resource_type: Option<&str>,
 ) -> Result<OutputStream, WaferError> {
     let payload = codec::encode(data)?;
-    let mut msg = Message::new(kind);
-    msg.set_meta(META_REQ_ACTION, kind);
-    if let Some(res) = resource {
-        msg.set_meta(META_WRAP_RESOURCE, res);
-        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
-        if let Some(rt) = resource_type {
-            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
-        }
-    }
+    let msg = build_service_message(kind, resource, is_write, resource_type);
     Ok(ctx
         .call_block(block, msg, InputStream::from_bytes(payload))
         .await)
@@ -221,13 +246,7 @@ pub(crate) async fn call_service_with_msg(
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
     msg.set_meta(META_REQ_ACTION, msg.kind.clone());
-    if let Some(res) = resource {
-        msg.set_meta(META_WRAP_RESOURCE, res);
-        msg.set_meta(META_WRAP_ACCESS, if is_write { "write" } else { "read" });
-        if let Some(rt) = resource_type {
-            msg.set_meta(META_WRAP_RESOURCE_TYPE, rt);
-        }
-    }
+    apply_wrap_meta(&mut msg, resource, is_write, resource_type);
     let out = ctx
         .call_block(block, msg, InputStream::from_bytes(Vec::new()))
         .await;
@@ -256,16 +275,179 @@ pub(crate) async fn call_service_with_msg(
 #[cfg(feature = "wasm-component")]
 pub(crate) fn call_service_with_msg(
     block: &str,
-    msg: Message,
+    mut msg: Message,
     resource: Option<&str>,
     is_write: bool,
     resource_type: Option<&str>,
 ) -> Result<Vec<u8>, WaferError> {
-    let _ = (block, msg, resource, is_write, resource_type);
-    Err(WaferError::new(
-        ErrorCode::UNIMPLEMENTED,
-        "wasm-component call_service_with_msg not yet implemented for streaming protocol",
-    ))
+    msg.set_meta(META_REQ_ACTION, msg.kind.clone());
+    apply_wrap_meta(&mut msg, resource, is_write, resource_type);
+    let msg_bytes = codec::encode(&msg)?;
+    // No request body — mirrors the native variant's empty `InputStream`.
+    wasm_streaming::run(block, &msg_bytes, &[])
+}
+
+/// Synchronous guest-side driver over the streaming ABI host imports, used by
+/// the wasm-component [`call_service`] / [`call_service_with_msg`] entry points.
+///
+/// This mirrors the guest-side driver in `wafer-sdk`'s `stream.rs`,
+/// reimplemented here so `wafer-core` carries **no** dependency on the guest
+/// SDK (the runtime-side crate must not depend on the guest-facing one). It
+/// drives the same `__wafer_host_stream_*` imports the host registers in
+/// `build_linker` under the `"wafer"` module:
+/// `init → write_chunk → finish → read* → close`.
+///
+/// The sync-guest ⇄ async-host boundary is handled entirely host-side: the
+/// guest's `_finish`/`_read_chunk` calls trap, the host resume loop runs the
+/// `async` dispatch / stream drive, then resumes the guest with the result.
+/// No `block_on`, no new host machinery — see TODO #103 design doc.
+#[cfg(feature = "wasm-component")]
+mod wasm_streaming {
+    use wafer_block::{codec, common::ErrorCode, WaferError};
+
+    #[cfg(target_arch = "wasm32")]
+    #[link(wasm_import_module = "wafer")]
+    extern "C" {
+        fn __wafer_host_stream_init(
+            name_ptr: i32,
+            name_len: i32,
+            msg_ptr: i32,
+            msg_len: i32,
+        ) -> i64;
+        fn __wafer_host_stream_write_chunk(handle: i64, body_ptr: i32, body_len: i32) -> i32;
+        fn __wafer_host_stream_finish(handle: i64) -> i32;
+        fn __wafer_host_stream_read_chunk(handle: i64) -> i64;
+        fn __wafer_host_stream_take_error(handle: i64) -> i64;
+        fn __wafer_host_stream_close(handle: i64);
+    }
+
+    /// Drive one full request/response cycle and return the concatenated
+    /// response body. `msg_bytes` is the rmp-encoded request `Message`; `body`
+    /// is the rmp-encoded request payload (empty for the `call_service_with_msg`
+    /// path, which carries no body).
+    pub(super) fn run(block: &str, msg_bytes: &[u8], body: &[u8]) -> Result<Vec<u8>, WaferError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The host imports only exist inside a wasm32 guest. The
+            // `wasm-component` feature is, in practice, only enabled for wasm32
+            // component builds; this arm keeps the crate compilable (and
+            // honestly diagnosable) if the feature is toggled on a host target.
+            let _ = (block, msg_bytes, body);
+            Err(WaferError::new(
+                ErrorCode::Unimplemented,
+                "wasm-component call_service is only available in wasm32 guests",
+            ))
+        }
+        #[cfg(target_arch = "wasm32")]
+        // SAFETY: every pointer/length handed to or received from the host is
+        // sized by the streaming-ABI contract. Response buffers are
+        // host-allocated via the guest `__wafer_alloc` and reclaimed here by
+        // reconstructing the owning `Vec`. `_guard` closes the handle on every
+        // exit path (including early returns and panics).
+        unsafe {
+            let handle = __wafer_host_stream_init(
+                block.as_ptr() as i32,
+                block.len() as i32,
+                msg_bytes.as_ptr() as i32,
+                msg_bytes.len() as i32,
+            );
+            if handle < 0 {
+                // No handle was allocated → nothing to close.
+                return Err(WaferError::new(
+                    ErrorCode::from_ordinal(sentinel_ordinal(handle)),
+                    format!("stream_init failed for {block}"),
+                ));
+            }
+            let _guard = CloseGuard(handle);
+
+            if !body.is_empty() {
+                let r = __wafer_host_stream_write_chunk(
+                    handle,
+                    body.as_ptr() as i32,
+                    body.len() as i32,
+                );
+                if r < 0 {
+                    return Err(WaferError::new(
+                        ErrorCode::from_ordinal(sentinel_ordinal(r as i64)),
+                        "stream_write_chunk failed",
+                    ));
+                }
+            }
+
+            let r = __wafer_host_stream_finish(handle);
+            if r < 0 {
+                return Err(WaferError::new(
+                    ErrorCode::from_ordinal(sentinel_ordinal(r as i64)),
+                    "stream_finish failed",
+                ));
+            }
+
+            let mut out = Vec::new();
+            loop {
+                let packed = __wafer_host_stream_read_chunk(handle);
+                if packed == 0 {
+                    break; // end of stream
+                }
+                if packed < 0 {
+                    return Err(take_error(handle));
+                }
+                let (ptr, len) = unpack_ptr_len(packed);
+                out.extend_from_slice(core::slice::from_raw_parts(ptr as *const u8, len));
+                // Reclaim the host-allocated guest buffer.
+                drop(Vec::from_raw_parts(ptr as *mut u8, len, len));
+            }
+            Ok(out)
+        }
+    }
+
+    /// Map a negative streaming-ABI sentinel to its `ErrorCode` ordinal (the
+    /// low byte of the sentinel's absolute value).
+    #[cfg(target_arch = "wasm32")]
+    fn sentinel_ordinal(sentinel: i64) -> u8 {
+        (sentinel.unsigned_abs() & 0xFF) as u8
+    }
+
+    /// Unpack a positive packed `(ptr, len)` i64 into `(ptr, len)` as `usize`.
+    #[cfg(target_arch = "wasm32")]
+    fn unpack_ptr_len(packed: i64) -> (usize, usize) {
+        let ptr = (packed >> 32) as u32 as usize;
+        let len = (packed & 0xFFFF_FFFF) as usize;
+        (ptr, len)
+    }
+
+    /// Fetch the full structured `WaferError` for a handle after a negative
+    /// read sentinel, falling back to a generic `Internal` error if absent or
+    /// undecodable.
+    ///
+    /// # Safety
+    /// `handle` must be a live stream handle owned by the caller.
+    #[cfg(target_arch = "wasm32")]
+    unsafe fn take_error(handle: i64) -> WaferError {
+        let packed = __wafer_host_stream_take_error(handle);
+        if packed > 0 {
+            let (ptr, len) = unpack_ptr_len(packed);
+            let bytes = core::slice::from_raw_parts(ptr as *const u8, len).to_vec();
+            // Reclaim the host-allocated guest buffer.
+            drop(Vec::from_raw_parts(ptr as *mut u8, len, len));
+            return codec::decode(&bytes).unwrap_or_else(|_| {
+                WaferError::new(ErrorCode::Internal, "stream error (undecodable)")
+            });
+        }
+        WaferError::new(ErrorCode::Internal, "stream error (no detail)")
+    }
+
+    /// RAII guard that closes the host stream handle on every exit path.
+    /// `__wafer_host_stream_close` is idempotent on the host.
+    #[cfg(target_arch = "wasm32")]
+    struct CloseGuard(i64);
+
+    #[cfg(target_arch = "wasm32")]
+    impl Drop for CloseGuard {
+        fn drop(&mut self) {
+            // SAFETY: handle is valid for the guard's lifetime; close is idempotent.
+            unsafe { __wafer_host_stream_close(self.0) }
+        }
+    }
 }
 
 /// Deserialize MessagePack bytes into a typed value.
@@ -385,4 +567,73 @@ where
         ErrorCode::INTERNAL,
         format!("{context}: stream ended without terminal event"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta<'a>(msg: &'a Message, key: &str) -> Option<&'a str> {
+        msg.meta
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.value.as_str())
+    }
+
+    #[test]
+    fn build_service_message_sets_kind_and_action() {
+        let msg = build_service_message("get", None, false, None);
+        assert_eq!(msg.kind, "get");
+        assert_eq!(meta(&msg, META_REQ_ACTION), Some("get"));
+        // No resource → no WRAP meta at all.
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE), None);
+        assert_eq!(meta(&msg, META_WRAP_ACCESS), None);
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE_TYPE), None);
+    }
+
+    #[test]
+    fn build_service_message_write_resource_sets_full_wrap_meta() {
+        let msg = build_service_message("create", Some("users"), true, Some("db"));
+        assert_eq!(meta(&msg, META_REQ_ACTION), Some("create"));
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE), Some("users"));
+        assert_eq!(meta(&msg, META_WRAP_ACCESS), Some("write"));
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE_TYPE), Some("db"));
+    }
+
+    #[test]
+    fn build_service_message_read_access_and_omitted_resource_type() {
+        let msg = build_service_message("list", Some("orders"), false, None);
+        assert_eq!(meta(&msg, META_WRAP_ACCESS), Some("read"));
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE), Some("orders"));
+        // resource_type omitted → key absent (not empty string).
+        assert_eq!(meta(&msg, META_WRAP_RESOURCE_TYPE), None);
+    }
+
+    #[test]
+    fn apply_wrap_meta_none_resource_is_noop() {
+        let mut msg = Message::new("ping");
+        apply_wrap_meta(&mut msg, None, true, Some("db"));
+        assert!(msg.meta.is_empty(), "no resource ⇒ no meta written");
+    }
+
+    #[test]
+    fn apply_wrap_meta_matches_message_builder_for_msg_path() {
+        // The `call_service_with_msg` path applies WRAP meta onto a caller's
+        // existing Message; it must produce the same WRAP keys as the
+        // kind-based builder for an equivalent resource.
+        let mut with_msg = Message::new("update");
+        with_msg.set_meta(META_REQ_ACTION, "update");
+        apply_wrap_meta(&mut with_msg, Some("acct"), true, Some("db"));
+
+        let built = build_service_message("update", Some("acct"), true, Some("db"));
+
+        for key in [
+            META_REQ_ACTION,
+            META_WRAP_RESOURCE,
+            META_WRAP_ACCESS,
+            META_WRAP_RESOURCE_TYPE,
+        ] {
+            assert_eq!(meta(&with_msg, key), meta(&built, key), "mismatch on {key}");
+        }
+    }
 }

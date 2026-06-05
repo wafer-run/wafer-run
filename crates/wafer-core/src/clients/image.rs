@@ -61,6 +61,7 @@ pub async fn generate(
     decode(&body)
 }
 
+/// Buffered: generate an image from the given prompt and params (WASM sync variant).
 #[cfg(feature = "wasm-component")]
 pub fn generate(request: &ImageRequest) -> Result<ImageResponse, WaferError> {
     let body = call_service(BLOCK, ServiceOp::IMAGE_GENERATE, request, None, false, None)?;
@@ -86,6 +87,7 @@ pub async fn list_models(ctx: &dyn Context) -> Result<Vec<ModelInfo>, WaferError
     decode(&body)
 }
 
+/// Buffered: list every model exposed by every registered image backend (WASM sync variant).
 #[cfg(feature = "wasm-component")]
 pub fn list_models() -> Result<Vec<ModelInfo>, WaferError> {
     let body = call_service(BLOCK, ServiceOp::IMAGE_LIST_MODELS, &(), None, false, None)?;
@@ -108,6 +110,7 @@ pub async fn status(ctx: &dyn Context, request: &StatusRequest) -> Result<ModelS
     decode(&body)
 }
 
+/// Buffered: query the current load state of `(backend_id, model_id)` (WASM sync variant).
 #[cfg(feature = "wasm-component")]
 pub fn status(request: &StatusRequest) -> Result<ModelStatus, WaferError> {
     let body = call_service(BLOCK, ServiceOp::IMAGE_STATUS, request, None, false, None)?;
@@ -134,6 +137,7 @@ pub async fn unload_model(
     Ok(())
 }
 
+/// Buffered: unload `(backend_id, model_id)` (WASM sync variant). Drops the response body.
 #[cfg(feature = "wasm-component")]
 pub fn unload_model(request: &UnloadModelRequest) -> Result<(), WaferError> {
     call_service(
