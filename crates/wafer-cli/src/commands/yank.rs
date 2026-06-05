@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{credentials, registry_client};
+use crate::{commands::info::parse_target, credentials, registry_client};
 
 pub enum YankOp {
     Yank,
@@ -13,12 +13,8 @@ pub async fn run(
     registry: Option<String>,
     op: YankOp,
 ) -> Result<()> {
-    let (org, rest) = target
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
-    let (block, version) = rest
-        .split_once('@')
-        .ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
+    let (org, block, version) = parse_target(&target)?;
+    let version = version.ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
 
     let url = registry_client::resolve_registry(registry);
     let cf = credentials::load().unwrap_or_default();
