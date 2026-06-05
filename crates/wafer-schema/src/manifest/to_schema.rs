@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use crate::error::SchemaError;
-use crate::types::*;
+use crate::{error::SchemaError, types::*};
 
 /// Convert a map of collection definitions to schema Table definitions.
 /// Tables are sorted by name for deterministic creation order (important for

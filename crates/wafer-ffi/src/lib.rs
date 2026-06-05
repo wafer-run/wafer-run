@@ -593,9 +593,10 @@ pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_block::core_types::MetaEntry;
     use wafer_run::OutputStream;
+
+    use super::*;
 
     #[tokio::test]
     async fn respond_utf8_body_uses_body_field() {

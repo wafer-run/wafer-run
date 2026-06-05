@@ -616,6 +616,7 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         use std::task::Poll;
+
         use wafer_block::stream::StreamEvent;
         if self.finished {
             return Poll::Ready(None);
