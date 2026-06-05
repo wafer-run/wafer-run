@@ -1,7 +1,31 @@
 # Design: WASM typed service clients (`call_service`) — TODO #103
 
-**Status:** design / not yet implemented. Phased follow-up to the 2026-06-04 code review
-(see `docs/reviews/2026-06-04-code-review.md`, item **R1**).
+**Status:** **PR 1 implemented (2026-06-05).** Phased follow-up to the 2026-06-04 code review
+(see `docs/reviews/2026-06-04-code-review.md`, item **R1**). PR 2 (integration fixture +
+test) and PR 3 (Go SDK) remain.
+
+## PR 1 — implementation notes (2026-06-05)
+
+Landed the two `#[cfg(feature = "wasm-component")]` stubs as a synchronous driver over the
+existing streaming ABI, exactly as designed — **the "no host change required" assumption was
+validated**: `wafer-core --features wasm-component --target wasm32-wasip1` compiles and the
+guest-initiated `init → write_chunk → finish → read* → close` cycle reuses the host's existing
+resume loop (`call_guest_resumable_with_attachments`) unchanged. Key decisions:
+
+- **Self-contained extern decls** in a `clients::wasm_streaming` module (no `wafer-core →
+  wafer-sdk` dependency — that edge would be backwards). The driver mirrors `wafer-sdk`'s
+  `stream.rs`. Block-level errors surface via the read path's `take_error` (full `WaferError`);
+  dispatch-level failures use the negative-ordinal sentinel.
+- **`ErrorCode` ordinal mapping centralised** in `wafer-block` (`ErrorCode::to_ordinal` /
+  `from_ordinal`) as the single source of truth. The host encoder (`error_code_to_neg_i32/i64`)
+  and both guest decoders (`wafer-sdk`, `wafer-core`) now route through it, replacing two
+  hand-rolled "keep in sync" copies.
+- **Shared `build_service_message` / `apply_wrap_meta`** helpers dedupe the request-message
+  construction across the native and wasm paths (unit-tested on the host).
+- **CI gate added** so this previously-uncompiled path stops rotting: `cargo clippy -p
+  wafer-core --features wasm-component --target wasm32-wasip1 -- -D warnings` in the `wasm`
+  job. Fixing the 8 latent `missing_docs` it surfaced (wasm twins in image/llm/network) was
+  part of the work.
 
 ## Problem
 

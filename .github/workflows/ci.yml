@@ -111,6 +111,13 @@ jobs:
       - name: Runtime builds with --no-default-features (wasmi off)
         run: cargo check -p wafer-run --no-default-features
 
+      # The wafer-core `wasm-component` guest path (sync typed service clients,
+      # incl. the `call_service` streaming-ABI driver) is compiled by nothing
+      # else in CI — default features leave it off. Lint it on the real wasm32
+      # target so extern-signature drift or FFI regressions surface here.
+      - name: Guest service-client path (wafer-core wasm-component → wasm32)
+        run: cargo clippy -p wafer-core --features wasm-component --target wasm32-wasip1 -- -D warnings
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest

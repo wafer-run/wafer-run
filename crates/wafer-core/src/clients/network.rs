@@ -213,6 +213,8 @@ impl Stream for NativeNetworkResponseStream {
 // Public API — WASM sync
 // ===========================================================================
 
+/// Perform an outbound HTTP request and return the response in a
+/// [`NetworkResponse`] (WASM sync variant).
 #[cfg(feature = "wasm-component")]
 pub fn do_request(
     method: &str,

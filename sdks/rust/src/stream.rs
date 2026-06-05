@@ -265,20 +265,13 @@ impl Drop for ResponseStream {
 // Error code mapping
 // ---------------------------------------------------------------------------
 
-/// Mirror of the host-side `error_code_ordinal` in
-/// `crates/wafer-run/src/wasm/wasmi_loader.rs`.
+/// Decode a streaming-ABI error sentinel (the absolute value of the host's
+/// negative sentinel) back to an `ErrorCode`.
 ///
-/// Maps a small integer ordinal (the absolute value of the host's negative
-/// sentinel) back to an `ErrorCode` variant. Unknown ordinals fall back to
-/// `ErrorCode::Internal`.
-///
-/// **Must be kept in sync with the host mapping.** The host mapping is:
-/// ```text
-/// Ok=0, Cancelled=1, Unknown=2, InvalidArgument=3, DeadlineExceeded=4,
-/// NotFound=5, AlreadyExists=6, PermissionDenied=7, ResourceExhausted=8,
-/// FailedPrecondition=9, Aborted=10, OutOfRange=11, Unimplemented=12,
-/// Internal=13, Unavailable=14, DataLoss=15, Unauthenticated=16
-/// ```
+/// Thin adapter over the canonical [`ErrorCode::from_ordinal`] in `wafer-block`
+/// (the single source of truth shared with the host encoder and `wafer-core`);
+/// this only adds the call-site ergonomics of an `i32` input that may arrive
+/// pre-negated. Unknown / out-of-range tags fall back to `ErrorCode::Internal`.
 // `dead_code` rather than `expect`: only the lib build sees this as unused;
 // tests do call it, so `#[expect]` would be unfulfilled under `--all-targets`.
 #[allow(
@@ -287,27 +280,7 @@ impl Drop for ResponseStream {
 )]
 pub(crate) fn error_code_from_ordinal(ordinal: i32) -> ErrorCode {
     // Normalise: host always emits positive ordinals as absolute values.
-    let abs = if ordinal < 0 { -ordinal } else { ordinal };
-    match abs {
-        0 => ErrorCode::Ok,
-        1 => ErrorCode::Cancelled,
-        2 => ErrorCode::Unknown,
-        3 => ErrorCode::InvalidArgument,
-        4 => ErrorCode::DeadlineExceeded,
-        5 => ErrorCode::NotFound,
-        6 => ErrorCode::AlreadyExists,
-        7 => ErrorCode::PermissionDenied,
-        8 => ErrorCode::ResourceExhausted,
-        9 => ErrorCode::FailedPrecondition,
-        10 => ErrorCode::Aborted,
-        11 => ErrorCode::OutOfRange,
-        12 => ErrorCode::Unimplemented,
-        13 => ErrorCode::Internal,
-        14 => ErrorCode::Unavailable,
-        15 => ErrorCode::DataLoss,
-        16 => ErrorCode::Unauthenticated,
-        _ => ErrorCode::Internal,
-    }
+    ErrorCode::from_ordinal(u8::try_from(ordinal.unsigned_abs()).unwrap_or(u8::MAX))
 }
 
 // ---------------------------------------------------------------------------
