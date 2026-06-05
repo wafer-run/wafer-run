@@ -22,10 +22,14 @@ resume loop (`call_guest_resumable_with_attachments`) unchanged. Key decisions:
   hand-rolled "keep in sync" copies.
 - **Shared `build_service_message` / `apply_wrap_meta`** helpers dedupe the request-message
   construction across the native and wasm paths (unit-tested on the host).
-- **CI gate added** so this previously-uncompiled path stops rotting: `cargo clippy -p
-  wafer-core --features wasm-component --target wasm32-wasip1 -- -D warnings` in the `wasm`
-  job. Fixing the 8 latent `missing_docs` it surfaced (wasm twins in image/llm/network) was
-  part of the work.
+- **CI gate added** so this previously-uncompiled path stops rotting: `cargo check -p
+  wafer-core --features wasm-component --target wasm32-wasip1` in the `wasm` job. Fixing the 8
+  latent `missing_docs` it surfaced (wasm twins in image/llm/network) was part of the work.
+  (Started as a `clippy -D warnings` gate, but that surfaced ~11 pre-existing
+  `arc_with_non_send_sync` lints in `service_blocks/{vector,storage}` on the single-threaded
+  wasm32 target — unrelated to `call_service`; downgraded to `cargo check` rather than expand
+  PR1 scope. **Follow-up:** clean those up + decide whether the native `service_blocks` should
+  even be part of the wasm32 `wasm-component` lib, then promote the gate back to clippy.)
 
 ## Problem
 
