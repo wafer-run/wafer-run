@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 use wafer_block::{
     common::ErrorCode,
     meta::*,
-    types::{ConfigVar, MetaAccess},
+    types::{ConfigVar, MetaGet},
     Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputStream,
     RequestAction, WaferError,
 };
@@ -169,7 +169,7 @@ fn error_code_to_http_status(code: &ErrorCode) -> u16 {
 
 fn get_status_code(meta: &[MetaEntry], default_code: u16) -> u16 {
     // Explicit override takes precedence
-    if let Some(code) = MetaAccess::get(meta, META_RESP_STATUS) {
+    if let Some(code) = MetaGet::get(meta, META_RESP_STATUS) {
         if let Ok(n) = code.parse::<u16>() {
             return n;
         }
@@ -226,7 +226,7 @@ pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Respo
             builder = apply_response_meta(builder, &buf.meta);
 
             // Set default content-type if not set
-            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
+            let has_ct = MetaGet::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
@@ -276,7 +276,7 @@ pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Respo
 
             builder = apply_response_meta(builder, &buf.meta);
 
-            let has_ct = MetaAccess::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
+            let has_ct = MetaGet::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
             if !has_ct {
                 builder = builder.header("Content-Type", "application/json");
             }
