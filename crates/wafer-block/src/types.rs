@@ -1262,6 +1262,11 @@ impl crate::Message {
     }
 
     /// Parse pagination query parameters (page, page_size, offset).
+    ///
+    /// `page` is an unbounded, externally-supplied query value, so the offset is
+    /// computed with saturating arithmetic: a hostile `?page=<huge>` clamps the
+    /// offset to `usize::MAX` (yielding an empty page) instead of overflowing —
+    /// which would panic in debug builds and silently wrap in release.
     pub fn pagination_params(&self, default_page_size: usize) -> (usize, usize, usize) {
         let page: usize = self.query("page").parse().unwrap_or(1).max(1);
         let page_size: usize = self
@@ -1269,7 +1274,7 @@ impl crate::Message {
             .parse()
             .unwrap_or(default_page_size)
             .min(100);
-        let offset = (page - 1) * page_size;
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
         (page, page_size, offset)
     }
 }
@@ -1547,5 +1552,51 @@ mod block_endpoint_tests {
             .summary("Health check")
             .output_schema(serde_json::json!({"type": "object"}));
         assert!(ep.has_schema());
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    fn msg_with_query(name: &str, value: &str) -> crate::Message {
+        let mut m = crate::Message::new("test");
+        m.set_meta(
+            format!("{}{}", crate::meta::META_REQ_QUERY_PREFIX, name),
+            value,
+        );
+        m
+    }
+
+    #[test]
+    fn defaults_to_page_one_when_absent() {
+        let m = crate::Message::new("test");
+        assert_eq!(m.pagination_params(25), (1, 25, 0));
+    }
+
+    #[test]
+    fn computes_offset_from_page_and_size() {
+        let m = msg_with_query("page", "3");
+        assert_eq!(m.pagination_params(20), (3, 20, 40));
+    }
+
+    #[test]
+    fn page_size_is_capped_at_100() {
+        let mut m = msg_with_query("page", "1");
+        m.set_meta(
+            format!("{}page_size", crate::meta::META_REQ_QUERY_PREFIX),
+            "10000",
+        );
+        let (_, page_size, _) = m.pagination_params(20);
+        assert_eq!(page_size, 100);
+    }
+
+    #[test]
+    fn huge_page_saturates_offset_instead_of_overflowing() {
+        // Regression: an unbounded `?page=` query value must not overflow the
+        // `(page - 1) * page_size` multiply (debug panic / release wraparound).
+        let m = msg_with_query("page", &usize::MAX.to_string());
+        let (page, page_size, offset) = m.pagination_params(50);
+        assert_eq!(page, usize::MAX);
+        assert_eq!(page_size, 50);
+        assert_eq!(offset, usize::MAX);
     }
 }
