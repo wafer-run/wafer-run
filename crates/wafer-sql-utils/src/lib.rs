@@ -73,6 +73,36 @@ impl Statement {
     }
 }
 
+/// Error returned by fallible SQL builders that validate caller-supplied
+/// fragments before splicing them into DDL/DML text.
+///
+/// Builders that only ever interpolate parameter-bound values or sanitised
+/// identifiers are infallible and return [`Statement`] directly; this type is
+/// for the cases where a builder must reject input it cannot safely render
+/// (e.g. an out-of-allowlist foreign-key action, or a date column that isn't a
+/// plain identifier) rather than silently producing wrong or unsafe SQL.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SqlBuildError {
+    /// A foreign-key referential action (`ON DELETE` / `ON UPDATE`) was
+    /// outside the allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION /
+    /// RESTRICT). The action is not sanitised because doing so would silently
+    /// corrupt multi-word actions like `SET NULL`.
+    #[error("invalid foreign-key referential action: {action:?} (allowed: CASCADE, SET NULL, SET DEFAULT, NO ACTION, RESTRICT)")]
+    InvalidFkAction {
+        /// The rejected action string, as supplied by the caller.
+        action: String,
+    },
+    /// An identifier that is interpolated into raw expression text (rather than
+    /// quoted or parameter-bound) contained characters outside the plain
+    /// identifier set (`[A-Za-z0-9_]`). Rejected so it can't break out of the
+    /// surrounding SQL expression.
+    #[error("identifier {value:?} is not a plain identifier (only ASCII alphanumerics and underscore are allowed)")]
+    InvalidIdentifier {
+        /// The rejected identifier, as supplied by the caller.
+        value: String,
+    },
+}
+
 /// Database backend dialect for SQL rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {

@@ -1,6 +1,6 @@
 use wafer_schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
-use crate::{ident::sanitize_ident, Backend};
+use crate::{ident::sanitize_ident, Backend, SqlBuildError};
 
 /// Quote an identifier for use in DDL (double-quote escaping).
 fn quote_ident(name: &str) -> String {
@@ -13,16 +13,16 @@ fn quote_ident(name: &str) -> String {
 /// it can be spliced directly into DDL. Unknown values are rejected — we do
 /// NOT pass them through `sanitize_ident`, which strips spaces and would turn
 /// `"SET NULL"` into `"SETNULL"` (silently breaking the constraint).
-fn validate_fk_action(action: &str) -> Result<&'static str, String> {
+fn validate_fk_action(action: &str) -> Result<&'static str, SqlBuildError> {
     match action.trim().to_ascii_uppercase().as_str() {
         "CASCADE" => Ok("CASCADE"),
         "SET NULL" => Ok("SET NULL"),
         "SET DEFAULT" => Ok("SET DEFAULT"),
         "NO ACTION" => Ok("NO ACTION"),
         "RESTRICT" => Ok("RESTRICT"),
-        other => Err(format!(
-            "invalid foreign-key referential action: {other:?} (allowed: CASCADE, SET NULL, SET DEFAULT, NO ACTION, RESTRICT)"
-        )),
+        _ => Err(SqlBuildError::InvalidFkAction {
+            action: action.to_string(),
+        }),
     }
 }
 
@@ -113,7 +113,10 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
 ///
 /// Returns `Err` if any column's foreign-key referential action is outside the
 /// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT).
-pub fn build_create_table(table: &Table, backend: Backend) -> Result<crate::Statement, String> {
+pub fn build_create_table(
+    table: &Table,
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
     let qtable = quote_ident(&table.name);
     let mut sql = format!("CREATE TABLE IF NOT EXISTS {qtable} (\n");
 
@@ -364,8 +367,11 @@ mod tests {
     fn test_fk_action_rejects_unknown() {
         let err = build_create_table(&fk_table("DROP TABLE", ""), Backend::Sqlite)
             .expect_err("unknown FK action should be rejected");
-        assert!(
-            err.contains("invalid foreign-key referential action"),
+        assert_eq!(
+            err,
+            SqlBuildError::InvalidFkAction {
+                action: "DROP TABLE".to_string()
+            },
             "unexpected error: {err}"
         );
     }

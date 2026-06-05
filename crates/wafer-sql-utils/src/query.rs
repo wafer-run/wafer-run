@@ -22,7 +22,12 @@ pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
                     let values: Vec<sea_query::Value> = arr.iter().map(json_to_sea_value).collect();
                     Expr::col(col).is_in(values)
                 } else {
-                    continue;
+                    // Fail-safe: an `In` filter whose value isn't a JSON array
+                    // is malformed input. Emit an always-false predicate rather
+                    // than dropping the filter — narrowing the result set to
+                    // nothing is safe; widening it (by skipping the predicate)
+                    // would leak rows the caller meant to exclude.
+                    Expr::cust("1=0")
                 }
             }
             FilterOp::Equal => Expr::col(col).eq(json_to_sea_value(&filter.value)),
@@ -31,7 +36,18 @@ pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
             FilterOp::GreaterEqual => Expr::col(col).gte(json_to_sea_value(&filter.value)),
             FilterOp::LessThan => Expr::col(col).lt(json_to_sea_value(&filter.value)),
             FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
-            FilterOp::Like => Expr::col(col).like(filter.value.as_str().unwrap_or("").to_string()),
+            FilterOp::Like => {
+                if let Some(pattern) = filter.value.as_str() {
+                    Expr::col(col).like(pattern.to_string())
+                } else {
+                    // Fail-safe: a `Like` filter whose value isn't a JSON
+                    // string is malformed input. Emit an always-false predicate
+                    // rather than coercing to `LIKE ''` (which matches only
+                    // empty strings — a surprising, non-failing result). Same
+                    // narrow-never-widen rule as the `In` arm above.
+                    Expr::cust("1=0")
+                }
+            }
         };
         cond = cond.add(expr);
     }
@@ -536,6 +552,77 @@ mod tests {
         assert!(sql.contains("SET \"c\" = \"c\" + ?"), "got: {sql}");
         assert_eq!(values[0], sea_query::Value::BigInt(Some(0)));
         assert_eq!(stmt.collection, "t");
+    }
+
+    #[test]
+    fn in_filter_with_non_array_value_emits_always_false_not_dropped() {
+        // Malformed `In` filter (value is a scalar, not an array). The
+        // predicate must NOT be dropped — that would widen the result set to
+        // every row. Instead we emit an always-false `1=0` so the query
+        // returns nothing (narrow, never widen).
+        let filters = vec![Filter {
+            field: "status".into(),
+            operator: FilterOp::In,
+            value: serde_json::json!("active"),
+        }];
+        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let stmt = build_delete_where_with(cond);
+        assert!(
+            stmt.contains("1 = 0") || stmt.contains("1=0"),
+            "expected always-false predicate, got: {stmt}"
+        );
+        // The malformed filter's value must not leak into bindings either.
+        assert!(
+            !stmt.contains("active"),
+            "malformed In value must not become a binding/literal: {stmt}"
+        );
+    }
+
+    #[test]
+    fn like_filter_with_non_string_value_emits_always_false_not_empty_like() {
+        // Malformed `Like` filter (value is a number, not a string). Old
+        // behaviour coerced this to `LIKE ''`, silently matching only empty
+        // strings. Fail-safe behaviour is an always-false predicate.
+        let filters = vec![Filter {
+            field: "name".into(),
+            operator: FilterOp::Like,
+            value: serde_json::json!(42),
+        }];
+        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let stmt = build_delete_where_with(cond);
+        assert!(
+            stmt.contains("1 = 0") || stmt.contains("1=0"),
+            "expected always-false predicate, got: {stmt}"
+        );
+        assert!(
+            !stmt.to_uppercase().contains("LIKE"),
+            "non-string Like must not render a LIKE clause: {stmt}"
+        );
+    }
+
+    #[test]
+    fn like_filter_with_string_value_still_renders_like() {
+        // The happy path must be untouched by the fail-safe coercion.
+        let filters = vec![Filter {
+            field: "name".into(),
+            operator: FilterOp::Like,
+            value: serde_json::json!("%alice%"),
+        }];
+        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let stmt = build_delete_where_with(cond);
+        assert!(
+            stmt.to_uppercase().contains("LIKE"),
+            "string Like should render a LIKE clause: {stmt}"
+        );
+    }
+
+    /// Render a standalone `DELETE FROM t WHERE <cond>` so the fail-safe tests
+    /// can inspect the rendered predicate text directly.
+    fn build_delete_where_with(cond: Cond) -> String {
+        let mut query = Query::delete();
+        query.from_table(DynCol("t".into())).cond_where(cond);
+        let (sql, _) = crate::render_delete(query, Backend::Sqlite);
+        sql
     }
 
     #[test]

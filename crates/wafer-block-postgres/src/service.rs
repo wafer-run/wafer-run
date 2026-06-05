@@ -651,30 +651,52 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
         let col_name = col.name().to_string();
         let type_name = col.type_info().name();
 
+        // Decode-failure logging: a `try_get` `Err` means the column's stored
+        // type didn't match the decoder we picked from `type_name` — a genuine
+        // data/schema problem, not a SQL NULL. We keep the NULL fallback (so a
+        // single bad column doesn't sink the whole row) but log it via
+        // `tracing::warn!` so it's observable, mirroring the SQLite read path's
+        // skip-and-warn. `Ok(None)` is a real NULL and stays silent.
+        let warn_decode = |e: &sqlx::Error| {
+            tracing::warn!(column = %col_name, sql_type = %type_name, error = %e, "failed to decode column; substituting NULL");
+        };
+
         let value: serde_json::Value = match type_name {
             "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => {
                 match row.try_get::<Option<String>, _>(col.ordinal()) {
                     Ok(Some(s)) => serde_json::Value::String(s),
                     Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
+                    Err(e) => {
+                        warn_decode(&e);
+                        serde_json::Value::Null
+                    }
                 }
             }
             "INT2" | "INT4" => match row.try_get::<Option<i32>, _>(col.ordinal()) {
                 Ok(Some(n)) => serde_json::Value::Number(n.into()),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "INT8" | "BIGINT" => match row.try_get::<Option<i64>, _>(col.ordinal()) {
                 Ok(Some(n)) => serde_json::Value::Number(n.into()),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "FLOAT4" => match row.try_get::<Option<f32>, _>(col.ordinal()) {
                 Ok(Some(f)) => serde_json::Number::from_f64(f as f64)
                     .map(serde_json::Value::Number)
                     .unwrap_or(serde_json::Value::Null),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => {
                 match row.try_get::<Option<f64>, _>(col.ordinal()) {
@@ -682,26 +704,41 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                         .map(serde_json::Value::Number)
                         .unwrap_or(serde_json::Value::Null),
                     Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
+                    Err(e) => {
+                        warn_decode(&e);
+                        serde_json::Value::Null
+                    }
                 }
             }
             "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(col.ordinal()) {
                 Ok(Some(b)) => serde_json::Value::Bool(b),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(col.ordinal()) {
                 Ok(Some(v)) => v,
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(col.ordinal()) {
                 Ok(Some(bytes)) => serde_json::Value::String(base64_encode(&bytes)),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             "TIMESTAMPTZ" | "TIMESTAMP" => {
-                // Try to get as string representation
+                // Try as a string first; a string-decode error here is not yet
+                // a failure — Postgres returns these as a native type, so we
+                // fall through to the chrono decoder and only warn if THAT also
+                // fails to decode a non-NULL value.
                 match row.try_get::<Option<String>, _>(col.ordinal()) {
                     Ok(Some(s)) => serde_json::Value::String(s),
                     Ok(None) => serde_json::Value::Null,
@@ -711,7 +748,10 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                         {
                             Ok(Some(dt)) => serde_json::Value::String(dt.to_rfc3339()),
                             Ok(None) => serde_json::Value::Null,
-                            Err(_) => serde_json::Value::Null,
+                            Err(e) => {
+                                warn_decode(&e);
+                                serde_json::Value::Null
+                            }
                         }
                     }
                 }
@@ -719,13 +759,19 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
             "UUID" => match row.try_get::<Option<uuid::Uuid>, _>(col.ordinal()) {
                 Ok(Some(u)) => serde_json::Value::String(u.to_string()),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
             // Fallback: try as string
             _ => match row.try_get::<Option<String>, _>(col.ordinal()) {
                 Ok(Some(s)) => serde_json::Value::String(s),
                 Ok(None) => serde_json::Value::Null,
-                Err(_) => serde_json::Value::Null,
+                Err(e) => {
+                    warn_decode(&e);
+                    serde_json::Value::Null
+                }
             },
         };
 
