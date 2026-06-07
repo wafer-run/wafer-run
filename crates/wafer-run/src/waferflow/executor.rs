@@ -158,16 +158,24 @@ pub async fn execute(
         }
 
         // --- Observability: block start ---
-        let obs_ctx = ObservabilityContext {
-            flow_id: flow.id.clone(),
-            node_path: step.id.clone(),
-            block_name: step.block.clone(),
-            trace_id: current_msg
-                .get_meta(wafer_block::meta::META_TRACE_ID)
-                .to_string(),
-            message: Some(current_msg.clone()),
-        };
-        wafer.hooks.fire_block_start(&obs_ctx);
+        // Build the context (and clone the Message into it) only when a block
+        // handler is actually registered. Observability is opt-in, so on the
+        // common no-subscriber path this avoids a per-step Message clone.
+        let obs_ctx = wafer
+            .hooks
+            .any_block_handlers()
+            .then(|| ObservabilityContext {
+                flow_id: flow.id.clone(),
+                node_path: step.id.clone(),
+                block_name: step.block.clone(),
+                trace_id: current_msg
+                    .get_meta(wafer_block::meta::META_TRACE_ID)
+                    .to_string(),
+                message: Some(current_msg.clone()),
+            });
+        if let Some(ref obs_ctx) = obs_ctx {
+            wafer.hooks.fire_block_start(obs_ctx);
+        }
         let start = Instant::now();
 
         // --- Execute block with panic recovery ---
@@ -188,7 +196,9 @@ pub async fn execute(
         let buf = out.collect_buffered().await;
 
         // --- Observability: block end ---
-        wafer.hooks.fire_block_end(&obs_ctx, start.elapsed());
+        if let Some(ref obs_ctx) = obs_ctx {
+            wafer.hooks.fire_block_end(obs_ctx, start.elapsed());
+        }
 
         // --- Process result ---
         match buf {

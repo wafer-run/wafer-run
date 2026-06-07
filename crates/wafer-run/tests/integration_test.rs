@@ -481,6 +481,59 @@ async fn test_continue_helper() {
 }
 
 // ===========================================================================
+// 6b. `requires` enforcement through top-level dispatch
+// ===========================================================================
+
+// A block that declares a `requires` list and, when handled, tries to
+// `call_block` a target that is NOT in that list — which must be denied.
+struct RequiresCallerBlock;
+
+#[async_trait::async_trait]
+impl Block for RequiresCallerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/requires-caller", "0.0.1", "http-handler@v1", "Caller")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["test/allowed".to_string()])
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        // "test/echo" is not in the requires list, so this call must be denied.
+        ctx.call_block("test/echo", Message::new("test.call"), InputStream::empty())
+            .await
+    }
+}
+
+// Regression for the dispatch perf refactor that reads `requires` from the
+// startup snapshot instead of rebuilding `BlockInfo` on every `run_block`:
+// a declared `requires` list must still be populated and enforced.
+#[tokio::test]
+async fn run_block_enforces_requires_read_from_snapshot() {
+    let mut w = empty_wafer();
+    w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
+        .unwrap();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
+    w.seal().await.expect("seal");
+
+    let out = Arc::new(w)
+        .run_block(
+            "test/requires-caller",
+            Message::new("test.req"),
+            InputStream::empty(),
+        )
+        .await;
+
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => {
+            assert_eq!(
+                e.code,
+                ErrorCode::PERMISSION_DENIED,
+                "call_block to a block outside the declared requires list must be denied"
+            );
+        }
+        other => panic!("expected PERMISSION_DENIED, got {other:?}"),
+    }
+}
+
+// ===========================================================================
 // 7. Observability hooks
 // ===========================================================================
 

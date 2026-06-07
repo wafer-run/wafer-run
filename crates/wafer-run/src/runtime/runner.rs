@@ -79,14 +79,20 @@ impl Wafer {
         }
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let caller_requires = {
-            let info = block.info();
-            if info.requires.is_empty() {
-                None
-            } else {
-                Some(info.requires)
-            }
-        };
+        // Read the target's `requires` list from the immutable startup snapshot
+        // rather than rebuilding the entire `BlockInfo` via `block.info()` on
+        // every dispatch — `info()` re-allocates all of the block's endpoint,
+        // collection and config-key fields just to read one (usually empty)
+        // Vec. Fall back to `block.info()` only if the block is somehow absent
+        // from the snapshot (e.g. registered after seal).
+        let caller_requires = self
+            .snapshot
+            .blocks
+            .iter()
+            .find(|b| b.name == resolved)
+            .map(|b| b.requires.clone())
+            .or_else(|| Some(block.info().requires))
+            .filter(|r| !r.is_empty());
 
         // Look up block config and flatten to HashMap<String, String>. Like
         // `lookup_with_alias`, try the alias-resolved name first then the
@@ -110,19 +116,29 @@ impl Wafer {
         ctx.caller_requires = caller_requires;
 
         // Observability
-        let obs_ctx = ObservabilityContext {
-            flow_id: String::new(),
-            node_path: resolved.to_string(),
-            block_name: block_name.to_string(),
-            trace_id: msg.get_meta(wafer_block::meta::META_TRACE_ID).to_string(),
-            message: Some(msg.clone()),
-        };
-        self.hooks.fire_block_start(&obs_ctx);
+        // Build the observability context (cloning the Message into it) only
+        // when a block handler is registered — observability is opt-in, so the
+        // common dispatch path skips the per-request Message clone.
+        let obs_ctx = self
+            .hooks
+            .any_block_handlers()
+            .then(|| ObservabilityContext {
+                flow_id: String::new(),
+                node_path: resolved.to_string(),
+                block_name: block_name.to_string(),
+                trace_id: msg.get_meta(wafer_block::meta::META_TRACE_ID).to_string(),
+                message: Some(msg.clone()),
+            });
+        if let Some(ref obs_ctx) = obs_ctx {
+            self.hooks.fire_block_start(obs_ctx);
+        }
         let start = Instant::now();
 
         let result = block.handle(&ctx, msg, input).await;
 
-        self.hooks.fire_block_end(&obs_ctx, start.elapsed());
+        if let Some(ref obs_ctx) = obs_ctx {
+            self.hooks.fire_block_end(obs_ctx, start.elapsed());
+        }
 
         result
     }
