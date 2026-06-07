@@ -126,6 +126,11 @@ needless_collect = "warn"
 uninlined_format_args = "warn"
 cloned_instead_of_copied = "warn"
 manual_let_else = "warn"
+# Promoted from clippy::pedantic/nursery because they map directly to the Apollo
+# Rust best-practices handbook (ch1 idioms, ch1.1 borrow, ch9 lock scope).
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+significant_drop_tightening = "warn"
 
 [workspace.lints.rust]
 unused_must_use = "warn"

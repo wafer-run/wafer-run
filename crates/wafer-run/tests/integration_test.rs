@@ -639,13 +639,13 @@ async fn test_observability_block_hooks() {
 
     run_flow(&w, "two-steps", Message::new("test"), vec![]).await;
 
-    let names = block_names.lock();
+    let names = block_names.lock().clone();
     assert_eq!(names.len(), 2);
     assert_eq!(names[0], "test/step-1");
     assert_eq!(names[1], "test/step-2");
 
-    let durations = block_durations.lock();
-    assert_eq!(durations.len(), 2);
+    let durations_len = block_durations.lock().len();
+    assert_eq!(durations_len, 2);
 }
 
 // ===========================================================================

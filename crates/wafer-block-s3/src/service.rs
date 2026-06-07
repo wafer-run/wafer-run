@@ -143,8 +143,7 @@ impl StorageService for S3StorageService {
 
         let last_modified = resp
             .last_modified()
-            .map(Self::to_chrono_datetime)
-            .unwrap_or_else(Utc::now);
+            .map_or_else(Utc::now, Self::to_chrono_datetime);
 
         let body = resp
             .body
@@ -219,8 +218,7 @@ impl StorageService for S3StorageService {
 
                 let last_modified = obj
                     .last_modified()
-                    .map(Self::to_chrono_datetime)
-                    .unwrap_or_else(Utc::now);
+                    .map_or_else(Utc::now, Self::to_chrono_datetime);
 
                 all_objects.push(ObjectInfo {
                     key: relative_key,

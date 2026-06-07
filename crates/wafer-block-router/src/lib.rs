@@ -175,7 +175,7 @@ impl Block for RouterBlock {
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let routes = self.routes.get().map(|r| r.as_slice()).unwrap_or(&[]);
+        let routes = self.routes.get().map_or(&[][..], Vec::as_slice);
         let action = msg.action().to_string();
         let path = msg.path().to_string();
 

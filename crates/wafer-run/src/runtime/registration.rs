@@ -115,7 +115,7 @@ impl RegistrationCore {
     /// Resolve `name` through the alias map, single-hop. Returns the alias
     /// target if `name` is an alias, else `name` itself.
     pub(crate) fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+        self.aliases.get(name).map_or(name, |s| s.as_str())
     }
 
     /// Resolve a dispatch target through the alias map, returning the

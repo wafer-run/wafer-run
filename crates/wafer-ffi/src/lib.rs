@@ -74,10 +74,7 @@ unsafe impl Send for UserData {}
 /// `wafer_free_string`). Returns a null pointer if the string contains
 /// interior NUL bytes (should never happen with JSON).
 fn to_c_string(s: &str) -> *mut c_char {
-    match CString::new(s) {
-        Ok(cs) => cs.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    CString::new(s).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
 /// Build a JSON error CString: `{"error":"<msg>"}`.
@@ -194,11 +191,14 @@ unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 /// pointer is dropped after the callback returns. Takes `UserData` (rather
 /// than the raw `*mut c_void`) so async blocks can pass the wrapper through
 /// without ever exposing the non-`Send` pointer as a local.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "UserData owns the non-Send C pointer and is consumed here (cb(ptr, ud.0)); \
+              callers move an owned UserData into spawned futures before passing it, so \
+              taking it by value (not &UserData) is required to carry it across the async boundary"
+)]
 unsafe fn invoke_done(cb: WaferDoneCb, result: Option<CString>, ud: UserData) {
-    let ptr = result
-        .as_ref()
-        .map(|c| c.as_ptr())
-        .unwrap_or(std::ptr::null());
+    let ptr = result.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
     cb(ptr, ud.0);
     // `result` dropped here — after the callback has consumed the pointer.
     drop(result);

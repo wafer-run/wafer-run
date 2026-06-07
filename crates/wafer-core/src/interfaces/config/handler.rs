@@ -41,13 +41,15 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             if let Err(e) = check_wrap_resource(msg, &key, "config key") {
                 return OutputStream::error(e);
             }
-            match service.get(&key) {
-                Some(val) => to_output(&wire::GetResponse { value: val }),
-                None => OutputStream::error(WaferError::new(
-                    ErrorCode::NOT_FOUND,
-                    format!("config key not found: {key}"),
-                )),
-            }
+            service.get(&key).map_or_else(
+                || {
+                    OutputStream::error(WaferError::new(
+                        ErrorCode::NOT_FOUND,
+                        format!("config key not found: {key}"),
+                    ))
+                },
+                |val| to_output(&wire::GetResponse { value: val }),
+            )
         }
         ServiceOp::CONFIG_SET => {
             let req = decode_or_err!(body, wire::SetRequest, "config.set");

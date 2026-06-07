@@ -12,9 +12,7 @@ use crate::registry_client::{self, PackageSummary};
 const DEFAULT_WIDTH: usize = 80;
 
 fn term_width() -> usize {
-    terminal_size::terminal_size()
-        .map(|(terminal_size::Width(w), _)| w as usize)
-        .unwrap_or(DEFAULT_WIDTH)
+    terminal_size::terminal_size().map_or(DEFAULT_WIDTH, |(terminal_size::Width(w), _)| w as usize)
 }
 
 /// Render a non-empty list of summaries as a three-column table.

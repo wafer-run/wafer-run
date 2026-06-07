@@ -330,7 +330,9 @@ fn render_source(src: &BlockReferenceSource) -> String {
             step_id,
             parallel_path,
         } => match parallel_path {
-            None => format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)"),
+            None => {
+                format!("      \u{2022} flow `{flow_id}` step {step_index} (`{step_id}`)")
+            }
             Some(path) => {
                 let mut s = format!("      \u{2022} flow `{flow_id}`");
                 for (i, &(outer, branch)) in path.iter().enumerate() {
@@ -348,10 +350,10 @@ fn render_source(src: &BlockReferenceSource) -> String {
             from_block,
             location,
             detail,
-        } => match detail {
-            None => format!("      \u{2022} from block `{from_block}` {location}"),
-            Some(d) => format!("      \u{2022} from block `{from_block}` {location} {d}"),
-        },
+        } => detail.as_ref().map_or_else(
+            || format!("      \u{2022} from block `{from_block}` {location}"),
+            |d| format!("      \u{2022} from block `{from_block}` {location} {d}"),
+        ),
     }
 }
 

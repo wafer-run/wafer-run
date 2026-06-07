@@ -136,16 +136,13 @@ impl Block for CorsBlock {
 
         let methods = ctx
             .config_get("allowed_methods")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.allowed_methods.clone());
+            .map_or_else(|| self.allowed_methods.clone(), |s| s.to_string());
         let headers = ctx
             .config_get("allowed_headers")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.allowed_headers.clone());
+            .map_or_else(|| self.allowed_headers.clone(), |s| s.to_string());
         let max_age = ctx
             .config_get("max_age")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string());
+            .map_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string(), |s| s.to_string());
 
         let mut out_msg = msg;
 

@@ -165,8 +165,7 @@ impl StorageService for LocalStorageService {
 
         let last_modified = metadata
             .modified()
-            .map(chrono::DateTime::<Utc>::from)
-            .unwrap_or_else(|_| Utc::now());
+            .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
 
         let info = ObjectInfo {
             key: key.to_string(),
@@ -250,8 +249,7 @@ impl StorageService for LocalStorageService {
             if metadata.is_dir() {
                 let created_at = metadata
                     .created()
-                    .map(chrono::DateTime::<Utc>::from)
-                    .unwrap_or_else(|_| Utc::now());
+                    .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
                 folders.push(FolderInfo {
                     name: entry.file_name().to_string_lossy().to_string(),
                     public: false,
@@ -296,8 +294,7 @@ impl LocalStorageService {
 
                 let last_modified = metadata
                     .modified()
-                    .map(chrono::DateTime::<Utc>::from)
-                    .unwrap_or_else(|_| Utc::now());
+                    .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
 
                 objects.push(ObjectInfo {
                     key: key.clone(),
@@ -382,8 +379,7 @@ mod tests {
         let base = std::env::temp_dir();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let pid = std::process::id();
         let dir = base.join(format!("wafer-local-storage-test-{pid}-{nonce}"));
         fs::create_dir_all(&dir).expect("create tempdir");

@@ -130,7 +130,8 @@ mod tests {
 
         // Now install the recording loader.
         let loader = RecordingLoader::ready();
-        wafer.set_asset_loader(loader.clone());
+        let callback: Arc<dyn LoadAssetCallback> = loader.clone();
+        wafer.set_asset_loader(&callback);
 
         // Drive a handle call — the loader should be reached via the host import.
         let body = invoke_once(&block).await;
@@ -161,7 +162,8 @@ mod tests {
 
         // Install the recording loader before any block is registered.
         let loader = RecordingLoader::ready();
-        wafer.set_asset_loader(loader.clone());
+        let callback: Arc<dyn LoadAssetCallback> = loader.clone();
+        wafer.set_asset_loader(&callback);
 
         // Now register the block.
         let wasm_bytes = compiled_wasm();

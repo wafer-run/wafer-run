@@ -43,15 +43,10 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "__wafer_host_is_cancelled",
             |caller: Caller<WasmiHostState>| -> i32 {
                 let state = caller.data();
-                if let Some(ref ctx) = state.context {
-                    if ctx.is_cancelled() {
-                        1
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
+                state
+                    .context
+                    .as_ref()
+                    .map_or(0, |ctx| i32::from(ctx.is_cancelled()))
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_is_cancelled: {e}")))?;
@@ -574,8 +569,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                 let nanos: u64 = if id == 0 {
                     web_time::SystemTime::now()
                         .duration_since(web_time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0)
+                        .map_or(0, |d| d.as_nanos() as u64)
                 } else {
                     // For monotonic/CPU-time IDs, fall back to an Instant-based
                     // counter relative to the runtime's own start. This is the

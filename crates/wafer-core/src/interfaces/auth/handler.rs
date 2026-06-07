@@ -28,7 +28,7 @@ fn err_to_wafer(e: AuthError) -> WaferError {
     }
 }
 
-fn service_role_to_wire(r: Role) -> String {
+fn service_role_to_wire(r: &Role) -> String {
     match r {
         Role::User => "User".to_string(),
         Role::Admin => "Admin".to_string(),
@@ -50,7 +50,7 @@ fn service_profile_to_wire(p: service::UserProfile) -> wire::UserProfileResponse
         email: p.email,
         display_name: p.display_name,
         avatar_url: p.avatar_url,
-        role: service_role_to_wire(p.role),
+        role: service_role_to_wire(&p.role),
         orgs: p.orgs.into_iter().map(service_org_to_wire).collect(),
     }
 }

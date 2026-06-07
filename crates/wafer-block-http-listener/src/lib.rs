@@ -57,7 +57,7 @@ fn http_method_to_action(method: &Method) -> &'static str {
 /// `GET`/`HEAD` → `RETRIEVE`, `POST` → `CREATE`, `PUT`/`PATCH` → `UPDATE`,
 /// `DELETE` → `DELETE`, everything else → `EXECUTE`.
 pub fn http_to_message(
-    method: Method,
+    method: &Method,
     uri_path: &str,
     raw_query: &str,
     headers: &HeaderMap,
@@ -86,7 +86,7 @@ pub fn http_to_message(
     );
 
     // Normalized request meta
-    msg.set_meta(META_REQ_ACTION, http_method_to_action(&method));
+    msg.set_meta(META_REQ_ACTION, http_method_to_action(method));
     msg.set_meta(META_REQ_RESOURCE, uri_path);
     msg.set_meta(META_REQ_CLIENT_IP, remote_addr);
     msg.set_meta(
@@ -481,17 +481,18 @@ impl Block for HttpListenerBlock {
                             .get("x-forwarded-for")
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.rsplit(',').next())
-                            .map(|s| s.trim().to_string())
-                            .unwrap_or_else(|| {
-                                parts
-                                    .extensions
-                                    .get::<std::net::SocketAddr>()
-                                    .map(|a| a.ip().to_string())
-                                    .unwrap_or_else(|| "unknown".to_string())
-                            });
+                            .map_or_else(
+                                || {
+                                    parts.extensions.get::<std::net::SocketAddr>().map_or_else(
+                                        || "unknown".to_string(),
+                                        |a| a.ip().to_string(),
+                                    )
+                                },
+                                |s| s.trim().to_string(),
+                            );
 
                         let msg = http_to_message(
-                            parts.method,
+                            &parts.method,
                             path,
                             query,
                             &parts.headers,

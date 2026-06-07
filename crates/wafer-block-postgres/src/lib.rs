@@ -132,7 +132,7 @@ impl Block for PostgresDatabaseBlock {
 
         // Run table migrations on Init
         if event.event_type == LifecycleType::Init {
-            let tables = self.tables.get().map(|t| t.as_slice()).unwrap_or(&[]);
+            let tables = self.tables.get().map_or(&[][..], |t| t.as_slice());
             if let Some(service) = self.service.get() {
                 wafer_core::interfaces::database::handler::handle_lifecycle(
                     service.as_ref(),

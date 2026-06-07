@@ -157,11 +157,9 @@ impl BlockCapabilities {
             if url.starts_with(allowed) {
                 return true;
             }
-            if let Some(stripped) = allowed.strip_suffix('/') {
+            allowed.strip_suffix('/').is_some_and(|stripped| {
                 url.starts_with(stripped) && url.as_bytes().get(stripped.len()) == Some(&b'/')
-            } else {
-                false
-            }
+            })
         })
     }
 

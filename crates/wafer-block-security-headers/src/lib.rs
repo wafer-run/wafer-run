@@ -59,7 +59,7 @@ impl SecurityHeadersBlock {
     /// The CSP applied to responses: the Init-set merged value, or
     /// [`DEFAULT_CSP`] when Init has not (yet) supplied one.
     fn effective_csp(&self) -> &str {
-        self.csp.get().map(String::as_str).unwrap_or(DEFAULT_CSP)
+        self.csp.get().map_or(DEFAULT_CSP, String::as_str)
     }
 }
 

@@ -214,9 +214,17 @@ impl Block for RateLimitBlock {
 
         bucket.count += 1;
 
-        if bucket.count > max {
+        // Snapshot the post-increment count and the bucket's window start, then
+        // release the map lock before building the response. Nothing below this
+        // point touches the shared bucket map, so holding the guard across the
+        // message construction would only widen lock contention needlessly.
+        let count = bucket.count;
+        let window_start = bucket.window_start;
+        drop(buckets);
+
+        if count > max {
             let remaining = window
-                .checked_sub(now.duration_since(bucket.window_start))
+                .checked_sub(now.duration_since(window_start))
                 .unwrap_or(Duration::ZERO);
             let retry_after = remaining.as_secs().to_string();
 
@@ -234,7 +242,7 @@ impl Block for RateLimitBlock {
             return OutputStream::error(err);
         }
 
-        let remaining = max - bucket.count;
+        let remaining = max - count;
         let mut out_msg = msg;
         out_msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
         out_msg.set_meta("resp.header.X-RateLimit-Remaining", remaining.to_string());

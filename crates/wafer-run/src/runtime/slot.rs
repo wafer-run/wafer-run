@@ -96,6 +96,10 @@ impl BlockSlot {
     /// - `Err(Permanent(_))` → cached; all future callers see the same error.
     /// - `Err(Transient(_))` → not cached; the next caller retries init.
     /// - `Err(Cycle { .. })` → not cached; returned as-is.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "async Mutex intentionally held across init().await to serialize concurrent first-time init; see module doc"
+    )]
     pub async fn get_or_init<F, Fut>(&self, init: F) -> Result<InitializedState, InitError>
     where
         F: FnOnce() -> Fut,

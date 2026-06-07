@@ -53,8 +53,7 @@ impl Block for ReadonlyGuardBlock {
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let readonly = ctx
             .config_get("readonly")
-            .map(|s| s == "true" || s == "1")
-            .unwrap_or(self.enabled);
+            .map_or(self.enabled, |s| s == "true" || s == "1");
 
         if !readonly {
             return OutputStream::continue_with(msg);

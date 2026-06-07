@@ -52,6 +52,7 @@ impl InitStack {
             return Err(path);
         }
         guard.push(name.to_string());
+        drop(guard);
         Ok(InitGuard {
             inner: self.inner.clone(),
             name: name.to_string(),

@@ -214,8 +214,7 @@ fn find_wasm_in_dir(dir: &Path, block_name: &str) -> anyhow::Result<std::path::P
             let want = normalize_stem(block_name);
             let matched = found.iter().find(|p| {
                 p.file_stem()
-                    .map(|s| normalize_stem(&s.to_string_lossy()) == want)
-                    .unwrap_or(false)
+                    .is_some_and(|s| normalize_stem(&s.to_string_lossy()) == want)
             });
             match matched {
                 Some(path) => Ok(path.clone()),

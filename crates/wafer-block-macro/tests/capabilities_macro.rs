@@ -38,6 +38,10 @@ mod fully_declared_block {
         )
     )]
     impl FullyDeclared {
+        #[expect(
+            clippy::needless_pass_by_value,
+            reason = "macro-required `handle` signature: #[wafer_block] re-emits this fn verbatim with by-value params"
+        )]
         fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
             let _ = msg;
             GuestResult::respond(b"{}".to_vec())
@@ -100,6 +104,10 @@ mod undeclared_block {
         summary = "test"
     )]
     impl Undeclared {
+        #[expect(
+            clippy::needless_pass_by_value,
+            reason = "macro-required `handle` signature: #[wafer_block] re-emits this fn verbatim with by-value params"
+        )]
         fn handle(msg: Message, _body: Vec<u8>) -> GuestResult {
             let _ = msg;
             GuestResult::respond(b"{}".to_vec())

@@ -119,7 +119,7 @@ impl RuntimeContext {
     /// [`crate::Wafer::canonicalize`]. Single-hop is sufficient because
     /// [`crate::Wafer::add_alias`] rejects chained registrations.
     pub(crate) fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+        self.aliases.get(name).map_or(name, |s| s.as_str())
     }
 
     /// Shared dispatch path used by both `call_block` and

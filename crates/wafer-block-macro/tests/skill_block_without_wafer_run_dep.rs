@@ -35,8 +35,7 @@ fn skill_block_without_wafer_run_dep_compiles_for_wasm32() {
     // Use a target dir under OUT_DIR-like scratch so this doesn't pollute
     // the parent workspace's `target/`.
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.join("target"))
+        .map_or_else(|| manifest_dir.join("target"), PathBuf::from)
         .join("skill-block-regression");
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
