@@ -125,30 +125,42 @@ fn ensure_columns_from_data(
     db: &Connection,
     table: &str,
     data: &HashMap<String, serde_json::Value>,
-) {
+) -> Result<(), DatabaseError> {
     let safe_table = sanitize_ident(table);
-    let Ok(existing) = table_columns(db, &safe_table) else {
-        return;
-    };
+    let existing = table_columns(db, &safe_table)?;
     for key in data.keys() {
         let safe_key = sanitize_ident(key);
         if !existing.contains(&safe_key.to_lowercase()) {
             let alter = ddl::build_add_text_column(&safe_table, &safe_key, Backend::Sqlite);
-            db.execute_batch(&alter.sql).ok();
+            db.execute_batch(&alter.sql)
+                .map_err(|e| DatabaseError::Internal(format!("add column {key}: {e}")))?;
         }
     }
+    Ok(())
 }
 
 /// Get list of column names for an existing table.
-fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, ()> {
+///
+/// Propagates real DB errors as [`DatabaseError`] so callers can tell a
+/// transient failure apart from an empty/absent table — mirrors the Postgres
+/// sibling `get_columns`. A row that fails to decode is a real error too (the
+/// `PRAGMA table_info` shape is fixed), so we surface it rather than silently
+/// dropping the column from the set.
+fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseError> {
     let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
-    let mut stmt = db.prepare(&sql).map_err(|_| ())?;
-    let cols: Vec<String> = stmt
+    let mut stmt = db
+        .prepare(&sql)
+        .map_err(|e| DatabaseError::Internal(format!("prepare table_info {table}: {e}")))?;
+    let mut cols = Vec::new();
+    let rows = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|_| ())?
-        .filter_map(|r| r.ok())
-        .map(|c| c.to_lowercase())
-        .collect();
+        .map_err(|e| DatabaseError::Internal(format!("query table_info {table}: {e}")))?;
+    for row in rows {
+        let name = row.map_err(|e| {
+            DatabaseError::Internal(format!("read table_info row for {table}: {e}"))
+        })?;
+        cols.push(name.to_lowercase());
+    }
     Ok(cols)
 }
 
@@ -187,24 +199,33 @@ fn table_exists(db: &Connection, table: &str) -> bool {
 
 /// Ensure that columns referenced in filters and sorts exist on the table.
 /// Adds missing columns as TEXT (they'll default to NULL).
-fn ensure_columns_for_query(db: &Connection, table: &str, filters: &[Filter], sort: &[SortField]) {
+fn ensure_columns_for_query(
+    db: &Connection,
+    table: &str,
+    filters: &[Filter],
+    sort: &[SortField],
+) -> Result<(), DatabaseError> {
     let safe_table = sanitize_ident(table);
-    if let Ok(existing) = table_columns(db, &safe_table) {
-        for f in filters {
-            let safe_field = sanitize_ident(&f.field);
-            if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
-                db.execute_batch(&alter.sql).ok();
-            }
-        }
-        for s in sort {
-            let safe_field = sanitize_ident(&s.field);
-            if !existing.contains(&safe_field.to_lowercase()) {
-                let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
-                db.execute_batch(&alter.sql).ok();
-            }
+    let existing = table_columns(db, &safe_table)?;
+    for f in filters {
+        let safe_field = sanitize_ident(&f.field);
+        if !existing.contains(&safe_field.to_lowercase()) {
+            let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
+            db.execute_batch(&alter.sql).map_err(|e| {
+                DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
+            })?;
         }
     }
+    for s in sort {
+        let safe_field = sanitize_ident(&s.field);
+        if !existing.contains(&safe_field.to_lowercase()) {
+            let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
+            db.execute_batch(&alter.sql).map_err(|e| {
+                DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[wafer_async_trait]
@@ -337,8 +358,7 @@ impl DbExec for SQLiteDatabaseService {
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        ensure_columns_for_query(&db, table, filters, sort);
-        Ok(())
+        ensure_columns_for_query(&db, table, filters, sort)
     }
 }
 
@@ -392,8 +412,11 @@ impl DatabaseService for SQLiteDatabaseService {
         }
 
         // Ensure any new columns exist (matches the postgres + D1 `create`
-        // paths). Table creation itself is the block migration's job.
-        ensure_columns_from_data(&db, &table, &data);
+        // paths). Table creation itself is the block migration's job. A failure
+        // here is a real DDL error (e.g. ALTER TABLE rejected) — propagate it
+        // rather than letting the subsequent INSERT fail with a confusing
+        // "no such column".
+        ensure_columns_from_data(&db, &table, &data)?;
 
         // Sorted-key iteration so the generated INSERT is stable across
         // process starts. HashMap order is randomized by RandomState, which
@@ -460,6 +483,11 @@ impl DatabaseService for SQLiteDatabaseService {
                     serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
                 );
             }
+
+            // Ensure any new columns exist before the UPDATE references them —
+            // matches the postgres `update` path. A failure is a real DDL error
+            // and must propagate, not be swallowed.
+            ensure_columns_from_data(&db, &table, &data)?;
 
             // Sorted-key iteration so the generated SET clause is stable —
             // see `create()` above for the rationale.
@@ -642,14 +670,17 @@ impl DatabaseService for SQLiteDatabaseService {
         db.execute_batch(&create_stmt.sql)
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
 
-        // Add any missing columns
-        if let Ok(existing) = table_columns(&db, &table.name) {
-            for col in &table.columns {
-                if !existing.contains(&col.name.to_lowercase()) {
-                    let alter = ddl::build_add_column(&table.name, col, Backend::Sqlite);
-                    if let Err(e) = db.execute_batch(&alter.sql) {
-                        tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
-                    }
+        // Add any missing columns. The table was just created above, so a
+        // failure to read its columns is a real error, not "no columns" —
+        // propagate it (matches `table_columns`' fail-loud contract). The
+        // individual `ADD COLUMN` adds stay best-effort/warn since a duplicate
+        // column is a benign re-run.
+        let existing = table_columns(&db, &table.name)?;
+        for col in &table.columns {
+            if !existing.contains(&col.name.to_lowercase()) {
+                let alter = ddl::build_add_column(&table.name, col, Backend::Sqlite);
+                if let Err(e) = db.execute_batch(&alter.sql) {
+                    tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
                 }
             }
         }
@@ -1256,6 +1287,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn update_lazily_adds_a_column_absent_from_the_schema() {
+        // Regression for the M18 fix: SQLite `update` now ensures columns from
+        // the update payload (matching Postgres). Previously it never called
+        // `ensure_columns_from_data`, so updating a key absent from the table
+        // failed with a confusing "no such column"; now the column is added.
+        let svc = make_test_svc();
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+        let created = DatabaseService::list(&svc, "widgets", &ListOptions::default())
+            .await
+            .unwrap();
+        let id = created.records[0].id.clone();
+
+        let mut patch = std::collections::HashMap::new();
+        // `nickname` is not in the seeded schema.
+        patch.insert("nickname".to_string(), serde_json::json!("ace"));
+        let updated = DatabaseService::update(&svc, "widgets", &id, patch)
+            .await
+            .expect("update should add the missing column and succeed");
+        assert_eq!(updated.data["nickname"], serde_json::json!("ace"));
+
+        // The column now exists and round-trips on a fresh read.
+        let reread = DatabaseService::get(&svc, "widgets", &id).await.unwrap();
+        assert_eq!(reread.data["nickname"], serde_json::json!("ace"));
+    }
+
+    #[tokio::test]
+    async fn ensure_query_columns_propagates_error_on_missing_table() {
+        // Regression for the M17 fix: `table_columns` now surfaces a real DB
+        // error instead of `Err(())` collapsed to "no columns". A
+        // `PRAGMA table_info` on a non-existent table returns no rows (not an
+        // error), so this still succeeds — but a malformed statement would now
+        // propagate. Here we assert the success-with-empty-rows contract is
+        // preserved so callers don't regress.
+        let svc = make_test_svc();
+        let filters = vec![Filter {
+            field: "whatever".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("x"),
+        }];
+        // No such table: PRAGMA table_info yields zero rows, so the missing
+        // filter column would be "added" against a table that doesn't exist,
+        // which surfaces as a real DDL error rather than being swallowed.
+        let res = svc
+            .ensure_query_columns("no_such_table", &filters, &[])
+            .await;
+        assert!(
+            res.is_err(),
+            "adding a column to a non-existent table must surface an error, not be swallowed"
+        );
     }
 
     #[tokio::test]

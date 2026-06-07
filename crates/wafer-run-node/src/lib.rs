@@ -146,9 +146,12 @@ mod bindings {
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
         /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
         ///
-        /// Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
-        /// of the `respond` action's `body` string — Halt may carry non-UTF-8 or
-        /// empty bodies.
+        /// Note: `halt` payloads always use `body_base64` (Base64-encoded bytes)
+        /// instead of a `body` string — Halt may carry non-UTF-8 or empty bodies.
+        /// A `respond` payload carries `body` (a UTF-8 string) when the body is
+        /// valid UTF-8; when it is not, it carries `body_base64` (Base64-encoded
+        /// bytes) instead so binary bodies are never collapsed to `""`. Exactly
+        /// one of `body` / `body_base64` is present on a `respond`.
         #[napi]
         pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
             let msg: Message = serde_json::from_str(&message_json)
@@ -162,19 +165,34 @@ mod bindings {
 
             let json = match output.collect_buffered().await {
                 Ok(buf) => {
-                    let body_str = String::from_utf8(buf.body).unwrap_or_default();
                     let meta_obj: serde_json::Value = buf
                         .meta
                         .iter()
                         .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
                         .collect::<serde_json::Map<_, _>>()
                         .into();
-                    serde_json::json!({
-                        "action": "respond",
-                        "body": body_str,
-                        "meta": meta_obj,
-                    })
-                    .to_string()
+                    // Emit `body` for valid UTF-8 (the common case, human-readable
+                    // wire shape); fall back to `body_base64` for non-UTF-8 bodies
+                    // so binary responses are not silently collapsed to "". This
+                    // mirrors the `halt` branch, which always base64-encodes.
+                    match String::from_utf8(buf.body) {
+                        Ok(body_str) => serde_json::json!({
+                            "action": "respond",
+                            "body": body_str,
+                            "meta": meta_obj,
+                        })
+                        .to_string(),
+                        Err(e) => {
+                            use base64ct::{Base64, Encoding};
+                            let body_b64 = Base64::encode_string(e.as_bytes());
+                            serde_json::json!({
+                                "action": "respond",
+                                "body_base64": body_b64,
+                                "meta": meta_obj,
+                            })
+                            .to_string()
+                        }
+                    }
                 }
                 Err(wafer_block::streams::output::TerminalNotResponse::Error(err)) => {
                     serde_json::json!({

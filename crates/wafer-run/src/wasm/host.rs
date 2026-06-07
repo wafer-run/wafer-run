@@ -44,6 +44,17 @@ impl Drop for ContextGuard {
 }
 
 struct ContextWrapper(*const dyn Context);
+// SAFETY: The pointed-to `dyn Context` is the runtime's real context, which is
+// itself `Send + Sync` (every `Context` impl crossing the wasmi host boundary
+// satisfies those bounds). `ContextGuard::new` only transmutes the borrow's
+// lifetime to `'static` — it extends *how long* the reference is held, never
+// the thread bounds of the pointee — so asserting `Send + Sync` on the wrapper
+// does not relax any guarantee the original `&dyn Context` already provided.
+// The pointer's validity window is bounded by `ContextGuard`: the guard owns
+// the only `Arc<ContextWrapper>`, hands out clones via `as_arc`, and its `Drop`
+// asserts `Arc::strong_count == 1`, so no clone can outlive the borrowed
+// context and dereference freed memory. (`clone_arc` panics for the same
+// reason — it would mint an Arc outside the guard's strong-count accounting.)
 unsafe impl Send for ContextWrapper {}
 unsafe impl Sync for ContextWrapper {}
 

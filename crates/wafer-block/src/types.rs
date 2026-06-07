@@ -201,6 +201,24 @@ fn default_instance_mode() -> crate::InstanceMode {
     crate::InstanceMode::PerNode
 }
 
+/// Validation failures raised by [`BlockInfo::validate`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BlockInfoError {
+    /// A block declared a `config_keys` / `flow_config` entry whose name
+    /// starts with [`SOLOBASE_SHARED_PREFIX`]. That prefix is platform-owned
+    /// (shared variables are seeded and write-gated centrally), so a block
+    /// declaring one would create a key it cannot legitimately own.
+    #[error(
+        "block '{block}' declares reserved config key '{key}': keys starting with '{SOLOBASE_SHARED_PREFIX}' are platform-owned and cannot be declared by a block"
+    )]
+    ReservedConfigKey {
+        /// Name of the block that declared the offending key.
+        block: String,
+        /// The reserved config key the block tried to declare.
+        key: String,
+    },
+}
+
 /// Block metadata — identity, schema declarations, and admin UI metadata.
 ///
 /// Only `name`, `version`, `interface`, and `summary` are required.
@@ -356,14 +374,15 @@ impl BlockInfo {
     /// block declaring one would create a key it cannot legitimately own.
     ///
     /// Called at block registration time by the runtime; returns the first
-    /// offending key with a clear message so boot fails loudly.
-    pub fn validate(&self) -> Result<(), String> {
+    /// offending key as a typed [`BlockInfoError`] so boot fails loudly and
+    /// callers can match on the failure rather than parse a string.
+    pub fn validate(&self) -> Result<(), BlockInfoError> {
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
             if var.key.starts_with(SOLOBASE_SHARED_PREFIX) {
-                return Err(format!(
-                    "block '{}' declares reserved config key '{}': keys starting with '{}' are platform-owned and cannot be declared by a block",
-                    self.name, var.key, SOLOBASE_SHARED_PREFIX
-                ));
+                return Err(BlockInfoError::ReservedConfigKey {
+                    block: self.name.clone(),
+                    key: var.key.clone(),
+                });
             }
         }
         Ok(())
@@ -1262,6 +1281,11 @@ impl crate::Message {
     }
 
     /// Parse pagination query parameters (page, page_size, offset).
+    ///
+    /// `page` is an unbounded, externally-supplied query value, so the offset is
+    /// computed with saturating arithmetic: a hostile `?page=<huge>` clamps the
+    /// offset to `usize::MAX` (yielding an empty page) instead of overflowing —
+    /// which would panic in debug builds and silently wrap in release.
     pub fn pagination_params(&self, default_page_size: usize) -> (usize, usize, usize) {
         let page: usize = self.query("page").parse().unwrap_or(1).max(1);
         let page_size: usize = self
@@ -1269,30 +1293,51 @@ impl crate::Message {
             .parse()
             .unwrap_or(default_page_size)
             .min(100);
-        let offset = (page - 1) * page_size;
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
         (page, page_size, offset)
     }
 }
 
 // ---------------------------------------------------------------------------
-// MetaAccess trait for Vec<MetaEntry>
+// Meta access traits for `Vec<MetaEntry>` / `[MetaEntry]`
 // ---------------------------------------------------------------------------
 
-/// Convenience trait giving `HashMap`-like access to `Vec<MetaEntry>`.
-pub trait MetaAccess {
+/// Read-only `HashMap`-like access to a sequence of [`crate::MetaEntry`].
+///
+/// Implemented for both `Vec<MetaEntry>` and the `[MetaEntry]` slice, so
+/// callers holding only a `&[MetaEntry]` can still look entries up. Mutation
+/// lives on the separate [`MetaSet`] trait, which is implemented only for the
+/// owning `Vec` — a slice can't grow, so it can never expose a setter.
+pub trait MetaGet {
     /// Look up the value for `key`, returning `None` if absent.
     fn get(&self, key: &str) -> Option<&str>;
-    /// Set `key` to `value`, replacing any existing entry with the same key.
-    fn set(&mut self, key: String, value: String);
     /// Whether an entry for `key` exists.
     fn contains_key(&self, key: &str) -> bool;
 }
 
-impl MetaAccess for Vec<crate::MetaEntry> {
+/// Mutating `HashMap`-like access to an owning `Vec<MetaEntry>`.
+///
+/// Deliberately *not* implemented for `[MetaEntry]`: a slice is a fixed-size
+/// view and cannot accept new entries, so insertion is only meaningful on the
+/// owning `Vec`. Splitting this off from [`MetaGet`] makes that a compile-time
+/// guarantee rather than a runtime panic.
+pub trait MetaSet {
+    /// Set `key` to `value`, replacing any existing entry with the same key.
+    fn set(&mut self, key: String, value: String);
+}
+
+impl MetaGet for Vec<crate::MetaEntry> {
     fn get(&self, key: &str) -> Option<&str> {
-        self.iter().find(|e| e.key == key).map(|e| e.value.as_str())
+        // Delegate to the slice impl so the lookup logic lives in one place.
+        MetaGet::get(self.as_slice(), key)
     }
 
+    fn contains_key(&self, key: &str) -> bool {
+        MetaGet::contains_key(self.as_slice(), key)
+    }
+}
+
+impl MetaSet for Vec<crate::MetaEntry> {
     fn set(&mut self, key: String, value: String) {
         if let Some(entry) = self.iter_mut().find(|e| e.key == key) {
             entry.value = value;
@@ -1300,19 +1345,11 @@ impl MetaAccess for Vec<crate::MetaEntry> {
             self.push(crate::MetaEntry { key, value });
         }
     }
-
-    fn contains_key(&self, key: &str) -> bool {
-        self.iter().any(|e| e.key == key)
-    }
 }
 
-impl MetaAccess for [crate::MetaEntry] {
+impl MetaGet for [crate::MetaEntry] {
     fn get(&self, key: &str) -> Option<&str> {
         self.iter().find(|e| e.key == key).map(|e| e.value.as_str())
-    }
-
-    fn set(&mut self, _key: String, _value: String) {
-        panic!("cannot insert into a slice; use Vec<MetaEntry> instead");
     }
 
     fn contains_key(&self, key: &str) -> bool {
@@ -1471,14 +1508,24 @@ mod block_info_tests {
 
     #[test]
     fn validate_rejects_reserved_prefix_in_config_keys() {
-        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").config_keys(vec![
-            ConfigVar::new(&format!("{SOLOBASE_SHARED_PREFIX}APP_NAME"), "desc", ""),
-        ]);
+        let key = format!("{SOLOBASE_SHARED_PREFIX}APP_NAME");
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
+            .config_keys(vec![ConfigVar::new(&key, "desc", "")]);
         let err = info
             .validate()
             .expect_err("reserved prefix must be rejected");
-        assert!(err.contains(SOLOBASE_SHARED_PREFIX), "message: {err}");
-        assert!(err.contains("org/b"), "message: {err}");
+        assert_eq!(
+            err,
+            BlockInfoError::ReservedConfigKey {
+                block: "org/b".to_string(),
+                key: key.clone(),
+            }
+        );
+        // Display still carries the operator-facing context.
+        let msg = err.to_string();
+        assert!(msg.contains(SOLOBASE_SHARED_PREFIX), "message: {msg}");
+        assert!(msg.contains("org/b"), "message: {msg}");
+        assert!(msg.contains(&key), "message: {msg}");
     }
 
     #[test]
@@ -1547,5 +1594,101 @@ mod block_endpoint_tests {
             .summary("Health check")
             .output_schema(serde_json::json!({"type": "object"}));
         assert!(ep.has_schema());
+    }
+}
+
+#[cfg(test)]
+mod meta_access_tests {
+    use super::*;
+    use crate::MetaEntry;
+
+    fn sample() -> Vec<MetaEntry> {
+        vec![
+            MetaEntry {
+                key: "a".into(),
+                value: "1".into(),
+            },
+            MetaEntry {
+                key: "b".into(),
+                value: "2".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn slice_exposes_read_methods() {
+        let v = sample();
+        let slice: &[MetaEntry] = v.as_slice();
+        assert_eq!(MetaGet::get(slice, "a"), Some("1"));
+        assert_eq!(MetaGet::get(slice, "missing"), None);
+        assert!(MetaGet::contains_key(slice, "b"));
+        assert!(!MetaGet::contains_key(slice, "missing"));
+    }
+
+    #[test]
+    fn vec_read_methods_match_slice() {
+        let v = sample();
+        assert_eq!(MetaGet::get(&v, "a"), Some("1"));
+        assert!(MetaGet::contains_key(&v, "b"));
+        assert!(!MetaGet::contains_key(&v, "missing"));
+    }
+
+    #[test]
+    fn vec_set_inserts_then_replaces() {
+        let mut v = sample();
+        // Insert a new key.
+        MetaSet::set(&mut v, "c".into(), "3".into());
+        assert_eq!(MetaGet::get(&v, "c"), Some("3"));
+        assert_eq!(v.len(), 3);
+        // Replace an existing key in place (no growth).
+        MetaSet::set(&mut v, "a".into(), "99".into());
+        assert_eq!(MetaGet::get(&v, "a"), Some("99"));
+        assert_eq!(v.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    fn msg_with_query(name: &str, value: &str) -> crate::Message {
+        let mut m = crate::Message::new("test");
+        m.set_meta(
+            format!("{}{}", crate::meta::META_REQ_QUERY_PREFIX, name),
+            value,
+        );
+        m
+    }
+
+    #[test]
+    fn defaults_to_page_one_when_absent() {
+        let m = crate::Message::new("test");
+        assert_eq!(m.pagination_params(25), (1, 25, 0));
+    }
+
+    #[test]
+    fn computes_offset_from_page_and_size() {
+        let m = msg_with_query("page", "3");
+        assert_eq!(m.pagination_params(20), (3, 20, 40));
+    }
+
+    #[test]
+    fn page_size_is_capped_at_100() {
+        let mut m = msg_with_query("page", "1");
+        m.set_meta(
+            format!("{}page_size", crate::meta::META_REQ_QUERY_PREFIX),
+            "10000",
+        );
+        let (_, page_size, _) = m.pagination_params(20);
+        assert_eq!(page_size, 100);
+    }
+
+    #[test]
+    fn huge_page_saturates_offset_instead_of_overflowing() {
+        // Regression: an unbounded `?page=` query value must not overflow the
+        // `(page - 1) * page_size` multiply (debug panic / release wraparound).
+        let m = msg_with_query("page", &usize::MAX.to_string());
+        let (page, page_size, offset) = m.pagination_params(50);
+        assert_eq!(page, usize::MAX);
+        assert_eq!(page_size, 50);
+        assert_eq!(offset, usize::MAX);
     }
 }

@@ -73,6 +73,42 @@ pub fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
     if o[0] == 169 && o[1] == 254 {
         return true;
     }
+    // 100.64.0.0/10 (carrier-grade NAT — routable internal infra on cloud
+    // providers). The std `Ipv4Addr::is_shared()` predicate is still unstable
+    // (feature `ip`, issue #27709) on the stable toolchain this crate targets,
+    // so the /10 mask is applied by hand: the first octet is 100 and the high
+    // two bits of the second octet are `01` (i.e. 64..=127).
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return true;
+    }
+    // 192.0.0.0/24 (IETF Protocol Assignments). Not covered by any stable std
+    // predicate (`is_documentation()` only matches the TEST-NET ranges and is
+    // itself unstable), so it is matched explicitly.
+    if o[0] == 192 && o[1] == 0 && o[2] == 0 {
+        return true;
+    }
+    // 198.18.0.0/15 (benchmarking). `Ipv4Addr::is_benchmarking()` is unstable
+    // (feature `ip`), so the /15 is matched by hand: first octet 198 and the
+    // low bit of the second octet cleared selects 18 and 19.
+    if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+        return true;
+    }
+    // 240.0.0.0/4 (reserved, incl. the former Class E space).
+    // `Ipv4Addr::is_reserved()` is unstable (feature `ip`); the /4 is the high
+    // nibble of the first octet being `1111` (i.e. >= 240). Note std's
+    // `is_reserved()` deliberately excludes 255.255.255.255 (broadcast); the
+    // broadcast address is covered separately below, so blocking the whole /4
+    // here is strictly safe for an SSRF guard.
+    if o[0] >= 240 {
+        return true;
+    }
+    // 255.255.255.255 (limited broadcast). `Ipv4Addr::is_broadcast()` is the
+    // one relevant predicate that is stable, so use it directly. (This is
+    // already covered by the 240.0.0.0/4 arm above, but the explicit check
+    // documents intent and stays correct if that arm is ever narrowed.)
+    if ip.is_broadcast() {
+        return true;
+    }
     false
 }
 
@@ -152,6 +188,51 @@ mod tests {
     fn test_blocks_link_local_ipv4() {
         assert!(is_blocked_url("http://169.254.1.1"));
         assert!(is_blocked_url("http://169.254.169.254"));
+    }
+
+    #[test]
+    fn test_blocks_carrier_grade_nat_ipv4() {
+        // 100.64.0.0/10 — routable internal infra on cloud providers.
+        assert!(is_blocked_url("http://100.64.0.1"));
+        assert!(is_blocked_url("http://100.127.255.255"));
+        // Just outside the /10 on both ends must stay allowed.
+        assert!(!is_blocked_url("http://100.63.255.255"));
+        assert!(!is_blocked_url("http://100.128.0.1"));
+    }
+
+    #[test]
+    fn test_blocks_ietf_protocol_assignments_ipv4() {
+        // 192.0.0.0/24 — IETF Protocol Assignments.
+        assert!(is_blocked_url("http://192.0.0.1"));
+        assert!(is_blocked_url("http://192.0.0.255"));
+        // 192.0.2.0/24 (TEST-NET-1) is a different block; adjacent 192.0.1.x
+        // is public — neither should be caught by the /24 above.
+        assert!(!is_blocked_url("http://192.0.1.1"));
+    }
+
+    #[test]
+    fn test_blocks_benchmarking_ipv4() {
+        // 198.18.0.0/15 — network benchmarking.
+        assert!(is_blocked_url("http://198.18.0.1"));
+        assert!(is_blocked_url("http://198.19.255.255"));
+        // Just outside the /15 must stay allowed.
+        assert!(!is_blocked_url("http://198.17.255.255"));
+        assert!(!is_blocked_url("http://198.20.0.1"));
+    }
+
+    #[test]
+    fn test_blocks_reserved_ipv4() {
+        // 240.0.0.0/4 — reserved (former Class E).
+        assert!(is_blocked_url("http://240.0.0.1"));
+        assert!(is_blocked_url("http://250.1.2.3"));
+        // Just below the /4 must stay allowed.
+        assert!(!is_blocked_url("http://239.255.255.255"));
+    }
+
+    #[test]
+    fn test_blocks_broadcast_ipv4() {
+        // 255.255.255.255 — limited broadcast.
+        assert!(is_blocked_url("http://255.255.255.255"));
     }
 
     #[test]

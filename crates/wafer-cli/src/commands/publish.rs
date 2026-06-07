@@ -87,7 +87,10 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
         .with_context(|| format!("POST {endpoint}"))?;
 
     let resp = crate::registry_client::ensure_ok(resp, "publish").await?;
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("read publish response from {endpoint}"))?;
 
     let parsed: PublishResponse =
         serde_json::from_str(&body).with_context(|| format!("decode publish response: {body}"))?;

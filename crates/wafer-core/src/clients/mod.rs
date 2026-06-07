@@ -569,6 +569,112 @@ where
     ))
 }
 
+/// Stream wrapper that decodes each `Chunk` frame as `T` via [`codec::decode`].
+///
+/// Used by services whose response is a sequence of independently encoded wire
+/// values with **no** header frame — e.g. LLM `chat` / `load_model` and image
+/// `load_model`. Each `Chunk` is decoded as `T`; `Meta` events are skipped;
+/// `Complete` ends the stream with `None`; every other terminal (`Error`,
+/// `Drop`, `Continue`, `Halt`) and an unexpected end-of-stream are translated
+/// into a single `Err` item, after which the stream returns `None`.
+///
+/// `context` is a static label prefixed onto error messages so callers can
+/// attribute a failure to a specific service operation (e.g. `"llm chat"`).
+///
+/// Shared by [`super::llm`] and [`super::image`] so both decode frames and map
+/// terminals identically.
+#[cfg(not(feature = "wasm-component"))]
+#[must_use = "response stream must be consumed"]
+pub struct NativeTypedFrameStream<T> {
+    inner: OutputStream,
+    context: &'static str,
+    finished: bool,
+    _frame: std::marker::PhantomData<T>,
+}
+
+#[cfg(not(feature = "wasm-component"))]
+impl<T> NativeTypedFrameStream<T> {
+    pub(crate) fn new(inner: OutputStream, context: &'static str) -> Self {
+        Self {
+            inner,
+            context,
+            finished: false,
+            _frame: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(not(feature = "wasm-component"))]
+impl<T> futures::Stream for NativeTypedFrameStream<T>
+where
+    T: serde::de::DeserializeOwned + Unpin,
+{
+    type Item = Result<T, WaferError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+
+        use wafer_block::stream::StreamEvent;
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        loop {
+            match std::pin::Pin::new(&mut self.inner).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!("{}: stream ended without terminal event", self.context),
+                    ))));
+                }
+                Poll::Ready(Some(StreamEvent::Chunk(bytes))) => {
+                    let ctx_label = self.context;
+                    return Poll::Ready(Some(codec::decode::<T>(&bytes).map_err(|e| {
+                        WaferError::new(e.code, format!("{ctx_label} frame decode: {}", e.message))
+                    })));
+                }
+                Poll::Ready(Some(StreamEvent::Meta(_))) => continue,
+                Poll::Ready(Some(StreamEvent::Complete { .. })) => {
+                    self.finished = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(StreamEvent::Error(e))) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(*e)));
+                }
+                Poll::Ready(Some(StreamEvent::Drop)) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!("{}: handler returned Drop", self.context),
+                    ))));
+                }
+                Poll::Ready(Some(StreamEvent::Continue(msg))) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!(
+                            "{}: handler returned Continue (kind: {})",
+                            self.context, msg.kind
+                        ),
+                    ))));
+                }
+                Poll::Ready(Some(StreamEvent::Halt { .. })) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(WaferError::new(
+                        ErrorCode::INTERNAL,
+                        format!("{}: handler returned Halt", self.context),
+                    ))));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

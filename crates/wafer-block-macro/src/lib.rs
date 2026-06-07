@@ -251,6 +251,7 @@ impl FlatArgs {
 
 /// Parsed skill(...) attribute — description and JSON parameters schema for
 /// the LLM-facing tool definition.
+#[derive(Debug)]
 struct SkillArgs {
     description: String,
     parameters: String,
@@ -261,7 +262,9 @@ fn parse_skill(meta: &syn::MetaList) -> syn::Result<SkillArgs> {
     let nested: Punctuated<syn::Meta, Token![,]> =
         meta.parse_args_with(Punctuated::parse_terminated)?;
     let mut description = None::<String>;
-    let mut parameters = None::<String>;
+    // Keep the literal (not just its value) so a JSON validation error can be
+    // attributed to the exact `parameters = "..."` token in the source.
+    let mut parameters_lit = None::<syn::LitStr>;
     for item in nested {
         match item {
             syn::Meta::NameValue(nv) => {
@@ -275,10 +278,10 @@ fn parse_skill(meta: &syn::MetaList) -> syn::Result<SkillArgs> {
                         )
                     })?
                     .to_string();
-                let val = match &nv.value {
+                let lit = match &nv.value {
                     Expr::Lit(ExprLit {
                         lit: Lit::Str(s), ..
-                    }) => s.value(),
+                    }) => s.clone(),
                     other => {
                         return Err(syn::Error::new(
                             other.span(),
@@ -287,8 +290,8 @@ fn parse_skill(meta: &syn::MetaList) -> syn::Result<SkillArgs> {
                     }
                 };
                 match key.as_str() {
-                    "description" => description = Some(val),
-                    "parameters" => parameters = Some(val),
+                    "description" => description = Some(lit.value()),
+                    "parameters" => parameters_lit = Some(lit),
                     other => {
                         return Err(syn::Error::new(
                             nv.path.span(),
@@ -311,12 +314,24 @@ fn parse_skill(meta: &syn::MetaList) -> syn::Result<SkillArgs> {
             "#[wafer_block]: skill(...) requires description = \"...\"",
         )
     })?;
-    let parameters = parameters.ok_or_else(|| {
+    let parameters_lit = parameters_lit.ok_or_else(|| {
         syn::Error::new(
             meta.span(),
             "#[wafer_block]: skill(...) requires parameters = \"...\"",
         )
     })?;
+    let parameters = parameters_lit.value();
+    // Validate the schema is well-formed JSON at macro-expansion time. The input
+    // is author-controlled and fully known at compile time, so a malformed schema
+    // must fail the build at the macro site rather than panicking the first time
+    // the generated `block_info()` is invoked (native `register_static_block!`
+    // registration, and the wasm `__wafer_info` export).
+    if let Err(e) = serde_json::from_str::<serde_json::Value>(&parameters) {
+        return Err(syn::Error::new_spanned(
+            &parameters_lit,
+            format!("#[wafer_block]: skill `parameters` is not valid JSON: {e}"),
+        ));
+    }
     Ok(SkillArgs {
         description,
         parameters,
@@ -604,7 +619,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let instance_mode_str = args
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
-    let _requires = args.get_str_list("requires");
+    let requires = args.get_str_list("requires");
 
     let struct_ty = &input.self_ty;
 
@@ -726,6 +741,19 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { None::<wafer_block::BlockCapabilities> }
     };
 
+    // Build the optional `requires` expression for `block_info()`. The
+    // `requires = [...]` attribute declares which other blocks this block may
+    // `call_block`; the runtime enforces it as an access-control gate (an empty
+    // list means "unrestricted"), so a declared-but-unwired list would silently
+    // disable the restriction.
+    let requires_expr = if requires.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            info = info.requires(vec![ #( #requires.to_string() ),* ]);
+        }
+    };
+
     // Build the optional SkillTool expression for `block_info()`.
     let skill_tool_expr = if let Some(skill) = &skill_args {
         let description = &skill.description;
@@ -735,6 +763,9 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 .role(wafer_block::types::SkillRole::Skill)
                 .tool(wafer_block::types::SkillTool {
                     description: #description.to_string(),
+                    // `parse_skill` already validated `#parameters_json` parses as
+                    // JSON at macro-expansion time, so this `.expect()` is an
+                    // unreachable invariant rather than an author-reachable panic.
                     parameters: serde_json::from_str(#parameters_json)
                         .expect(concat!("skill parameters JSON parse error in block ", #name)),
                 });
@@ -761,6 +792,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 if let Some(c) = caps {
                     info = info.capabilities(c);
                 }
+                #requires_expr
                 #skill_tool_expr
                 info
             }
@@ -840,4 +872,45 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     };
 
     Ok(expanded.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_skill;
+
+    /// Build a `syn::MetaList` for a `skill(...)` attribute from source text.
+    fn skill_meta(src: &str) -> syn::MetaList {
+        syn::parse_str::<syn::MetaList>(src).expect("test input must parse as a MetaList")
+    }
+
+    #[test]
+    fn parse_skill_accepts_valid_json_parameters() {
+        let meta = skill_meta(
+            r#"skill(description = "does a thing", parameters = "{\"type\":\"object\",\"properties\":{}}")"#,
+        );
+        let args = parse_skill(&meta).expect("valid JSON parameters should parse");
+        assert_eq!(args.description, "does a thing");
+        assert_eq!(args.parameters, r#"{"type":"object","properties":{}}"#);
+    }
+
+    #[test]
+    fn parse_skill_rejects_malformed_json_parameters() {
+        // Missing closing brace — well-formed string literal, malformed JSON.
+        let meta = skill_meta(r#"skill(description = "d", parameters = "{\"type\":")"#);
+        let err =
+            parse_skill(&meta).expect_err("malformed JSON parameters must be a macro-site error");
+        assert!(
+            err.to_string().contains("not valid JSON"),
+            "error should explain the JSON validation failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_skill_accepts_non_object_json_scalar() {
+        // Any well-formed JSON value parses; the macro only checks well-formedness,
+        // not that the schema is a JSON object.
+        let meta = skill_meta(r#"skill(description = "d", parameters = "42")"#);
+        let args = parse_skill(&meta).expect("scalar JSON is still valid JSON");
+        assert_eq!(args.parameters, "42");
+    }
 }

@@ -23,10 +23,10 @@ pub use core_types::{
 pub use meta::*;
 // Re-export runtime-specific types (needed by block authors for BlockInfo etc.)
 pub use types::{
-    ActionSpec, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime, CollectionSchema,
-    ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema, InputType, InterfaceSpec,
-    MetaAccess, RequestAction, ResourceGrant, ResourceType, SkillRole, SkillTool, UiRoute,
-    SOLOBASE_SHARED_PREFIX,
+    ActionSpec, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockInfoError, BlockRuntime,
+    CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema, InputType,
+    InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceGrant, ResourceType, SkillRole,
+    SkillTool, UiRoute, SOLOBASE_SHARED_PREFIX,
 };
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 

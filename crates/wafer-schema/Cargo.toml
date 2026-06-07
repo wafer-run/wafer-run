@@ -8,6 +8,7 @@ description = "Schema record types (Table, Column, DataType, …) used to descri
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

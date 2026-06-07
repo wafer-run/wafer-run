@@ -34,6 +34,20 @@ pub enum CompareOp {
     Le,
 }
 
+impl CompareOp {
+    /// The source token this operator was parsed from, for error messages.
+    fn as_str(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "==",
+            CompareOp::Ne => "!=",
+            CompareOp::Gt => ">",
+            CompareOp::Lt => "<",
+            CompareOp::Ge => ">=",
+            CompareOp::Le => "<=",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LogicalOp {
     And,
@@ -428,7 +442,7 @@ pub fn eval(
         Expr::Compare { left, op, right } => {
             let lv = eval(left, resolve)?;
             let rv = eval(right, resolve)?;
-            Ok(Value::Bool(compare_values(&lv, *op, &rv)))
+            Ok(Value::Bool(compare_values(&lv, *op, &rv)?))
         }
         Expr::Logical { left, op, right } => {
             let lv = eval(left, resolve)?;
@@ -465,22 +479,43 @@ pub fn eval(
     }
 }
 
-fn compare_values(left: &Value, op: CompareOp, right: &Value) -> bool {
+fn compare_values(left: &Value, op: CompareOp, right: &Value) -> Result<bool, ExprError> {
     match op {
-        CompareOp::Eq => left == right,
-        CompareOp::Ne => left != right,
+        // Equality works for any value types (structural comparison).
+        CompareOp::Eq => Ok(left == right),
+        CompareOp::Ne => Ok(left != right),
+        // Ordered comparisons require both operands to be numeric. A non-numeric
+        // operand (e.g. comparing string fields with `>`) is an authoring error
+        // and must surface rather than silently evaluating to `false`.
         CompareOp::Gt | CompareOp::Lt | CompareOp::Ge | CompareOp::Le => {
             match (as_f64(left), as_f64(right)) {
-                (Some(l), Some(r)) => match op {
+                (Some(l), Some(r)) => Ok(match op {
                     CompareOp::Gt => l > r,
                     CompareOp::Lt => l < r,
                     CompareOp::Ge => l >= r,
                     CompareOp::Le => l <= r,
                     _ => unreachable!(),
-                },
-                _ => false,
+                }),
+                _ => Err(ExprError::TypeError(format!(
+                    "ordered comparison '{}' requires numeric operands, got {} and {}",
+                    op.as_str(),
+                    type_name(left),
+                    type_name(right),
+                ))),
             }
         }
+    }
+}
+
+/// A human-readable JSON type name, used in [`ExprError::TypeError`] messages.
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -631,6 +666,45 @@ mod tests {
     #[test]
     fn string_literal_rejects_unknown_escape() {
         assert!(parse_expr(r#""bad \q escape""#).is_err());
+    }
+
+    #[test]
+    fn ordered_comparison_of_strings_is_type_error() {
+        // `$.a.name > $.b.name` (string operands) must surface a TypeError
+        // rather than silently evaluating the branch as not-taken.
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            match segments.first().map(String::as_str) {
+                Some("a") => Ok(json!("alpha")),
+                Some("b") => Ok(json!("beta")),
+                _ => Err(ExprError::UnresolvedReference(segments.join("."))),
+            }
+        };
+        let expr = parse_expr("$.a > $.b").unwrap();
+        let err = eval(&expr, &resolve).unwrap_err();
+        assert!(
+            matches!(err, ExprError::TypeError(_)),
+            "expected TypeError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn numeric_ordered_comparison_still_works() {
+        // Both `>` directions on numeric operands keep evaluating.
+        let expr = parse_expr("$.step1.count > 5").unwrap();
+        assert_eq!(eval(&expr, &dummy_resolve).unwrap(), json!(true));
+        let expr = parse_expr("$.step1.count < 5").unwrap();
+        assert_eq!(eval(&expr, &dummy_resolve).unwrap(), json!(false));
+        let expr = parse_expr("$.step1.count >= 10").unwrap();
+        assert_eq!(eval(&expr, &dummy_resolve).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn string_equality_does_not_error() {
+        // Equality (==/!=) of non-numeric operands must keep working, never error.
+        let expr = parse_expr("$.input.email == \"alice@example.com\"").unwrap();
+        assert_eq!(eval(&expr, &dummy_resolve).unwrap(), json!(true));
+        let expr = parse_expr("$.input.email != \"bob@example.com\"").unwrap();
+        assert_eq!(eval(&expr, &dummy_resolve).unwrap(), json!(true));
     }
 
     #[test]

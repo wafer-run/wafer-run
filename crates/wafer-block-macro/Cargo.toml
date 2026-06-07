@@ -12,13 +12,16 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+# Used at macro-expansion time to validate author-supplied `skill(parameters = "...")`
+# JSON, so malformed schemas fail the build at the macro site rather than panicking
+# the first time the generated `block_info()` runs.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-sdk = { path = "../../sdks/rust" }
 wafer-run = { path = "../wafer-run" }
 async-trait = "0.1"
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 trybuild = "1"
 

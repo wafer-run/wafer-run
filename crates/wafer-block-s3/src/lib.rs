@@ -124,7 +124,7 @@ impl Block for S3StorageBlock {
             } else {
                 S3StorageService::with_endpoint(&bucket, &prefix, &endpoint, &region).await
             }
-            .map_err(|e| WaferError::new("init", format!("wafer-run/s3: {e}")))?;
+            .map_err(|e| WaferError::new(ErrorCode::Internal, format!("wafer-run/s3 init: {e}")))?;
 
             tracing::info!(bucket = %bucket, "S3 storage service initialized");
             self.service.set(Arc::new(svc)).ok();

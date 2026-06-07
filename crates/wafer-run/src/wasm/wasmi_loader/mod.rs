@@ -108,9 +108,11 @@ pub fn run_spike(
 /// goroutine scheduler, global vars) and to invoke `main()` (which calls
 /// `wafer.Register`). Without it every WAFER export traps with `unreachable`.
 ///
-/// `_start` terminates by calling `proc_exit(0)` — that traps with our stub.
-/// We treat a trap message containing "proc_exit" as expected WASI shutdown.
-/// Rust-compiled blocks have no `_start` export and are unaffected.
+/// `_start` terminates by calling `proc_exit(0)` — that traps with our
+/// [`ProcExitTrap`] marker. We downcast the wasmi error to that typed marker:
+/// `proc_exit(0)` is the expected WASI shutdown; a non-zero (or unrelated) trap
+/// is surfaced as an error. Rust-compiled blocks have no `_start` export and
+/// are unaffected.
 fn instantiate(
     engine: &Engine,
     linker: &Linker<WasmiHostState>,
@@ -146,13 +148,19 @@ fn instantiate(
     if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&store, "_start") {
         match start_fn.call(&mut store, ()) {
             Ok(()) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("proc_exit") {
+            Err(e) => match e.downcast_ref::<ProcExitTrap>() {
+                // proc_exit(0) is the normal WASI shutdown path — expected.
+                Some(ProcExitTrap { code: 0 }) => {}
+                // A non-zero exit, or any other trap, is a genuine startup failure.
+                Some(ProcExitTrap { code }) => {
+                    return Err(RuntimeError::Wasm(format!(
+                        "WASM _start exited with non-zero code {code}"
+                    )));
+                }
+                None => {
                     return Err(RuntimeError::Wasm(format!("WASM _start failed: {e}")));
                 }
-                // proc_exit(0) is the normal WASI shutdown path — expected.
-            }
+            },
         }
         // Re-fill fuel so the subsequent guest call has a full budget.
         store
