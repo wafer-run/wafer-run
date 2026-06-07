@@ -379,8 +379,7 @@ mod tests {
         let base = std::env::temp_dir();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let pid = std::process::id();
         let dir = base.join(format!("wafer-local-storage-test-{pid}-{nonce}"));
         fs::create_dir_all(&dir).expect("create tempdir");

@@ -569,8 +569,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                 let nanos: u64 = if id == 0 {
                     web_time::SystemTime::now()
                         .duration_since(web_time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0)
+                        .map_or(0, |d| d.as_nanos() as u64)
                 } else {
                     // For monotonic/CPU-time IDs, fall back to an Instant-based
                     // counter relative to the runtime's own start. This is the
