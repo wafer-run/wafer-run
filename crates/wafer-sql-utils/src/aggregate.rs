@@ -243,7 +243,18 @@ pub struct GroupedQueryConfig {
 /// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS INTEGER) as avg_ms
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
-pub fn build_grouped_query(cfg: &GroupedQueryConfig, backend: Backend) -> crate::Statement {
+///
+/// Takes `cfg` **by value** on purpose: [`GroupedQueryConfig`] is `!Send`
+/// (its [`AggregateColumn`] expressions hold `Rc<dyn sea_query::Iden>`), so an
+/// async caller that built the config inline must be able to *move and drop* it
+/// before the next `.await`. A by-reference signature would keep the config
+/// alive across the await point and make the caller's future `!Send`. The
+/// `needless_pass_by_value` lint can't see that ownership transfer is the point.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "by-value lets async callers drop the !Send GroupedQueryConfig (Rc<dyn Iden>) before awaiting; a &ref signature would poison their futures' Send-ness"
+)]
+pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::Statement {
     let mut query = Query::select();
     query.from(DynCol(cfg.table.clone()));
 
@@ -406,7 +417,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
         let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
@@ -432,7 +443,7 @@ mod tests {
             order_by: vec![],
             limit: None,
         };
-        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
         let sql = stmt.sql;
         eprintln!("SQL: {sql}");
         assert!(
@@ -475,7 +486,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(&cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite);
         let sql = stmt.sql;
         // Both plain aggregate and CASE-WHEN aggregate render.
         assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");
