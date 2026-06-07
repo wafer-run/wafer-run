@@ -619,7 +619,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let instance_mode_str = args
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
-    let _requires = args.get_str_list("requires");
+    let requires = args.get_str_list("requires");
 
     let struct_ty = &input.self_ty;
 
@@ -741,6 +741,19 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { None::<wafer_block::BlockCapabilities> }
     };
 
+    // Build the optional `requires` expression for `block_info()`. The
+    // `requires = [...]` attribute declares which other blocks this block may
+    // `call_block`; the runtime enforces it as an access-control gate (an empty
+    // list means "unrestricted"), so a declared-but-unwired list would silently
+    // disable the restriction.
+    let requires_expr = if requires.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            info = info.requires(vec![ #( #requires.to_string() ),* ]);
+        }
+    };
+
     // Build the optional SkillTool expression for `block_info()`.
     let skill_tool_expr = if let Some(skill) = &skill_args {
         let description = &skill.description;
@@ -779,6 +792,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 if let Some(c) = caps {
                     info = info.capabilities(c);
                 }
+                #requires_expr
                 #skill_tool_expr
                 info
             }
