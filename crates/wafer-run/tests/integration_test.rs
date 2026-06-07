@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use wafer_block::{streams::output::TerminalNotResponse, types::MetaAccess};
+use wafer_block::{
+    streams::output::TerminalNotResponse,
+    types::{MetaGet, MetaSet},
+};
 use wafer_run::{types::ErrorCode, *};
 
 // ---------------------------------------------------------------------------

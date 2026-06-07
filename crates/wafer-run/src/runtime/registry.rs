@@ -21,6 +21,14 @@ impl Wafer {
             .insert(name.into(), Box::new(f));
     }
 
+    /// Add a named registrar function. Registrars are called by
+    /// [`register`](Self::register) to set up blocks, flows, and config
+    /// by name.
+    ///
+    /// Typically called by crate consumers (e.g. wafer-core) to make
+    /// their blocks available via `wafer.register("wafer-run/...", config)`.
+    ///
+    /// wasm32 variant: single-threaded, so the closure carries no `Send + Sync` bound.
     #[cfg(target_arch = "wasm32")]
     pub fn add_registrar(
         &mut self,
@@ -115,6 +123,11 @@ impl Wafer {
             .insert(name.into(), Box::new(expander));
     }
 
+    /// Register a config expander that splits a composite config into
+    /// individual block configs. Called during `resolve()` before configs
+    /// are distributed to blocks.
+    ///
+    /// wasm32 variant: single-threaded, so the closure carries no `Send + Sync` bound.
     #[cfg(target_arch = "wasm32")]
     pub fn add_config_expander(
         &mut self,

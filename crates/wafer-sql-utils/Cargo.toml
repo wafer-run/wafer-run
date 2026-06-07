@@ -10,6 +10,7 @@ wafer-block = { path = "../wafer-block" }
 wafer-schema = { workspace = true }
 sea-query = "0.32"
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

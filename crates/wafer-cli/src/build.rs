@@ -46,8 +46,12 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     let block_wasm_path = dir.join("target").join("block.wasm");
 
+    // The `{block}` half of the `{org}/{block}` manifest name is the best
+    // deterministic anchor for picking among multiple `.wasm` outputs.
+    let block_name = manifest.name.rsplit('/').next().unwrap_or(&manifest.name);
+
     match lang {
-        Lang::Rust => build_rust(dir, &block_wasm_path)?,
+        Lang::Rust => build_rust(dir, &block_wasm_path, block_name)?,
         Lang::Go => build_go(dir, &block_wasm_path)?,
     }
 
@@ -95,7 +99,7 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
 // Language-specific build steps
 // ---------------------------------------------------------------------------
 
-fn build_rust(dir: &Path, out: &Path) -> anyhow::Result<()> {
+fn build_rust(dir: &Path, out: &Path, block_name: &str) -> anyhow::Result<()> {
     // Verify the target is installed.
     let check = Command::new("rustup")
         .args(["target", "list", "--installed"])
@@ -126,7 +130,7 @@ fn build_rust(dir: &Path, out: &Path) -> anyhow::Result<()> {
     // look for any .wasm in the release directory.
     let release_dir = dir.join("target").join("wasm32-wasip1").join("release");
 
-    let wasm_file = find_wasm_in_dir(&release_dir)
+    let wasm_file = find_wasm_in_dir(&release_dir, block_name)
         .with_context(|| format!("No .wasm file found in {}", release_dir.display()))?;
 
     println!("Found: {}", wasm_file.display());
@@ -167,7 +171,29 @@ fn build_go(dir: &Path, out: &Path) -> anyhow::Result<()> {
 // Helper: find a single .wasm file in a directory (skip .d files).
 // ---------------------------------------------------------------------------
 
-fn find_wasm_in_dir(dir: &Path) -> anyhow::Result<std::path::PathBuf> {
+/// Normalize a file stem / block name for comparison: lowercase and treat
+/// `-` and `_` as equivalent. Cargo replaces `-` with `_` in output artifact
+/// names, so a `my-block` manifest matches a `my_block.wasm` output.
+fn normalize_stem(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+/// Find the block's `.wasm` output in `dir`.
+///
+/// `read_dir` order is filesystem-arbitrary, so when more than one `.wasm`
+/// exists we cannot rely on position. Instead we prefer the file whose stem
+/// matches `block_name` (with `-`/`_` normalized, since cargo rewrites `-` to
+/// `_` in artifact names). Only if no stem matches do we fall back to the
+/// first entry, warning that the choice is ambiguous.
+fn find_wasm_in_dir(dir: &Path, block_name: &str) -> anyhow::Result<std::path::PathBuf> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
 
@@ -185,14 +211,26 @@ fn find_wasm_in_dir(dir: &Path) -> anyhow::Result<std::path::PathBuf> {
         0 => bail!("No .wasm files found in {}", dir.display()),
         1 => Ok(found.into_iter().next().unwrap()),
         _ => {
-            // Multiple .wasm files — prefer one whose stem matches common output names.
-            // Fall back to the first one and warn.
-            eprintln!(
-                "Warning: multiple .wasm files found in {}; using {}",
-                dir.display(),
-                found[0].display()
-            );
-            Ok(found.into_iter().next().unwrap())
+            let want = normalize_stem(block_name);
+            let matched = found.iter().find(|p| {
+                p.file_stem()
+                    .map(|s| normalize_stem(&s.to_string_lossy()) == want)
+                    .unwrap_or(false)
+            });
+            match matched {
+                Some(path) => Ok(path.clone()),
+                None => {
+                    // No stem matches the block name — the choice is genuinely
+                    // ambiguous, so fall back to the first entry and warn.
+                    eprintln!(
+                        "Warning: multiple .wasm files found in {} and none match block {:?}; using {}",
+                        dir.display(),
+                        block_name,
+                        found[0].display()
+                    );
+                    Ok(found.into_iter().next().unwrap())
+                }
+            }
         }
     }
 }
@@ -217,4 +255,52 @@ fn check_wafer_lock_sync(dir: &Path) -> anyhow::Result<()> {
         anyhow::bail!("{e}\nhint: run 'wafer install' without --frozen to update wafer.lock");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), b"\0asm").unwrap();
+    }
+
+    #[test]
+    fn find_wasm_single_file_returned() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "anything.wasm");
+        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
+        assert_eq!(got.file_name().unwrap(), "anything.wasm");
+    }
+
+    #[test]
+    fn find_wasm_prefers_stem_matching_block_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two outputs; the deps/* one sorts arbitrarily but must not win.
+        touch(tmp.path(), "aaaa_unrelated.wasm");
+        touch(tmp.path(), "my_block.wasm");
+        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
+        assert_eq!(
+            got.file_name().unwrap(),
+            "my_block.wasm",
+            "should prefer the .wasm whose stem matches the block name (- normalized to _)"
+        );
+    }
+
+    #[test]
+    fn find_wasm_falls_back_to_first_when_no_stem_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "alpha.wasm");
+        touch(tmp.path(), "beta.wasm");
+        // No file stem matches "my-block"; fall back is allowed (still a .wasm).
+        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
+        let name = got.file_name().unwrap().to_string_lossy();
+        assert!(name == "alpha.wasm" || name == "beta.wasm", "got {name}");
+    }
+
+    #[test]
+    fn normalize_stem_treats_dash_and_underscore_equal() {
+        assert_eq!(normalize_stem("My-Block"), normalize_stem("my_block"));
+        assert_eq!(normalize_stem("a-b-c"), "a_b_c");
+    }
 }

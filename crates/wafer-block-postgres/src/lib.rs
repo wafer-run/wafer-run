@@ -97,7 +97,12 @@ impl Block for PostgresDatabaseBlock {
             let tables = match config.get("collections") {
                 Some(v) => {
                     match serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()) {
-                        Ok(colls) => collections_to_tables(&colls),
+                        Ok(colls) => collections_to_tables(&colls).map_err(|e| {
+                            WaferError::new(
+                                "config",
+                                format!("wafer-run/postgres: invalid collections config: {e}"),
+                            )
+                        })?,
                         Err(e) => {
                             tracing::error!(
                                 error = %e,

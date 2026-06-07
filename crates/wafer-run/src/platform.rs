@@ -41,6 +41,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// RegistrarFn — function that registers a block or flow with config.
 #[cfg(not(target_arch = "wasm32"))]
 pub type RegistrarFn = Box<dyn Fn(&mut crate::runtime::Wafer, serde_json::Value) + Send + Sync>;
+/// RegistrarFn — function that registers a block or flow with config
+/// (wasm32 — single-threaded, no `Send + Sync` bound).
 #[cfg(target_arch = "wasm32")]
 pub type RegistrarFn = Box<dyn Fn(&mut crate::runtime::Wafer, serde_json::Value)>;
 
@@ -48,5 +50,7 @@ pub type RegistrarFn = Box<dyn Fn(&mut crate::runtime::Wafer, serde_json::Value)
 #[cfg(not(target_arch = "wasm32"))]
 pub type ConfigExpanderFn =
     Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)> + Send + Sync>;
+/// ConfigExpanderFn — function that splits a composite config into individual block
+/// configs (wasm32 — single-threaded, no `Send + Sync` bound).
 #[cfg(target_arch = "wasm32")]
 pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)>>;

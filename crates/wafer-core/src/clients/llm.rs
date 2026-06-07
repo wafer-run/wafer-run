@@ -11,20 +11,7 @@
 //!   per-frame. There is no header frame, unlike `clients::network`.
 
 #[cfg(not(feature = "wasm-component"))]
-use std::marker::PhantomData;
-#[cfg(not(feature = "wasm-component"))]
-use std::pin::Pin;
-#[cfg(not(feature = "wasm-component"))]
-use std::task::{Context as TaskContext, Poll};
-
-#[cfg(not(feature = "wasm-component"))]
-use futures::Stream;
-#[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
-#[cfg(not(feature = "wasm-component"))]
-use wafer_block::stream::StreamEvent;
-#[cfg(not(feature = "wasm-component"))]
-use wafer_block::streams::output::OutputStream;
 /// Re-export the wire types so callers use one path for both the request
 /// payloads and the typed stream items.
 pub use wafer_block::wire::llm::{
@@ -33,13 +20,11 @@ pub use wafer_block::wire::llm::{
     ModelState, ModelStatus, ResponseFormat, StatusRequest, TokenUsage, ToolCall, ToolDefinition,
     UnloadModelRequest,
 };
-#[cfg(not(feature = "wasm-component"))]
-use wafer_block::{codec, common::ErrorCode};
 use wafer_block::{common::ServiceOp, WaferError};
 
-#[cfg(not(feature = "wasm-component"))]
-use super::call_service_streaming;
 use super::{call_service, decode};
+#[cfg(not(feature = "wasm-component"))]
+use super::{call_service_streaming, NativeTypedFrameStream};
 
 const BLOCK: &str = "wafer-run/llm";
 
@@ -183,100 +168,4 @@ pub async fn load_model_stream(
     )
     .await?;
     Ok(NativeTypedFrameStream::new(out, "llm load_model"))
-}
-
-// ===========================================================================
-// Streaming wrapper
-// ===========================================================================
-
-/// Stream wrapper that decodes each `Chunk` frame as `T` via [`codec::decode`].
-///
-/// Used by services whose response is a sequence of independently encoded
-/// values with no header frame (LLM `chat`, `load_model`). Non-`Complete`
-/// terminals are translated into a single `Err` item, after which the stream
-/// returns `None`.
-#[cfg(not(feature = "wasm-component"))]
-#[must_use = "response stream must be consumed"]
-pub struct NativeTypedFrameStream<T> {
-    inner: OutputStream,
-    context: &'static str,
-    finished: bool,
-    _frame: PhantomData<T>,
-}
-
-#[cfg(not(feature = "wasm-component"))]
-impl<T> NativeTypedFrameStream<T> {
-    fn new(inner: OutputStream, context: &'static str) -> Self {
-        Self {
-            inner,
-            context,
-            finished: false,
-            _frame: PhantomData,
-        }
-    }
-}
-
-#[cfg(not(feature = "wasm-component"))]
-impl<T> Stream for NativeTypedFrameStream<T>
-where
-    T: serde::de::DeserializeOwned + Unpin,
-{
-    type Item = Result<T, WaferError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        if self.finished {
-            return Poll::Ready(None);
-        }
-        loop {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => {
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
-                        format!("{}: stream ended without terminal event", self.context),
-                    ))));
-                }
-                Poll::Ready(Some(StreamEvent::Chunk(bytes))) => {
-                    let ctx_label = self.context;
-                    return Poll::Ready(Some(codec::decode::<T>(&bytes).map_err(|e| {
-                        WaferError::new(e.code, format!("{ctx_label} frame decode: {}", e.message))
-                    })));
-                }
-                Poll::Ready(Some(StreamEvent::Meta(_))) => continue,
-                Poll::Ready(Some(StreamEvent::Complete { .. })) => {
-                    self.finished = true;
-                    return Poll::Ready(None);
-                }
-                Poll::Ready(Some(StreamEvent::Error(e))) => {
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(*e)));
-                }
-                Poll::Ready(Some(StreamEvent::Drop)) => {
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
-                        format!("{}: handler returned Drop", self.context),
-                    ))));
-                }
-                Poll::Ready(Some(StreamEvent::Continue(msg))) => {
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
-                        format!(
-                            "{}: handler returned Continue (kind: {})",
-                            self.context, msg.kind
-                        ),
-                    ))));
-                }
-                Poll::Ready(Some(StreamEvent::Halt { .. })) => {
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
-                        format!("{}: handler returned Halt", self.context),
-                    ))));
-                }
-            }
-        }
-    }
 }

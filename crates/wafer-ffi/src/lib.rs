@@ -34,9 +34,12 @@ use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
 ///   the form `{"action":"respond|drop|error|continue|halt", ...}`.
-///   Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead
-///   of the `respond` action's `body` string — Halt may carry non-UTF-8 or
-///   empty bodies.
+///   Note: `halt` payloads always use `body_base64` (Base64-encoded bytes)
+///   instead of a `body` string — Halt may carry non-UTF-8 or empty bodies.
+///   A `respond` payload carries `body` (a UTF-8 string) when the body is
+///   valid UTF-8; when it is not, it carries `body_base64` (Base64-encoded
+///   bytes) instead so binary bodies are never collapsed to `""`. Exactly
+///   one of `body` / `body_base64` is present on a `respond`.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.
@@ -102,19 +105,34 @@ async fn output_to_json(output: wafer_run::OutputStream) -> String {
     use wafer_block::streams::output::TerminalNotResponse;
     match output.collect_buffered().await {
         Ok(buf) => {
-            let body_str = String::from_utf8(buf.body).unwrap_or_default();
             let meta_obj: serde_json::Value = buf
                 .meta
                 .iter()
                 .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
                 .collect::<serde_json::Map<_, _>>()
                 .into();
-            serde_json::json!({
-                "action": "respond",
-                "body": body_str,
-                "meta": meta_obj,
-            })
-            .to_string()
+            // Emit `body` for valid UTF-8 (the common case, human-readable
+            // wire shape); fall back to `body_base64` for non-UTF-8 bodies so
+            // binary responses are not silently collapsed to "". This mirrors
+            // the `halt` branch, which always base64-encodes.
+            match String::from_utf8(buf.body) {
+                Ok(body_str) => serde_json::json!({
+                    "action": "respond",
+                    "body": body_str,
+                    "meta": meta_obj,
+                })
+                .to_string(),
+                Err(e) => {
+                    use base64ct::{Base64, Encoding};
+                    let body_b64 = Base64::encode_string(e.as_bytes());
+                    serde_json::json!({
+                        "action": "respond",
+                        "body_base64": body_b64,
+                        "meta": meta_obj,
+                    })
+                    .to_string()
+                }
+            }
         }
         Err(TerminalNotResponse::Error(err)) => serde_json::json!({
             "action": "error",
@@ -398,8 +416,16 @@ pub unsafe extern "C" fn wafer_register(
         };
 
         // register_block / add_flow_json are sync — block_on isn't needed.
-        // We acquire the write lock blockingly because we're guaranteed to be
-        // on the C caller's thread (no tokio context expected).
+        // We acquire the write lock with `blocking_write`, which is a CALLER
+        // CONTRACT, not something this layer can enforce: `wafer_register`
+        // must be called from a non-tokio thread (e.g. the C caller's own
+        // thread), NOT from inside a `WaferDoneCb`, which may run on a thread
+        // owned by the internal tokio runtime (see the module-level docs on
+        // `WaferDoneCb`). `blocking_write` PANICS if invoked within a tokio
+        // runtime context; if a consumer violates the contract, the
+        // surrounding `catch_unwind` converts that panic into a JSON error
+        // string ("panic in wafer_register") rather than unwinding across the
+        // FFI boundary.
         let mut inner = runtime.inner.blocking_write();
         if path_str.ends_with(".wasm") {
             match WasmiBlock::load(path_str) {
@@ -562,5 +588,64 @@ pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drop(CString::from_raw(s));
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wafer_block::core_types::MetaEntry;
+    use wafer_run::OutputStream;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn respond_utf8_body_uses_body_field() {
+        let out = OutputStream::respond(b"hello".to_vec());
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(json["action"], "respond");
+        assert_eq!(json["body"], "hello");
+        assert!(json.get("body_base64").is_none());
+    }
+
+    #[tokio::test]
+    async fn respond_non_utf8_body_uses_body_base64_not_empty_string() {
+        // Lone 0xFF is invalid UTF-8 — the old `unwrap_or_default()` collapsed
+        // this to `body: ""` (silent data loss). It must now round-trip as
+        // base64 and not appear under `body`.
+        let bytes = vec![0xFF, 0x00, 0x42];
+        let out = OutputStream::respond(bytes.clone());
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(json["action"], "respond");
+        assert!(
+            json.get("body").is_none(),
+            "binary body must not be under `body`"
+        );
+        use base64ct::{Base64, Encoding};
+        let b64 = json["body_base64"].as_str().expect("body_base64 present");
+        assert_eq!(Base64::decode_vec(b64).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn respond_empty_body_is_empty_string_not_base64() {
+        // A genuinely-empty UTF-8 body stays `body: ""` — distinguishable from
+        // a non-UTF-8 body, which would use `body_base64`.
+        let out = OutputStream::respond(Vec::new());
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(json["action"], "respond");
+        assert_eq!(json["body"], "");
+        assert!(json.get("body_base64").is_none());
+    }
+
+    #[tokio::test]
+    async fn respond_preserves_meta() {
+        let out = OutputStream::respond_with_meta(
+            b"ok".to_vec(),
+            vec![MetaEntry {
+                key: "x-test".into(),
+                value: "1".into(),
+            }],
+        );
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(json["meta"]["x-test"], "1");
     }
 }

@@ -478,7 +478,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "wasi_snapshot_preview1",
             "proc_exit",
             |_caller: Caller<WasmiHostState>, code: i32| -> Result<(), WasmiError> {
-                Err(WasmiError::new(format!("guest called proc_exit({code})")))
+                Err(WasmiError::host(ProcExitTrap { code }))
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking proc_exit stub: {e}")))?;

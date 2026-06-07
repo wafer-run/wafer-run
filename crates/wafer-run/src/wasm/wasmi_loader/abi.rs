@@ -170,6 +170,26 @@ impl std::fmt::Display for LoadAssetTrap {
 
 impl wasmi::core::HostError for LoadAssetTrap {}
 
+/// Marker trap raised by the `proc_exit(code)` WASI stub. TinyGo's `_start`
+/// terminates by calling `proc_exit`, so this is the expected end-of-`_start`
+/// signal. The instantiation path downcasts the wasmi error to this marker via
+/// [`wasmi::Error::downcast_ref`] — `code == 0` is a clean shutdown; a non-zero
+/// `code` is surfaced as a guest error. Carrying the typed code (rather than
+/// keying off the trap's `Display` string) is what makes that decision robust.
+#[derive(Debug)]
+pub(super) struct ProcExitTrap {
+    /// The exit status the guest passed to `proc_exit`.
+    pub(super) code: i32,
+}
+
+impl std::fmt::Display for ProcExitTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest called proc_exit({})", self.code)
+    }
+}
+
+impl wasmi::core::HostError for ProcExitTrap {}
+
 // ---------------------------------------------------------------------------
 // Negative-i64 / negative-i32 ErrorCode sentinels for the streaming ABI
 // ---------------------------------------------------------------------------

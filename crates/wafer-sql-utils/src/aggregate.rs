@@ -4,7 +4,7 @@ use wafer_block::db::{Filter, SortField};
 use crate::{
     ident::DynCol,
     query::{apply_order, build_condition},
-    Backend,
+    Backend, SqlBuildError,
 };
 
 /// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
@@ -64,25 +64,32 @@ pub fn build_sum(
 /// date_field < end`); the helper does not synthesize the window itself
 /// so callers can layer extra predicates (e.g. `status = 'ERROR'`)
 /// without re-implementing it.
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] if `date_field` is not a plain
+/// identifier (`[A-Za-z0-9_]`). It is interpolated into the raw `date(...)` /
+/// `to_char(...)` expression text rather than parameter-bound, so this is a
+/// fail-closed guard, not a passthrough: we reject rather than splice an
+/// identifier that could break out of the expression.
 pub fn build_daily_count(
     table: &str,
     date_field: &str,
     filters: &[Filter],
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     use sea_query::SimpleExpr;
 
     // The column reference is interpolated into the raw expression text via
-    // ANSI double-quoting (works for both SQLite and Postgres). `date_field`
-    // is always an internal constant from caller code — no user input — so
-    // we don't need parameterization here. Defensive guard rejects anything
-    // that isn't a plain identifier just in case.
-    assert!(
-        date_field
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
-        "date_field must be a plain identifier; got {date_field:?}"
-    );
+    // ANSI double-quoting (works for both SQLite and Postgres), so it cannot be
+    // parameter-bound. Reject anything that isn't a plain identifier rather
+    // than risk it escaping the surrounding expression.
+    if !date_field
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(SqlBuildError::InvalidIdentifier {
+            value: date_field.to_string(),
+        });
+    }
     let date_expr_sql: String = match backend {
         Backend::Sqlite => format!("date(\"{date_field}\")"),
         Backend::Postgres => {
@@ -105,7 +112,7 @@ pub fn build_daily_count(
     query.order_by(Alias::new("day"), sea_query::Order::Asc);
 
     let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    Ok(crate::Statement::new(sql, values, table))
 }
 
 /// Build SELECT AVG({field}) FROM {table} WHERE {filters}.
@@ -332,7 +339,7 @@ mod tests {
             operator: FilterOp::GreaterEqual,
             value: serde_json::json!("2026-04-01"),
         }];
-        let stmt = build_daily_count("users", "created_at", &filters, Backend::Sqlite);
+        let stmt = build_daily_count("users", "created_at", &filters, Backend::Sqlite).unwrap();
         let sql = stmt.sql;
         let vals = stmt.values;
         eprintln!("SQL: {sql}");
@@ -347,12 +354,27 @@ mod tests {
 
     #[test]
     fn test_build_daily_count_postgres() {
-        let stmt = build_daily_count("users", "created_at", &[], Backend::Postgres);
+        let stmt = build_daily_count("users", "created_at", &[], Backend::Postgres).unwrap();
         let sql = stmt.sql;
         assert!(sql.contains("to_char"));
         assert!(sql.contains("CAST"));
         assert!(sql.contains("GROUP BY"));
         assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn build_daily_count_rejects_non_identifier_date_field() {
+        // `date_field` is interpolated into raw expression text, so a value
+        // carrying anything outside [A-Za-z0-9_] must be rejected rather than
+        // spliced — otherwise it could break out of the `date(...)` expression.
+        let err = build_daily_count("events", "created_at\") OR 1=1 --", &[], Backend::Sqlite)
+            .expect_err("non-identifier date_field should be rejected");
+        assert_eq!(
+            err,
+            SqlBuildError::InvalidIdentifier {
+                value: "created_at\") OR 1=1 --".to_string()
+            }
+        );
     }
 
     #[test]
