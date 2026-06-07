@@ -129,7 +129,6 @@ manual_let_else = "warn"
 # Promoted from clippy::pedantic/nursery because they map directly to the Apollo
 # Rust best-practices handbook (ch1 idioms, ch1.1 borrow, ch9 lock scope).
 map_unwrap_or = "warn"
-option_if_let_else = "warn"
 needless_pass_by_value = "warn"
 significant_drop_tightening = "warn"
 

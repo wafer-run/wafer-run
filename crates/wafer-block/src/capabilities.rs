@@ -233,10 +233,6 @@ impl BlockCapabilities {
     ///
     /// The `apply_overrides_empty_set_narrows_to_deny_all` unit test locks in
     /// this behavior.
-    #[expect(
-        clippy::option_if_let_else,
-        reason = "symmetric match over Option per field reads clearer than map_or_else; handbook ch1.3 prefers match for inner-type matching"
-    )]
     pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
         let headers = match &o.headers {
             Some(h) => HeaderPolicy {

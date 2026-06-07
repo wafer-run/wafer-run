@@ -103,10 +103,6 @@ impl LlmService for MultiBackendLlmService {
         model_id: &str,
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LoadProgress, LlmError>> {
-        #[expect(
-            clippy::option_if_let_else,
-            reason = "None arm is multi-statement (owns backend_id into an async stream); match reads clearer than map_or_else"
-        )]
         match self.find(backend_id) {
             Some(svc) => svc.load_model(backend_id, model_id, cancel),
             None => {

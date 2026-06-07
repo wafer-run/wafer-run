@@ -619,7 +619,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let instance_mode_str = args
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
-    let _requires = args.get_str_list("requires");
+    let requires = args.get_str_list("requires");
 
     let struct_ty = &input.self_ty;
 
@@ -660,10 +660,6 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let handle_block = &handle_fn.block;
     let handle_attrs = &handle_fn.attrs;
 
-    #[expect(
-        clippy::option_if_let_else,
-        reason = "Some arm binds sig/block/attrs before building the quote; a closure form would be less readable"
-    )]
     let lifecycle_impl = match &lifecycle_fn {
         Some(lf) => {
             let sig = &lf.sig;
@@ -692,10 +688,6 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     };
 
     // Build the capabilities expression for `__wafer_info`.
-    #[expect(
-        clippy::option_if_let_else,
-        reason = "Some arm builds a large multi-field quote! token stream; map_or_else would be far less readable"
-    )]
     let capabilities_expr = if let Some(c) = &capabilities_args {
         let crypto = c.crypto;
         let network = c.network;
@@ -749,11 +741,20 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { None::<wafer_block::BlockCapabilities> }
     };
 
+    // Build the optional `requires` expression for `block_info()`. The
+    // `requires = [...]` attribute declares which other blocks this block may
+    // `call_block`; the runtime enforces it as an access-control gate (an empty
+    // list means "unrestricted"), so a declared-but-unwired list would silently
+    // disable the restriction.
+    let requires_expr = if requires.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            info = info.requires(vec![ #( #requires.to_string() ),* ]);
+        }
+    };
+
     // Build the optional SkillTool expression for `block_info()`.
-    #[expect(
-        clippy::option_if_let_else,
-        reason = "Some arm builds a quote! token stream; map_or_else would be less readable"
-    )]
     let skill_tool_expr = if let Some(skill) = &skill_args {
         let description = &skill.description;
         let parameters_json = &skill.parameters;
@@ -791,6 +792,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 if let Some(c) = caps {
                     info = info.capabilities(c);
                 }
+                #requires_expr
                 #skill_tool_expr
                 info
             }

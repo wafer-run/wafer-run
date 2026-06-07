@@ -238,13 +238,6 @@ impl Block for CorsBlock {
             //   - array of strings -> join with `,` (matches the internal
             //     split-on-comma representation)
             //   - anything else -> warn + fail closed (SEC-087)
-            #[expect(
-                clippy::option_if_let_else,
-                reason = "the Ok/Err match deserializes config and emits tracing::warn! \
-                          on every fail-closed fallback path; folding it into map_or/\
-                          map_or_else would bury those warnings inside closures and \
-                          hurt readability of the SEC-087 fail-closed logic"
-            )]
             let cfg_origins = if event.data.is_empty() {
                 None
             } else {

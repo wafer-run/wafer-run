@@ -98,6 +98,15 @@ impl ObservabilityBus {
         self.flow_end_handlers.write().push(Arc::new(h));
     }
 
+    /// Returns `true` if any block-level (start or end) handler is registered.
+    ///
+    /// Callers use this to skip building a per-step [`ObservabilityContext`] —
+    /// in particular cloning the [`Message`] into it — when no subscriber would
+    /// observe it. Observability is opt-in, so the common case is no handlers.
+    pub(crate) fn any_block_handlers(&self) -> bool {
+        !self.block_start_handlers.read().is_empty() || !self.block_end_handlers.read().is_empty()
+    }
+
     pub(crate) fn fire_block_start(&self, ctx: &ObservabilityContext) {
         let handlers = self.block_start_handlers.read();
         for h in handlers.iter() {

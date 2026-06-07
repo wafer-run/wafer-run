@@ -37,10 +37,6 @@ pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
             FilterOp::LessThan => Expr::col(col).lt(json_to_sea_value(&filter.value)),
             FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
             FilterOp::Like => {
-                #[expect(
-                    clippy::option_if_let_else,
-                    reason = "the else branch documents the fail-safe always-false predicate; if let keeps that reasoning readable"
-                )]
                 if let Some(pattern) = filter.value.as_str() {
                     Expr::col(col).like(pattern.to_string())
                 } else {

@@ -183,10 +183,6 @@ impl Wafer {
                     .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
 
                 // Strip + parse the `capabilities` subkey from block config.
-                #[expect(
-                    clippy::option_if_let_else,
-                    reason = "nested if-let with the obj.remove() side effect and inner match reads far clearer than map_or_else"
-                )]
                 let config_overrides = if let Some(cfg) =
                     self.registration.block_configs.get_mut(name)
                 {
