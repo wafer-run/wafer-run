@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::LifecycleType;
 
-    fn config_from(json: serde_json::Value) -> BlockConfig {
+    fn config_from(json: &serde_json::Value) -> BlockConfig {
         BlockConfig::from_event(&LifecycleEvent {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(&json).expect("serialize test config"),
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn str_or_falls_back_on_missing_empty_or_non_string() {
-        let cfg = config_from(serde_json::json!({
+        let cfg = config_from(&serde_json::json!({
             "set": "value",
             "empty": "",
             "number": 7,
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn bool_accepts_json_bool_and_string_forms() {
-        let cfg = config_from(serde_json::json!({
+        let cfg = config_from(&serde_json::json!({
             "typed_true": true,
             "typed_false": false,
             "string_true": "true",
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn str_array_keeps_strings_and_drops_other_entries() {
-        let cfg = config_from(serde_json::json!({
+        let cfg = config_from(&serde_json::json!({
             "roles": ["admin", "developer"],
             "mixed": [42, "kept", true],
             "empty": [],
