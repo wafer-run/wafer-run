@@ -6306,6 +6306,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
  "wafer-block",
  "wafer-block-macro",
  "wafer-schema",

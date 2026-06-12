@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 use base64ct::{Base64, Encoding};
 use rusqlite::{types::Value as SqlValue, Connection, Row};
-use wafer_block::db::{Filter, ListOptions, SortField};
+use wafer_block::db::{Filter, ListOptions};
 use wafer_block_macro::wafer_async_trait;
 #[cfg(test)]
 use wafer_core::interfaces::database::service::{pk, DataType};
@@ -10,7 +10,7 @@ use wafer_core::interfaces::database::{
     exec::DbExec,
     service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
-use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
+use wafer_sql_utils::{ddl, introspect, Backend};
 
 /// SQLite implementation of the DatabaseService.
 pub struct SQLiteDatabaseService {
@@ -111,49 +111,30 @@ fn json_to_sql_value(v: &serde_json::Value) -> SqlValue {
     }
 }
 
-/// For each key in `data` that isn't already a column on `table`, run
-/// `ALTER TABLE ... ADD COLUMN ... TEXT`. Mirrors the lazy column-add
-/// behaviour postgres + D1 keep on the `create` path — the table itself
-/// must already exist via the block's migration files, but new columns
-/// supplied through `data` are added on demand.
-fn ensure_columns_from_data(
-    db: &Connection,
-    table: &str,
-    data: &HashMap<String, serde_json::Value>,
-) -> Result<(), DatabaseError> {
-    let safe_table = sanitize_ident(table);
-    let existing = table_columns(db, &safe_table)?;
-    for key in data.keys() {
-        let safe_key = sanitize_ident(key);
-        if !existing.contains(&safe_key.to_lowercase()) {
-            let alter = ddl::build_add_text_column(&safe_table, &safe_key, Backend::Sqlite);
-            db.execute_batch(&alter.sql)
-                .map_err(|e| DatabaseError::Internal(format!("add column {key}: {e}")))?;
-        }
-    }
-    Ok(())
-}
-
 /// Get list of column names for an existing table.
 ///
-/// Propagates real DB errors as [`DatabaseError`] so callers can tell a
-/// transient failure apart from an empty/absent table — mirrors the Postgres
-/// sibling `get_columns`. A row that fails to decode is a real error too (the
-/// `PRAGMA table_info` shape is fixed), so we surface it rather than silently
-/// dropping the column from the set.
+/// Synchronous sibling of the shared `DbExec::get_columns` default, for
+/// callers that already hold the connection lock (`ensure_schema_table`).
+/// Propagates real DB errors as [`DatabaseError`]; a row that fails to decode
+/// is a real error too (the introspection shape is fixed), so we surface it
+/// rather than silently dropping the column from the set.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseError> {
-    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite)
-        .map_err(|e| DatabaseError::Internal(format!("table_info {table}: {e}")))?;
+    let (sql, params) = introspect::build_list_columns(table, Backend::Sqlite);
+    let bound: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+    let bound_refs: Vec<&dyn rusqlite::types::ToSql> = bound
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
     let mut stmt = db
         .prepare(&sql)
-        .map_err(|e| DatabaseError::Internal(format!("prepare table_info {table}: {e}")))?;
+        .map_err(|e| DatabaseError::Internal(format!("prepare list_columns {table}: {e}")))?;
     let mut cols = Vec::new();
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| DatabaseError::Internal(format!("query table_info {table}: {e}")))?;
+        .query_map(bound_refs.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| DatabaseError::Internal(format!("query list_columns {table}: {e}")))?;
     for row in rows {
         let name = row.map_err(|e| {
-            DatabaseError::Internal(format!("read table_info row for {table}: {e}"))
+            DatabaseError::Internal(format!("read list_columns row for {table}: {e}"))
         })?;
         cols.push(name.to_lowercase());
     }
@@ -182,48 +163,6 @@ fn has_integer_pk(db: &Connection, table: &str) -> bool {
         }
     }
     false
-}
-
-/// Check if a table exists in the database.
-fn table_exists(db: &Connection, table: &str) -> bool {
-    db.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [table],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-        > 0
-}
-
-/// Ensure that columns referenced in filters and sorts exist on the table.
-/// Adds missing columns as TEXT (they'll default to NULL).
-fn ensure_columns_for_query(
-    db: &Connection,
-    table: &str,
-    filters: &[Filter],
-    sort: &[SortField],
-) -> Result<(), DatabaseError> {
-    let safe_table = sanitize_ident(table);
-    let existing = table_columns(db, &safe_table)?;
-    for f in filters {
-        let safe_field = sanitize_ident(&f.field);
-        if !existing.contains(&safe_field.to_lowercase()) {
-            let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
-            db.execute_batch(&alter.sql).map_err(|e| {
-                DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
-            })?;
-        }
-    }
-    for s in sort {
-        let safe_field = sanitize_ident(&s.field);
-        if !existing.contains(&safe_field.to_lowercase()) {
-            let alter = ddl::build_add_text_column(&safe_table, &safe_field, Backend::Sqlite);
-            db.execute_batch(&alter.sql).map_err(|e| {
-                DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
-            })?;
-        }
-    }
-    Ok(())
 }
 
 #[wafer_async_trait]
@@ -351,24 +290,39 @@ impl DbExec for SQLiteDatabaseService {
     }
 
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        Ok(table_exists(&db, table))
+        let (sql, params) = introspect::build_table_exists(table, Backend::Sqlite);
+        Ok(self.run_scalar_i64(&sql, &params).await? > 0)
     }
 
-    async fn ensure_query_columns(
+    /// Lock-spanning insert: `last_insert_rowid()` is only meaningful while no
+    /// other insert can run on the connection, so the guard covers both calls.
+    async fn run_insert(
         &self,
-        table: &str,
-        filters: &[Filter],
-        sort: &[SortField],
-    ) -> Result<(), DatabaseError> {
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Option<i64>, DatabaseError> {
         let db = self
             .db
             .lock()
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        ensure_columns_for_query(&db, table, filters, sort)
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        db.execute(sql, query_params.as_slice())
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let rowid = db.last_insert_rowid();
+        drop(db);
+        Ok(Some(rowid))
+    }
+
+    /// Tables with `INTEGER PRIMARY KEY` autoincrement generate their own id;
+    /// `create` must not synthesize a UUID for them.
+    async fn table_autogenerates_id(&self, table: &str) -> bool {
+        self.db
+            .lock()
+            .map_or(false, |db| has_integer_pk(&db, table))
     }
 }
 
@@ -391,85 +345,7 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let table = sanitize_ident(collection);
-
-        let mut data = data;
-
-        // Auto-generate ID if not provided, but only for string/UUID PKs.
-        // Tables with INTEGER PRIMARY KEY AUTOINCREMENT should not get a
-        // UUID — let SQLite handle the autoincrement.
-        if !data.contains_key("id") && !has_integer_pk(&db, &table) {
-            data.insert(
-                "id".to_string(),
-                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
-            );
-        }
-
-        // Auto-set timestamps
-        let now = chrono::Utc::now().to_rfc3339();
-        if !data.contains_key("created_at") {
-            data.insert(
-                "created_at".to_string(),
-                serde_json::Value::String(now.clone()),
-            );
-        }
-        if !data.contains_key("updated_at") {
-            data.insert("updated_at".to_string(), serde_json::Value::String(now));
-        }
-
-        // Ensure any new columns exist (matches the postgres + D1 `create`
-        // paths). Table creation itself is the block migration's job. A failure
-        // here is a real DDL error (e.g. ALTER TABLE rejected) — propagate it
-        // rather than letting the subsequent INSERT fail with a confusing
-        // "no such column".
-        ensure_columns_from_data(&db, &table, &data)?;
-
-        // Sorted-key iteration so the generated INSERT is stable across
-        // process starts. HashMap order is randomized by RandomState, which
-        // would otherwise produce N permutations of the same INSERT — each
-        // a distinct cached prepared statement.
-        let mut columns: Vec<&String> = data.keys().collect();
-        columns.sort();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
-        let values: Vec<SqlValue> = columns
-            .iter()
-            .map(|k| json_to_sql_value(&data[*k]))
-            .collect();
-
-        let safe_col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table,
-            safe_col_names.join(", "),
-            placeholders.join(", ")
-        );
-
-        let params: Vec<&dyn rusqlite::types::ToSql> = values
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        db.execute(&sql, params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        let id = match data.get("id") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => {
-                // For autoincrement tables, retrieve the generated id
-                let rowid = db.last_insert_rowid();
-                let id_str = rowid.to_string();
-                data.insert("id".to_string(), serde_json::json!(rowid));
-                id_str
-            }
-        };
-        drop(db);
-
-        Ok(Record { id, data })
+        DbExec::create(self, collection, data).await
     }
 
     async fn update(
@@ -478,66 +354,7 @@ impl DatabaseService for SQLiteDatabaseService {
         id: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        {
-            let db = self
-                .db
-                .lock()
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-            let table = sanitize_ident(collection);
-
-            let mut data = data;
-
-            // Auto-update timestamp
-            if !data.contains_key("updated_at") {
-                data.insert(
-                    "updated_at".to_string(),
-                    serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-                );
-            }
-
-            // Ensure any new columns exist before the UPDATE references them —
-            // matches the postgres `update` path. A failure is a real DDL error
-            // and must propagate, not be swallowed.
-            ensure_columns_from_data(&db, &table, &data)?;
-
-            // Sorted-key iteration so the generated SET clause is stable —
-            // see `create()` above for the rationale.
-            let mut keys: Vec<&String> = data.keys().collect();
-            keys.sort();
-            let set_clauses: Vec<String> = keys
-                .iter()
-                .enumerate()
-                .map(|(i, k)| format!("{} = ?{}", sanitize_ident(k), i + 1))
-                .collect();
-
-            let mut values: Vec<SqlValue> =
-                keys.iter().map(|k| json_to_sql_value(&data[*k])).collect();
-            values.push(SqlValue::Text(id.to_string()));
-
-            let sql = format!(
-                "UPDATE {} SET {} WHERE id = ?{}",
-                table,
-                set_clauses.join(", "),
-                values.len()
-            );
-
-            let params: Vec<&dyn rusqlite::types::ToSql> = values
-                .iter()
-                .map(|v| v as &dyn rusqlite::types::ToSql)
-                .collect();
-
-            let rows = db
-                .execute(&sql, params.as_slice())
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-            drop(db);
-
-            if rows == 0 {
-                return Err(DatabaseError::NotFound);
-            }
-        }
-
-        // Fetch the updated record
-        DatabaseService::get(self, collection, id).await
+        DbExec::update(self, collection, id, data).await
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
@@ -578,14 +395,7 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(());
-        }
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await?;
-        Ok(())
+        DbExec::delete_where(self, collection, filters).await
     }
 
     async fn delete_where_count(
@@ -593,13 +403,7 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(0);
-        }
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Sqlite);
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::delete_where_count(self, collection, filters).await
     }
 
     async fn take_where(
@@ -607,14 +411,7 @@ impl DatabaseService for SQLiteDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(vec![]);
-        }
-        let stmt =
-            wafer_sql_utils::query::build_delete_where_returning(&table, filters, Backend::Sqlite);
-        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::take_where(self, collection, filters).await
     }
 
     async fn update_where(
@@ -623,28 +420,7 @@ impl DatabaseService for SQLiteDatabaseService {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Err(DatabaseError::NotFound);
-        }
-        let mut data = data;
-        if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-            );
-        }
-        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
-        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let stmt = wafer_sql_utils::query::build_update_where(
-            &table,
-            &data_pairs,
-            filters,
-            Backend::Sqlite,
-        );
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await?;
-        Ok(())
+        DbExec::update_where(self, collection, filters, data).await
     }
 
     async fn increment_field_where(
@@ -654,19 +430,7 @@ impl DatabaseService for SQLiteDatabaseService {
         delta: i64,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(0);
-        }
-        let stmt = wafer_sql_utils::query::build_increment_field_where(
-            &table,
-            col,
-            delta,
-            filters,
-            Backend::Sqlite,
-        );
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::increment_field_where(self, collection, col, delta, filters).await
     }
 
     // --- Schema management ---
@@ -706,15 +470,11 @@ impl DatabaseService for SQLiteDatabaseService {
         }
 
         // Create indexes for columns with foreign keys
-        for col in &table.columns {
-            if col.references.is_some() {
-                let tbl = sanitize_ident(&table.name);
-                let c = sanitize_ident(&col.name);
-                let idx_name = format!("idx_{tbl}_{c}");
-                let sql = format!("CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({c})");
-                db.execute_batch(&sql)
-                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
-            }
+        let fk_stmts = ddl::build_fk_indexes(table, Backend::Sqlite)
+            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
+        for stmt in fk_stmts {
+            db.execute_batch(&stmt.sql)
+                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
         }
         drop(db);
 
@@ -741,6 +501,7 @@ impl DatabaseService for SQLiteDatabaseService {
 #[cfg(test)]
 mod tests {
     use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+    use wafer_sql_utils::value::sea_values_to_json;
 
     use super::*;
 
@@ -1042,7 +803,9 @@ mod tests {
                     data.insert(k, v);
                 }
             }
-            svc.create(collection, data).await.unwrap();
+            DatabaseService::create(svc, collection, data)
+                .await
+                .unwrap();
         }
     }
 
@@ -1066,7 +829,9 @@ mod tests {
             value: serde_json::json!("active"),
         }];
 
-        let count = svc.delete_where_count("items", &filters).await.unwrap();
+        let count = DatabaseService::delete_where_count(&svc, "items", &filters)
+            .await
+            .unwrap();
         assert_eq!(count, 2, "should have deleted exactly 2 active rows");
 
         // Remaining row is the inactive one
@@ -1090,7 +855,9 @@ mod tests {
             value: serde_json::json!("nonexistent"),
         }];
 
-        let count = svc.delete_where_count("items", &filters).await.unwrap();
+        let count = DatabaseService::delete_where_count(&svc, "items", &filters)
+            .await
+            .unwrap();
         assert_eq!(count, 0);
 
         // Row still exists
@@ -1106,8 +873,7 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let count = svc
-            .delete_where_count("no_such_table", &filters)
+        let count = DatabaseService::delete_where_count(&svc, "no_such_table", &filters)
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -1133,7 +899,9 @@ mod tests {
             value: serde_json::json!(false),
         }];
 
-        let taken = svc.take_where("codes", &filters).await.unwrap();
+        let taken = DatabaseService::take_where(&svc, "codes", &filters)
+            .await
+            .unwrap();
         assert_eq!(taken.len(), 2, "should have taken 2 unused codes");
 
         // Verify the rows are actually deleted
@@ -1157,7 +925,9 @@ mod tests {
             value: serde_json::json!(false),
         }];
 
-        let taken = svc.take_where("codes", &filters).await.unwrap();
+        let taken = DatabaseService::take_where(&svc, "codes", &filters)
+            .await
+            .unwrap();
         assert!(taken.is_empty());
 
         // Original row still present
@@ -1173,7 +943,9 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("abc"),
         }];
-        let taken = svc.take_where("no_such_table", &filters).await.unwrap();
+        let taken = DatabaseService::take_where(&svc, "no_such_table", &filters)
+            .await
+            .unwrap();
         assert!(taken.is_empty());
     }
 
@@ -1199,7 +971,7 @@ mod tests {
             let mut row = std::collections::HashMap::new();
             row.insert("id".into(), serde_json::json!(id));
             row.insert("access_count".into(), serde_json::json!(0));
-            svc.create("shares", row).await.unwrap();
+            DatabaseService::create(&svc, "shares", row).await.unwrap();
         }
 
         // CAS-style bump on a single id with a max-cap predicate (the share.rs
@@ -1216,10 +988,10 @@ mod tests {
                 value: serde_json::json!(5_i64),
             },
         ];
-        let rows = svc
-            .increment_field_where("shares", "access_count", 1, &filters)
-            .await
-            .unwrap();
+        let rows =
+            DatabaseService::increment_field_where(&svc, "shares", "access_count", 1, &filters)
+                .await
+                .unwrap();
         assert_eq!(rows, 1, "exactly one row should match");
 
         let r = DatabaseService::get(&svc, "shares", "a").await.unwrap();
@@ -1236,11 +1008,150 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("nope"),
         }];
-        let rows = svc
-            .increment_field_where("no_such_table", "access_count", 1, &filters)
+        let rows = DatabaseService::increment_field_where(
+            &svc,
+            "no_such_table",
+            "access_count",
+            1,
+            &filters,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lazy column-add on filtered writes (sqlite/postgres divergence resolved
+    // deliberately: both backends now lazily add missing filter/data columns
+    // on the *_where family, matching the documented lazy column-add design;
+    // previously SQLite errored with "no such column").
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_where_lazily_adds_missing_filter_column() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "items", vec![serde_json::json!({"name": "alpha"})]).await;
+
+        // `archived` is not in the schema: the column is lazily added (NULL),
+        // the filter matches nothing, and no error surfaces.
+        let filters = vec![Filter {
+            field: "archived".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("yes"),
+        }];
+        let count = DatabaseService::delete_where_count(&svc, "items", &filters)
+            .await
+            .expect("missing filter column must be lazily added, not error");
+        assert_eq!(count, 0);
+
+        // The row survives and the column now exists (NULL on the old row).
+        let remaining = DatabaseService::list(&svc, "items", &ListOptions::default())
             .await
             .unwrap();
-        assert_eq!(rows, 0);
+        assert_eq!(remaining.records.len(), 1);
+        assert_eq!(
+            remaining.records[0].data.get("archived"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_where_lazily_adds_missing_data_and_filter_columns() {
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "items",
+            vec![
+                serde_json::json!({"name": "alpha"}),
+                serde_json::json!({"name": "beta"}),
+            ],
+        )
+        .await;
+
+        // Neither `flag` (SET) nor `category` (WHERE) exists yet.
+        let mut patch = std::collections::HashMap::new();
+        patch.insert("flag".to_string(), serde_json::json!("on"));
+        let filters = vec![Filter {
+            field: "category".to_string(),
+            operator: FilterOp::IsNull,
+            value: serde_json::Value::Null,
+        }];
+        DatabaseService::update_where(&svc, "items", &filters, patch)
+            .await
+            .expect("missing SET/filter columns must be lazily added, not error");
+
+        // Both rows match (category IS NULL after the lazy add) and got the flag.
+        let rows = DatabaseService::list(&svc, "items", &ListOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(rows.records.len(), 2);
+        for r in &rows.records {
+            assert_eq!(r.data["flag"], serde_json::json!("on"));
+        }
+    }
+
+    #[tokio::test]
+    async fn take_where_lazily_adds_missing_filter_column() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "codes", vec![serde_json::json!({"code": "abc"})]).await;
+        let filters = vec![Filter {
+            field: "claimed_by".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("nobody"),
+        }];
+        let taken = DatabaseService::take_where(&svc, "codes", &filters)
+            .await
+            .expect("missing filter column must be lazily added, not error");
+        assert!(taken.is_empty());
+        let remaining = DatabaseService::count(&svc, "codes", &[]).await.unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn create_stores_objects_as_json_and_roundtrips() {
+        // Objects flow through the shared create default →
+        // wafer_sql_utils::query::build_insert → Value::Json → TEXT bind on
+        // SQLite; the read path parses JSON-looking text back into a value.
+        let svc = make_test_svc();
+        seed_rows(&svc, "items", vec![serde_json::json!({"name": "seed"})]).await;
+        let mut data = std::collections::HashMap::new();
+        data.insert("name".to_string(), serde_json::json!("with-meta"));
+        data.insert("meta".to_string(), serde_json::json!({"a": 1, "b": [true]}));
+        let created = DatabaseService::create(&svc, "items", data).await.unwrap();
+        assert!(!created.id.is_empty());
+
+        let reread = DatabaseService::get(&svc, "items", &created.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            reread.data["meta"],
+            serde_json::json!({"a": 1, "b": [true]})
+        );
+    }
+
+    #[tokio::test]
+    async fn create_on_integer_pk_table_returns_generated_rowid() {
+        // INTEGER PRIMARY KEY tables generate their own id: create() must not
+        // synthesize a UUID, and the rowid from the lock-spanning run_insert
+        // is folded into the returned record.
+        let svc = make_test_svc();
+        {
+            let db = svc.db.lock().unwrap();
+            db.execute_batch(
+                "CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+            )
+            .unwrap();
+        }
+        let mut data = std::collections::HashMap::new();
+        data.insert("name".to_string(), serde_json::json!("first"));
+        let created = DatabaseService::create(&svc, "counters", data)
+            .await
+            .unwrap();
+        assert_eq!(created.id, "1");
+        assert_eq!(created.data["id"], serde_json::json!(1));
+
+        let reread = DatabaseService::get(&svc, "counters", "1").await.unwrap();
+        assert_eq!(reread.data["name"], serde_json::json!("first"));
     }
 
     #[tokio::test]
