@@ -234,67 +234,60 @@ impl BlockCapabilities {
     /// The `apply_overrides_empty_set_narrows_to_deny_all` unit test locks in
     /// this behavior.
     pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
-        let headers = match &o.headers {
-            Some(h) => HeaderPolicy {
-                readable: match &h.readable {
-                    Some(r) => intersect_vec(&self.headers.readable, r),
-                    None => self.headers.readable.clone(),
-                },
-                writable: match &h.writable {
-                    Some(w) => intersect_vec(&self.headers.writable, w),
-                    None => self.headers.writable.clone(),
-                },
-                masked: match &h.masked {
-                    Some(m) => union_vec(&self.headers.masked, m),
-                    None => self.headers.masked.clone(),
-                },
-            },
-            None => self.headers.clone(),
-        };
-
+        let h = o.headers.as_ref();
         Self {
-            collections: match &o.collections {
-                Some(c) => intersect_wildcard_set(&self.collections, c),
-                None => self.collections.clone(),
+            collections: narrow(&self.collections, o.collections.as_ref(), |a, b| {
+                intersect_wildcard_set(a, b)
+            }),
+            raw_sql: narrow(&self.raw_sql, o.raw_sql.as_ref(), |a, b| *a && *b),
+            ddl: narrow(&self.ddl, o.ddl.as_ref(), |a, b| *a && *b),
+            storage_folders: narrow(&self.storage_folders, o.storage_folders.as_ref(), |a, b| {
+                intersect_wildcard_set(a, b)
+            }),
+            crypto: narrow(&self.crypto, o.crypto.as_ref(), |a, b| *a && *b),
+            network: narrow(&self.network, o.network.as_ref(), |a, b| *a && *b),
+            network_allow: narrow(&self.network_allow, o.network_allow.as_ref(), |a, b| {
+                intersect_vec(a, b)
+            }),
+            config: narrow(&self.config, o.config.as_ref(), |a, b| *a && *b),
+            config_keys: narrow(&self.config_keys, o.config_keys.as_ref(), |a, b| {
+                intersect_wildcard_set(a, b)
+            }),
+            callable_blocks: narrow(&self.callable_blocks, o.callable_blocks.as_ref(), |a, b| {
+                intersect_wildcard_set(a, b)
+            }),
+            headers: HeaderPolicy {
+                readable: narrow(
+                    &self.headers.readable,
+                    h.and_then(|h| h.readable.as_ref()),
+                    |a, b| intersect_vec(a, b),
+                ),
+                writable: narrow(
+                    &self.headers.writable,
+                    h.and_then(|h| h.writable.as_ref()),
+                    |a, b| intersect_vec(a, b),
+                ),
+                masked: narrow(
+                    &self.headers.masked,
+                    h.and_then(|h| h.masked.as_ref()),
+                    |a, b| union_vec(a, b),
+                ),
             },
-            raw_sql: match o.raw_sql {
-                Some(r) => self.raw_sql && r,
-                None => self.raw_sql,
-            },
-            ddl: match o.ddl {
-                Some(d) => self.ddl && d,
-                None => self.ddl,
-            },
-            storage_folders: match &o.storage_folders {
-                Some(s) => intersect_wildcard_set(&self.storage_folders, s),
-                None => self.storage_folders.clone(),
-            },
-            crypto: match o.crypto {
-                Some(c) => self.crypto && c,
-                None => self.crypto,
-            },
-            network: match o.network {
-                Some(n) => self.network && n,
-                None => self.network,
-            },
-            network_allow: match &o.network_allow {
-                Some(n) => intersect_vec(&self.network_allow, n),
-                None => self.network_allow.clone(),
-            },
-            config: match o.config {
-                Some(c) => self.config && c,
-                None => self.config,
-            },
-            config_keys: match &o.config_keys {
-                Some(c) => intersect_wildcard_set(&self.config_keys, c),
-                None => self.config_keys.clone(),
-            },
-            callable_blocks: match &o.callable_blocks {
-                Some(c) => intersect_wildcard_set(&self.callable_blocks, c),
-                None => self.callable_blocks.clone(),
-            },
-            headers,
         }
+    }
+}
+
+/// Apply a per-field combine rule only when the operator supplied an override.
+///
+/// `None` (field omitted from config) preserves `declared` exactly;
+/// `Some(o)` combines via the same rule function [`BlockCapabilities::intersect`]
+/// uses for that field — so each field's combination rule is named once here
+/// and once in `intersect`, with the rule body living in a single function
+/// (`intersect_wildcard_set` / `intersect_vec` / `union_vec` / bool AND).
+fn narrow<T: Clone, U>(declared: &T, ov: Option<&U>, combine: impl FnOnce(&T, &U) -> T) -> T {
+    match ov {
+        Some(o) => combine(declared, o),
+        None => declared.clone(),
     }
 }
 
