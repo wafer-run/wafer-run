@@ -22,6 +22,20 @@ use wafer_block::*;
 /// [`CorsBlock::handle`].
 const DEFAULT_MAX_AGE_SECONDS: u32 = 86_400;
 
+/// Default `Access-Control-Allow-Methods` value.
+///
+/// Single source of truth for the `allowed_methods` default: rendered into
+/// the `allowed_methods` [`ConfigVar`] and used as the per-request fallback
+/// in [`CorsBlock::handle`].
+const DEFAULT_ALLOWED_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
+
+/// Default `Access-Control-Allow-Headers` value.
+///
+/// Single source of truth for the `allowed_headers` default: rendered into
+/// the `allowed_headers` [`ConfigVar`] and used as the per-request fallback
+/// in [`CorsBlock::handle`].
+const DEFAULT_ALLOWED_HEADERS: &str = "Content-Type, Authorization, X-Requested-With";
+
 /// CorsBlock handles CORS preflight and sets CORS headers.
 ///
 /// # Configuration
@@ -50,8 +64,6 @@ pub struct CorsBlock {
     /// per-request context does not supply `allowed_origins`. Unset until
     /// Init parses a non-empty value (write-once).
     allowed_origins: OnceLock<String>,
-    allowed_methods: String,
-    allowed_headers: String,
 }
 
 impl Default for CorsBlock {
@@ -61,20 +73,16 @@ impl Default for CorsBlock {
 }
 
 impl CorsBlock {
-    /// Construct a `CorsBlock` with no allow-list resolved and the standard
-    /// header defaults (`GET, POST, PUT, PATCH, DELETE, OPTIONS` for
-    /// `Access-Control-Allow-Methods`; `Content-Type, Authorization,
-    /// X-Requested-With` for `Access-Control-Allow-Headers`). `Access-Control-
-    /// Max-Age` defaults to [`DEFAULT_MAX_AGE_SECONDS`] and is overridable via
-    /// the `max_age` config. The allow-list stays unset — and the block
-    /// therefore fails closed on cross-origin requests — until
-    /// `lifecycle(Init)` parses block config or per-request `ctx.config_get`
-    /// supplies one. See SEC-087 for the rationale.
+    /// Construct a `CorsBlock` with no allow-list resolved. Methods, headers,
+    /// and max-age fall back to [`DEFAULT_ALLOWED_METHODS`],
+    /// [`DEFAULT_ALLOWED_HEADERS`], and [`DEFAULT_MAX_AGE_SECONDS`] unless
+    /// overridden per request via `ctx.config_get`. The allow-list stays
+    /// unset — and the block therefore fails closed on cross-origin
+    /// requests — until `lifecycle(Init)` parses block config or per-request
+    /// `ctx.config_get` supplies one. See SEC-087 for the rationale.
     pub fn new() -> Self {
         Self {
             allowed_origins: OnceLock::new(),
-            allowed_methods: "GET, POST, PUT, PATCH, DELETE, OPTIONS".to_string(),
-            allowed_headers: "Content-Type, Authorization, X-Requested-With".to_string(),
         }
     }
 
@@ -98,22 +106,23 @@ impl Block for CorsBlock {
                 "allowed_origins",
                 "Origins permitted to make cross-origin requests. Comma-separated \
                  string (e.g. \"https://a,https://b\" or \"*\") or JSON array of \
-                 strings (e.g. [\"*\"]).",
-                "*",
+                 strings (e.g. [\"*\"]). No default: when unset the block fails \
+                 closed and denies all cross-origin requests (SEC-087).",
+                "",
             )
             .name("Allowed Origins"),
             ConfigVar::new(
                 "allowed_methods",
                 "Comma-separated list of HTTP methods returned in \
                  Access-Control-Allow-Methods.",
-                "GET,POST,PUT,DELETE,OPTIONS",
+                DEFAULT_ALLOWED_METHODS,
             )
             .name("Allowed Methods"),
             ConfigVar::new(
                 "allowed_headers",
                 "Comma-separated list of request headers returned in \
                  Access-Control-Allow-Headers.",
-                "Content-Type,Authorization",
+                DEFAULT_ALLOWED_HEADERS,
             )
             .name("Allowed Headers"),
             ConfigVar::new(
@@ -136,10 +145,12 @@ impl Block for CorsBlock {
 
         let methods = ctx
             .config_get("allowed_methods")
-            .map_or_else(|| self.allowed_methods.clone(), |s| s.to_string());
+            .unwrap_or(DEFAULT_ALLOWED_METHODS)
+            .to_string();
         let headers = ctx
             .config_get("allowed_headers")
-            .map_or_else(|| self.allowed_headers.clone(), |s| s.to_string());
+            .unwrap_or(DEFAULT_ALLOWED_HEADERS)
+            .to_string();
         let max_age = ctx
             .config_get("max_age")
             .map_or_else(|| DEFAULT_MAX_AGE_SECONDS.to_string(), |s| s.to_string());
@@ -315,6 +326,23 @@ wafer_block::register_static_block!("wafer-run/cors", CorsBlock);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_config_defaults_match_runtime_fallbacks() {
+        let info = CorsBlock::new().info();
+        let default_of = |key: &str| {
+            info.flow_config
+                .iter()
+                .find(|v| v.key == key)
+                .map(|v| v.default.clone())
+                .expect("ConfigVar must be declared")
+        };
+        // SEC-087: no permissive declared default — empty means fail closed.
+        assert_eq!(default_of("allowed_origins"), "");
+        assert_eq!(default_of("allowed_methods"), DEFAULT_ALLOWED_METHODS);
+        assert_eq!(default_of("allowed_headers"), DEFAULT_ALLOWED_HEADERS);
+        assert_eq!(default_of("max_age"), DEFAULT_MAX_AGE_SECONDS.to_string());
+    }
 
     #[test]
     fn block_constructor_has_no_default_allowed_origins() {
