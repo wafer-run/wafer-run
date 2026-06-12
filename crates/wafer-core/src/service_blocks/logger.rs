@@ -1,50 +1,56 @@
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
+use crate::interfaces::logger::{
+    handler,
+    service::{Field, LoggerService},
 };
-use wafer_block_macro::wafer_async_trait;
 
-use crate::interfaces::logger::{handler, service::LoggerService};
-
-/// Unified logger block. Wraps any `LoggerService` implementation.
-pub struct LoggerBlock {
-    service: Arc<dyn LoggerService>,
+crate::service_block! {
+    /// Unified logger block. Wraps any `LoggerService` implementation.
+    block: pub LoggerBlock,
+    name: "wafer-run/logger",
+    version: "0.0.1",
+    interface: "logger@v1",
+    description: "Structured logging",
+    category: Service,
+    fields: { service: Arc<dyn LoggerService> },
+    handle: |this, _ctx, msg, body| handler::handle_message(this.service.as_ref(), &msg, &body),
 }
 
-impl LoggerBlock {
-    /// Wrap the given `LoggerService` implementation as a `LoggerBlock`.
-    pub fn new(service: Arc<dyn LoggerService>) -> Self {
-        Self { service }
+/// [`LoggerService`] implementation that forwards every call to the `tracing`
+/// crate at the matching level (`debug!`/`info!`/`warn!`/`error!`) with fields
+/// rendered as a trailing `key=value key=value` string on the default target.
+pub struct TracingLogger;
+
+impl LoggerService for TracingLogger {
+    fn debug(&self, msg: &str, fields: &[Field]) {
+        let fields_str = format_fields(fields);
+        tracing::debug!("{} {}", msg, fields_str);
+    }
+
+    fn info(&self, msg: &str, fields: &[Field]) {
+        let fields_str = format_fields(fields);
+        tracing::info!("{} {}", msg, fields_str);
+    }
+
+    fn warn(&self, msg: &str, fields: &[Field]) {
+        let fields_str = format_fields(fields);
+        tracing::warn!("{} {}", msg, fields_str);
+    }
+
+    fn error(&self, msg: &str, fields: &[Field]) {
+        let fields_str = format_fields(fields);
+        tracing::error!("{} {}", msg, fields_str);
     }
 }
 
-#[wafer_async_trait]
-impl Block for LoggerBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/logger",
-            "0.0.1",
-            "logger@v1",
-            "Structured logging",
-        )
-        .category(BlockCategory::Service)
+fn format_fields(fields: &[Field]) -> String {
+    if fields.is_empty() {
+        return String::new();
     }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body)
-    }
-}
-
-/// Register the unified logger block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn LoggerService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/logger", Arc::new(LoggerBlock::new(service)))
+    fields
+        .iter()
+        .map(|f| format!("{}={}", f.key, f.value))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

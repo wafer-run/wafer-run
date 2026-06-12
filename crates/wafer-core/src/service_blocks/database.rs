@@ -1,71 +1,33 @@
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
+use wafer_block::{BlockRegistry, RuntimeError};
 use wafer_schema::Table;
 
 use crate::interfaces::database::{handler, service::DatabaseService};
 
-/// Unified database block. Wraps any `DatabaseService` implementation.
-pub struct DatabaseBlock {
-    service: Arc<dyn DatabaseService>,
-    tables: Vec<Table>,
+crate::service_block! {
+    /// Unified database block. Wraps any `DatabaseService` implementation.
+    block: pub DatabaseBlock,
+    name: "wafer-run/database",
+    version: "0.0.1",
+    interface: "database@v1",
+    description: "Database service (SQL queries, CRUD, schema migrations)",
+    category: Service,
+    fields: { service: Arc<dyn DatabaseService> },
+    extra_fields: { tables: Vec<Table> },
+    handle: |this, _ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    },
+    lifecycle: |this, _ctx, event| {
+        handler::handle_lifecycle(this.service.as_ref(), &this.tables, &event).await
+    },
 }
 
 impl DatabaseBlock {
-    /// Wrap the given `DatabaseService` implementation as a `DatabaseBlock`
-    /// with an initially empty declarative table list.
-    pub fn new(service: Arc<dyn DatabaseService>) -> Self {
-        Self {
-            service,
-            tables: Vec::new(),
-        }
-    }
-
     /// Create with pre-built schema tables for migration during lifecycle Init.
     pub fn with_tables(service: Arc<dyn DatabaseService>, tables: Vec<Table>) -> Self {
         Self { service, tables }
     }
-}
-
-#[wafer_async_trait]
-impl Block for DatabaseBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/database",
-            "0.0.1",
-            "database@v1",
-            "Database service (SQL queries, CRUD, schema migrations)",
-        )
-        .category(BlockCategory::Service)
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body).await
-    }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        handler::handle_lifecycle(self.service.as_ref(), &self.tables, &event).await
-    }
-}
-
-/// Register the unified database block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn DatabaseService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/database", Arc::new(DatabaseBlock::new(service)))
 }
 
 /// Register with pre-built schema tables for migration.

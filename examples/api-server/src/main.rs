@@ -13,8 +13,8 @@ use std::sync::Arc;
 use wafer_block::db::ListOptions;
 // Force-link `wafer-block-inspector` so its `register_static_block!`
 // inventory entry survives into the binary. The `wafer-block-sqlite`
-// and `wafer-block-logger` deps don't need this — they're explicitly
-// referenced by the `register_with` calls below.
+// dep doesn't need this — it's explicitly referenced by the
+// `register_with` call below.
 use wafer_block_inspector as _;
 use wafer_core::clients::database as db;
 use wafer_run::*;
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .expect("register database");
     wafer_core::service_blocks::logger::register_with(
         &mut wafer,
-        Arc::new(wafer_block_logger::service::TracingLogger),
+        Arc::new(wafer_core::service_blocks::logger::TracingLogger),
     )
     .expect("register logger");
     // wafer-run/inspector is loaded automatically by Wafer::new() via inventory autoreg.

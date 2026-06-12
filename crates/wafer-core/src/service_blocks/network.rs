@@ -1,59 +1,28 @@
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::{BlockInfo, ConfigVar},
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
+use wafer_block::types::ConfigVar;
 
 use crate::interfaces::network::{handler, service::NetworkService};
 
-/// Unified network block. Wraps any `NetworkService` implementation.
-pub struct NetworkBlock {
-    service: Arc<dyn NetworkService>,
-}
-
-impl NetworkBlock {
-    /// Wrap the given `NetworkService` implementation as a `NetworkBlock`.
-    pub fn new(service: Arc<dyn NetworkService>) -> Self {
-        Self { service }
-    }
-}
-
-#[wafer_async_trait]
-impl Block for NetworkBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/network",
-            "0.0.1",
-            "http-client@v1",
-            "Outbound HTTP requests",
-        )
-        .category(BlockCategory::Service)
-        .config_keys(vec![ConfigVar::new(
-            "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES",
-            "Maximum response body size in bytes accepted by the HTTP \
-             network service. Responses exceeding this limit are rejected \
-             with an error rather than buffered. Defaults to 50 MiB \
-             (52428800) when unset.",
-            "52428800",
-        )
-        .name("Max Response Body Bytes")])
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body).await
-    }
-}
-
-/// Register the unified network block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn NetworkService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/network", Arc::new(NetworkBlock::new(service)))
+crate::service_block! {
+    /// Unified network block. Wraps any `NetworkService` implementation.
+    block: pub NetworkBlock,
+    name: "wafer-run/network",
+    version: "0.0.1",
+    interface: "http-client@v1",
+    description: "Outbound HTTP requests",
+    category: Service,
+    fields: { service: Arc<dyn NetworkService> },
+    info_extras: |_this, info| info.config_keys(vec![ConfigVar::new(
+        "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES",
+        "Maximum response body size in bytes accepted by the HTTP \
+         network service. Responses exceeding this limit are rejected \
+         with an error rather than buffered. Defaults to 50 MiB \
+         (52428800) when unset.",
+        "52428800",
+    )
+    .name("Max Response Body Bytes")]),
+    handle: |this, _ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    },
 }

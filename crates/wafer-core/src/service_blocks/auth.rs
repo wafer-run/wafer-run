@@ -1,73 +1,37 @@
-//! Unified auth block. Mirrors `service_blocks/crypto.rs` shape.
+//! Unified auth block.
 //!
 //! Wraps any `AuthService` implementation behind the `Block` trait; the
 //! shared handler in `interfaces::auth::handler` routes `auth.*` messages.
 
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
+use wafer_block::{ErrorCode, LifecycleType, WaferError};
 
 use crate::interfaces::auth::{handler, service::AuthService};
 
-/// Unified auth block. Wraps any `AuthService` implementation.
-pub struct AuthBlock {
-    service: Arc<dyn AuthService>,
-}
-
-impl AuthBlock {
-    /// Wrap the given `AuthService` implementation as an `AuthBlock`.
-    pub fn new(service: Arc<dyn AuthService>) -> Self {
-        Self { service }
-    }
-}
-
-#[wafer_async_trait]
-impl Block for AuthBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "suppers-ai/auth",
-            "0.0.1",
-            "auth@v1",
-            "Identity, sessions, PATs, orgs — see auth-block-design spec",
-        )
-        .category(BlockCategory::Service)
-        .grants(self.service.grants())
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body).await
-    }
-
-    async fn lifecycle(
-        &self,
-        ctx: &dyn Context,
-        event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
+crate::service_block! {
+    /// Unified auth block. Wraps any `AuthService` implementation.
+    block: pub AuthBlock,
+    name: "suppers-ai/auth",
+    version: "0.0.1",
+    interface: "auth@v1",
+    description: "Identity, sessions, PATs, orgs — see auth-block-design spec",
+    category: Service,
+    fields: { service: Arc<dyn AuthService> },
+    info_extras: |this, info| info.grants(this.service.grants()),
+    handle: |this, _ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    },
+    lifecycle: |this, ctx, event| {
         use crate::interfaces::auth::service::AuthError;
         if matches!(event.event_type, LifecycleType::Init) {
-            self.service.init(ctx).await.map_err(|e| match e {
+            this.service.init(ctx).await.map_err(|e| match e {
                 AuthError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
                 other => WaferError::new(ErrorCode::Internal, format!("auth init: {other}")),
             })?;
         }
         Ok(())
-    }
-}
-
-/// Register the unified auth block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn AuthService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("suppers-ai/auth", Arc::new(AuthBlock::new(service)))
+    },
 }
 
 #[cfg(test)]
@@ -76,6 +40,9 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    use wafer_block::{Block, LifecycleEvent, LifecycleType, Message};
+    use wafer_block_macro::wafer_async_trait;
 
     use super::*;
     use crate::interfaces::auth::service::{
@@ -89,7 +56,7 @@ mod tests {
 
     #[wafer_async_trait]
     impl AuthService for InitCounterService {
-        async fn init(&self, _ctx: &dyn Context) -> Result<(), AuthError> {
+        async fn init(&self, _ctx: &dyn wafer_block::Context) -> Result<(), AuthError> {
             self.inits.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

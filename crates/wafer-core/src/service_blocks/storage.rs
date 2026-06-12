@@ -1,50 +1,17 @@
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
-
 use crate::interfaces::storage::{handler, service::StorageService};
 
-/// Unified storage block. Wraps any `StorageService` implementation.
-pub struct StorageBlock {
-    service: Arc<dyn StorageService>,
-}
-
-impl StorageBlock {
-    /// Wrap the given `StorageService` implementation as a `StorageBlock`.
-    pub fn new(service: Arc<dyn StorageService>) -> Self {
-        Self { service }
-    }
-}
-
-#[wafer_async_trait]
-impl Block for StorageBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/storage",
-            "0.0.1",
-            "storage@v1",
-            "Object storage service (files, folders, buckets)",
-        )
-        .category(BlockCategory::Service)
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body).await
-    }
-}
-
-/// Register the unified storage block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn StorageService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/storage", Arc::new(StorageBlock::new(service)))
+crate::service_block! {
+    /// Unified storage block. Wraps any `StorageService` implementation.
+    block: pub StorageBlock,
+    name: "wafer-run/storage",
+    version: "0.0.1",
+    interface: "storage@v1",
+    description: "Object storage service (files, folders, buckets)",
+    category: Service,
+    fields: { service: Arc<dyn StorageService> },
+    handle: |this, _ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    },
 }
