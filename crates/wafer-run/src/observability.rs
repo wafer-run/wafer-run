@@ -61,6 +61,24 @@ pub struct ObservabilityBus {
     flow_end_handlers: RwLock<Vec<FlowEndHandler>>,
 }
 
+/// An in-flight block observation opened by [`ObservabilityBus::block_span`].
+///
+/// Construction fires `block_start`; [`BlockSpan::end`] fires `block_end`
+/// with the elapsed duration. One span brackets exactly one block dispatch.
+#[must_use = "call `end()` after the block dispatch so `block_end` fires"]
+pub struct BlockSpan<'a> {
+    bus: &'a ObservabilityBus,
+    ctx: ObservabilityContext,
+    start: crate::platform::Instant,
+}
+
+impl BlockSpan<'_> {
+    /// Fire `block_end` with the time elapsed since the span was opened.
+    pub fn end(self) {
+        self.bus.fire_block_end(&self.ctx, self.start.elapsed());
+    }
+}
+
 impl ObservabilityBus {
     /// Create an empty bus with no subscribers.
     pub fn new() -> Self {
@@ -105,6 +123,42 @@ impl ObservabilityBus {
     /// observe it. Observability is opt-in, so the common case is no handlers.
     pub(crate) fn any_block_handlers(&self) -> bool {
         !self.block_start_handlers.read().is_empty() || !self.block_end_handlers.read().is_empty()
+    }
+
+    /// Open an observability span around one block dispatch.
+    ///
+    /// Returns `None` — skipping the per-dispatch [`Message`] clone — when no
+    /// block-level handler is registered: observability is opt-in, so the
+    /// common dispatch path stays clone-free. Otherwise builds the
+    /// [`ObservabilityContext`] (cloning `msg` into it), fires `block_start`,
+    /// and returns the span whose [`BlockSpan::end`] fires `block_end`.
+    ///
+    /// `node_path` is the node within the flow tree (the resolved block name
+    /// outside flows); `block_name` is the name as written by the caller
+    /// (flow-step `block`, alias, or canonical name).
+    pub fn block_span(
+        &self,
+        flow_id: &str,
+        node_path: &str,
+        block_name: &str,
+        msg: &Message,
+    ) -> Option<BlockSpan<'_>> {
+        if !self.any_block_handlers() {
+            return None;
+        }
+        let ctx = ObservabilityContext {
+            flow_id: flow_id.to_string(),
+            node_path: node_path.to_string(),
+            block_name: block_name.to_string(),
+            trace_id: msg.get_meta(wafer_block::meta::META_TRACE_ID).to_string(),
+            message: Some(msg.clone()),
+        };
+        self.fire_block_start(&ctx);
+        Some(BlockSpan {
+            bus: self,
+            ctx,
+            start: crate::platform::Instant::now(),
+        })
     }
 
     pub(crate) fn fire_block_start(&self, ctx: &ObservabilityContext) {

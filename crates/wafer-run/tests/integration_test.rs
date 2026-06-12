@@ -648,6 +648,82 @@ async fn test_observability_block_hooks() {
     assert_eq!(durations_len, 2);
 }
 
+// A block that fans out to `test/noop` via `call_block` — used to verify the
+// nested block-to-block dispatch path fires the same observability hooks as
+// top-level dispatch (it previously fired none).
+struct NestedCallerBlock;
+
+#[async_trait::async_trait]
+impl Block for NestedCallerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/nested-caller",
+            "0.0.1",
+            "http-handler@v1",
+            "Nested caller",
+        )
+        .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        // "retrieve" is a valid http-handler@v1 action, so the interface
+        // validator lets the nested dispatch through.
+        ctx.call_block("test/noop", Message::new("retrieve"), input)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn test_observability_block_hooks_fire_on_nested_call_block() {
+    let mut w = empty_wafer();
+
+    // (block_name, node_path) per block_start firing, in order.
+    let started = Arc::new(parking_lot::Mutex::new(Vec::<(String, String)>::new()));
+    let s = started.clone();
+    w.hooks.on_block_start(move |ctx| {
+        s.lock()
+            .push((ctx.block_name.clone(), ctx.node_path.clone()));
+    });
+
+    let end_count = Arc::new(AtomicUsize::new(0));
+    let e = end_count.clone();
+    w.hooks.on_block_end(move |_ctx, _dur| {
+        e.fetch_add(1, Ordering::SeqCst);
+    });
+
+    w.register_block("test/nested-caller", Arc::new(NestedCallerBlock))
+        .unwrap();
+    w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
+    w.seal().await.expect("seal failed");
+
+    let out = w
+        .run_block(
+            "test/nested-caller",
+            Message::new("test"),
+            InputStream::empty(),
+        )
+        .await;
+    out.collect_buffered()
+        .await
+        .expect("nested dispatch succeeds");
+
+    let frames = started.lock().clone();
+    let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["test/nested-caller", "test/noop"],
+        "nested call_block must fire block_start for the callee, after the caller's"
+    );
+    assert_eq!(
+        frames[1].1, "test/noop",
+        "nested span's node_path must be the resolved callee name"
+    );
+    assert_eq!(
+        end_count.load(Ordering::SeqCst),
+        2,
+        "block_end must fire for both the outer and the nested frame"
+    );
+}
+
 // ===========================================================================
 // 8. Flow references via next routing with flow field
 // ===========================================================================

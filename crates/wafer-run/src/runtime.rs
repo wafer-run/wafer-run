@@ -196,8 +196,11 @@ pub struct Wafer {
     pub(crate) registration: crate::runtime::registration::RegistrationCore,
     /// Registered flows (id → flow). Read during execution.
     pub(crate) flows: HashMap<String, wafer_flow::WaferFlow>,
-    /// Observability hook bus — exposed so consumers can register flow/block callbacks.
-    pub hooks: ObservabilityBus,
+    /// Observability hook bus — exposed so consumers can register flow/block
+    /// callbacks. `Arc`-shared with every [`RuntimeContext`] so nested
+    /// block-to-block dispatch (`call_block`) fires the same hooks as the
+    /// top-level dispatch paths.
+    pub hooks: Arc<ObservabilityBus>,
     /// Single immutable bundle of post-startup metadata shared with every
     /// [`RuntimeContext`]. Populated at the end of [`Wafer::seal`].
     pub(crate) snapshot: Arc<crate::snapshot::StartupSnapshot>,
@@ -252,7 +255,7 @@ impl Wafer {
         Self {
             registration: crate::runtime::registration::RegistrationCore::new(),
             flows: HashMap::new(),
-            hooks: ObservabilityBus::new(),
+            hooks: Arc::new(ObservabilityBus::new()),
             snapshot: crate::snapshot::StartupSnapshot::empty(),
             warned_unknown_interfaces: Arc::new(parking_lot::Mutex::new(Default::default())),
             wasm: crate::runtime::wasm_state::WasmState::new(),
@@ -453,6 +456,7 @@ impl Wafer {
             init_breadcrumbs,
             slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
+            hooks: self.hooks.clone(),
         }
     }
 

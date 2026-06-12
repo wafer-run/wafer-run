@@ -3,7 +3,84 @@ use std::sync::{atomic::AtomicBool, Arc};
 use wafer_block::streams::{input::InputStream, output::OutputStream};
 
 use super::{flow_policy::FlowConfigExt, Wafer};
-use crate::{block::Block, observability::ObservabilityContext, platform::Instant, types::*};
+use crate::{
+    block::Block, context::RuntimeContext, observability::ObservabilityBus, platform::Instant,
+    types::*,
+};
+
+/// Identity fields for the observability bracket around one block dispatch.
+pub(crate) struct DispatchObs<'a> {
+    /// Flow in scope, or `""` outside flows.
+    pub(crate) flow_id: &'a str,
+    /// Node path within the flow tree (the resolved block name outside flows).
+    pub(crate) node_path: &'a str,
+    /// Block name as written by the caller (flow-step `block`, alias, or
+    /// canonical name).
+    pub(crate) block_name: &'a str,
+}
+
+/// Lazy-init inputs for [`run_resolved`] — the resolved block plus the slot,
+/// config source, context and cycle-detection stack the init pipeline needs.
+pub(crate) struct DispatchInit<'a> {
+    /// The resolved target block.
+    pub(crate) block: Arc<dyn Block>,
+    /// The block's once-success init slot.
+    pub(crate) slot: Arc<super::slot::BlockSlot>,
+    /// Per-block env-var config source consulted on first init.
+    pub(crate) config_source: Arc<dyn super::config_source::ConfigSource>,
+    /// Context passed to `lifecycle(Init)`.
+    pub(crate) init_ctx: RuntimeContext,
+    /// Init cycle-detection stack for this dispatch.
+    pub(crate) stack: &'a super::init_stack::InitStack,
+}
+
+/// Shared scaffolding for all three dispatch paths ([`Wafer::run_block`],
+/// the flow executor's per-step dispatch, and
+/// [`RuntimeContext::dispatch_call`]):
+///
+/// 1. Lazy init — run the init pipeline for `resolved`, converting failures
+///    into a terminal error stream (`Err`).
+/// 2. Observability — bracket the dispatch in the opt-in
+///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
+///
+/// The invocation itself differs per path (plain `handle`, panic-recovery
+/// wrapper + stream collection, wasmi attachment seeding), so it is supplied
+/// as `invoke`; the observability span covers everything the returned future
+/// awaits.
+pub(crate) async fn run_resolved<'a, T, Fut>(
+    hooks: &ObservabilityBus,
+    obs: DispatchObs<'a>,
+    resolved: &'a str,
+    init: DispatchInit<'a>,
+    msg: Message,
+    input: InputStream,
+    invoke: impl FnOnce(Message, InputStream) -> Fut,
+) -> Result<T, OutputStream>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    if let Err(e) = super::run_init_pipeline(
+        resolved,
+        init.block,
+        init.slot,
+        init.config_source,
+        init.init_ctx,
+        init.stack,
+    )
+    .await
+    {
+        return Err(OutputStream::error(super::init_error_to_wafer_error(
+            resolved, e,
+        )));
+    }
+
+    let span = hooks.block_span(obs.flow_id, obs.node_path, obs.block_name, &msg);
+    let out = invoke(msg, input).await;
+    if let Some(span) = span {
+        span.end();
+    }
+    Ok(out)
+}
 
 impl Wafer {
     /// Run a flow by ID with the given message.
@@ -70,14 +147,6 @@ impl Wafer {
             ));
         };
 
-        // Lazy init: ensure lifecycle(Init) has run on the target block before
-        // dispatching `handle`. Top-level dispatch starts a fresh init-stack;
-        // any transitive `init_block` calls inherit it through `RuntimeContext`.
-        let init_stack = crate::runtime::init_stack::InitStack::new();
-        if let Err(e) = self.init_block_with_stack(resolved, &init_stack).await {
-            return OutputStream::error(crate::runtime::init_error_to_wafer_error(resolved, e));
-        }
-
         let cancelled = Arc::new(AtomicBool::new(false));
         // Read the target's `requires` list from the immutable startup snapshot
         // rather than rebuilding the entire `BlockInfo` via `block.info()` on
@@ -112,35 +181,72 @@ impl Wafer {
         // request appeared to come from a non-block caller — false denials.
         // Use the resolved block name instead. `flow_id` is empty (no flow
         // in scope at the top level).
-        let mut ctx = self.make_context("", resolved, block_config, cancelled, None, init_stack);
+        //
+        // Top-level dispatch starts a fresh init-stack; any transitive
+        // `init_block` calls inherit it through `RuntimeContext`.
+        let init_stack = crate::runtime::init_stack::InitStack::new();
+        let mut ctx = self.make_context(
+            "",
+            resolved,
+            block_config,
+            cancelled,
+            None,
+            init_stack.clone(),
+        );
         ctx.caller_requires = caller_requires;
 
-        // Observability
-        // Build the observability context (cloning the Message into it) only
-        // when a block handler is registered — observability is opt-in, so the
-        // common dispatch path skips the per-request Message clone.
-        let obs_ctx = self
-            .hooks
-            .any_block_handlers()
-            .then(|| ObservabilityContext {
-                flow_id: String::new(),
-                node_path: resolved.to_string(),
-                block_name: block_name.to_string(),
-                trace_id: msg.get_meta(wafer_block::meta::META_TRACE_ID).to_string(),
-                message: Some(msg.clone()),
-            });
-        if let Some(ref obs_ctx) = obs_ctx {
-            self.hooks.fire_block_start(obs_ctx);
+        // Lazy init + observability bracket via the shared dispatch scaffold.
+        run_resolved(
+            &self.hooks,
+            DispatchObs {
+                flow_id: "",
+                node_path: resolved,
+                block_name,
+            },
+            resolved,
+            self.dispatch_init(resolved, &block, &init_stack),
+            msg,
+            input,
+            |msg, input| block.handle(&ctx, msg, input),
+        )
+        .await
+        .unwrap_or_else(|init_failure| init_failure)
+    }
+
+    /// Build the lazy-init inputs for [`run_resolved`] from runtime state:
+    /// the block's once-success slot, the config source, and a dedicated
+    /// `lifecycle(Init)` context that inherits `stack` so transitive
+    /// `init_block` calls participate in the same cycle-detection frame.
+    ///
+    /// Every registered block has a paired slot (`register_block_inner` /
+    /// `register_remote_block`); a missing entry is a runtime invariant
+    /// violation, so panic loudly rather than silently constructing a fresh
+    /// slot (which would let concurrent callers each run `lifecycle(Init)`).
+    pub(crate) fn dispatch_init<'a>(
+        &self,
+        resolved: &str,
+        block: &Arc<dyn Block>,
+        stack: &'a super::init_stack::InitStack,
+    ) -> DispatchInit<'a> {
+        DispatchInit {
+            block: block.clone(),
+            slot: self
+                .registration
+                .slots
+                .get(resolved)
+                .cloned()
+                .expect("slot must exist for any registered block"),
+            config_source: self.config.source.clone(),
+            init_ctx: self.make_context(
+                "init",
+                resolved,
+                std::collections::HashMap::new(),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                stack.clone(),
+            ),
+            stack,
         }
-        let start = Instant::now();
-
-        let result = block.handle(&ctx, msg, input).await;
-
-        if let Some(ref obs_ctx) = obs_ctx {
-            self.hooks.fire_block_end(obs_ctx, start.elapsed());
-        }
-
-        result
     }
 
     /// Flows returns info about all loaded flows.

@@ -6,10 +6,7 @@ use wafer_block::streams::{
 };
 use wafer_flow::{Accumulator, WaferFlow};
 
-use crate::{
-    config::parse_config_map, observability::ObservabilityContext, platform::Instant,
-    runtime::Wafer, types::*,
-};
+use crate::{config::parse_config_map, platform::Instant, runtime::Wafer, types::*};
 
 /// Execute a WaferFlow definition.
 ///
@@ -147,58 +144,39 @@ pub async fn execute(
             step_init_stack.clone(),
         );
 
-        // Lazy init: ensure the step's target block has had lifecycle(Init)
-        // run before dispatching `handle`. Surface init failure as an error
-        // event so the flow short-circuits via the standard error path.
-        if let Err(e) = wafer
-            .init_block_with_stack(&block_name, &step_init_stack)
-            .await
-        {
-            return OutputStream::error(crate::runtime::init_error_to_wafer_error(&block_name, e));
-        }
-
-        // --- Observability: block start ---
-        // Build the context (and clone the Message into it) only when a block
-        // handler is actually registered. Observability is opt-in, so on the
-        // common no-subscriber path this avoids a per-step Message clone.
-        let obs_ctx = wafer
-            .hooks
-            .any_block_handlers()
-            .then(|| ObservabilityContext {
-                flow_id: flow.id.clone(),
-                node_path: step.id.clone(),
-                block_name: step.block.clone(),
-                trace_id: current_msg
-                    .get_meta(wafer_block::meta::META_TRACE_ID)
-                    .to_string(),
-                message: Some(current_msg.clone()),
-            });
-        if let Some(ref obs_ctx) = obs_ctx {
-            wafer.hooks.fire_block_start(obs_ctx);
-        }
-        let start = Instant::now();
-
-        // --- Execute block with panic recovery ---
+        // --- Execute block (lazy init + observability via the shared
+        //     dispatch scaffold, panic recovery via run_block_with_recovery,
+        //     stream collection inside the observed window). Init failure
+        //     surfaces as an error event so the flow short-circuits via the
+        //     standard error path. ---
         // Save body before handing it to the block — middleware (Continue)
         // blocks don't produce a response body, so we need to restore the
         // original input for the next step.
         let saved_body = current_body.clone();
         let step_input = InputStream::from_bytes(std::mem::take(&mut current_body));
-        let out = crate::runtime::run_block_with_recovery(
-            block.as_ref(),
-            &ctx,
+        let scaffold_result = crate::runtime::runner::run_resolved(
+            &wafer.hooks,
+            crate::runtime::runner::DispatchObs {
+                flow_id: &flow.id,
+                node_path: &step.id,
+                block_name: &step.block,
+            },
+            &block_name,
+            wafer.dispatch_init(&block_name, &block, &step_init_stack),
             current_msg.clone(),
             step_input,
+            |msg, input| async {
+                crate::runtime::run_block_with_recovery(block.as_ref(), &ctx, msg, input)
+                    .await
+                    .collect_buffered()
+                    .await
+            },
         )
         .await;
-
-        // --- Collect result ---
-        let buf = out.collect_buffered().await;
-
-        // --- Observability: block end ---
-        if let Some(ref obs_ctx) = obs_ctx {
-            wafer.hooks.fire_block_end(obs_ctx, start.elapsed());
-        }
+        let buf = match scaffold_result {
+            Ok(buf) => buf,
+            Err(init_failure) => return init_failure,
+        };
 
         // --- Process result ---
         match buf {
