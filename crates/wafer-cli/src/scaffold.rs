@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 
-use crate::{detect::Lang, manifest::Manifest};
+use crate::{block_name::parse_org_block, detect::Lang};
 
 /// Create a new block project directory for the given `name` and `lang`.
 ///
@@ -10,13 +10,8 @@ use crate::{detect::Lang, manifest::Manifest};
 /// after the block segment (the part after "/").
 pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     // Validate name format.
-    let parts: Vec<&str> = name.splitn(3, '/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        bail!(
-            "Invalid block name {name:?}: must be in {{org}}/{{block}} format (exactly one \"/\")"
-        );
-    }
-    let block_name = parts[1];
+    let (org, block_name) = parse_org_block(name)?;
+    let block_name = block_name.as_str();
     let dir = Path::new(block_name);
 
     if dir.exists() {
@@ -26,8 +21,9 @@ pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create directory {}", dir.display()))?;
 
-    // Write manifest.json.
-    Manifest::write_template(dir, name)?;
+    // Write wafer.toml — the single source of package metadata for
+    // build/package/publish/install.
+    write_wafer_toml(dir, &org, block_name)?;
 
     // Write the sample test fixture.
     write_test_fixture(dir, block_name)?;
@@ -38,7 +34,7 @@ pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     }
 
     println!("Created block project in ./{block_name}/");
-    println!("  manifest.json");
+    println!("  wafer.toml");
     println!("  tests/echo.json");
     match lang {
         Lang::Rust => {
@@ -172,6 +168,21 @@ func main() {{
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Write the `wafer.toml` template: `[package]` identity plus a one-line
+/// summary. ABI is pinned at 1 (the only ABI major the runtime speaks).
+fn write_wafer_toml(dir: &Path, org: &str, block_name: &str) -> anyhow::Result<()> {
+    let body = format!(
+        r#"[package]
+org = "{org}"
+name = "{block_name}"
+version = "0.1.0"
+abi = 1
+summary = "A WAFER block: {org}/{block_name}"
+"#
+    );
+    write_file(dir, "wafer.toml", &body)
+}
 
 fn write_test_fixture(dir: &Path, _block_name: &str) -> anyhow::Result<()> {
     let tests_dir = dir.join("tests");

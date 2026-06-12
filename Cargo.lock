@@ -6285,6 +6285,7 @@ dependencies = [
  "uuid",
  "wafer-block",
  "wasmi",
+ "wat",
  "webbrowser",
  "wiremock",
 ]

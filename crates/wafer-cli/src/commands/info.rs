@@ -8,27 +8,12 @@
 //!
 //! `--json` emits `{"package": <PackageDetail>}` or `{"version": <VersionDetail>}`.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
-use crate::registry_client::{self, PackageDetail, VersionDetail, VersionSummary};
-
-/// Parse `org/block` or `org/block@version`. Extra `/`, missing segments,
-/// or stray whitespace are rejected with a user-friendly error.
-pub(crate) fn parse_target(target: &str) -> Result<(String, String, Option<String>)> {
-    let target = target.trim();
-    let (left, version) = match target.split_once('@') {
-        Some((l, v)) if !v.is_empty() => (l, Some(v.to_string())),
-        Some((_, _)) => bail!("target must be org/block or org/block@version"),
-        None => (target, None),
-    };
-    let mut parts = left.split('/');
-    let org = parts.next().unwrap_or("");
-    let block = parts.next().unwrap_or("");
-    if org.is_empty() || block.is_empty() || parts.next().is_some() {
-        bail!("target must be org/block or org/block@version");
-    }
-    Ok((org.to_string(), block.to_string(), version))
-}
+use crate::{
+    block_name::parse_target,
+    registry_client::{self, PackageDetail, Registry, VersionDetail, VersionSummary},
+};
 
 /// Format a unix-epoch seconds timestamp as ISO date (`YYYY-MM-DD`).
 /// Invalid values (negative / far future) fall back to the raw number.
@@ -104,9 +89,9 @@ pub(crate) fn render_package(pkg: &PackageDetail, all: bool) -> String {
     out
 }
 
-/// Render the version view. `registry` is the resolved base URL for the
-/// download hint; trailing slash trimmed.
-pub(crate) fn render_version(v: &VersionDetail, registry: &str) -> String {
+/// Render the version view. `registry` supplies the base URL for the
+/// download hint.
+pub(crate) fn render_version(v: &VersionDetail, registry: &Registry) -> String {
     let mut out = String::new();
     if v.yanked != 0 {
         out.push_str("⚠ THIS VERSION IS YANKED\n");
@@ -122,10 +107,7 @@ pub(crate) fn render_version(v: &VersionDetail, registry: &str) -> String {
     ));
     out.push_str(&format!(
         "  download:    {}/registry/download/{}/{}/{}.wafer\n",
-        registry.trim_end_matches('/'),
-        v.org_name,
-        v.pkg_name,
-        v.version,
+        registry, v.org_name, v.pkg_name, v.version,
     ));
     out.push_str(&format!(
         "  install:     wafer install {}/{}@{}\n",
@@ -179,52 +161,6 @@ mod tests {
             yanked,
             published_at,
         }
-    }
-
-    #[test]
-    fn parse_target_package_form() {
-        let (o, b, v) = parse_target("acme/widget").unwrap();
-        assert_eq!((o.as_str(), b.as_str(), v), ("acme", "widget", None));
-    }
-
-    #[test]
-    fn parse_target_version_form() {
-        let (o, b, v) = parse_target("acme/widget@0.3.1").unwrap();
-        assert_eq!(
-            (o.as_str(), b.as_str(), v.as_deref()),
-            ("acme", "widget", Some("0.3.1"))
-        );
-    }
-
-    #[test]
-    fn parse_target_rejects_missing_block() {
-        assert!(parse_target("acme").is_err());
-        assert!(parse_target("acme/").is_err());
-    }
-
-    #[test]
-    fn parse_target_rejects_too_many_segments() {
-        assert!(parse_target("acme/widget/sub").is_err());
-    }
-
-    #[test]
-    fn parse_target_rejects_interior_empty_segments() {
-        // Leading slash, empty middle segment, bare slash, empty string.
-        assert!(parse_target("/widget").is_err());
-        assert!(parse_target("acme//widget").is_err());
-        assert!(parse_target("/").is_err());
-        assert!(parse_target("").is_err());
-    }
-
-    #[test]
-    fn parse_target_trims_whitespace() {
-        let (o, b, v) = parse_target("  acme/widget  ").unwrap();
-        assert_eq!((o.as_str(), b.as_str(), v), ("acme", "widget", None));
-    }
-
-    #[test]
-    fn parse_target_rejects_empty_version() {
-        assert!(parse_target("acme/widget@").is_err());
     }
 
     #[test]
@@ -313,7 +249,7 @@ mod tests {
             yanked_reason: None,
             published_at: 1_775_952_000,
         };
-        let out = render_version(&v, "https://wafer.run");
+        let out = render_version(&v, &Registry::new("https://wafer.run"));
         assert!(!out.contains("YANKED"), "{out}");
         assert!(out.contains("acme/widget@0.3.1"), "{out}");
         assert!(out.contains("published:   2026-04-12"), "{out}");
@@ -348,7 +284,7 @@ mod tests {
             yanked_reason: Some("bad".into()),
             published_at: 0,
         };
-        let out = render_version(&v, "https://wafer.run");
+        let out = render_version(&v, &Registry::new("https://wafer.run"));
         assert!(out.starts_with("⚠ THIS VERSION IS YANKED"), "{out}");
     }
 }

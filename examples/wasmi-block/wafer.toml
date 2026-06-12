@@ -1,0 +1,6 @@
+[package]
+org = "example"
+name = "echo"
+version = "0.1.0"
+abi = 1
+summary = "Echo block for wasmi testing"

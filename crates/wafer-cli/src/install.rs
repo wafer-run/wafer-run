@@ -26,9 +26,10 @@ use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType};
 
 use crate::{
+    block_name::parse_org_block,
     cache::CacheRoot,
     lockfile::{Lockfile, LockfilePackage},
-    registry_client::{self, VersionDetail, VersionSummary},
+    registry_client::{self, Registry, VersionDetail, VersionSummary},
 };
 
 /// Result of a cache-only install. `from_cache=true` means no network was touched.
@@ -40,6 +41,83 @@ pub struct InstallOutcome {
     #[expect(dead_code, reason = "captured for future verification logging")]
     pub sha256: String,
     pub from_cache: bool,
+}
+
+impl InstallOutcome {
+    /// Outcome for a cache hit — no network was touched.
+    fn cached(
+        org: &str,
+        block: &str,
+        version: impl Into<String>,
+        sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: sha256.into(),
+            from_cache: true,
+        }
+    }
+
+    /// Outcome for a fresh download + extract.
+    fn fresh(
+        org: &str,
+        block: &str,
+        version: impl Into<String>,
+        sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            org: org.into(),
+            block: block.into(),
+            version: version.into(),
+            sha256: sha256.into(),
+            from_cache: false,
+        }
+    }
+}
+
+/// The download critical section shared by the frozen and non-frozen
+/// install paths: verify the tarball's sha256 against `expected_sha`,
+/// extract into a sibling `.extract-{uuid}` temp dir, then atomically
+/// promote it to `final_dir` via `fs::rename`. The caller must hold the
+/// cache flock. `integrity_msg` renders the path-specific error for a sha
+/// mismatch, receiving the actual sha.
+fn verify_and_promote(
+    bytes: &[u8],
+    expected_sha: &str,
+    final_dir: &Path,
+    integrity_msg: impl FnOnce(&str) -> String,
+) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if actual != expected_sha {
+        bail!("{}", integrity_msg(&actual));
+    }
+
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("cache package path has no parent"))?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let tmp_dir = parent.join(format!(".extract-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = extract_tarball(bytes, &tmp_dir) {
+        // Mid-stream failure (disk full, bad tarball, ...) may have left
+        // a partially populated tmp dir — remove it before bailing.
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_dir, final_dir) {
+        // Clean up on failure; one common cause is a race where another
+        // process completed the same install first.
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e).with_context(|| {
+            format!(
+                "promote {} -> {} (concurrent install may have completed)",
+                tmp_dir.display(),
+                final_dir.display(),
+            )
+        });
+    }
+    Ok(())
 }
 
 /// Pick the highest non-yanked version from a list, or return `None` if
@@ -55,7 +133,7 @@ pub(crate) fn pick_latest_non_yanked(versions: &[VersionSummary]) -> Option<&Ver
 
 /// Build a `LockfilePackage` entry from server metadata + a resolved registry URL.
 pub(crate) fn lockfile_entry(
-    registry: &str,
+    registry: &Registry,
     org: &str,
     block: &str,
     version: &str,
@@ -65,7 +143,7 @@ pub(crate) fn lockfile_entry(
         name: format!("{org}/{block}"),
         version: version.into(),
         sha256: sha256.into(),
-        source: format!("registry+{}", registry.trim_end_matches('/')),
+        source: format!("registry+{registry}"),
     }
 }
 
@@ -147,7 +225,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Full cache-only install orchestration.
 pub async fn install_cache_only(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     lockfile_path: &Path,
     org: &str,
@@ -174,13 +252,12 @@ pub async fn install_cache_only(
                 {
                     if cache.is_populated(org, block, ver) {
                         // Network-free: use the lockfile entry.
-                        return Ok(InstallOutcome {
-                            org: org.into(),
-                            block: block.into(),
-                            version: entry.version.clone(),
-                            sha256: entry.sha256.clone(),
-                            from_cache: true,
-                        });
+                        return Ok(InstallOutcome::cached(
+                            org,
+                            block,
+                            entry.version.clone(),
+                            entry.sha256.clone(),
+                        ));
                     }
                 }
                 // Fallback: ask the registry.
@@ -212,13 +289,12 @@ pub async fn install_cache_only(
     // Step 3: pre-lock cache-hit shortcut.
     if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version) {
         if cached_sha == expected_sha {
-            return Ok(InstallOutcome {
-                org: org.into(),
-                block: block.into(),
-                version: resolved_version,
-                sha256: expected_sha,
-                from_cache: true,
-            });
+            return Ok(InstallOutcome::cached(
+                org,
+                block,
+                resolved_version,
+                expected_sha,
+            ));
         }
     }
 
@@ -239,13 +315,12 @@ pub async fn install_cache_only(
                 && p.sha256 == expected_sha
         }) {
             // `guard` drops on return — RAII releases the flock.
-            return Ok(InstallOutcome {
-                org: org.into(),
-                block: block.into(),
-                version: resolved_version,
-                sha256: expected_sha,
-                from_cache: true,
-            });
+            return Ok(InstallOutcome::cached(
+                org,
+                block,
+                resolved_version,
+                expected_sha,
+            ));
         }
         // Cache dir exists but nothing vouches for it — stale, remove and
         // re-download.
@@ -256,39 +331,10 @@ pub async fn install_cache_only(
         registry_client::download_tarball(registry, org, block, &resolved_version).await?
     };
 
-    // Verify sha256.
-    let actual = sha256_hex(&bytes);
-    if actual != expected_sha {
-        bail!(
-            "integrity check failed: tarball sha256 did not match registry metadata — re-run, and report if it persists"
-        );
-    }
-
-    // Extract into a sibling temp dir, then atomic rename.
-    let parent = final_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("cache package path has no parent"))?;
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let tmp_name = format!(".extract-{}", uuid::Uuid::new_v4());
-    let tmp_dir = parent.join(&tmp_name);
-    if let Err(e) = extract_tarball(&bytes, &tmp_dir) {
-        // Mid-stream failure (disk full, bad tarball, ...) may have left
-        // a partially populated tmp dir — remove it before bailing.
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&tmp_dir, &final_dir) {
-        // Clean up on failure; one common cause is a race where another
-        // process completed the same install first.
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(e).with_context(|| {
-            format!(
-                "promote {} -> {} (concurrent install may have completed)",
-                tmp_dir.display(),
-                final_dir.display(),
-            )
-        });
-    }
+    // Verify sha256, extract, and atomically promote into the cache.
+    verify_and_promote(&bytes, &expected_sha, &final_dir, |_actual| {
+        "integrity check failed: tarball sha256 did not match registry metadata — re-run, and report if it persists".to_string()
+    })?;
 
     // Step 5: update lockfile. This must happen while we still hold the
     // flock, otherwise another installer could acquire the lock, write its
@@ -304,13 +350,12 @@ pub async fn install_cache_only(
 
     drop(guard);
 
-    Ok(InstallOutcome {
-        org: org.into(),
-        block: block.into(),
-        version: resolved_version,
-        sha256: expected_sha,
-        from_cache: false,
-    })
+    Ok(InstallOutcome::fresh(
+        org,
+        block,
+        resolved_version,
+        expected_sha,
+    ))
 }
 
 /// Frozen variant: download + verify against a caller-supplied sha256
@@ -322,7 +367,7 @@ pub async fn install_cache_only(
 /// if the registry silently swapped the tarball under the same version,
 /// the sha check fails and we bail loudly.
 pub async fn install_cache_only_frozen(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     org: &str,
     block: &str,
@@ -332,13 +377,7 @@ pub async fn install_cache_only_frozen(
     // Fast path: if the cache is populated, trust the lockfile sha as the
     // proof of provenance (that's what --frozen means: lockfile is truth).
     if cache.is_populated(org, block, version) {
-        return Ok(InstallOutcome {
-            org: org.into(),
-            block: block.into(),
-            version: version.into(),
-            sha256: expected_sha.into(),
-            from_cache: true,
-        });
+        return Ok(InstallOutcome::cached(org, block, version, expected_sha));
     }
 
     // Slow path: download, hash, verify, extract under the flock.
@@ -347,58 +386,25 @@ pub async fn install_cache_only_frozen(
     // Re-check under the lock — another installer may have populated.
     let final_dir = cache.package_dir(org, block, version);
     if final_dir.is_dir() {
-        return Ok(InstallOutcome {
-            org: org.into(),
-            block: block.into(),
-            version: version.into(),
-            sha256: expected_sha.into(),
-            from_cache: true,
-        });
+        return Ok(InstallOutcome::cached(org, block, version, expected_sha));
     }
 
     let bytes = registry_client::download_tarball(registry, org, block, version).await?;
-    let actual = sha256_hex(&bytes);
-    if actual != expected_sha {
-        anyhow::bail!(
+
+    // Verify sha256, extract, and atomically promote into the cache.
+    verify_and_promote(&bytes, expected_sha, &final_dir, |actual| {
+        format!(
             "integrity check failed: {org}/{block}@{version} — wafer.lock pins sha256 {expected_sha}, but the registry served a tarball with sha256 {actual}. --frozen refuses to install a version the lockfile doesn't pin."
-        );
-    }
+        )
+    })?;
 
-    // Extract into a sibling temp dir, then atomic rename.
-    let parent = final_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("cache package path has no parent"))?;
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let tmp_name = format!(".extract-{}", uuid::Uuid::new_v4());
-    let tmp_dir = parent.join(&tmp_name);
-    if let Err(e) = extract_tarball(&bytes, &tmp_dir) {
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&tmp_dir, &final_dir) {
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(e).with_context(|| {
-            format!(
-                "promote {} -> {} (concurrent install may have completed)",
-                tmp_dir.display(),
-                final_dir.display(),
-            )
-        });
-    }
-
-    Ok(InstallOutcome {
-        org: org.into(),
-        block: block.into(),
-        version: version.into(),
-        sha256: expected_sha.into(),
-        from_cache: false,
-    })
+    Ok(InstallOutcome::fresh(org, block, version, expected_sha))
 }
 
 /// Full install: `install_cache_only` + mutate `wafer.toml`'s
 /// `[dependencies]` to pin the resolved version.
 pub async fn install_full(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     lockfile_path: &std::path::Path,
     wafer_toml_path: &std::path::Path,
@@ -423,7 +429,7 @@ pub async fn install_full(
 /// and (when not frozen) rewrites `wafer.lock` from the manifest (pruning
 /// orphans).
 pub async fn install_from_manifest(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     wafer_toml_path: &std::path::Path,
     lockfile_path: &std::path::Path,
@@ -451,7 +457,7 @@ pub async fn install_from_manifest(
         // really needs to be fetched).
         let mut out = Vec::with_capacity(lf.packages.len());
         for pkg in &lf.packages {
-            let (org, block) = split_name(&pkg.name)?;
+            let (org, block) = parse_org_block(&pkg.name)?;
             let outcome =
                 install_cache_only_frozen(registry, cache, &org, &block, &pkg.version, &pkg.sha256)
                     .await?;
@@ -464,7 +470,7 @@ pub async fn install_from_manifest(
     // updates the lockfile as it goes. After we're done, prune orphans.
     let mut out = Vec::with_capacity(deps.len());
     for (name, version) in &deps {
-        let (org, block) = split_name(name)?;
+        let (org, block) = parse_org_block(name)?;
         let outcome =
             install_cache_only(registry, cache, lockfile_path, &org, &block, Some(version)).await?;
         out.push(outcome);
@@ -481,16 +487,6 @@ pub async fn install_from_manifest(
     }
 
     Ok(out)
-}
-
-fn split_name(name: &str) -> Result<(String, String)> {
-    let (org, block) = name
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("invalid package name {name:?}: expected org/block"))?;
-    if org.is_empty() || block.is_empty() || block.contains('/') {
-        anyhow::bail!("invalid package name {name:?}: expected org/block");
-    }
-    Ok((org.into(), block.into()))
 }
 
 #[cfg(test)]
@@ -543,7 +539,13 @@ mod tests {
 
     #[test]
     fn lockfile_entry_formats_source() {
-        let e = lockfile_entry("https://wafer.run/", "acme", "widget", "0.3.1", "abc");
+        let e = lockfile_entry(
+            &Registry::new("https://wafer.run/"),
+            "acme",
+            "widget",
+            "0.3.1",
+            "abc",
+        );
         assert_eq!(e.name, "acme/widget");
         assert_eq!(e.source, "registry+https://wafer.run");
     }
@@ -684,25 +686,5 @@ mod tests {
             cache_hit(&cache, &lf, "a", "b", "1.0.0"),
             Some("zzz".into())
         );
-    }
-
-    #[test]
-    fn split_name_accepts_valid() {
-        assert_eq!(
-            split_name("acme/widget").unwrap(),
-            ("acme".into(), "widget".into())
-        );
-    }
-
-    #[test]
-    fn split_name_rejects_missing_slash() {
-        assert!(split_name("justname").is_err());
-    }
-
-    #[test]
-    fn split_name_rejects_empty_segments() {
-        assert!(split_name("/b").is_err());
-        assert!(split_name("a/").is_err());
-        assert!(split_name("a/b/c").is_err());
     }
 }

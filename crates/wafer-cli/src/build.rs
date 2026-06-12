@@ -4,8 +4,8 @@ use anyhow::{bail, Context};
 
 use crate::{
     detect::{detect_language, Lang},
-    manifest::Manifest,
     validate::validate_wasm,
+    wafer_toml::WaferToml,
 };
 
 /// Size threshold (in bytes) above which we warn the user.
@@ -14,25 +14,27 @@ const WASM_SIZE_WARN_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 /// Build the WAFER block in `dir`.
 ///
 /// Steps:
-/// 1. Load and validate `manifest.json`.
+/// 1. Load `wafer.toml` and its `[package]` identity.
 /// 2. Auto-detect the project language.
 /// 3. Run the appropriate toolchain to produce a `.wasm` binary.
 /// 4. Copy the output to `<dir>/target/block.wasm`.
 /// 5. Validate the WASM (required exports + `__wafer_info`).
-/// 6. Compare the info name with the manifest name.
+/// 6. Compare the info name with the `[package]` `{org}/{name}`.
 /// 7. Warn if the binary exceeds 16 MiB.
 pub fn build(dir: &Path) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
-    // 1. Load manifest.
+    // 1. Load wafer.toml [package].
     // -----------------------------------------------------------------------
-    let manifest = Manifest::load(dir)
-        .context("Failed to load manifest.json — run `wafer new` to create one")?;
+    let package = WaferToml::read(&dir.join("wafer.toml"))
+        .context("Failed to read wafer.toml — run `wafer new` to create one")?
+        .package()?;
+    let full_name = package.full_name();
 
-    println!("Building block: {}", manifest.name);
+    println!("Building block: {full_name}");
 
     // -----------------------------------------------------------------------
     // 1b. Lockfile ↔ wafer.toml sync check.
-    // Silent when either file is absent; errors on drift with a hint.
+    // Silent when wafer.lock is absent; errors on drift with a hint.
     // -----------------------------------------------------------------------
     check_wafer_lock_sync(dir)?;
 
@@ -46,12 +48,10 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     let block_wasm_path = dir.join("target").join("block.wasm");
 
-    // The `{block}` half of the `{org}/{block}` manifest name is the best
+    // The `{block}` half of the `{org}/{block}` name is the best
     // deterministic anchor for picking among multiple `.wasm` outputs.
-    let block_name = manifest.name.rsplit('/').next().unwrap_or(&manifest.name);
-
     match lang {
-        Lang::Rust => build_rust(dir, &block_wasm_path, block_name)?,
+        Lang::Rust => build_rust(dir, &block_wasm_path, &package.name)?,
         Lang::Go => build_go(dir, &block_wasm_path)?,
     }
 
@@ -62,11 +62,12 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
 
     let info = validate_wasm(&block_wasm_path).context("WASM validation failed")?;
 
-    if info.name != manifest.name {
+    if info.name != full_name {
         bail!(
-            "Block name mismatch: manifest says {:?} but __wafer_info() returned {:?}.\n\
-             Make sure the `name` argument in `#[wafer_block(name = …)]` matches manifest.json.",
-            manifest.name,
+            "Block name mismatch: wafer.toml says {:?} but __wafer_info() returned {:?}.\n\
+             Make sure the `name` argument in `#[wafer_block(name = …)]` matches \
+             wafer.toml's [package] org/name.",
+            full_name,
             info.name
         );
     }
@@ -238,13 +239,14 @@ fn find_wasm_in_dir(dir: &Path, block_name: &str) -> anyhow::Result<std::path::P
 // Lockfile sync check
 // ---------------------------------------------------------------------------
 
-/// If wafer.toml + wafer.lock both exist, enforce §Lockfile ↔ manifest sync.
-/// Missing wafer.toml OR wafer.lock is silent — pre-install projects are
-/// allowed to build.
+/// If wafer.lock exists, enforce §Lockfile ↔ manifest sync against
+/// wafer.toml. A missing wafer.lock is silent — pre-install projects are
+/// allowed to build. (wafer.toml itself is guaranteed by the caller, which
+/// already loaded `[package]` from it.)
 fn check_wafer_lock_sync(dir: &Path) -> anyhow::Result<()> {
     let toml_path = dir.join("wafer.toml");
     let lock_path = dir.join("wafer.lock");
-    if !toml_path.is_file() || !lock_path.is_file() {
+    if !lock_path.is_file() {
         return Ok(());
     }
     let wt = crate::wafer_toml::WaferToml::read(&toml_path)?;

@@ -7,6 +7,7 @@
 //! the crate exposes no library API. The `#![warn(missing_docs)]` attribute is
 //! kept on for consistency with the rest of the workspace.
 
+mod block_name;
 mod build;
 mod cache;
 mod commands;
@@ -14,8 +15,8 @@ mod credentials;
 mod detect;
 mod install;
 mod lockfile;
-mod manifest;
 mod package;
+mod paths;
 mod registry_client;
 mod registry_error;
 mod scaffold;
@@ -23,6 +24,7 @@ mod sync_check;
 mod test_runner;
 mod validate;
 mod wafer_toml;
+mod wasm_stubs;
 
 use std::path::PathBuf;
 
@@ -63,7 +65,8 @@ enum Commands {
         /// Path to a test fixture or directory (default: ./tests/).
         path: Option<String>,
     },
-    /// Package the built block for publishing.
+    /// Package the built block into a publishable .wafer tarball
+    /// (target/wafer/{name}-{version}.wafer).
     Package,
     /// Log in to a WAFER registry.
     Login {

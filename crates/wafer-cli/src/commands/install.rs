@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use crate::{
+    block_name::parse_target,
     cache::CacheRoot,
-    commands::info::parse_target,
     install::{install_cache_only, install_from_manifest, install_full},
     registry_client,
 };
