@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use wafer_block::error::RuntimeError;
+use wafer_block::{
+    error::RuntimeError,
+    lockfile::{Lockfile, LockfilePackage, SCHEMA_VERSION},
+};
 
 use crate::runtime::Wafer;
 #[cfg(feature = "wasmi")]
@@ -72,7 +75,10 @@ pub(crate) enum LockLoaderError {
         source_value: String,
     },
 
-    #[error("invalid lockfile at {}: unsupported version {version} (expected 1)", path.display())]
+    #[error(
+        "invalid lockfile at {}: unsupported version {version} (expected {SCHEMA_VERSION})",
+        path.display()
+    )]
     UnsupportedVersion { path: PathBuf, version: u32 },
 
     // Only constructed when the `wasmi` feature is absent; suppress the dead-code
@@ -92,28 +98,9 @@ impl From<LockLoaderError> for RuntimeError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lockfile schema (mirrored locally — wafer-run can't depend on wafer-cli)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize, Debug, Clone)]
-pub(crate) struct Lockfile {
-    pub(crate) version: u32,
-    #[serde(default, rename = "package")]
-    pub(crate) packages: Vec<LockfilePackage>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub(crate) struct LockfilePackage {
-    pub(crate) name: String,
-    pub(crate) version: String,
-    #[expect(
-        dead_code,
-        reason = "verified during cache resolution; not consumed by this struct's own callers"
-    )]
-    pub(crate) sha256: String,
-    pub(crate) source: String,
-}
+// Lockfile schema: `wafer_block::lockfile` is the single source of truth for
+// the on-disk contract, shared with the wafer-cli writer. This module only
+// owns the TOML parse + version gate below.
 
 // ---------------------------------------------------------------------------
 // wafer.toml schema (only the bits we need for name cross-check)
@@ -158,7 +145,7 @@ pub(crate) fn parse_lockfile(path: &Path) -> Result<Option<Lockfile>, LockLoader
             path: path.to_path_buf(),
             source,
         })?;
-    if parsed.version != 1 {
+    if parsed.version != SCHEMA_VERSION {
         return Err(LockLoaderError::UnsupportedVersion {
             path: path.to_path_buf(),
             version: parsed.version,
