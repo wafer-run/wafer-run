@@ -45,6 +45,9 @@ futures = { workspace = true }
 # features (rt, rt-multi-thread) come in via the `wasm` feature for native
 # hosts that actually run a tokio runtime.
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+# Used by `embed::output_to_json` for the base64 wire encoding of binary
+# respond/halt bodies, shared by the wafer-ffi and wafer-run-node bindings.
+base64ct = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }

@@ -6350,6 +6350,7 @@ name = "wafer-run"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64ct",
  "bytes",
  "chrono",
  "dirs 5.0.1",
