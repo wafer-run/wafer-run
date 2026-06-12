@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
+use base64ct::{Base64, Encoding};
 use rusqlite::{types::Value as SqlValue, Connection, Row};
 use wafer_block::db::{Filter, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
@@ -9,10 +10,7 @@ use wafer_core::interfaces::database::{
     exec::DbExec,
     service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
-use wafer_sql_utils::{
-    base64::base64_encode, ddl, ident::sanitize_ident, introspect, value::sea_values_to_json,
-    Backend,
-};
+use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
 
 /// SQLite implementation of the DatabaseService.
 pub struct SQLiteDatabaseService {
@@ -77,7 +75,7 @@ impl SQLiteDatabaseService {
                     }
                 }
                 Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                    serde_json::Value::String(base64_encode(b))
+                    serde_json::Value::String(Base64::encode_string(b))
                 }
                 Err(_) => serde_json::Value::Null,
             };
@@ -144,7 +142,8 @@ fn ensure_columns_from_data(
 /// `PRAGMA table_info` shape is fixed), so we surface it rather than silently
 /// dropping the column from the set.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseError> {
-    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite)
+        .map_err(|e| DatabaseError::Internal(format!("table_info {table}: {e}")))?;
     let mut stmt = db
         .prepare(&sql)
         .map_err(|e| DatabaseError::Internal(format!("prepare table_info {table}: {e}")))?;
@@ -163,7 +162,9 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseEr
 
 /// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
 fn has_integer_pk(db: &Connection, table: &str) -> bool {
-    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let Ok((sql, _)) = introspect::build_table_info(table, Backend::Sqlite) else {
+        return false;
+    };
     let Ok(mut stmt) = db.prepare(&sql) else {
         return false;
     };
@@ -698,7 +699,8 @@ impl DatabaseService for SQLiteDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite)
+                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
             db.execute_batch(&idx_stmt.sql)
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }

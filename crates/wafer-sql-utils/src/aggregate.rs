@@ -2,16 +2,23 @@ use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
 use wafer_block::db::{Filter, SortField};
 
 use crate::{
-    ident::DynCol,
+    ident::{validate_ident, DynCol},
     query::{apply_order, build_condition},
     Backend, SqlBuildError,
 };
 
-/// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
-pub fn build_count(table: &str, filters: &[Filter], backend: Backend) -> crate::Statement {
+/// Shared tail of the single-aggregate builders:
+/// `SELECT {expr} AS {alias} FROM {table} WHERE {filters}`.
+fn agg_select(
+    table: &str,
+    expr: SimpleExpr,
+    alias: &str,
+    filters: &[Filter],
+    backend: Backend,
+) -> crate::Statement {
     let mut query = Query::select();
     query
-        .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("cnt"))
+        .expr_as(expr, Alias::new(alias))
         .from(DynCol(table.into()));
 
     if let Some(cond) = build_condition(filters) {
@@ -22,6 +29,17 @@ pub fn build_count(table: &str, filters: &[Filter], backend: Backend) -> crate::
     crate::Statement::new(sql, values, table)
 }
 
+/// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
+pub fn build_count(table: &str, filters: &[Filter], backend: Backend) -> crate::Statement {
+    agg_select(
+        table,
+        Func::count(Expr::col(Asterisk)).into(),
+        "cnt",
+        filters,
+        backend,
+    )
+}
+
 /// Build SELECT COALESCE(SUM({field}), 0) FROM {table} WHERE {filters}.
 pub fn build_sum(
     table: &str,
@@ -29,23 +47,11 @@ pub fn build_sum(
     filters: &[Filter],
     backend: Backend,
 ) -> crate::Statement {
-    let mut query = Query::select();
-    query
-        .expr_as(
-            Func::coalesce([
-                Func::sum(Expr::col(DynCol(field.into()))).into(),
-                Expr::val(0i64).into(),
-            ]),
-            Alias::new("total"),
-        )
-        .from(DynCol(table.into()));
-
-    if let Some(cond) = build_condition(filters) {
-        query.cond_where(cond);
-    }
-
-    let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    let expr = Func::coalesce([
+        Func::sum(Expr::col(DynCol(field.into()))).into(),
+        Expr::val(0i64).into(),
+    ]);
+    agg_select(table, expr.into(), "total", filters, backend)
 }
 
 /// Build a per-day count over a date window.
@@ -76,20 +82,11 @@ pub fn build_daily_count(
     filters: &[Filter],
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
-    use sea_query::SimpleExpr;
-
     // The column reference is interpolated into the raw expression text via
     // ANSI double-quoting (works for both SQLite and Postgres), so it cannot be
     // parameter-bound. Reject anything that isn't a plain identifier rather
     // than risk it escaping the surrounding expression.
-    if !date_field
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err(SqlBuildError::InvalidIdentifier {
-            value: date_field.to_string(),
-        });
-    }
+    let date_field = validate_ident(date_field)?;
     let date_expr_sql: String = match backend {
         Backend::Sqlite => format!("date(\"{date_field}\")"),
         Backend::Postgres => {
@@ -122,20 +119,13 @@ pub fn build_avg(
     filters: &[Filter],
     backend: Backend,
 ) -> crate::Statement {
-    let mut query = Query::select();
-    query
-        .expr_as(
-            Func::avg(Expr::col(DynCol(field.into()))),
-            Alias::new("avg_val"),
-        )
-        .from(DynCol(table.into()));
-
-    if let Some(cond) = build_condition(filters) {
-        query.cond_where(cond);
-    }
-
-    let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    agg_select(
+        table,
+        Func::avg(Expr::col(DynCol(field.into()))).into(),
+        "avg_val",
+        filters,
+        backend,
+    )
 }
 
 /// Aggregate function type.

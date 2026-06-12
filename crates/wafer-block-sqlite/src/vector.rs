@@ -45,6 +45,13 @@ impl SqliteVecService {
         Ok(Self::new(Connection::open_in_memory()?))
     }
 
+    /// Validate `name` and compute the index's table names. Non-identifier
+    /// names are rejected fail-closed — they would otherwise be spliced into
+    /// SQL identifier positions.
+    fn schema_for(name: &str) -> Result<VectorIndexSchema, VectorError> {
+        VectorIndexSchema::new(name).map_err(|_| VectorError::InvalidIndexName(name.to_string()))
+    }
+
     fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
         let exists: bool = conn
             .query_row(
@@ -76,7 +83,7 @@ impl VectorService for SqliteVecService {
     async fn create_index(&self, config: VectorIndexConfig) -> Result<(), VectorError> {
         let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(&config.name);
+        let schema = Self::schema_for(&config.name)?;
         if Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexAlreadyExists(config.name));
         }
@@ -97,7 +104,7 @@ impl VectorService for SqliteVecService {
     async fn delete_index(&self, name: &str) -> Result<(), VectorError> {
         let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(name);
+        let schema = Self::schema_for(name)?;
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(name.to_string()));
         }
@@ -114,7 +121,7 @@ impl VectorService for SqliteVecService {
         }
         let mut conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(index);
+        let schema = Self::schema_for(index)?;
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
@@ -201,7 +208,7 @@ impl VectorService for SqliteVecService {
     ) -> Result<Vec<VectorMatch>, VectorError> {
         let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(index);
+        let schema = Self::schema_for(index)?;
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
@@ -331,7 +338,7 @@ impl VectorService for SqliteVecService {
         }
         let mut conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(index);
+        let schema = Self::schema_for(index)?;
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
@@ -379,7 +386,7 @@ impl VectorService for SqliteVecService {
     async fn count(&self, index: &str) -> Result<u64, VectorError> {
         let conn = self.db.lock();
         ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = VectorIndexSchema::new(index);
+        let schema = Self::schema_for(index)?;
         if !Self::index_exists(&conn, &schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }

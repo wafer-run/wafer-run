@@ -9,19 +9,16 @@
 /// Aggregate SQL builders — `COUNT`, `SUM`, `AVG`, daily buckets, and a
 /// flexible grouped-aggregate query.
 pub mod aggregate;
-/// Dependency-free base64 encoder used by builders that need to embed
-/// binary payloads (e.g. vector embeddings) in SQL text.
-pub mod base64;
 /// DDL builders — `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD
 /// COLUMN`, `DROP TABLE`, with dialect-specific type mapping.
 pub mod ddl;
 /// Identifier helpers — a runtime [`sea_query::Iden`] implementation and
-/// an alphanumeric-only sanitiser for table / column names that have to
-/// be interpolated rather than parameter-bound.
+/// a fail-closed validator for table / column names that have to be
+/// interpolated rather than parameter-bound.
 pub mod ident;
-/// Introspection queries — list user tables, fetch column info, count
-/// rows. Each emits the dialect-specific catalog query for SQLite or
-/// Postgres.
+/// Introspection queries — table-existence probe, list user tables,
+/// list/fetch column info, count rows. Each emits the dialect-specific
+/// catalog query for SQLite or Postgres.
 pub mod introspect;
 /// Filter / sort / pagination plumbing plus CRUD-shape builders
 /// (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, atomic increment).

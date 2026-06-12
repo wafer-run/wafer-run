@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64ct::{Base64, Encoding};
 use sqlx::{postgres::PgRow, PgPool, Row};
 #[cfg(test)]
 use wafer_block::db::FilterOp;
@@ -9,9 +10,7 @@ use wafer_core::interfaces::database::{
     exec::DbExec,
     service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
-use wafer_sql_utils::{
-    base64::base64_encode, ddl, ident::sanitize_ident, value::sea_values_to_json, Backend,
-};
+use wafer_sql_utils::{ddl, ident::sanitize_ident, value::sea_values_to_json, Backend};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -175,7 +174,8 @@ impl PostgresDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres);
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres)
+                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
             sqlx::query(&idx_stmt.sql)
                 .execute(&self.pool)
                 .await
@@ -725,7 +725,7 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                 }
             },
             "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(col.ordinal()) {
-                Ok(Some(bytes)) => serde_json::Value::String(base64_encode(&bytes)),
+                Ok(Some(bytes)) => serde_json::Value::String(Base64::encode_string(&bytes)),
                 Ok(None) => serde_json::Value::Null,
                 Err(e) => {
                     warn_decode(&e);
@@ -1071,15 +1071,6 @@ mod tests {
             sanitize_ident("Robert'); DROP TABLE users;--"),
             "RobertDROPTABLEusers"
         );
-    }
-
-    #[test]
-    fn test_base64_encode() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 
     // Filter/clause/order tests now covered by wafer-sql-utils::query::tests

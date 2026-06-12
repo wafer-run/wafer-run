@@ -9,6 +9,7 @@ description = "SQLite database block for WAFER"
 wafer-block = { workspace = true }
 wafer-core = { path = "../wafer-core", default-features = false }
 wafer-sql-utils = { path = "../wafer-sql-utils" }
+base64ct = { workspace = true }
 parking_lot = { workspace = true }
 rusqlite = { workspace = true }
 sqlite-vec = { version = "0.1", optional = true }

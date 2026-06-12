@@ -91,8 +91,30 @@ pub fn build_select_with_condition(
     extra_condition: Option<Cond>,
     backend: Backend,
 ) -> crate::Statement {
+    select_with_projection(table, None, opts, extra_condition, backend)
+}
+
+/// Shared body of [`build_select_with_condition`] (`None` projection →
+/// `SELECT *`) and [`build_select_columns`] (explicit column list).
+fn select_with_projection(
+    table: &str,
+    columns: Option<&[&str]>,
+    opts: &ListOptions,
+    extra_condition: Option<Cond>,
+    backend: Backend,
+) -> crate::Statement {
     let mut query = Query::select();
-    query.column(Asterisk).from(DynCol(table.into()));
+    match columns {
+        Some(cols) => {
+            for col in cols {
+                query.column(DynCol((*col).into()));
+            }
+        }
+        None => {
+            query.column(Asterisk);
+        }
+    }
+    query.from(DynCol(table.into()));
 
     if let Some(cond) = build_condition(&opts.filters) {
         query.cond_where(cond);
@@ -137,23 +159,7 @@ pub fn build_select_columns(
     extra_condition: Option<Cond>,
     backend: Backend,
 ) -> crate::Statement {
-    let mut query = Query::select();
-    for col in columns {
-        query.column(DynCol((*col).into()));
-    }
-    query.from(DynCol(table.into()));
-
-    if let Some(cond) = build_condition(&opts.filters) {
-        query.cond_where(cond);
-    }
-    if let Some(extra) = extra_condition {
-        query.cond_where(extra);
-    }
-    apply_order(&mut query, &opts.sort);
-    apply_pagination(&mut query, opts.limit, opts.offset);
-
-    let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    select_with_projection(table, Some(columns), opts, extra_condition, backend)
 }
 
 /// Build INSERT INTO {table} (cols) VALUES (vals).
