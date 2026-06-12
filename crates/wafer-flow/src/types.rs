@@ -173,27 +173,3 @@ pub struct FlowInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
-
-/// Metadata for a registered block, as published in the package registry's
-/// `block.json` and consumed by the WaferFlow spec / docs site.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockDef {
-    /// Block identifier (e.g. `"wafer-run/sqlite"`).
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// SemVer version string for this block release.
-    pub version: String,
-    /// Free-form description shown in registry listings.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// JSON Schema describing the block's accepted input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<PortSchema>,
-    /// JSON Schema describing the block's output.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<PortSchema>,
-    /// Runtime tag (`"native"`, `"wasm"`, or `"both"`); see the runtime registry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
-}

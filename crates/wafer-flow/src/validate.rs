@@ -39,6 +39,12 @@ fn collect_step_ids(
     errors: &mut Vec<ValidationError>,
 ) {
     for step in steps {
+        // `input` (caller payload) and `each` (fan-out binding) are
+        // accumulator keys owned by the runtime — a step claiming either
+        // would silently clobber them at execution time.
+        if step.id == "input" || step.id == "each" {
+            errors.push(ValidationError::ReservedStepId(step.id.clone()));
+        }
         if !ids.insert(step.id.clone()) {
             errors.push(ValidationError::DuplicateStepId(step.id.clone()));
         }
@@ -207,6 +213,30 @@ mod tests {
         let flow = parse(json).unwrap();
         let errors = validate(&flow).unwrap_err();
         assert!(errors.iter().any(|e| matches!(e, ValidationError::UnknownNextTarget { target, .. } if target == "nonexistent")));
+    }
+
+    #[test]
+    fn reserved_step_ids_rejected() {
+        for reserved in ["input", "each"] {
+            let json = format!(
+                r#"{{
+                    "id": "test",
+                    "name": "Test",
+                    "version": "0.1.0",
+                    "steps": [
+                        {{ "id": "{reserved}", "block": "block-a" }}
+                    ]
+                }}"#
+            );
+            let flow = parse(&json).unwrap();
+            let errors = validate(&flow).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::ReservedStepId(id) if id == reserved)),
+                "step id '{reserved}' must be rejected as reserved"
+            );
+        }
     }
 
     #[test]

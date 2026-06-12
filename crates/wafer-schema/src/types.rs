@@ -218,12 +218,6 @@ impl Column {
         self
     }
 
-    /// Mark the column as `UNIQUE`.
-    pub fn uniq(mut self) -> Self {
-        self.unique = true;
-        self
-    }
-
     /// Attach a default value to the column.
     pub fn def(mut self, d: DefaultValue) -> Self {
         self.default = Some(d);
@@ -236,17 +230,6 @@ impl Column {
             table: table.to_string(),
             column: column.to_string(),
             on_delete: "CASCADE".to_string(),
-            on_update: String::new(),
-        });
-        self
-    }
-
-    /// Attach a foreign-key reference with `ON DELETE RESTRICT`.
-    pub fn ref_restrict(mut self, table: &str, column: &str) -> Self {
-        self.references = Some(Reference {
-            table: table.to_string(),
-            column: column.to_string(),
-            on_delete: "RESTRICT".to_string(),
             on_update: String::new(),
         });
         self
@@ -367,11 +350,4 @@ impl Table {
             unique_keys: Vec::new(),
         }
     }
-}
-
-/// Schema is a collection of tables.
-#[derive(Debug, Clone)]
-pub struct Schema {
-    /// Tables that make up this schema.
-    pub tables: Vec<Table>,
 }
