@@ -1,14 +1,21 @@
 //! Typed client for the network service.
+//!
+//! `NETWORK_DO_REQUEST` uses a header-then-body response protocol: the
+//! first frame carries the encoded [`ResponseHeader`], subsequent frames
+//! carry raw body bytes. [`do_request`] accumulates the body;
+//! [`do_request_stream`] returns a [`NetworkResponseStream`] for chunked
+//! access.
 
 use std::collections::HashMap;
 
 use wafer_block::{
     codec,
     wire::network::{Request, Response, ResponseHeader},
-    ErrorCode, Message, ServiceOp, WaferError,
+    ErrorCode, ServiceOp, WaferError,
 };
 
-use crate::stream::{CallStream, ResponseStream};
+use super::common::{decode_frame, open_buffered};
+use crate::stream::ResponseStream;
 
 const BLOCK: &str = "wafer-run/network";
 
@@ -20,17 +27,7 @@ pub fn do_request(
     headers: &HashMap<String, String>,
     body: Option<&[u8]>,
 ) -> Result<Response, WaferError> {
-    let mut response_stream = open_request_stream(method, url, headers, body)?;
-    // First chunk is the header frame.
-    let header_bytes = response_stream
-        .next_chunk()?
-        .ok_or_else(|| WaferError::new(ErrorCode::Internal, "stream ended before header frame"))?;
-    let header: ResponseHeader = codec::decode(&header_bytes).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding network response header: {}", e.message),
-        )
-    })?;
+    let (mut response_stream, header) = open_with_header(method, url, headers, body)?;
 
     // Subsequent chunks are body bytes; accumulate.
     let mut full_body = Vec::new();
@@ -52,16 +49,7 @@ pub fn do_request_stream(
     headers: &HashMap<String, String>,
     body: Option<&[u8]>,
 ) -> Result<NetworkResponseStream, WaferError> {
-    let mut response_stream = open_request_stream(method, url, headers, body)?;
-    let header_bytes = response_stream
-        .next_chunk()?
-        .ok_or_else(|| WaferError::new(ErrorCode::Internal, "stream ended before header frame"))?;
-    let header: ResponseHeader = codec::decode(&header_bytes).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding network response header: {}", e.message),
-        )
-    })?;
+    let (response_stream, header) = open_with_header(method, url, headers, body)?;
     Ok(NetworkResponseStream {
         inner: response_stream,
         header,
@@ -101,12 +89,15 @@ impl NetworkResponseStream {
     }
 }
 
-fn open_request_stream(
+/// Open a `NETWORK_DO_REQUEST` stream and consume its leading
+/// [`ResponseHeader`] frame. Shared by [`do_request`] and
+/// [`do_request_stream`].
+fn open_with_header(
     method: &str,
     url: &str,
     headers: &HashMap<String, String>,
     body: Option<&[u8]>,
-) -> Result<ResponseStream, WaferError> {
+) -> Result<(ResponseStream, ResponseHeader), WaferError> {
     let req = Request {
         method: method.into(),
         url: url.into(),
@@ -114,11 +105,10 @@ fn open_request_stream(
         body: body.map(|b| b.to_vec()),
     };
     let req_bytes = codec::encode(&req)?;
-    let msg = Message {
-        kind: ServiceOp::NETWORK_DO_REQUEST.to_string(),
-        meta: vec![],
-    };
-    let mut call = CallStream::open(BLOCK, &msg)?;
-    call.write_chunk(&req_bytes)?;
-    call.finish()
+    let mut response_stream = open_buffered(BLOCK, ServiceOp::NETWORK_DO_REQUEST, &req_bytes)?;
+    let header_bytes = response_stream
+        .next_chunk()?
+        .ok_or_else(|| WaferError::new(ErrorCode::Internal, "stream ended before header frame"))?;
+    let header = decode_frame(&header_bytes, "network response header")?;
+    Ok((response_stream, header))
 }

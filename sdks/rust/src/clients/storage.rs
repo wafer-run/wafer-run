@@ -16,11 +16,11 @@ use wafer_block::{
         CreateFolderRequest, DeleteFolderRequest, DeleteRequest, FolderInfo, GetRequest,
         ListRequest, ObjectInfo, ObjectList, PutRequest,
     },
-    ErrorCode, Message, ServiceOp, WaferError,
+    ErrorCode, ServiceOp, WaferError,
 };
 
-use super::common::{collect_single_frame, consume_ack, open_buffered};
-use crate::stream::{CallStream, ResponseStream};
+use super::common::{call, call_ack, call_no_body, decode_frame, open_buffered};
+use crate::stream::ResponseStream;
 
 const BLOCK: &str = "wafer-run/storage";
 
@@ -37,9 +37,7 @@ pub fn put(folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(
         data: data.to_vec(),
         content_type: content_type.into(),
     };
-    let req_bytes = codec::encode(&req)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::STORAGE_PUT, &req_bytes)?;
-    consume_ack(&mut response_stream)
+    call_ack(BLOCK, ServiceOp::STORAGE_PUT, &req)
 }
 
 /// Buffered: fetch an object, accumulating its body into a `Vec<u8>`.
@@ -61,24 +59,14 @@ pub fn delete(folder: &str, key: &str) -> Result<(), WaferError> {
         folder: folder.into(),
         key: key.into(),
     };
-    let req_bytes = codec::encode(&req)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::STORAGE_DELETE, &req_bytes)?;
-    consume_ack(&mut response_stream)
+    call_ack(BLOCK, ServiceOp::STORAGE_DELETE, &req)
 }
 
 /// Buffered: list objects under a folder. Filtering / pagination fields on
 /// [`ListRequest`] (`prefix`, `limit`, `offset`) are honored verbatim;
 /// returns the full [`ObjectList`].
 pub fn list(request: &ListRequest) -> Result<ObjectList, WaferError> {
-    let req_bytes = codec::encode(request)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::STORAGE_LIST, &req_bytes)?;
-    let body = collect_single_frame(&mut response_stream, "storage LIST")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding storage LIST response: {}", e.message),
-        )
-    })
+    call(BLOCK, ServiceOp::STORAGE_LIST, request)
 }
 
 /// Buffered: create a folder, optionally marking it as public.
@@ -87,35 +75,19 @@ pub fn create_folder(name: &str, public: bool) -> Result<(), WaferError> {
         name: name.into(),
         public,
     };
-    let req_bytes = codec::encode(&req)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::STORAGE_CREATE_FOLDER, &req_bytes)?;
-    consume_ack(&mut response_stream)
+    call_ack(BLOCK, ServiceOp::STORAGE_CREATE_FOLDER, &req)
 }
 
 /// Buffered: delete a folder.
 pub fn delete_folder(name: &str) -> Result<(), WaferError> {
     let req = DeleteFolderRequest { name: name.into() };
-    let req_bytes = codec::encode(&req)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::STORAGE_DELETE_FOLDER, &req_bytes)?;
-    consume_ack(&mut response_stream)
+    call_ack(BLOCK, ServiceOp::STORAGE_DELETE_FOLDER, &req)
 }
 
 /// Buffered: list all folders. The op takes no request body — the request
 /// side is closed immediately via `finish()` (zero `write_chunk` calls).
 pub fn list_folders() -> Result<Vec<FolderInfo>, WaferError> {
-    let msg = Message {
-        kind: ServiceOp::STORAGE_LIST_FOLDERS.to_string(),
-        meta: vec![],
-    };
-    let call = CallStream::open(BLOCK, &msg)?;
-    let mut response_stream = call.finish()?;
-    let body = collect_single_frame(&mut response_stream, "storage LIST_FOLDERS")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding storage LIST_FOLDERS response: {}", e.message),
-        )
-    })
+    call_no_body(BLOCK, ServiceOp::STORAGE_LIST_FOLDERS, vec![])
 }
 
 // ---------------------------------------------------------------------------
@@ -182,13 +154,8 @@ fn decode_get_header(stream: &mut ResponseStream) -> Result<ObjectInfo, WaferErr
     let header_bytes = stream.next_chunk()?.ok_or_else(|| {
         WaferError::new(
             ErrorCode::Internal,
-            "stream ended before storage GET header frame",
+            "stream ended before storage.get header frame",
         )
     })?;
-    codec::decode(&header_bytes).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding storage GET header: {}", e.message),
-        )
-    })
+    decode_frame(&header_bytes, "storage.get header")
 }
