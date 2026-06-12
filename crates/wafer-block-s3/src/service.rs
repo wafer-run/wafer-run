@@ -89,6 +89,33 @@ impl S3StorageService {
     fn to_chrono_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> DateTime<Utc> {
         DateTime::from_timestamp(dt.secs(), dt.subsec_nanos()).unwrap_or_else(Utc::now)
     }
+
+    /// Fetch every `ListObjectsV2` page under `prefix` and return each
+    /// page's objects. The SDK paginator owns the `is_truncated` /
+    /// `next_continuation_token` plumbing, so pagination edge cases live
+    /// in exactly one place. `err_ctx` prefixes error messages with the
+    /// calling operation's context (e.g. `"S3 ListObjectsV2"`).
+    async fn list_pages(
+        &self,
+        prefix: &str,
+        err_ctx: &str,
+    ) -> Result<Vec<Vec<aws_sdk_s3::types::Object>>, StorageError> {
+        let mut stream = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .into_paginator()
+            .send();
+
+        let mut pages = Vec::new();
+        while let Some(page) = stream.next().await {
+            let page =
+                page.map_err(|e| StorageError::Internal(format!("{err_ctx} {prefix}: {e}")))?;
+            pages.push(page.contents().to_vec());
+        }
+        Ok(pages)
+    }
 }
 
 #[wafer_async_trait]
@@ -185,54 +212,31 @@ impl StorageService for S3StorageService {
         };
 
         let mut all_objects = Vec::new();
-        let mut continuation_token: Option<String> = None;
+        let pages = self.list_pages(&search_prefix, "S3 ListObjectsV2").await?;
+        for obj in pages.iter().flatten() {
+            let full_key = obj.key().unwrap_or_default();
 
-        loop {
-            let mut req = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&search_prefix);
+            // Strip the folder prefix to get the relative key
+            let relative_key = full_key
+                .strip_prefix(&prefix)
+                .unwrap_or(full_key)
+                .to_string();
 
-            if let Some(ref token) = continuation_token {
-                req = req.continuation_token(token);
+            // Skip the folder marker itself (empty key after prefix strip)
+            if relative_key.is_empty() {
+                continue;
             }
 
-            let resp = req.send().await.map_err(|e| {
-                StorageError::Internal(format!("S3 ListObjectsV2 {search_prefix}: {e}"))
-            })?;
+            let last_modified = obj
+                .last_modified()
+                .map_or_else(Utc::now, Self::to_chrono_datetime);
 
-            for obj in resp.contents() {
-                let full_key = obj.key().unwrap_or_default();
-
-                // Strip the folder prefix to get the relative key
-                let relative_key = full_key
-                    .strip_prefix(&prefix)
-                    .unwrap_or(full_key)
-                    .to_string();
-
-                // Skip the folder marker itself (empty key after prefix strip)
-                if relative_key.is_empty() {
-                    continue;
-                }
-
-                let last_modified = obj
-                    .last_modified()
-                    .map_or_else(Utc::now, Self::to_chrono_datetime);
-
-                all_objects.push(ObjectInfo {
-                    key: relative_key,
-                    size: obj.size().unwrap_or(0),
-                    content_type: String::new(), // S3 ListObjects doesn't return content-type
-                    last_modified,
-                });
-            }
-
-            if resp.is_truncated() == Some(true) {
-                continuation_token = resp.next_continuation_token().map(|s| s.to_string());
-            } else {
-                break;
-            }
+            all_objects.push(ObjectInfo {
+                key: relative_key,
+                size: obj.size().unwrap_or(0),
+                content_type: String::new(), // S3 ListObjects doesn't return content-type
+                last_modified,
+            });
         }
 
         let total_count = all_objects.len() as i64;
@@ -273,67 +277,40 @@ impl StorageService for S3StorageService {
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
         let prefix = self.folder_prefix(name);
 
-        // List all objects under this folder prefix and delete them in batches.
-        let mut continuation_token: Option<String> = None;
-
-        loop {
-            let mut req = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&prefix);
-
-            if let Some(ref token) = continuation_token {
-                req = req.continuation_token(token);
-            }
-
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| StorageError::Internal(format!("S3 list for delete {prefix}: {e}")))?;
-
-            let contents = resp.contents();
-
-            if !contents.is_empty() {
-                // Build batch delete request
-                let objects_to_delete: Vec<aws_sdk_s3::types::ObjectIdentifier> = contents
-                    .iter()
-                    .filter_map(|obj| {
-                        let k = obj.key()?;
-                        aws_sdk_s3::types::ObjectIdentifier::builder()
-                            .key(k)
-                            .build()
-                            .map_err(|e| {
-                                tracing::warn!(key = %k, err = %e, "skip object in batch delete");
-                            })
-                            .ok()
-                    })
-                    .collect();
-
-                if !objects_to_delete.is_empty() {
-                    let delete = aws_sdk_s3::types::Delete::builder()
-                        .set_objects(Some(objects_to_delete))
+        // List all objects under this folder prefix, then delete them in
+        // per-page batches (a ListObjectsV2 page holds at most 1000 keys —
+        // the DeleteObjects request limit).
+        for page in self.list_pages(&prefix, "S3 list for delete").await? {
+            // Build batch delete request
+            let objects_to_delete: Vec<aws_sdk_s3::types::ObjectIdentifier> = page
+                .iter()
+                .filter_map(|obj| {
+                    let k = obj.key()?;
+                    aws_sdk_s3::types::ObjectIdentifier::builder()
+                        .key(k)
                         .build()
                         .map_err(|e| {
-                            StorageError::Internal(format!("build Delete request: {e}"))
-                        })?;
+                            tracing::warn!(key = %k, err = %e, "skip object in batch delete");
+                        })
+                        .ok()
+                })
+                .collect();
 
-                    self.client
-                        .delete_objects()
-                        .bucket(&self.bucket)
-                        .delete(delete)
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            StorageError::Internal(format!("S3 DeleteObjects {prefix}: {e}"))
-                        })?;
-                }
-            }
+            if !objects_to_delete.is_empty() {
+                let delete = aws_sdk_s3::types::Delete::builder()
+                    .set_objects(Some(objects_to_delete))
+                    .build()
+                    .map_err(|e| StorageError::Internal(format!("build Delete request: {e}")))?;
 
-            if resp.is_truncated() == Some(true) {
-                continuation_token = resp.next_continuation_token().map(|s| s.to_string());
-            } else {
-                break;
+                self.client
+                    .delete_objects()
+                    .bucket(&self.bucket)
+                    .delete(delete)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        StorageError::Internal(format!("S3 DeleteObjects {prefix}: {e}"))
+                    })?;
             }
         }
 
