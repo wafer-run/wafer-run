@@ -1069,6 +1069,29 @@ impl crate::WaferError {
             meta: Vec::new(),
         }
     }
+
+    /// Attach a precise, machine-readable application error code as
+    /// structured meta under [`crate::meta::META_ERROR_CODE`].
+    ///
+    /// The coarse [`crate::ErrorCode`] stays the transport-level
+    /// classification; this carries the app-level code (e.g.
+    /// `auth.invalid_token`) so callers don't prefix it into the
+    /// human-readable message. Replaces any existing entry.
+    #[must_use]
+    pub fn with_detail_code(mut self, code: impl Into<String>) -> Self {
+        MetaSet::set(
+            &mut self.meta,
+            crate::meta::META_ERROR_CODE.to_string(),
+            code.into(),
+        );
+        self
+    }
+
+    /// Read the structured application error code set via
+    /// [`Self::with_detail_code`], if any.
+    pub fn detail_code(&self) -> Option<&str> {
+        MetaGet::get(self.meta.as_slice(), crate::meta::META_ERROR_CODE)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,6 +1560,39 @@ mod meta_access_tests {
         MetaSet::set(&mut v, "a".into(), "99".into());
         assert_eq!(MetaGet::get(&v, "a"), Some("99"));
         assert_eq!(v.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod wafer_error_detail_code_tests {
+    use crate::{meta::META_ERROR_CODE, types::MetaGet, ErrorCode, WaferError};
+
+    #[test]
+    fn with_detail_code_sets_structured_meta() {
+        let err = WaferError::new(ErrorCode::InvalidArgument, "bad email")
+            .with_detail_code("auth.invalid_email");
+        assert_eq!(err.detail_code(), Some("auth.invalid_email"));
+        assert_eq!(
+            MetaGet::get(err.meta.as_slice(), META_ERROR_CODE),
+            Some("auth.invalid_email")
+        );
+        // The human-readable message stays human-only.
+        assert_eq!(err.message, "bad email");
+    }
+
+    #[test]
+    fn with_detail_code_replaces_existing_entry() {
+        let err = WaferError::new(ErrorCode::Internal, "boom")
+            .with_detail_code("a.first")
+            .with_detail_code("b.second");
+        assert_eq!(err.detail_code(), Some("b.second"));
+        assert_eq!(err.meta.len(), 1);
+    }
+
+    #[test]
+    fn detail_code_absent_is_none() {
+        let err = WaferError::new(ErrorCode::NotFound, "nope");
+        assert_eq!(err.detail_code(), None);
     }
 }
 

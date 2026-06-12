@@ -43,6 +43,18 @@ pub const META_WRAP_ACCESS: &str = "wrap.access";
 /// `"crypto"`, or `"network"`.
 pub const META_WRAP_RESOURCE_TYPE: &str = "wrap.resource_type";
 
+// Error meta keys (set by blocks on `WaferError.meta`, read by adapters).
+
+/// Precise, machine-readable application error code carried as structured
+/// meta on a [`crate::WaferError`] (e.g. `auth.invalid_token`). The coarse
+/// [`crate::ErrorCode`] classifies the failure for transport/status mapping;
+/// this key carries the app-level code so consumers don't have to smuggle it
+/// into the human-readable message. Set via
+/// [`crate::WaferError::with_detail_code`], read via
+/// [`crate::WaferError::detail_code`]; HTTP adapters surface it as a JSON
+/// `code` field on error responses.
+pub const META_ERROR_CODE: &str = "error.code";
+
 // Response meta keys (set by blocks, read by bridge).
 
 /// Response HTTP status code (stringified integer).

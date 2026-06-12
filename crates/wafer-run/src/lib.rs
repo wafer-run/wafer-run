@@ -53,9 +53,15 @@ pub use wafer_block::{
         AliasError, BlockReferenceError, BlockReferenceSource, GrantValidationError, RuntimeError,
     },
     executor::{extract_path_vars, match_path, matches_pattern},
+    // Canonical hash/hex helpers (from wafer_block::hash) — re-exported at the
+    // root so consumers (e.g. solobase-core) use this single implementation
+    // instead of carrying copies. (#163)
+    hex_encode,
     meta::*,
     registry::BlockRegistry,
-    sha256_hex, streams,
+    sha256,
+    sha256_hex,
+    streams,
     streams::{
         input::InputStream,
         output::{OutputSink, OutputStream, TerminalNotResponse},
@@ -65,7 +71,14 @@ pub use wafer_block::{
         ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet, MetaSet,
         RequestAction, ResourceGrant, ResourceType,
     },
-    wrap, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
+    wrap,
+    ErrorCode,
+    InstanceMode,
+    LifecycleEvent,
+    LifecycleType,
+    Message,
+    MetaEntry,
+    WaferError,
 };
 mod builder;
 pub use builder::WaferBuilder;
