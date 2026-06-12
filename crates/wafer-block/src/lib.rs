@@ -46,6 +46,7 @@ pub mod executor;
 pub mod hash;
 pub mod interfaces;
 pub mod introspection;
+pub mod lockfile;
 pub mod registry;
 pub mod response;
 pub mod runtime;
