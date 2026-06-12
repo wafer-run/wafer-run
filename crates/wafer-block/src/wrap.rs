@@ -234,22 +234,10 @@ pub fn check_access(
 
         // Rule 5: grant match
         if let Some(caller) = caller_id {
-            for grant in grants {
-                if !grant_matches_grantee(&grant.grantee, caller) {
-                    continue;
-                }
-                if !grant_matches_resource(&grant.resource, resource) {
-                    continue;
-                }
-                if is_write && !grant.write {
-                    continue;
-                }
-                if let Some(ref grant_type) = grant.resource_type {
-                    match resource_type {
-                        Some(req_type) if grant_type == req_type => {}
-                        _ => continue,
-                    }
-                }
+            if grants
+                .iter()
+                .any(|g| grant_allows(g, caller, resource, is_write, resource_type))
+            {
                 return Ok(());
             }
         }
@@ -322,22 +310,10 @@ pub fn check_access(
     // Rule 5: grant match — uses the canonicalized resource so grants
     // declared without `@` match cross-block requests with `@`.
     if let Some(caller) = caller_id {
-        for grant in grants {
-            if !grant_matches_grantee(&grant.grantee, caller) {
-                continue;
-            }
-            if !grant_matches_resource(&grant.resource, canonical_resource) {
-                continue;
-            }
-            if is_write && !grant.write {
-                continue;
-            }
-            if let Some(ref grant_type) = grant.resource_type {
-                match resource_type {
-                    Some(req_type) if grant_type == req_type => {}
-                    _ => continue,
-                }
-            }
+        if grants
+            .iter()
+            .any(|g| grant_allows(g, caller, canonical_resource, is_write, resource_type))
+        {
             return Ok(());
         }
     }
@@ -354,6 +330,36 @@ pub fn check_access(
 
 fn grant_matches_grantee(grantee: &str, caller: &str) -> bool {
     grantee == "*" || grantee == caller
+}
+
+/// Whether a single grant admits `caller` to `resource` — the one place that
+/// encodes the four grant-matching conditions (grantee, resource pattern,
+/// write flag, resource-type guard). Used by both the namespace-resource and
+/// storage/network/crypto branches of [`check_access`]; the latter passes the
+/// canonicalized (`@`-stripped) resource.
+fn grant_allows(
+    grant: &ResourceGrant,
+    caller: &str,
+    resource: &str,
+    is_write: bool,
+    resource_type: Option<&crate::types::ResourceType>,
+) -> bool {
+    if !grant_matches_grantee(&grant.grantee, caller) {
+        return false;
+    }
+    if !grant_matches_resource(&grant.resource, resource) {
+        return false;
+    }
+    if is_write && !grant.write {
+        return false;
+    }
+    if let Some(ref grant_type) = grant.resource_type {
+        match resource_type {
+            Some(req_type) if grant_type == req_type => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Pattern matching for grant resource patterns.
