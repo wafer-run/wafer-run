@@ -7,6 +7,7 @@
 //! the crate exposes no library API. The `#![warn(missing_docs)]` attribute is
 //! kept on for consistency with the rest of the workspace.
 
+mod block_name;
 mod build;
 mod cache;
 mod commands;

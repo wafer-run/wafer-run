@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType};
 
 use crate::{
+    block_name::parse_org_block,
     cache::CacheRoot,
     lockfile::{Lockfile, LockfilePackage},
     registry_client::{self, VersionDetail, VersionSummary},
@@ -451,7 +452,7 @@ pub async fn install_from_manifest(
         // really needs to be fetched).
         let mut out = Vec::with_capacity(lf.packages.len());
         for pkg in &lf.packages {
-            let (org, block) = split_name(&pkg.name)?;
+            let (org, block) = parse_org_block(&pkg.name)?;
             let outcome =
                 install_cache_only_frozen(registry, cache, &org, &block, &pkg.version, &pkg.sha256)
                     .await?;
@@ -464,7 +465,7 @@ pub async fn install_from_manifest(
     // updates the lockfile as it goes. After we're done, prune orphans.
     let mut out = Vec::with_capacity(deps.len());
     for (name, version) in &deps {
-        let (org, block) = split_name(name)?;
+        let (org, block) = parse_org_block(name)?;
         let outcome =
             install_cache_only(registry, cache, lockfile_path, &org, &block, Some(version)).await?;
         out.push(outcome);
@@ -481,16 +482,6 @@ pub async fn install_from_manifest(
     }
 
     Ok(out)
-}
-
-fn split_name(name: &str) -> Result<(String, String)> {
-    let (org, block) = name
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("invalid package name {name:?}: expected org/block"))?;
-    if org.is_empty() || block.is_empty() || block.contains('/') {
-        anyhow::bail!("invalid package name {name:?}: expected org/block");
-    }
-    Ok((org.into(), block.into()))
 }
 
 #[cfg(test)]
@@ -684,25 +675,5 @@ mod tests {
             cache_hit(&cache, &lf, "a", "b", "1.0.0"),
             Some("zzz".into())
         );
-    }
-
-    #[test]
-    fn split_name_accepts_valid() {
-        assert_eq!(
-            split_name("acme/widget").unwrap(),
-            ("acme".into(), "widget".into())
-        );
-    }
-
-    #[test]
-    fn split_name_rejects_missing_slash() {
-        assert!(split_name("justname").is_err());
-    }
-
-    #[test]
-    fn split_name_rejects_empty_segments() {
-        assert!(split_name("/b").is_err());
-        assert!(split_name("a/").is_err());
-        assert!(split_name("a/b/c").is_err());
     }
 }

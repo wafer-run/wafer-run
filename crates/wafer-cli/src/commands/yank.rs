@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{commands::info::parse_target, credentials, registry_client};
+use crate::{block_name::parse_target, credentials, registry_client};
 
 pub enum YankOp {
     Yank,

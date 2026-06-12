@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 
-use crate::{detect::Lang, manifest::Manifest};
+use crate::{block_name::parse_org_block, detect::Lang, manifest::Manifest};
 
 /// Create a new block project directory for the given `name` and `lang`.
 ///
@@ -10,13 +10,8 @@ use crate::{detect::Lang, manifest::Manifest};
 /// after the block segment (the part after "/").
 pub fn scaffold(name: &str, lang: Lang) -> anyhow::Result<()> {
     // Validate name format.
-    let parts: Vec<&str> = name.splitn(3, '/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        bail!(
-            "Invalid block name {name:?}: must be in {{org}}/{{block}} format (exactly one \"/\")"
-        );
-    }
-    let block_name = parts[1];
+    let (_org, block_name) = parse_org_block(name)?;
+    let block_name = block_name.as_str();
     let dir = Path::new(block_name);
 
     if dir.exists() {
