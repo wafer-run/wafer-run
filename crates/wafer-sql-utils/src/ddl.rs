@@ -210,6 +210,34 @@ pub fn build_create_index(
     Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
+/// Generate one `CREATE INDEX IF NOT EXISTS idx_{table}_{column}` statement
+/// per foreign-key column on `table`, in column-declaration order.
+///
+/// This is the builder behind the backends' "index every FK column" pass in
+/// `ensure_schema_table` — both SQL backends create a plain index for each
+/// column that carries a `references` clause so FK lookups and cascades don't
+/// table-scan. Each statement is built via [`build_create_index`] with a
+/// synthesised name, so the same fail-closed identifier validation applies;
+/// the first invalid table/column name aborts with
+/// [`SqlBuildError::InvalidIdentifier`].
+pub fn build_fk_indexes(
+    table: &Table,
+    backend: Backend,
+) -> Result<Vec<crate::Statement>, SqlBuildError> {
+    let mut stmts = Vec::new();
+    for col in &table.columns {
+        if col.references.is_some() {
+            let idx = Index {
+                name: String::new(),
+                columns: vec![col.name.clone()],
+                unique: false,
+            };
+            stmts.push(build_create_index(&table.name, &idx, backend)?);
+        }
+    }
+    Ok(stmts)
+}
+
 /// Generate an ALTER TABLE ADD COLUMN statement.
 pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> crate::Statement {
     let sql = format!(
@@ -475,6 +503,49 @@ mod tests {
         };
         let err = build_create_index("users", &idx, Backend::Sqlite)
             .expect_err("non-identifier index name must be rejected");
+        assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+    }
+
+    #[test]
+    fn test_fk_indexes_one_statement_per_fk_column() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let stmts =
+                build_fk_indexes(&fk_table("CASCADE", ""), backend).expect("valid identifiers");
+            assert_eq!(stmts.len(), 1, "one FK column → one index statement");
+            assert_eq!(
+                stmts[0].sql,
+                "CREATE INDEX IF NOT EXISTS idx_posts_author_id ON \"posts\"(\"author_id\")"
+            );
+            assert_eq!(stmts[0].collection, "posts");
+        }
+    }
+
+    #[test]
+    fn test_fk_indexes_empty_without_references() {
+        let stmts = build_fk_indexes(&test_table(), Backend::Sqlite).expect("valid identifiers");
+        assert!(stmts.is_empty(), "no FK columns → no statements");
+    }
+
+    #[test]
+    fn test_fk_indexes_rejects_non_identifier_column() {
+        use wafer_schema::Reference;
+
+        let mut bad_col = col_string("user-id"); // hyphen: not a plain identifier
+        bad_col.references = Some(Reference {
+            table: "users".into(),
+            column: "id".into(),
+            on_delete: String::new(),
+            on_update: String::new(),
+        });
+        let table = Table {
+            name: "posts".into(),
+            columns: vec![pk("id"), bad_col],
+            indexes: vec![],
+            primary_key: vec![],
+            unique_keys: vec![],
+        };
+        let err = build_fk_indexes(&table, Backend::Sqlite)
+            .expect_err("non-identifier FK column must be rejected");
         assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
     }
 

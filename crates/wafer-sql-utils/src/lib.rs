@@ -16,9 +16,9 @@ pub mod ddl;
 /// a fail-closed validator for table / column names that have to be
 /// interpolated rather than parameter-bound.
 pub mod ident;
-/// Introspection queries — list user tables, fetch column info, count
-/// rows. Each emits the dialect-specific catalog query for SQLite or
-/// Postgres.
+/// Introspection queries — table-existence probe, list user tables,
+/// list/fetch column info, count rows. Each emits the dialect-specific
+/// catalog query for SQLite or Postgres.
 pub mod introspect;
 /// Filter / sort / pagination plumbing plus CRUD-shape builders
 /// (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, atomic increment).

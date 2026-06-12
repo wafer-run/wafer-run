@@ -34,6 +34,63 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
     }
 }
 
+/// Build query to check whether a table exists.
+///
+/// Returns `(sql, params)`. The result is a single row with one column
+/// `present` — `1`/`0` on SQLite, `true`/`false` on Postgres — so callers can
+/// decode it as a scalar in either dialect.
+///
+/// SQLite: `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present`
+/// Postgres: `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present`
+///
+/// The table name is parameter-bound in both dialects, so this builder is
+/// infallible — no identifier validation needed.
+pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present"
+                .to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
+/// Build query to list a table's column names.
+///
+/// Returns `(sql, params)`. The result shape is identical across dialects —
+/// one `name` column per table column, in declaration order — unlike
+/// [`build_table_info`], whose result columns differ per backend. A missing
+/// table yields zero rows (not an error) in both dialects.
+///
+/// SQLite: `SELECT name FROM pragma_table_info(?1) ORDER BY cid` (the
+/// table-valued pragma function, available since SQLite 3.16, which —
+/// unlike `PRAGMA table_info(...)` — accepts a bound parameter).
+/// Postgres: `SELECT column_name AS name FROM information_schema.columns
+/// WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`.
+///
+/// The table name is parameter-bound in both dialects, so this builder is
+/// infallible — no identifier validation needed.
+pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT name FROM pragma_table_info(?1) ORDER BY cid".to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT column_name AS name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
@@ -129,5 +186,84 @@ mod tests {
         let err = build_table_row_count("users; DROP TABLE", Backend::Sqlite)
             .expect_err("non-identifier table name must be rejected");
         assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+    }
+
+    #[test]
+    fn test_table_exists_sqlite() {
+        let (sql, params) = build_table_exists("users", Backend::Sqlite);
+        assert!(sql.contains("sqlite_master"), "{sql}");
+        assert!(sql.contains("AS present"), "{sql}");
+        assert!(sql.contains("?1"), "table name must be bound: {sql}");
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    #[test]
+    fn test_table_exists_postgres() {
+        let (sql, params) = build_table_exists("users", Backend::Postgres);
+        assert!(sql.contains("information_schema.tables"), "{sql}");
+        assert!(sql.contains("AS present"), "{sql}");
+        assert!(sql.contains("$1"), "table name must be bound: {sql}");
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    #[test]
+    fn test_list_columns_sqlite() {
+        let (sql, params) = build_list_columns("users", Backend::Sqlite);
+        assert!(sql.contains("pragma_table_info(?1)"), "{sql}");
+        assert!(sql.contains("ORDER BY cid"), "{sql}");
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    #[test]
+    fn test_list_columns_postgres() {
+        let (sql, params) = build_list_columns("users", Backend::Postgres);
+        assert!(sql.contains("information_schema.columns"), "{sql}");
+        assert!(sql.contains("AS name"), "{sql}");
+        assert!(sql.contains("ORDER BY ordinal_position"), "{sql}");
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    // Defense-in-depth: run the parameter-bound introspection SQL against a
+    // real SQLite engine. `pragma_table_info(?1)` is the table-valued pragma
+    // function form — prove the engine shipped with the workspace accepts a
+    // bound table name, since that's the whole point of the builder.
+    #[test]
+    fn test_table_exists_and_list_columns_execute_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT, created_at TEXT)",
+            [],
+        )
+        .unwrap();
+
+        let (sql, params) = build_table_exists("widgets", Backend::Sqlite);
+        let present: i64 = conn
+            .query_row(&sql, [params[0].as_str().unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(present, 1);
+        let (sql, params) = build_table_exists("no_such_table", Backend::Sqlite);
+        let present: i64 = conn
+            .query_row(&sql, [params[0].as_str().unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(present, 0);
+
+        let (sql, params) = build_list_columns("widgets", Backend::Sqlite);
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([params[0].as_str().unwrap()], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(cols, vec!["id", "name", "created_at"]);
+
+        // Missing table: zero rows, not an error.
+        let (sql, params) = build_list_columns("no_such_table", Backend::Sqlite);
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([params[0].as_str().unwrap()], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.is_empty());
     }
 }
