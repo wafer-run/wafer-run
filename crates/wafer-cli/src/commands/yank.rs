@@ -18,21 +18,16 @@ pub async fn run(
 
     let url = registry_client::resolve_registry(registry);
     let cf = credentials::load().unwrap_or_default();
-    let entry = credentials::resolve(&cf, &url)
+    let entry = credentials::resolve(&cf, url.as_str())
         .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;
 
     let action = match op {
         YankOp::Yank => "yank",
         YankOp::Unyank => "unyank",
     };
-    let endpoint = format!(
-        "{}/registry/api/packages/{}/{}/{}/{}",
-        url.trim_end_matches('/'),
-        org,
-        block,
-        version,
-        action
-    );
+    let endpoint = url.join(&format!(
+        "/registry/api/packages/{org}/{block}/{version}/{action}"
+    ));
 
     let mut req = crate::registry_client::client()
         .post(&endpoint)

@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::{
     block_name::parse_target,
-    registry_client::{self, PackageDetail, VersionDetail, VersionSummary},
+    registry_client::{self, PackageDetail, Registry, VersionDetail, VersionSummary},
 };
 
 /// Format a unix-epoch seconds timestamp as ISO date (`YYYY-MM-DD`).
@@ -89,9 +89,9 @@ pub(crate) fn render_package(pkg: &PackageDetail, all: bool) -> String {
     out
 }
 
-/// Render the version view. `registry` is the resolved base URL for the
-/// download hint; trailing slash trimmed.
-pub(crate) fn render_version(v: &VersionDetail, registry: &str) -> String {
+/// Render the version view. `registry` supplies the base URL for the
+/// download hint.
+pub(crate) fn render_version(v: &VersionDetail, registry: &Registry) -> String {
     let mut out = String::new();
     if v.yanked != 0 {
         out.push_str("⚠ THIS VERSION IS YANKED\n");
@@ -107,10 +107,7 @@ pub(crate) fn render_version(v: &VersionDetail, registry: &str) -> String {
     ));
     out.push_str(&format!(
         "  download:    {}/registry/download/{}/{}/{}.wafer\n",
-        registry.trim_end_matches('/'),
-        v.org_name,
-        v.pkg_name,
-        v.version,
+        registry, v.org_name, v.pkg_name, v.version,
     ));
     out.push_str(&format!(
         "  install:     wafer install {}/{}@{}\n",
@@ -252,7 +249,7 @@ mod tests {
             yanked_reason: None,
             published_at: 1_775_952_000,
         };
-        let out = render_version(&v, "https://wafer.run");
+        let out = render_version(&v, &Registry::new("https://wafer.run"));
         assert!(!out.contains("YANKED"), "{out}");
         assert!(out.contains("acme/widget@0.3.1"), "{out}");
         assert!(out.contains("published:   2026-04-12"), "{out}");
@@ -287,7 +284,7 @@ mod tests {
             yanked_reason: Some("bad".into()),
             published_at: 0,
         };
-        let out = render_version(&v, "https://wafer.run");
+        let out = render_version(&v, &Registry::new("https://wafer.run"));
         assert!(out.starts_with("⚠ THIS VERSION IS YANKED"), "{out}");
     }
 }

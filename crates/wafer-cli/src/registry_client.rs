@@ -92,87 +92,109 @@ pub struct VersionDetail {
     pub published_at: i64,
 }
 
+// ---- Registry base URL ----------------------------------------------------
+
+/// A registry base URL, normalized exactly once at construction (trailing
+/// slashes trimmed). Every endpoint URL is built via [`Registry::join`] and
+/// the `Display` impl renders the normalized base, so no consumer ever
+/// needs to re-normalize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registry(String);
+
+impl Registry {
+    /// Wrap and normalize a raw base URL.
+    pub fn new(raw: impl AsRef<str>) -> Self {
+        Self(raw.as_ref().trim_end_matches('/').to_string())
+    }
+
+    /// The normalized base URL (no trailing slash).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Join an absolute path (starting with `/`) onto the base URL.
+    pub fn join(&self, path: &str) -> String {
+        format!("{}{path}", self.0)
+    }
+
+    /// `GET {path}` and decode the JSON body as `T`. `op` names the
+    /// operation for [`RegistryError`](crate::registry_error::RegistryError)
+    /// rendering; `what` names the payload for decode-error context.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        op: &'static str,
+        what: &str,
+        path: &str,
+    ) -> Result<T> {
+        let url = self.join(path);
+        let resp = client()
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        let resp = ensure_ok(resp, op).await?;
+        resp.json()
+            .await
+            .with_context(|| format!("decode {what} from {url}"))
+    }
+}
+
+impl std::fmt::Display for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 // ---- Fetchers ------------------------------------------------------------
 
 /// `GET /registry/search?q={query}`. Callers are responsible for rejecting
 /// empty queries — this function does not inspect `query`.
-pub async fn search(registry: &str, query: &str) -> Result<SearchResponse> {
-    let url = format!(
-        "{}/registry/search?q={}",
-        registry.trim_end_matches('/'),
-        urlencoding_encode(query),
-    );
-    let resp = client()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    let resp = ensure_ok(resp, "search").await?;
-    resp.json()
-        .await
-        .with_context(|| format!("decode search response from {url}"))
+pub async fn search(registry: &Registry, query: &str) -> Result<SearchResponse> {
+    let path = format!("/registry/search?q={}", urlencoding_encode(query));
+    registry.get_json("search", "search response", &path).await
 }
 
 /// `GET /registry/api/packages/{org}/{block}`.
-pub async fn get_package(registry: &str, org: &str, block: &str) -> Result<PackageDetail> {
-    let url = format!(
-        "{}/registry/api/packages/{}/{}",
-        registry.trim_end_matches('/'),
+pub async fn get_package(registry: &Registry, org: &str, block: &str) -> Result<PackageDetail> {
+    let path = format!(
+        "/registry/api/packages/{}/{}",
         urlencoding_encode(org),
         urlencoding_encode(block),
     );
-    let resp = client()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    let resp = ensure_ok(resp, "info").await?;
-    resp.json()
-        .await
-        .with_context(|| format!("decode package detail from {url}"))
+    registry.get_json("info", "package detail", &path).await
 }
 
 /// `GET /registry/api/packages/{org}/{block}/{version}`.
 pub async fn get_version(
-    registry: &str,
+    registry: &Registry,
     org: &str,
     block: &str,
     version: &str,
 ) -> Result<VersionDetail> {
-    let url = format!(
-        "{}/registry/api/packages/{}/{}/{}",
-        registry.trim_end_matches('/'),
+    let path = format!(
+        "/registry/api/packages/{}/{}/{}",
         urlencoding_encode(org),
         urlencoding_encode(block),
         urlencoding_encode(version),
     );
-    let resp = client()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    let resp = ensure_ok(resp, "info").await?;
-    resp.json()
-        .await
-        .with_context(|| format!("decode version detail from {url}"))
+    registry.get_json("info", "version detail", &path).await
 }
 
 /// `GET /registry/download/{org}/{block}/{version}.wafer` — returns the
 /// raw gzipped tarball bytes. Callers are responsible for hashing +
 /// verifying against the registry's stored sha256.
 pub async fn download_tarball(
-    registry: &str,
+    registry: &Registry,
     org: &str,
     block: &str,
     version: &str,
 ) -> Result<Vec<u8>> {
-    let url = format!(
-        "{}/registry/download/{}/{}/{}.wafer",
-        registry.trim_end_matches('/'),
+    let url = registry.join(&format!(
+        "/registry/download/{}/{}/{}.wafer",
         urlencoding_encode(org),
         urlencoding_encode(block),
         urlencoding_encode(version),
-    );
+    ));
     // Larger timeout than the JSON endpoints — tarballs can be ~MiB-sized.
     let resp = client_with_timeout(120)
         .get(&url)
@@ -210,18 +232,16 @@ fn urlencoding_encode(s: &str) -> String {
 ///
 /// Future: also consult `wafer.toml [registry].url` and the default
 /// credential entry — see parent spec §Registry URL resolution.
-pub fn resolve_registry(flag: Option<String>) -> String {
-    flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
-        .unwrap_or_else(|| "https://wafer.run".to_string())
+pub fn resolve_registry(flag: Option<String>) -> Registry {
+    Registry::new(
+        flag.or_else(|| std::env::var("WAFER_REGISTRY").ok())
+            .unwrap_or_else(|| "https://wafer.run".to_string()),
+    )
 }
 
-/// Build a reqwest client with a default 60-second timeout and user-agent.
+/// Build a reqwest client with the default 60-second timeout and user-agent.
 pub fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("wafer-cli/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("build reqwest client")
+    client_with_timeout(60)
 }
 
 /// Build a reqwest client with a custom timeout and user-agent.
@@ -233,11 +253,8 @@ pub fn client_with_timeout(secs: u64) -> reqwest::Client {
         .expect("build reqwest client")
 }
 
-pub async fn exchange_code(registry: &str, code: &str) -> Result<ExchangeResponse> {
-    let url = format!(
-        "{}/registry/api/cli-login/exchange",
-        registry.trim_end_matches('/')
-    );
+pub async fn exchange_code(registry: &Registry, code: &str) -> Result<ExchangeResponse> {
+    let url = registry.join("/registry/api/cli-login/exchange");
     let resp = client()
         .post(&url)
         .json(&serde_json::json!({ "code": code }))
@@ -252,8 +269,8 @@ pub async fn exchange_code(registry: &str, code: &str) -> Result<ExchangeRespons
     Ok(parsed)
 }
 
-pub async fn me(registry: &str, token: &str) -> Result<MeResponse> {
-    let url = format!("{}/registry/api/me", registry.trim_end_matches('/'));
+pub async fn me(registry: &Registry, token: &str) -> Result<MeResponse> {
+    let url = registry.join("/registry/api/me");
     let resp = client()
         .get(&url)
         .bearer_auth(token)
@@ -392,5 +409,19 @@ mod tests {
         assert_eq!(super::urlencoding_encode("a b/c"), "a%20b%2Fc");
         assert_eq!(super::urlencoding_encode("acme/widget"), "acme%2Fwidget");
         assert_eq!(super::urlencoding_encode("plain"), "plain");
+    }
+
+    #[test]
+    fn registry_normalizes_trailing_slashes_once() {
+        let r = Registry::new("https://wafer.run/");
+        assert_eq!(r.as_str(), "https://wafer.run");
+        assert_eq!(
+            r.join("/registry/api/me"),
+            "https://wafer.run/registry/api/me"
+        );
+        assert_eq!(r.to_string(), "https://wafer.run");
+
+        let plain = Registry::new("https://wafer.run");
+        assert_eq!(plain, r);
     }
 }

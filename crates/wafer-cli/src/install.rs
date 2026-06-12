@@ -29,7 +29,7 @@ use crate::{
     block_name::parse_org_block,
     cache::CacheRoot,
     lockfile::{Lockfile, LockfilePackage},
-    registry_client::{self, VersionDetail, VersionSummary},
+    registry_client::{self, Registry, VersionDetail, VersionSummary},
 };
 
 /// Result of a cache-only install. `from_cache=true` means no network was touched.
@@ -133,7 +133,7 @@ pub(crate) fn pick_latest_non_yanked(versions: &[VersionSummary]) -> Option<&Ver
 
 /// Build a `LockfilePackage` entry from server metadata + a resolved registry URL.
 pub(crate) fn lockfile_entry(
-    registry: &str,
+    registry: &Registry,
     org: &str,
     block: &str,
     version: &str,
@@ -143,7 +143,7 @@ pub(crate) fn lockfile_entry(
         name: format!("{org}/{block}"),
         version: version.into(),
         sha256: sha256.into(),
-        source: format!("registry+{}", registry.trim_end_matches('/')),
+        source: format!("registry+{registry}"),
     }
 }
 
@@ -225,7 +225,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Full cache-only install orchestration.
 pub async fn install_cache_only(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     lockfile_path: &Path,
     org: &str,
@@ -367,7 +367,7 @@ pub async fn install_cache_only(
 /// if the registry silently swapped the tarball under the same version,
 /// the sha check fails and we bail loudly.
 pub async fn install_cache_only_frozen(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     org: &str,
     block: &str,
@@ -404,7 +404,7 @@ pub async fn install_cache_only_frozen(
 /// Full install: `install_cache_only` + mutate `wafer.toml`'s
 /// `[dependencies]` to pin the resolved version.
 pub async fn install_full(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     lockfile_path: &std::path::Path,
     wafer_toml_path: &std::path::Path,
@@ -429,7 +429,7 @@ pub async fn install_full(
 /// and (when not frozen) rewrites `wafer.lock` from the manifest (pruning
 /// orphans).
 pub async fn install_from_manifest(
-    registry: &str,
+    registry: &Registry,
     cache: &CacheRoot,
     wafer_toml_path: &std::path::Path,
     lockfile_path: &std::path::Path,
@@ -539,7 +539,13 @@ mod tests {
 
     #[test]
     fn lockfile_entry_formats_source() {
-        let e = lockfile_entry("https://wafer.run/", "acme", "widget", "0.3.1", "abc");
+        let e = lockfile_entry(
+            &Registry::new("https://wafer.run/"),
+            "acme",
+            "widget",
+            "0.3.1",
+            "abc",
+        );
         assert_eq!(e.name, "acme/widget");
         assert_eq!(e.source, "registry+https://wafer.run");
     }

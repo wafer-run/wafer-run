@@ -5,7 +5,7 @@ use crate::{credentials, registry_client};
 pub async fn run(registry: Option<String>) -> Result<()> {
     let url = registry_client::resolve_registry(registry);
     let cf = credentials::load()?;
-    let Some(entry) = credentials::resolve(&cf, &url) else {
+    let Some(entry) = credentials::resolve(&cf, url.as_str()) else {
         bail!("no token for {url} — run `wafer login`");
     };
 

@@ -25,7 +25,7 @@ fn read_code() -> Result<String> {
 
 pub async fn run(registry: Option<String>) -> Result<()> {
     let url = registry_client::resolve_registry(registry);
-    let login_page = format!("{}/registry/cli-login", url.trim_end_matches('/'));
+    let login_page = url.join("/registry/cli-login");
 
     // Best-effort browser open; ignore errors (e.g. headless / CI).
     let _ = webbrowser::open(&login_page);
@@ -43,7 +43,7 @@ pub async fn run(registry: Option<String>) -> Result<()> {
         &mut cf,
         None,
         Entry {
-            registry: url.clone(),
+            registry: url.as_str().to_string(),
             token: resp.token,
         },
     );
