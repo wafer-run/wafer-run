@@ -1216,10 +1216,11 @@ mod tests {
 
     #[tokio::test]
     async fn update_lazily_adds_a_column_absent_from_the_schema() {
-        // Regression for the M18 fix: SQLite `update` now ensures columns from
-        // the update payload (matching Postgres). Previously it never called
-        // `ensure_columns_from_data`, so updating a key absent from the table
-        // failed with a confusing "no such column"; now the column is added.
+        // Regression for the M18 fix: SQLite `update` ensures columns from
+        // the update payload (matching Postgres) — now via the shared
+        // `DbExec::ensure_data_columns` default. Previously updating a key
+        // absent from the table failed with a confusing "no such column";
+        // now the column is added.
         let svc = make_test_svc();
         seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
         let created = DatabaseService::list(&svc, "widgets", &ListOptions::default())
