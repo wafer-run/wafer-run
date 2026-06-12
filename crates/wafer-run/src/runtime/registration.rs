@@ -44,6 +44,22 @@ impl WrapState {
             validation_errors: Vec::new(),
         }
     }
+
+    /// Append grants to the shared grant list. Clone-extend-re-`Arc` (rather
+    /// than `Arc::make_mut`) so live `RuntimeContext` clones holding the
+    /// previous `Arc` keep their snapshot. No-op for an empty iterator.
+    fn append_grants(
+        &mut self,
+        grants: impl IntoIterator<Item = wafer_block::types::ResourceGrant>,
+    ) {
+        let mut grants = grants.into_iter().peekable();
+        if grants.peek().is_none() {
+            return;
+        }
+        let mut all = (*self.grants).clone();
+        all.extend(grants);
+        self.grants = Arc::new(all);
+    }
 }
 
 /// Block-registration state grouped out of the `Wafer` god-struct: the
@@ -193,9 +209,39 @@ impl RegistrationCore {
     /// [`set_admin_block`](Self::set_admin_block) rescan does not drop them.
     pub(crate) fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
         self.wrap.grants_external.extend(grants.iter().cloned());
-        let mut all = (*self.wrap.grants).clone();
-        all.extend(grants);
-        self.wrap.grants = Arc::new(all);
+        self.wrap.append_grants(grants);
+    }
+
+    /// Shared registration tail used by both
+    /// [`register_block_inner`](Self::register_block_inner) and
+    /// [`register_remote_block`](Self::register_remote_block): validate the
+    /// block's WRAP grant declarations (accepted grants are appended, rejected
+    /// ones accumulate for `seal()` to surface as `GrantsRejected`), insert
+    /// the block, and pair it with a fresh init slot.
+    fn insert_block_with_grants(
+        &mut self,
+        name: &str,
+        block: Arc<dyn Block>,
+        info: &crate::block::BlockInfo,
+    ) {
+        // Validate this block's WRAP grants and append the accepted ones.
+        // Typed grants declared before `set_admin_block` are deferred — that
+        // rescan re-collects them, so registration order doesn't matter.
+        let admin_block: String = (*self.wrap.admin_block).clone();
+        let outcome =
+            crate::runtime::lifecycle::validate_and_collect_grants_for_block(info, &admin_block);
+        self.wrap.append_grants(outcome.accepted);
+        self.wrap.validation_errors.extend(outcome.rejected);
+
+        self.blocks.insert(name.to_string(), block);
+        // Pair every registration with a fresh init slot so `Wafer::init_block`
+        // can lazily run lifecycle(Init) once per block. Mutate through
+        // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
+        // Arc keep their snapshot.
+        Arc::make_mut(&mut self.slots).insert(
+            name.to_string(),
+            Arc::new(crate::runtime::slot::BlockSlot::new()),
+        );
     }
 
     /// Shared validation + insertion logic for code-registered blocks. Used by
@@ -241,19 +287,6 @@ impl RegistrationCore {
             }
         }
 
-        // Validate this block's WRAP grants and append the accepted ones.
-        // Typed grants declared before `set_admin_block` are deferred — that
-        // rescan re-collects them, so registration order doesn't matter.
-        let admin_block: String = (*self.wrap.admin_block).clone();
-        let outcome =
-            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
-        if !outcome.accepted.is_empty() {
-            let mut all = (*self.wrap.grants).clone();
-            all.extend(outcome.accepted);
-            self.wrap.grants = Arc::new(all);
-        }
-        self.wrap.validation_errors.extend(outcome.rejected);
-
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
         // skipped without any unsafe code.
@@ -265,15 +298,7 @@ impl RegistrationCore {
             wasmi_block.set_asset_loader(asset_loader.clone());
         }
 
-        self.blocks.insert(name.to_string(), block);
-        // Pair every registration with a fresh init slot so `Wafer::init_block`
-        // can lazily run lifecycle(Init) once per block. Mutate through
-        // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
-        // Arc keep their snapshot.
-        Arc::make_mut(&mut self.slots).insert(
-            name.to_string(),
-            Arc::new(crate::runtime::slot::BlockSlot::new()),
-        );
+        self.insert_block_with_grants(name, block, &info);
         Ok(())
     }
 
@@ -297,21 +322,8 @@ impl RegistrationCore {
         // naming-convention nicety, so it applies to remote blocks too (unlike
         // the block-name / config-prefix checks this helper skips).
         info.validate().map_err(RuntimeError::ReservedConfigKey)?;
-        let admin_block: String = (*self.wrap.admin_block).clone();
-        let outcome =
-            crate::runtime::lifecycle::validate_and_collect_grants_for_block(&info, &admin_block);
-        if !outcome.accepted.is_empty() {
-            let mut all = (*self.wrap.grants).clone();
-            all.extend(outcome.accepted);
-            self.wrap.grants = Arc::new(all);
-        }
-        self.wrap.validation_errors.extend(outcome.rejected);
 
-        self.blocks.insert(name.to_string(), block);
-        Arc::make_mut(&mut self.slots).insert(
-            name.to_string(),
-            Arc::new(crate::runtime::slot::BlockSlot::new()),
-        );
+        self.insert_block_with_grants(name, block, &info);
         Ok(())
     }
 
