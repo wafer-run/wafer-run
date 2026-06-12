@@ -110,12 +110,13 @@ pub fn parse_expr(s: &str) -> Result<Expr, ExprError> {
     parse_atom(s)
 }
 
-fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
-    // Split on && or || (scan left-to-right, respecting strings).
-    // We find the rightmost logical operator to make it left-associative.
-    let mut best_pos = None;
-    let mut best_op = None;
-    let mut best_len = 0;
+/// Scan `s` and invoke `f(i, bytes)` for each byte index `i` that lies
+/// *outside* a string literal, where `bytes` is `s.as_bytes()`. String
+/// literals are delimited by `"` or `'`; a delimiter preceded by an odd
+/// number of backslashes is treated as escaped (so `\"` stays inside the
+/// string but `\\"` closes it). This is the single owner of the
+/// in-string/escape skeleton shared by the operator/keyword scanners below.
+fn for_each_unquoted(s: &str, mut f: impl FnMut(usize, &[u8])) {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut in_string = false;
@@ -123,7 +124,7 @@ fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
 
     while i < bytes.len() {
         if in_string {
-            if bytes[i] == string_char && (i == 0 || bytes[i - 1] != b'\\') {
+            if bytes[i] == string_char && !is_escaped(bytes, i) {
                 in_string = false;
             }
             i += 1;
@@ -135,6 +136,31 @@ fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
             i += 1;
             continue;
         }
+        f(i, bytes);
+        i += 1;
+    }
+}
+
+/// True if the byte at `i` is escaped by a preceding run of backslashes of
+/// odd length (so `\"` is escaped but `\\"` is not).
+fn is_escaped(bytes: &[u8], i: usize) -> bool {
+    let mut backslashes = 0;
+    let mut j = i;
+    while j > 0 && bytes[j - 1] == b'\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
+    // Split on && or || (scan left-to-right, respecting strings).
+    // We find the rightmost logical operator to make it left-associative.
+    let mut best_pos = None;
+    let mut best_op = None;
+    let mut best_len = 0;
+
+    for_each_unquoted(s, |i, bytes| {
         if i + 1 < bytes.len() {
             if &bytes[i..i + 2] == b"&&" {
                 best_pos = Some(i);
@@ -146,8 +172,7 @@ fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
                 best_len = 2;
             }
         }
-        i += 1;
-    }
+    });
 
     if let (Some(pos), Some(op)) = (best_pos, best_op) {
         let left = s[..pos].trim();
@@ -236,61 +261,34 @@ fn try_parse_membership(s: &str) -> Result<Option<Expr>, ExprError> {
 
 /// Find a keyword that is surrounded by whitespace (not part of an identifier).
 fn find_keyword(s: &str, keyword: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
     let kw_bytes = keyword.as_bytes();
     let kw_len = kw_bytes.len();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
+    let mut found = None;
 
-    while i < bytes.len() {
-        if in_string {
-            if bytes[i] == string_char && (i == 0 || bytes[i - 1] != b'\\') {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            in_string = true;
-            string_char = bytes[i];
-            i += 1;
-            continue;
+    for_each_unquoted(s, |i, bytes| {
+        if found.is_some() {
+            return;
         }
         if i + kw_len <= bytes.len()
             && &bytes[i..i + kw_len] == kw_bytes
             && (i == 0 || bytes[i - 1] == b' ')
             && (i + kw_len >= bytes.len() || bytes[i + kw_len] == b' ')
         {
-            return Some(i);
+            found = Some(i);
         }
-        i += 1;
-    }
-    None
+    });
+    found
 }
 
 /// Find an operator token outside of string literals.
 fn find_operator(s: &str, op: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
     let op_bytes = op.as_bytes();
     let op_len = op_bytes.len();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
+    let mut found = None;
 
-    while i < bytes.len() {
-        if in_string {
-            if bytes[i] == string_char && (i == 0 || bytes[i - 1] != b'\\') {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            in_string = true;
-            string_char = bytes[i];
-            i += 1;
-            continue;
+    for_each_unquoted(s, |i, bytes| {
+        if found.is_some() {
+            return;
         }
         if i + op_len <= bytes.len() && &bytes[i..i + op_len] == op_bytes {
             // For single-char ops (> or <), make sure it's not part of >= or <=, !=, ==.
@@ -299,8 +297,7 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
                 && i + 1 < bytes.len()
                 && bytes[i + 1] == b'='
             {
-                i += 1;
-                continue;
+                return;
             }
             // For single-char ops, also skip if preceded by ! or = (to avoid matching != or ==).
             if op_len == 1
@@ -311,14 +308,12 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
                     || bytes[i - 1] == b'>'
                     || bytes[i - 1] == b'<')
             {
-                i += 1;
-                continue;
+                return;
             }
-            return Some(i);
+            found = Some(i);
         }
-        i += 1;
-    }
-    None
+    });
+    found
 }
 
 fn parse_atom(s: &str) -> Result<Expr, ExprError> {
@@ -717,6 +712,35 @@ mod tests {
                 assert_eq!(*right, Expr::Literal(json!(r#"a"b"#)));
             }
             other => panic!("expected comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn escaped_backslash_before_quote_closes_string() {
+        // The first literal ends with an escaped backslash (`\\`) immediately
+        // before its closing quote. A naive `bytes[i-1] != '\\'` escape check
+        // mistakes that quote for an escaped one and never leaves the string,
+        // swallowing the `&&` that follows. The parity-based scanner sees the
+        // even backslash run, closes the string, and splits on `&&`.
+        let expr = parse_expr(r#"$.a == "c:\\" && $.b == "x""#).unwrap();
+        match expr {
+            Expr::Logical { left, op, right } => {
+                assert_eq!(op, LogicalOp::And);
+                match *left {
+                    Expr::Compare { right: lit, .. } => {
+                        // `c:\\` unescapes to a single trailing backslash.
+                        assert_eq!(*lit, Expr::Literal(json!(r"c:\")));
+                    }
+                    other => panic!("expected comparison on left, got {other:?}"),
+                }
+                match *right {
+                    Expr::Compare { right: lit, .. } => {
+                        assert_eq!(*lit, Expr::Literal(json!("x")));
+                    }
+                    other => panic!("expected comparison on right, got {other:?}"),
+                }
+            }
+            other => panic!("expected logical expression, got {other:?}"),
         }
     }
 }
