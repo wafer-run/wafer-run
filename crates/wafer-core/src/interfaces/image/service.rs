@@ -13,12 +13,11 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use wafer_block_macro::wafer_async_trait;
-
 pub use wafer_block::wire::image::{
     GeneratedImage, ImageParams, ImageRequest, ImageResponse, LoadProgress, ModelCapabilities,
     ModelInfo, ModelState, ModelStatus,
 };
+use wafer_block_macro::wafer_async_trait;
 
 // ---------- Error ----------
 

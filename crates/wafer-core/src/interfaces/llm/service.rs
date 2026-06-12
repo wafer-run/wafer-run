@@ -14,13 +14,12 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use wafer_block_macro::wafer_async_trait;
-
 pub use wafer_block::wire::llm::{
     ChatChunk, ChatContent, ChatMessage, ChatParams, ChatRequest, ChatRole, ChunkDelta,
     ContentPart, FinishReason, LoadProgress, ModelCapabilities, ModelInfo, ModelState, ModelStatus,
     ResponseFormat, TokenUsage, ToolCall, ToolDefinition,
 };
+use wafer_block_macro::wafer_async_trait;
 
 // ---------- Error ----------
 

@@ -8,11 +8,10 @@
 //! `EmbeddingService`, `VectorError`) live in this module.
 
 use thiserror::Error;
-use wafer_block_macro::wafer_async_trait;
-
 pub use wafer_block::wire::vector::{
     DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
 };
+use wafer_block_macro::wafer_async_trait;
 
 /// Errors returned by [`VectorService`] and [`EmbeddingService`] operations.
 #[derive(Error, Debug)]
