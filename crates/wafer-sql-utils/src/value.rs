@@ -20,6 +20,7 @@ pub fn sea_value_to_json(v: Value) -> serde_json::Value {
         Value::Float(Some(f)) => serde_json::json!(f),
         Value::Double(Some(f)) => serde_json::json!(f),
         Value::String(Some(s)) => serde_json::Value::String(*s),
+        Value::Json(Some(j)) => *j,
         _ => serde_json::Value::Null,
     }
 }
@@ -39,9 +40,11 @@ pub fn json_to_sea_value(v: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(Some(Box::new(s.clone()))),
-        // Arrays and objects are stored as JSON text
+        // Arrays and objects are carried as JSON values so each backend keeps
+        // its own bind policy (SQLite serialises to JSON text, Postgres binds
+        // JSONB) — `sea_value_to_json` returns the original value unchanged.
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Value::String(Some(Box::new(v.to_string())))
+            Value::Json(Some(Box::new(v.clone())))
         }
     }
 }
@@ -95,8 +98,20 @@ mod tests {
         let v = serde_json::json!([1, 2, 3]);
         assert_eq!(
             json_to_sea_value(&v),
-            Value::String(Some(Box::new("[1,2,3]".to_string())))
+            Value::Json(Some(Box::new(v.clone())))
         );
+    }
+
+    #[test]
+    fn test_object_roundtrips_unchanged() {
+        // Objects/arrays must survive Statement params unchanged so each
+        // backend applies its own bind policy (TEXT on SQLite, JSONB on
+        // Postgres) — collapsing to a JSON-text string here would force a
+        // TEXT bind on every backend.
+        let v = serde_json::json!({"key": "val", "n": 1});
+        assert_eq!(sea_value_to_json(json_to_sea_value(&v)), v);
+        let a = serde_json::json!([1, "two", null]);
+        assert_eq!(sea_value_to_json(json_to_sea_value(&a)), a);
     }
 
     #[test]

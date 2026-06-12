@@ -303,6 +303,50 @@ pub fn build_add_text_column(
     build_add_column_with_type(table_name, column_name, type_sql, backend)
 }
 
+/// Pick the dialect column type for a lazily added column holding `value`.
+///
+/// Postgres maps the JSON value onto a native type (`BOOLEAN`, `BIGINT`,
+/// `DOUBLE PRECISION`, `JSONB`, `TEXT`); SQLite — dynamically typed — always
+/// declares `TEXT`, matching its historical lazy column-add behaviour.
+pub fn column_type_for_value(value: &serde_json::Value, backend: Backend) -> &'static str {
+    match backend {
+        Backend::Sqlite => "TEXT",
+        Backend::Postgres => match value {
+            serde_json::Value::Null | serde_json::Value::String(_) => "TEXT",
+            serde_json::Value::Bool(_) => "BOOLEAN",
+            serde_json::Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    "BIGINT"
+                } else {
+                    "DOUBLE PRECISION"
+                }
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => "JSONB",
+        },
+    }
+}
+
+/// Generate an `ALTER TABLE <table> ADD COLUMN` statement whose column type is
+/// derived from the JSON `value` being written (see [`column_type_for_value`]).
+///
+/// This is the lazy column-add primitive behind `create`/`update` write paths:
+/// a record field absent from the table is added with a type matching the
+/// value, so subsequent typed binds (e.g. JSONB on Postgres) line up with the
+/// column.
+pub fn build_add_column_for_value(
+    table_name: &str,
+    column_name: &str,
+    value: &serde_json::Value,
+    backend: Backend,
+) -> crate::Statement {
+    build_add_column_with_type(
+        table_name,
+        column_name,
+        column_type_for_value(value, backend),
+        backend,
+    )
+}
+
 /// Generate a DROP TABLE IF EXISTS statement.
 pub fn build_drop_table(table_name: &str, _backend: Backend) -> crate::Statement {
     let sql = format!("DROP TABLE IF EXISTS {}", quote_ident(table_name));
@@ -463,6 +507,52 @@ mod tests {
             "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"amount\" BIGINT"
         );
         assert_eq!(stmt.collection, "orders");
+    }
+
+    #[test]
+    #[expect(
+        clippy::approx_constant,
+        reason = "test literal happens to look like PI; not an approximation"
+    )]
+    fn test_column_type_for_value() {
+        use serde_json::json;
+        // Postgres: native types derived from the value.
+        for (value, expected) in [
+            (serde_json::Value::Null, "TEXT"),
+            (json!("hello"), "TEXT"),
+            (json!(true), "BOOLEAN"),
+            (json!(42), "BIGINT"),
+            (json!(3.14), "DOUBLE PRECISION"),
+            (json!([1, 2, 3]), "JSONB"),
+            (json!({"key": "val"}), "JSONB"),
+        ] {
+            assert_eq!(column_type_for_value(&value, Backend::Postgres), expected);
+        }
+        // SQLite: always TEXT (dynamic typing).
+        for value in [json!(true), json!(42), json!({"key": "val"})] {
+            assert_eq!(column_type_for_value(&value, Backend::Sqlite), "TEXT");
+        }
+    }
+
+    #[test]
+    fn test_add_column_for_value() {
+        let stmt = build_add_column_for_value(
+            "orders",
+            "meta",
+            &serde_json::json!({"a": 1}),
+            Backend::Postgres,
+        );
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"meta\" JSONB"
+        );
+        let stmt = build_add_column_for_value(
+            "orders",
+            "meta",
+            &serde_json::json!({"a": 1}),
+            Backend::Sqlite,
+        );
+        assert_eq!(stmt.sql, "ALTER TABLE \"orders\" ADD COLUMN \"meta\" TEXT");
     }
 
     #[test]
