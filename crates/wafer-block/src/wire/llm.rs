@@ -1,25 +1,28 @@
 //! Wire-format types for the LLM service.
 //!
-//! Mirrors `crates/wafer-core/src/interfaces/llm/handler.rs` and
-//! `crates/wafer-core/src/interfaces/llm/service.rs`. The buffered request
-//! and response shapes are defined here. Streaming chat ops emit a sequence
-//! of `ChatChunk` values — each chunk is encoded as its own frame by Task 9
-//! (`SDK ResponseStream`); the chunk shape itself is reused as-is.
+//! These are the canonical chat / model-management types: the buffered
+//! request and response shapes are defined here, and
+//! `wafer_core::interfaces::llm::service` re-exports them so host-side
+//! service impls and wire-level consumers share one definition. Streaming
+//! chat ops emit a sequence of `ChatChunk` values — each chunk is encoded as
+//! its own frame; the chunk shape itself is reused as-is.
 //!
-//! This module **redefines** the streaming-content types (`ChatRequest`,
-//! `ChatChunk`, `ModelInfo`, etc.) here rather than re-exporting from
-//! `wafer-core` — `wafer-block` is a leaf crate and cannot depend on
-//! `wafer-core`. Field names + types match the existing `interfaces::llm::service`
-//! types exactly so consumers can convert between them with `serde_json`
-//! during migration. After Task 14 (handler migration), the wafer-core types
-//! become thin re-exports of these.
+//! The model-management types (`StatusRequest`, `LoadModelRequest`,
+//! `UnloadModelRequest`, `ModelStatus`, `ModelState`, `LoadProgress`) are
+//! shared verbatim with the image service and live in
+//! [`super::model_common`]; they are re-exported here so existing
+//! `wire::llm::*` import paths keep working.
 
 use serde::{Deserialize, Serialize};
+
+pub use super::model_common::{
+    LoadModelRequest, LoadProgress, ModelState, ModelStatus, StatusRequest, UnloadModelRequest,
+};
 
 // ---- Chat request ----
 
 /// Request for `llm.chat`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatRequest {
     /// Identifier of the configured LLM backend to dispatch to.
     pub backend_id: String,
@@ -38,8 +41,27 @@ pub struct ChatRequest {
     pub extra: serde_json::Value,
 }
 
+impl ChatRequest {
+    /// Minimal constructor. Leaves `params`, `tools`, and `extra` defaulted;
+    /// callers set them via field access.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model: impl Into<String>,
+        messages: Vec<ChatMessage>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model: model.into(),
+            messages,
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+        }
+    }
+}
+
 /// Sampling / decoding parameters for a chat request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatParams {
     /// Maximum number of output tokens to generate.
     pub max_tokens: Option<u32>,
@@ -57,7 +79,7 @@ pub struct ChatParams {
 }
 
 /// Output-format constraint requested from the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ResponseFormat {
     /// Unconstrained text output.
     Text,
@@ -68,7 +90,7 @@ pub enum ResponseFormat {
 }
 
 /// One message in a chat conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
     /// Role of the message author.
     pub role: ChatRole,
@@ -80,6 +102,58 @@ pub struct ChatMessage {
     /// When `role == Assistant`, tool calls the model issued in this turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+}
+
+impl ChatMessage {
+    /// Text-only user message.
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::User, text)
+    }
+
+    /// Text-only system message.
+    pub fn system(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::System, text)
+    }
+
+    /// Text-only assistant message.
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self::text(ChatRole::Assistant, text)
+    }
+
+    /// Tool-result message.
+    pub fn tool(tool_call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: ChatContent::Text(text.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// Construct a message with arbitrary role + content (no tool fields set).
+    pub fn new(role: ChatRole, content: ChatContent) -> Self {
+        Self {
+            role,
+            content,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// Builder: attach tool-call results to an assistant message.
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = tool_calls;
+        self
+    }
+
+    fn text(role: ChatRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: ChatContent::Text(text.into()),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
 }
 
 /// Author role of a [`ChatMessage`].
@@ -100,7 +174,8 @@ pub enum ChatRole {
 pub enum ChatContent {
     /// Plain text content.
     Text(String),
-    /// Multipart content (mixed text + images).
+    /// Multipart content (mixed text + images). Impls that don't support the
+    /// requested parts should return `LlmError::NotSupported`.
     Parts(Vec<ContentPart>),
 }
 
@@ -126,7 +201,7 @@ pub enum ContentPart {
 }
 
 /// Tool descriptor passed to the model (JSON-Schema parameters).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDefinition {
     /// Tool name.
     pub name: String,
@@ -136,8 +211,23 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+impl ToolDefinition {
+    /// Build a `ToolDefinition` from its `name`, `description`, and parameter schema.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+}
+
 /// A tool invocation issued by the model in a single turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
     /// Per-call id used to correlate the result message back to this call.
     pub id: String,
@@ -147,10 +237,25 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+impl ToolCall {
+    /// Build a `ToolCall` from its `id`, tool `name`, and `arguments`.
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
 // ---- Chat streaming chunk ----
 
 /// One frame in a streaming chat response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatChunk {
     /// Incremental update for this frame.
     pub delta: ChunkDelta,
@@ -162,8 +267,80 @@ pub struct ChatChunk {
     pub usage: Option<TokenUsage>,
 }
 
+impl ChatChunk {
+    /// A non-terminal text delta.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::Text(s.into()),
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A terminal chunk with the given finish reason and optional usage. The
+    /// delta is `Empty` — a meta-only terminal frame.
+    pub fn finish(reason: FinishReason, usage: Option<TokenUsage>) -> Self {
+        Self {
+            delta: ChunkDelta::Empty,
+            finish_reason: Some(reason),
+            usage,
+        }
+    }
+
+    /// A non-terminal chunk carrying any delta variant (for tool-call events).
+    pub fn delta(delta: ChunkDelta) -> Self {
+        Self {
+            delta,
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A chunk announcing the start of a tool call.
+    pub fn tool_call_start(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallStart {
+                id: id.into(),
+                name: name.into(),
+            },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A chunk carrying an incremental tool-call arguments delta.
+    pub fn tool_call_arguments(id: impl Into<String>, arguments_delta: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallArguments {
+                id: id.into(),
+                arguments_delta: arguments_delta.into(),
+            },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A chunk announcing the end of a tool call.
+    pub fn tool_call_complete(id: impl Into<String>) -> Self {
+        Self {
+            delta: ChunkDelta::ToolCallComplete { id: id.into() },
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    /// A meta-only chunk carrying just a usage update.
+    pub fn usage(usage: TokenUsage) -> Self {
+        Self {
+            delta: ChunkDelta::Empty,
+            finish_reason: None,
+            usage: Some(usage),
+        }
+    }
+}
+
 /// Incremental payload variant carried by [`ChatChunk::delta`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChunkDelta {
     /// Appended assistant text.
     Text(String),
@@ -218,37 +395,34 @@ pub struct TokenUsage {
     pub reasoning_tokens: Option<u32>,
 }
 
-// ---- Status / model management ----
+impl TokenUsage {
+    /// Construct with input + output token counts. cached/reasoning default to None.
+    pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        }
+    }
 
-/// Request for `llm.status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier within the backend.
-    pub model_id: String,
+    /// Set the cached-tokens field.
+    pub fn with_cached(mut self, cached: u32) -> Self {
+        self.cached_tokens = Some(cached);
+        self
+    }
+
+    /// Set the reasoning-tokens field.
+    pub fn with_reasoning(mut self, reasoning: u32) -> Self {
+        self.reasoning_tokens = Some(reasoning);
+        self
+    }
 }
 
-/// Request for `llm.load_model`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadModelRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier to load.
-    pub model_id: String,
-}
-
-/// Request for `llm.unload_model`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnloadModelRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier to unload.
-    pub model_id: String,
-}
+// ---- Model management ----
 
 /// Descriptor of an available model returned by `llm.list_models`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelInfo {
     /// Backend identifier the model is hosted in.
     pub backend_id: String,
@@ -261,8 +435,30 @@ pub struct ModelInfo {
     pub capabilities: ModelCapabilities,
 }
 
+impl ModelInfo {
+    /// Minimal constructor. Capabilities default to all-false / unlimited.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model_id: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model_id: model_id.into(),
+            display_name: display_name.into(),
+            capabilities: ModelCapabilities::default(),
+        }
+    }
+
+    /// Replace the `capabilities` field; chainable on `new()`.
+    pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
 /// Capability flags for a [`ModelInfo`].
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCapabilities {
     /// Supports streaming responses.
     pub streaming: bool,
@@ -278,99 +474,79 @@ pub struct ModelCapabilities {
     pub max_output_tokens: Option<u32>,
 }
 
-/// Loaded-model status returned by `llm.status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelStatus {
-    /// Current model state.
-    pub state: ModelState,
-    /// Optional 0.0..1.0 progress when `state == Loading`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<f32>,
-}
-
-/// Lifecycle state of a model on a backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelState {
-    /// Model is loaded and ready to serve requests.
-    Ready,
-    /// Model is currently being loaded.
-    Loading,
-    /// Model is known to the backend but not loaded.
-    Unloaded,
-    /// Loading or serving failed.
-    Error {
-        /// Error description.
-        message: String,
-    },
-}
-
-/// Progress detail for a model-load operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadProgress {
-    /// Free-form stage label (e.g. `"downloading"`, `"verifying"`).
-    pub stage: String,
-    /// Bytes downloaded so far (if known).
-    pub bytes_downloaded: Option<u64>,
-    /// Expected total bytes (if known).
-    pub bytes_total: Option<u64>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec;
 
+    /// Representative request: params, tools, multipart content, and an
+    /// assistant turn carrying tool calls. Full decode equality pins the wire
+    /// shape end-to-end.
     #[test]
     fn chat_request_round_trips() {
         let original = ChatRequest {
             backend_id: "openai-main".into(),
             model: "gpt-4o-mini".into(),
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: ChatContent::Text("hi".into()),
-                tool_call_id: None,
-                tool_calls: vec![],
-            }],
+            messages: vec![
+                ChatMessage::system("be terse"),
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: ChatContent::Parts(vec![
+                        ContentPart::Text("what is this?".into()),
+                        ContentPart::ImageUrl {
+                            url: "https://example.com/cat.png".into(),
+                            detail: Some("high".into()),
+                        },
+                    ]),
+                    tool_call_id: None,
+                    tool_calls: vec![],
+                },
+                ChatMessage::assistant("checking").with_tool_calls(vec![ToolCall::new(
+                    "call_1",
+                    "lookup",
+                    serde_json::json!({"q": "cat"}),
+                )]),
+                ChatMessage::tool("call_1", "a cat"),
+            ],
             params: ChatParams {
+                max_tokens: Some(256),
                 temperature: Some(0.7),
-                ..Default::default()
+                top_p: Some(0.9),
+                stop_sequences: vec!["END".into()],
+                seed: Some(42),
+                response_format: Some(ResponseFormat::JsonSchema(
+                    serde_json::json!({"type": "object"}),
+                )),
             },
-            tools: vec![],
-            extra: serde_json::Value::Null,
+            tools: vec![ToolDefinition::new(
+                "lookup",
+                "look something up",
+                serde_json::json!({"type": "object"}),
+            )],
+            extra: serde_json::json!({"provider_knob": true}),
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ChatRequest = codec::decode(&encoded).expect("decode");
-        assert_eq!(decoded.backend_id, "openai-main");
-        assert_eq!(decoded.messages.len(), 1);
-        assert_eq!(decoded.params.temperature, Some(0.7));
+        assert_eq!(decoded, original);
     }
 
     #[test]
     fn chat_chunk_text_round_trips() {
-        let original = ChatChunk {
-            delta: ChunkDelta::Text("hello".into()),
-            finish_reason: None,
-            usage: None,
-        };
+        let original = ChatChunk::text("hello");
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ChatChunk = codec::decode(&encoded).expect("decode");
-        assert!(matches!(decoded.delta, ChunkDelta::Text(ref s) if s == "hello"));
+        assert_eq!(decoded, original);
     }
 
     #[test]
     fn chat_chunk_terminal_with_usage_round_trips() {
-        let original = ChatChunk {
-            delta: ChunkDelta::Empty,
-            finish_reason: Some(FinishReason::Stop),
-            usage: Some(TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                cached_tokens: Some(4),
-                reasoning_tokens: None,
-            }),
-        };
+        let original = ChatChunk::finish(
+            FinishReason::Stop,
+            Some(TokenUsage::new(10, 20).with_cached(4)),
+        );
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ChatChunk = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
         assert!(matches!(decoded.finish_reason, Some(FinishReason::Stop)));
         let usage = decoded.usage.unwrap();
         assert_eq!(usage.input_tokens, 10);
@@ -378,79 +554,58 @@ mod tests {
     }
 
     #[test]
-    fn status_request_round_trips() {
-        let original = StatusRequest {
-            backend_id: "b1".into(),
-            model_id: "m1".into(),
-        };
-        let encoded = codec::encode(&original).expect("encode");
-        let decoded: StatusRequest = codec::decode(&encoded).expect("decode");
-        assert_eq!(decoded.backend_id, "b1");
-        assert_eq!(decoded.model_id, "m1");
+    fn chat_chunk_tool_call_round_trips() {
+        for original in [
+            ChatChunk::tool_call_start("call_1", "search"),
+            ChatChunk::tool_call_arguments("call_1", "{\"q\":"),
+            ChatChunk::tool_call_complete("call_1"),
+            ChatChunk::usage(TokenUsage::new(1, 2)),
+        ] {
+            let encoded = codec::encode(&original).expect("encode");
+            let decoded: ChatChunk = codec::decode(&encoded).expect("decode");
+            assert_eq!(decoded, original);
+        }
     }
 
     #[test]
     fn model_info_round_trips() {
-        let original = ModelInfo {
-            backend_id: "b".into(),
-            model_id: "m".into(),
-            display_name: "M".into(),
-            capabilities: ModelCapabilities {
-                streaming: true,
-                tools: true,
-                ..Default::default()
-            },
-        };
+        let original = ModelInfo::new("b", "m", "M").with_capabilities(ModelCapabilities {
+            streaming: true,
+            tools: true,
+            ..Default::default()
+        });
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ModelInfo = codec::decode(&encoded).expect("decode");
-        assert_eq!(decoded.backend_id, "b");
-        assert!(decoded.capabilities.streaming);
-        assert!(decoded.capabilities.tools);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn chat_message_constructors_set_expected_fields() {
+        let user = ChatMessage::user("hi");
+        assert_eq!(user.role, ChatRole::User);
+        assert_eq!(user.content, ChatContent::Text("hi".into()));
+        assert!(user.tool_call_id.is_none());
+        assert!(user.tool_calls.is_empty());
+
+        let tool = ChatMessage::tool("call_1", "result");
+        assert_eq!(tool.role, ChatRole::Tool);
+        assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn token_usage_builders_set_optional_fields() {
+        let u = TokenUsage::new(7, 11);
+        assert_eq!(u.input_tokens, 7);
+        assert_eq!(u.output_tokens, 11);
+        assert!(u.cached_tokens.is_none());
+        assert!(u.reasoning_tokens.is_none());
+
+        let u2 = TokenUsage::new(1, 2).with_cached(3).with_reasoning(4);
+        assert_eq!(u2.cached_tokens, Some(3));
+        assert_eq!(u2.reasoning_tokens, Some(4));
     }
 
     // ----- Schema locks -----
-
-    #[test]
-    fn schema_lock_status_request() {
-        let req = StatusRequest {
-            backend_id: String::new(),
-            model_id: String::new(),
-        };
-        let encoded = codec::encode(&req).expect("encode");
-        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex, "82aa6261636b656e645f6964a0a86d6f64656c5f6964a0",
-            "StatusRequest schema changed — review consumer impact before updating this literal"
-        );
-    }
-
-    #[test]
-    fn schema_lock_load_model_request() {
-        let req = LoadModelRequest {
-            backend_id: String::new(),
-            model_id: String::new(),
-        };
-        let encoded = codec::encode(&req).expect("encode");
-        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex, "82aa6261636b656e645f6964a0a86d6f64656c5f6964a0",
-            "LoadModelRequest schema changed — review consumer impact before updating this literal"
-        );
-    }
-
-    #[test]
-    fn schema_lock_unload_model_request() {
-        let req = UnloadModelRequest {
-            backend_id: String::new(),
-            model_id: String::new(),
-        };
-        let encoded = codec::encode(&req).expect("encode");
-        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex, "82aa6261636b656e645f6964a0a86d6f64656c5f6964a0",
-            "UnloadModelRequest schema changed — review consumer impact before updating this literal"
-        );
-    }
 
     #[test]
     fn schema_lock_token_usage() {
@@ -460,6 +615,19 @@ mod tests {
         assert_eq!(
             hex, "84ac696e7075745f746f6b656e7300ad6f75747075745f746f6b656e7300ad6361636865645f746f6b656e73c0b0726561736f6e696e675f746f6b656e73c0",
             "TokenUsage schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_chat_chunk_text() {
+        let chunk = ChatChunk::text("hi");
+        let encoded = codec::encode(&chunk).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        // {"delta": {"Text": "hi"}} — finish_reason/usage omitted via
+        // skip_serializing_if.
+        assert_eq!(
+            hex, "81a564656c746181a454657874a26869",
+            "ChatChunk schema changed — review consumer impact before updating this literal"
         );
     }
 }

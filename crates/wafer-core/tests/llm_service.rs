@@ -137,9 +137,7 @@ fn build_router(backend: ScriptedLlm) -> Arc<dyn LlmService> {
 
 #[tokio::test]
 async fn chat_streams_chunks_then_completes() {
-    let mut usage = TokenUsage::default();
-    usage.input_tokens = 2;
-    usage.output_tokens = 2;
+    let usage = TokenUsage::new(2, 2);
     let chunks = vec![
         ChatChunk::text("hello "),
         ChatChunk::text("world"),
@@ -191,8 +189,10 @@ async fn unknown_operation_yields_error() {
 
 #[tokio::test]
 async fn list_models_buffered_payload_is_aggregated_json() {
-    let mut caps = ModelCapabilities::default();
-    caps.streaming = true;
+    let caps = ModelCapabilities {
+        streaming: true,
+        ..Default::default()
+    };
     let models = vec![
         ModelInfo::new("test", "m1", "One").with_capabilities(caps),
         ModelInfo::new("test", "m2", "Two"),

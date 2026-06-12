@@ -242,21 +242,23 @@ mod tests {
         assert_eq!(decoded.entries[0].text.as_deref(), Some("hello"));
     }
 
+    /// Representative query: metadata filter + hybrid mode + keyword query.
+    /// Full decode equality pins the wire shape end-to-end.
     #[test]
     fn query_request_round_trips() {
+        let mut equals = BTreeMap::new();
+        equals.insert("user.id".to_string(), serde_json::json!("u1"));
         let original = QueryRequest {
             index: "docs".into(),
             vector: vec![1.0, 2.0],
             top_k: 5,
-            filter: None,
-            mode: SearchMode::Vector,
-            keyword_query: None,
+            filter: Some(MetadataFilter { equals }),
+            mode: SearchMode::Hybrid,
+            keyword_query: Some("cats".into()),
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: QueryRequest = codec::decode(&encoded).expect("decode");
-        assert_eq!(decoded.top_k, 5);
-        assert_eq!(decoded.mode, SearchMode::Vector);
-        assert_eq!(decoded.vector.len(), 2);
+        assert_eq!(decoded, original);
     }
 
     #[test]
@@ -426,6 +428,47 @@ mod tests {
             hex, "83a56d6f64656ca0aa64696d656e73696f6e7300a7766563746f727390",
             "EmbedResponse schema changed — review consumer impact before updating this literal"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON representation (config files / HTTP surfaces use serde_json)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_mode_serializes_lowercase_json() {
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Vector).unwrap(),
+            "\"vector\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Keyword).unwrap(),
+            "\"keyword\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Hybrid).unwrap(),
+            "\"hybrid\""
+        );
+    }
+
+    #[test]
+    fn index_config_json_round_trips() {
+        let cfg = VectorIndexConfig {
+            name: "docs".into(),
+            model: "bge-m3".into(),
+            dimensions: 1024,
+            metric: DistanceMetric::Cosine,
+            keyword_search: true,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: VectorIndexConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn keyword_search_defaults_false() {
+        let json = r#"{"name":"i","model":"m","dimensions":1,"metric":"cosine"}"#;
+        let cfg: VectorIndexConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.keyword_search);
     }
 
     #[test]

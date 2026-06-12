@@ -2,8 +2,11 @@
 //! clients) and `wafer_sdk` (WASM skill clients). Encoded via `wafer_block::codec`
 //! (currently MessagePack).
 //!
-//! Each service interface gets its own submodule. Types are pure DTOs —
-//! `#[derive(Serialize, Deserialize, Debug, Clone)]` only, no behavior.
+//! Each service interface gets its own submodule. Types are DTOs —
+//! `#[derive(Serialize, Deserialize, Debug, Clone)]` plus convenience
+//! constructors; the serde shape is the contract. Types shared verbatim by
+//! more than one service (the model-management set) live in
+//! [`model_common`] and are re-exported from each service's module.
 //!
 //! # Forward-compatibility strategy
 //!
@@ -42,6 +45,7 @@ pub mod database;
 pub mod image;
 pub mod llm;
 pub mod logger;
+pub mod model_common;
 pub mod network;
 pub mod storage;
 pub mod vector;

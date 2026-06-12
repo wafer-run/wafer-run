@@ -1,11 +1,20 @@
 //! Wire-format types for the image service.
 //!
-//! Mirrors `interfaces::image::service` in wafer-core. Field-identical
-//! types — the handler in `wafer-core` converts between wire and service
-//! representations because wafer-block is a leaf crate that cannot
-//! depend on wafer-core.
+//! These are the canonical image types: `wafer_core::interfaces::image::service`
+//! re-exports them so host-side service impls and wire-level consumers share
+//! one definition.
+//!
+//! The model-management types (`StatusRequest`, `LoadModelRequest`,
+//! `UnloadModelRequest`, `ModelStatus`, `ModelState`, `LoadProgress`) are
+//! shared verbatim with the LLM service and live in [`super::model_common`];
+//! they are re-exported here so existing `wire::image::*` import paths keep
+//! working.
 
 use serde::{Deserialize, Serialize};
+
+pub use super::model_common::{
+    LoadModelRequest, LoadProgress, ModelState, ModelStatus, StatusRequest, UnloadModelRequest,
+};
 
 // ---- Request ----
 
@@ -24,6 +33,24 @@ pub struct ImageRequest {
     /// Backend-specific pass-through parameters (free-form JSON).
     #[serde(default)]
     pub extra: serde_json::Value,
+}
+
+impl ImageRequest {
+    /// Build a request with the given `backend_id`, `model`, and `prompt` and
+    /// default parameters.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model: model.into(),
+            prompt: prompt.into(),
+            params: ImageParams::default(),
+            extra: serde_json::Value::Null,
+        }
+    }
 }
 
 /// Generation parameters for [`ImageRequest`].
@@ -53,6 +80,13 @@ pub struct ImageResponse {
     pub images: Vec<GeneratedImage>,
 }
 
+impl ImageResponse {
+    /// Wrap a vector of `GeneratedImage` as a response.
+    pub fn new(images: Vec<GeneratedImage>) -> Self {
+        Self { images }
+    }
+}
+
 /// A single generated image returned from the backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GeneratedImage {
@@ -62,34 +96,17 @@ pub struct GeneratedImage {
     pub mime_type: String,
 }
 
+impl GeneratedImage {
+    /// Build a `GeneratedImage` from raw `bytes` and a `mime_type`.
+    pub fn new(bytes: Vec<u8>, mime_type: impl Into<String>) -> Self {
+        Self {
+            bytes,
+            mime_type: mime_type.into(),
+        }
+    }
+}
+
 // ---- Model management ----
-
-/// Request for `image.status`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StatusRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier within the backend.
-    pub model_id: String,
-}
-
-/// Request for `image.load_model`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct LoadModelRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier to load.
-    pub model_id: String,
-}
-
-/// Request for `image.unload_model`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct UnloadModelRequest {
-    /// Backend identifier.
-    pub backend_id: String,
-    /// Model identifier to unload.
-    pub model_id: String,
-}
 
 /// Descriptor of an available image model returned by `image.list_models`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -105,6 +122,28 @@ pub struct ModelInfo {
     pub capabilities: ModelCapabilities,
 }
 
+impl ModelInfo {
+    /// Build a `ModelInfo` with default capabilities.
+    pub fn new(
+        backend_id: impl Into<String>,
+        model_id: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend_id: backend_id.into(),
+            model_id: model_id.into(),
+            display_name: display_name.into(),
+            capabilities: ModelCapabilities::default(),
+        }
+    }
+
+    /// Replace the `capabilities` field; chainable on `new()`.
+    pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
 /// Capability flags for an image [`ModelInfo`].
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCapabilities {
@@ -116,52 +155,6 @@ pub struct ModelCapabilities {
     pub supports_negative_prompt: bool,
     /// Maximum supported diffusion-step count.
     pub max_steps: Option<u32>,
-}
-
-/// Loaded-model status returned by `image.status`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ModelStatus {
-    /// Current model state.
-    pub state: ModelState,
-    /// Optional 0.0..1.0 progress when `state == Loading`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<f32>,
-}
-
-impl Default for ModelStatus {
-    fn default() -> Self {
-        Self {
-            state: ModelState::Unloaded,
-            progress: None,
-        }
-    }
-}
-
-/// Lifecycle state of an image model on a backend.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ModelState {
-    /// Model is loaded and ready to serve requests.
-    Ready,
-    /// Model is currently being loaded.
-    Loading,
-    /// Model is known to the backend but not loaded.
-    Unloaded,
-    /// Loading or serving failed.
-    Error {
-        /// Error description.
-        message: String,
-    },
-}
-
-/// Progress detail for an image-model load operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LoadProgress {
-    /// Free-form stage label (e.g. `"downloading"`, `"compiling"`).
-    pub stage: String,
-    /// Bytes downloaded so far (if known).
-    pub bytes_downloaded: Option<u64>,
-    /// Expected total bytes (if known).
-    pub bytes_total: Option<u64>,
 }
 
 #[cfg(test)]
@@ -199,18 +192,31 @@ mod tests {
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ImageResponse = codec::decode(&encoded).expect("decode");
-        assert_eq!(decoded.images.len(), 1);
+        assert_eq!(decoded, original);
         assert_eq!(decoded.images[0].bytes, vec![1, 2, 3, 4]);
     }
 
     #[test]
-    fn schema_lock_status_request() {
-        let req = StatusRequest::default();
-        let encoded = codec::encode(&req).expect("encode");
-        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex, "82aa6261636b656e645f6964a0a86d6f64656c5f6964a0",
-            "StatusRequest schema changed — review consumer impact before updating this literal"
-        );
+    fn image_constructors_set_expected_fields() {
+        let img = GeneratedImage::new(vec![1, 2, 3], "image/png");
+        assert_eq!(img.bytes, vec![1, 2, 3]);
+        assert_eq!(img.mime_type, "image/png");
+
+        let resp = ImageResponse::new(vec![img.clone()]);
+        assert_eq!(resp.images, vec![img]);
+
+        let req = ImageRequest::new("transformers-image", "Xenova/sd-turbo", "a cat");
+        assert_eq!(req.prompt, "a cat");
+        assert_eq!(req.params, ImageParams::default());
+        assert_eq!(req.extra, serde_json::Value::Null);
+
+        let info = ModelInfo::new("transformers-image", "Xenova/sd-turbo", "SD-Turbo")
+            .with_capabilities(ModelCapabilities {
+                max_width: Some(512),
+                supports_negative_prompt: true,
+                ..Default::default()
+            });
+        assert_eq!(info.capabilities.max_width, Some(512));
+        assert!(info.capabilities.supports_negative_prompt);
     }
 }
