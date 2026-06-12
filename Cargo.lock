@@ -6155,6 +6155,7 @@ name = "wafer-block-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64ct",
  "chrono",
  "serde",
  "serde_json",
@@ -6223,6 +6224,7 @@ name = "wafer-block-sqlite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64ct",
  "chrono",
  "parking_lot",
  "rusqlite",

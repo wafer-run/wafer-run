@@ -9,9 +9,6 @@
 /// Aggregate SQL builders — `COUNT`, `SUM`, `AVG`, daily buckets, and a
 /// flexible grouped-aggregate query.
 pub mod aggregate;
-/// Dependency-free base64 encoder used by builders that need to embed
-/// binary payloads (e.g. vector embeddings) in SQL text.
-pub mod base64;
 /// DDL builders — `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD
 /// COLUMN`, `DROP TABLE`, with dialect-specific type mapping.
 pub mod ddl;
