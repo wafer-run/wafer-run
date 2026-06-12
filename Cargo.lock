@@ -6061,7 +6061,6 @@ name = "wafer-block-inspector"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "parking_lot",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -6212,7 +6211,6 @@ name = "wafer-block-security-headers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "serde_json",
  "wafer-block",
  "wafer-block-macro",
 ]

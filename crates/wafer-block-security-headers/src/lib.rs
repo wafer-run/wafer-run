@@ -119,12 +119,11 @@ impl Block for SecurityHeadersBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init {
-            if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
-                if let Some(custom_csp) = cfg.get("csp").and_then(|v| v.as_str()) {
-                    let merged = merge_csp(DEFAULT_CSP, custom_csp);
-                    // Write-once: Init fires a single time per registration.
-                    let _ = self.csp.set(merged);
-                }
+            let config = BlockConfig::from_event(&event);
+            if let Some(custom_csp) = config.get("csp").and_then(|v| v.as_str()) {
+                let merged = merge_csp(DEFAULT_CSP, custom_csp);
+                // Write-once: Init fires a single time per registration.
+                let _ = self.csp.set(merged);
             }
         }
         Ok(())

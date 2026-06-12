@@ -238,48 +238,42 @@ impl Block for CorsBlock {
             //   - array of strings -> join with `,` (matches the internal
             //     split-on-comma representation)
             //   - anything else -> warn + fail closed (SEC-087)
-            let cfg_origins = if event.data.is_empty() {
-                None
-            } else {
-                match serde_json::from_slice::<serde_json::Value>(&event.data) {
-                    Ok(cfg) => match cfg.get("allowed_origins") {
-                        Some(serde_json::Value::String(s)) => Some(s.clone()),
-                        Some(serde_json::Value::Array(items)) => {
-                            let strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
-                            if strs.is_empty() {
-                                tracing::warn!(
-                                    "CORS: `allowed_origins` array is empty or \
-                                     contains no string entries — falling back to \
-                                     fail-closed (set a non-empty array of origin \
-                                     strings, or a comma-separated string)",
-                                );
-                                None
-                            } else {
-                                if strs.len() != items.len() {
-                                    tracing::warn!(
-                                        "CORS: `allowed_origins` array contains {} non-string \
-                                         entry/entries (out of {}) which were dropped — \
-                                         only string entries are honored",
-                                        items.len() - strs.len(),
-                                        items.len(),
-                                    );
-                                }
-                                Some(strs.join(","))
-                            }
-                        }
-                        Some(other) => {
+            let config = BlockConfig::from_event(&event);
+            let cfg_origins = match config.get("allowed_origins") {
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(serde_json::Value::Array(items)) => {
+                    let strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+                    if strs.is_empty() {
+                        tracing::warn!(
+                            "CORS: `allowed_origins` array is empty or \
+                             contains no string entries — falling back to \
+                             fail-closed (set a non-empty array of origin \
+                             strings, or a comma-separated string)",
+                        );
+                        None
+                    } else {
+                        if strs.len() != items.len() {
                             tracing::warn!(
-                                "CORS: `allowed_origins` has unsupported JSON shape \
-                                 ({:?}) — expected string or array of strings; falling \
-                                 back to fail-closed",
-                                other,
+                                "CORS: `allowed_origins` array contains {} non-string \
+                                 entry/entries (out of {}) which were dropped — \
+                                 only string entries are honored",
+                                items.len() - strs.len(),
+                                items.len(),
                             );
-                            None
                         }
-                        None => None,
-                    },
-                    Err(_) => None,
+                        Some(strs.join(","))
+                    }
                 }
+                Some(other) => {
+                    tracing::warn!(
+                        "CORS: `allowed_origins` has unsupported JSON shape \
+                         ({:?}) — expected string or array of strings; falling \
+                         back to fail-closed",
+                        other,
+                    );
+                    None
+                }
+                None => None,
             };
 
             match cfg_origins {

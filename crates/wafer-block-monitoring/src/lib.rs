@@ -17,8 +17,8 @@ use std::{collections::HashMap, net::IpAddr, sync::OnceLock, time::Instant};
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, LifecycleEvent, LifecycleType,
-    Message, OutputStream, WaferError,
+    Block, BlockConfig, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, LifecycleEvent,
+    LifecycleType, Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -201,22 +201,16 @@ impl Block for MonitoringBlock {
         _ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        if event.event_type == LifecycleType::Init && !event.data.is_empty() {
-            if let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&event.data) {
-                let read = |key: &str, default: &str| {
-                    cfg.get(key)
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(default)
-                        .to_string()
-                };
-                let paths = EndpointPaths {
-                    stats: read("stats_path", DEFAULT_STATS_PATH),
-                    monitoring: read("monitoring_path", DEFAULT_MONITORING_PATH),
-                };
-                // Write-once: Init fires a single time per registration.
-                let _ = self.paths.set(paths);
-            }
+        if event.event_type == LifecycleType::Init {
+            let config = BlockConfig::from_event(&event);
+            let paths = EndpointPaths {
+                stats: config.str_or("stats_path", DEFAULT_STATS_PATH).to_string(),
+                monitoring: config
+                    .str_or("monitoring_path", DEFAULT_MONITORING_PATH)
+                    .to_string(),
+            };
+            // Write-once: Init fires a single time per registration.
+            let _ = self.paths.set(paths);
         }
         Ok(())
     }
