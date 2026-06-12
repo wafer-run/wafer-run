@@ -1,8 +1,10 @@
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
-use wasmi::{Caller, Engine, Linker, Module, Store};
+use wasmi::{Engine, Module, Store};
+
+use crate::wasm_stubs;
 
 /// A test fixture file. The `kind` and `meta` fields match `wafer_block::Message`.
 /// The optional `data` field carries the body bytes to pass as the second argument
@@ -18,28 +20,16 @@ struct TestFixture {
     data: Vec<u8>,
 }
 
-/// State held in the wasmi store during test execution.
-struct TestState {
-    /// block-name -> mock BlockResult JSON bytes
-    mock_results: HashMap<String, Vec<u8>>,
-    /// Current write offset for mock responses in guest memory.
-    /// Starts at MOCK_BUF_OFFSET and advances after each call_block call
-    /// so that multiple calls within one Handle() invocation don't overwrite
-    /// each other.
-    mock_write_offset: u32,
-}
-
-const DEFAULT_CONTINUE: &[u8] =
-    br#"{"action":"Continue","response":null,"error":null,"message":null}"#;
-
-/// Offset in guest memory used for writing mock responses.
-/// 1 MiB — well above typical stack/heap usage for a freshly-started guest.
-const MOCK_BUF_OFFSET: usize = 1024 * 1024;
-
 /// Run test fixtures for the block in `dir`.
 ///
+/// The module is instantiated against the shared stub linker
+/// ([`crate::wasm_stubs`]), which registers exactly the host-import set the
+/// runtime provides — including the streaming ABI and excluding the removed
+/// legacy `__wafer_host_call_block`. A block that links here links in
+/// production too.
+///
 /// * `specific_path` — if Some, run only that one file; otherwise run all
-///   `tests/*.json` files (excluding `tests/mocks/`).
+///   `tests/*.json` files.
 pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 1. Load block.wasm
@@ -63,319 +53,14 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
         .with_context(|| format!("Failed to compile WASM module: {}", wasm_path.display()))?;
 
     // -----------------------------------------------------------------------
-    // 3. Load mock results from tests/mocks/*.json
+    // 3. Build the shared stub linker and instantiate
     // -----------------------------------------------------------------------
-    let mocks_dir = dir.join("tests/mocks");
-    let mut mock_results: HashMap<String, Vec<u8>> = HashMap::new();
-
-    if mocks_dir.is_dir() {
-        for entry in std::fs::read_dir(&mocks_dir)
-            .with_context(|| format!("Failed to read mocks dir: {}", mocks_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                // filename uses "--" instead of "/" for block names
-                let block_name = stem.replacen("--", "/", 1);
-                let contents = std::fs::read(&path)
-                    .with_context(|| format!("Failed to read mock: {}", path.display()))?;
-                mock_results.insert(block_name, contents);
-            }
-        }
-    }
+    let linker = wasm_stubs::build_stub_linker::<()>(&engine)?;
+    let mut store = Store::new(&engine, ());
+    let instance = wasm_stubs::instantiate_and_start(&linker, &mut store, &module)?;
 
     // -----------------------------------------------------------------------
-    // 4. Build linker with host stubs
-    // -----------------------------------------------------------------------
-    let mut linker = Linker::<TestState>::new(&engine);
-
-    // wafer::__wafer_host_is_cancelled() -> i32
-    linker
-        .func_wrap(
-            "wafer",
-            "__wafer_host_is_cancelled",
-            |_: Caller<TestState>| 0i32,
-        )
-        .context("Failed to define __wafer_host_is_cancelled stub")?;
-
-    // wafer::__wafer_host_log(level_ptr, level_len, msg_ptr, msg_len) — no-op
-    linker
-        .func_wrap(
-            "wafer",
-            "__wafer_host_log",
-            |_: Caller<TestState>,
-             _level_ptr: i32,
-             _level_len: i32,
-             _msg_ptr: i32,
-             _msg_len: i32| {},
-        )
-        .context("Failed to define __wafer_host_log stub")?;
-
-    // wafer::__wafer_host_call_block(name_ptr, name_len, msg_ptr, msg_len, body_ptr, body_len) -> i64
-    //
-    // Looks up the block name in mock_results. Writes the mock JSON into guest
-    // memory at the current mock_write_offset (starting at MOCK_BUF_OFFSET) and
-    // advances the offset so multiple calls don't overwrite each other.
-    linker
-        .func_wrap(
-            "wafer",
-            "__wafer_host_call_block",
-            |mut caller: Caller<TestState>,
-             name_ptr: i32,
-             name_len: i32,
-             _msg_ptr: i32,
-             _msg_len: i32,
-             _body_ptr: i32,
-             _body_len: i32|
-             -> i64 {
-                // Read block name from guest memory
-                let block_name =
-                    if let Some(wasmi::Extern::Memory(mem)) = caller.get_export("memory") {
-                        let mut name_bytes = vec![0u8; name_len as usize];
-                        let _ = mem.read(&caller, name_ptr as usize, &mut name_bytes);
-                        String::from_utf8(name_bytes).unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-
-                // Choose mock payload
-                let payload: Vec<u8> = caller
-                    .data()
-                    .mock_results
-                    .get(&block_name)
-                    .cloned()
-                    .unwrap_or_else(|| DEFAULT_CONTINUE.to_vec());
-
-                // Write payload into guest memory at the current advancing offset.
-                // Using an incrementing offset means multiple call_block calls within
-                // a single Handle() invocation don't overwrite each other's results.
-                let write_offset = caller.data().mock_write_offset as usize;
-                if let Some(wasmi::Extern::Memory(mem)) = caller.get_export("memory") {
-                    let _ = mem.write(&mut caller, write_offset, &payload);
-                }
-
-                // Advance the offset past this payload (align to 8 bytes for safety).
-                let advance = payload.len().div_ceil(8) * 8;
-                caller.data_mut().mock_write_offset += advance as u32;
-
-                let ptr = write_offset as i64;
-                let len = payload.len() as i64;
-                (ptr << 32) | len
-            },
-        )
-        .context("Failed to define __wafer_host_call_block stub")?;
-
-    // wasi_snapshot_preview1::fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
-    // For fd=2 (stderr), print the output to help debug panics in guest code.
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "fd_write",
-            |mut caller: Caller<TestState>,
-             fd: i32,
-             iovs_ptr: i32,
-             iovs_len: i32,
-             nwritten_ptr: i32|
-             -> i32 {
-                let mut total_written: u32 = 0;
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    for i in 0..iovs_len {
-                        let iov_offset = (iovs_ptr as usize) + (i as usize) * 8;
-                        let mut buf_ptr_bytes = [0u8; 4];
-                        let mut buf_len_bytes = [0u8; 4];
-                        let _ = memory.read(&caller, iov_offset, &mut buf_ptr_bytes);
-                        let _ = memory.read(&caller, iov_offset + 4, &mut buf_len_bytes);
-                        let buf_ptr = u32::from_le_bytes(buf_ptr_bytes) as usize;
-                        let buf_len = u32::from_le_bytes(buf_len_bytes) as usize;
-
-                        if buf_len > 0 && (fd == 1 || fd == 2) {
-                            let mut buf = vec![0u8; buf_len];
-                            let _ = memory.read(&caller, buf_ptr, &mut buf);
-                            let text = String::from_utf8_lossy(&buf);
-                            eprint!("{text}");
-                        }
-                        total_written += buf_len as u32;
-                    }
-                    let _ = memory.write(
-                        &mut caller,
-                        nwritten_ptr as usize,
-                        &total_written.to_le_bytes(),
-                    );
-                }
-                0
-            },
-        )
-        .context("Failed to define fd_write stub")?;
-
-    // wasi_snapshot_preview1::proc_exit(code) — trap
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "proc_exit",
-            |_: Caller<TestState>, code: i32| -> Result<(), wasmi::Error> {
-                Err(wasmi::Error::new(format!("guest called proc_exit({code})")))
-            },
-        )
-        .context("Failed to define proc_exit stub")?;
-
-    // wasi_snapshot_preview1::environ_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "environ_sizes_get",
-            |mut caller: Caller<TestState>, argc_ptr: i32, argv_buf_size_ptr: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes());
-                    let _ =
-                        memory.write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes());
-                }
-                0
-            },
-        )
-        .context("Failed to define environ_sizes_get stub")?;
-
-    // wasi_snapshot_preview1::environ_get(argv_ptr, argv_buf_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "environ_get",
-            |_: Caller<TestState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
-        )
-        .context("Failed to define environ_get stub")?;
-
-    // wasi_snapshot_preview1::args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "args_sizes_get",
-            |mut caller: Caller<TestState>, argc_ptr: i32, argv_buf_size_ptr: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, argc_ptr as usize, &0u32.to_le_bytes());
-                    let _ =
-                        memory.write(&mut caller, argv_buf_size_ptr as usize, &0u32.to_le_bytes());
-                }
-                0
-            },
-        )
-        .context("Failed to define args_sizes_get stub")?;
-
-    // wasi_snapshot_preview1::args_get(argv_ptr, argv_buf_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "args_get",
-            |_: Caller<TestState>, _argv_ptr: i32, _argv_buf_ptr: i32| -> i32 { 0 },
-        )
-        .context("Failed to define args_get stub")?;
-
-    // wasi_snapshot_preview1::clock_time_get(id, precision, time_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "clock_time_get",
-            |mut caller: Caller<TestState>, _id: i32, _precision: i64, time_ptr: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, time_ptr as usize, &0u64.to_le_bytes());
-                }
-                0
-            },
-        )
-        .context("Failed to define clock_time_get stub")?;
-
-    // wasi_snapshot_preview1::random_get(buf_ptr, buf_len) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "random_get",
-            |mut caller: Caller<TestState>, buf_ptr: i32, buf_len: i32| -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let zeros = vec![0u8; buf_len as usize];
-                    let _ = memory.write(&mut caller, buf_ptr as usize, &zeros);
-                }
-                0
-            },
-        )
-        .context("Failed to define random_get stub")?;
-
-    // wasi_snapshot_preview1::poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr) -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "poll_oneoff",
-            |mut caller: Caller<TestState>,
-             _in_ptr: i32,
-             _out_ptr: i32,
-             _nsubscriptions: i32,
-             nevents_ptr: i32|
-             -> i32 {
-                if let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") {
-                    let _ = memory.write(&mut caller, nevents_ptr as usize, &0u32.to_le_bytes());
-                }
-                0
-            },
-        )
-        .context("Failed to define poll_oneoff stub")?;
-
-    // wasi_snapshot_preview1::sched_yield() -> errno
-    linker
-        .func_wrap(
-            "wasi_snapshot_preview1",
-            "sched_yield",
-            |_: Caller<TestState>| -> i32 { 0 },
-        )
-        .context("Failed to define sched_yield stub")?;
-
-    // -----------------------------------------------------------------------
-    // 5. Instantiate
-    // -----------------------------------------------------------------------
-    let mut store = Store::new(
-        &engine,
-        TestState {
-            mock_results,
-            mock_write_offset: MOCK_BUF_OFFSET as u32,
-        },
-    );
-
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .context("Failed to instantiate WASM module")?
-        .start(&mut store)
-        .context("Failed to run WASM start function")?;
-
-    // -----------------------------------------------------------------------
-    // 5b. Call the exported `_start` function if present.
-    //
-    // TinyGo WASM modules (wasi target) use an exported `_start` to
-    // initialise the Go runtime and call `main()`. Without this call the
-    // exported wafer functions trap with `unreachable` because the allocator
-    // and goroutine scheduler have not been set up.
-    //
-    // `_start` ends by calling `proc_exit(0)` — that traps with our stub
-    // error.  We treat any error containing "proc_exit" as normal shutdown.
-    // A genuine failure message (e.g. a panic from user code) is re-raised.
-    // Rust-compiled blocks (no `_start` export) are unaffected.
-    // -----------------------------------------------------------------------
-    if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&store, "_start") {
-        match start_fn.call(&mut store, ()) {
-            Ok(()) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("guest called proc_exit(0)") {
-                    // proc_exit(0) — normal WASI shutdown for TinyGo modules.
-                } else {
-                    bail!("WASM _start function failed: {e}");
-                }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 6. Collect test files
+    // 4. Collect test files
     // -----------------------------------------------------------------------
     let test_files: Vec<std::path::PathBuf> = if let Some(p) = specific_path {
         vec![dir.join(p)]
@@ -392,7 +77,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
-                // Only top-level .json files — skip directories (mocks/) and .expected.json
+                // Only top-level .json files — skip directories and .expected.json
                 p.is_file()
                     && p.extension().is_some_and(|e| e == "json")
                     && !p
@@ -410,7 +95,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     }
 
     // -----------------------------------------------------------------------
-    // 7. Get typed function handles (shared across all tests)
+    // 5. Get typed function handles (shared across all tests)
     // -----------------------------------------------------------------------
     let alloc = instance
         .get_typed_func::<i32, i32>(&store, "__wafer_alloc")
@@ -420,7 +105,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
         .context("Failed to get __wafer_handle export")?;
 
     // -----------------------------------------------------------------------
-    // 8. Run tests
+    // 6. Run tests
     // -----------------------------------------------------------------------
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -450,7 +135,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     }
 
     // -----------------------------------------------------------------------
-    // 9. Summary
+    // 7. Summary
     // -----------------------------------------------------------------------
     println!();
     println!(
@@ -472,7 +157,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
 fn run_single_test(
     test_path: &Path,
     test_name: &str,
-    store: &mut Store<TestState>,
+    store: &mut Store<()>,
     alloc: &wasmi::TypedFunc<i32, i32>,
     handle: &wasmi::TypedFunc<(i32, i32), i64>,
     instance: &wasmi::Instance,
@@ -515,36 +200,17 @@ fn run_single_test(
         .with_context(|| format!("Failed to write message to guest memory for {test_name}"))?;
 
     // -----------------------------------------------------------------------
-    // c. Call __wafer_handle and unpack the result
+    // c. Call __wafer_handle and read the result bytes
     // -----------------------------------------------------------------------
     let result_packed = handle
         .call(&mut *store, (ptr, msg_bytes.len() as i32))
         .with_context(|| format!("__wafer_handle trapped for {test_name}"))?;
 
-    let result_ptr = (result_packed >> 32) as u32;
-    let result_len = (result_packed & 0xFFFF_FFFF) as u32;
+    let result_bytes =
+        wasm_stubs::read_packed_region(&memory, store, result_packed, "__wafer_handle")?;
 
     // -----------------------------------------------------------------------
-    // d. Read result bytes from guest memory
-    // -----------------------------------------------------------------------
-    let result_bytes = {
-        let data = memory.data(&*store);
-        let start = result_ptr as usize;
-        let end = start
-            .checked_add(result_len as usize)
-            .filter(|&e| e <= data.len())
-            .with_context(|| {
-                format!(
-                    "__wafer_handle returned out-of-bounds region: ptr={result_ptr}, \
-                     len={result_len}, memory_size={}",
-                    data.len()
-                )
-            })?;
-        data[start..end].to_vec()
-    };
-
-    // -----------------------------------------------------------------------
-    // e. Parse as BlockResult
+    // d. Parse as BlockResult
     // -----------------------------------------------------------------------
     let actual: serde_json::Value = serde_json::from_slice(&result_bytes).with_context(|| {
         format!(
@@ -559,7 +225,7 @@ fn run_single_test(
     }
 
     // -----------------------------------------------------------------------
-    // f. Check expected output if a .expected.json sibling exists
+    // e. Check expected output if a .expected.json sibling exists
     // -----------------------------------------------------------------------
     let expected_path = {
         let stem = test_path

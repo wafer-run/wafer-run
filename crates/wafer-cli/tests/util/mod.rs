@@ -11,25 +11,32 @@ pub fn block_wasm(full_name: &str, extra_imports: &str) -> Vec<u8> {
     let info_json = format!(
         r#"{{"name":"{full_name}","version":"0.1.0","interface":"handler@v1","summary":"test block"}}"#
     );
+    let handle_json = r#"{"action":"respond"}"#;
     // Escape for a WAT data-segment string literal.
-    let escaped: String = info_json
-        .chars()
-        .map(|c| match c {
-            '"' => "\\\"".to_string(),
-            '\\' => "\\\\".to_string(),
-            other => other.to_string(),
-        })
-        .collect();
+    let escape = |s: &str| -> String {
+        s.chars()
+            .map(|c| match c {
+                '"' => "\\\"".to_string(),
+                '\\' => "\\\\".to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    };
     let info_offset: i64 = 16;
-    let packed: i64 = (info_offset << 32) | info_json.len() as i64;
+    let handle_offset: i64 = 2048;
+    let info_packed: i64 = (info_offset << 32) | info_json.len() as i64;
+    let handle_packed: i64 = (handle_offset << 32) | handle_json.len() as i64;
+    let info_escaped = escape(&info_json);
+    let handle_escaped = escape(handle_json);
     let wat = format!(
         r#"(module
   {extra_imports}
   (memory (export "memory") 1)
-  (data (i32.const {info_offset}) "{escaped}")
+  (data (i32.const {info_offset}) "{info_escaped}")
+  (data (i32.const {handle_offset}) "{handle_escaped}")
   (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
-  (func (export "__wafer_info") (result i64) i64.const {packed})
-  (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+  (func (export "__wafer_info") (result i64) i64.const {info_packed})
+  (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const {handle_packed})
   (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
 )"#
     );

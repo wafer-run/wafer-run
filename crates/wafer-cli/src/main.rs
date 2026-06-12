@@ -23,6 +23,7 @@ mod sync_check;
 mod test_runner;
 mod validate;
 mod wafer_toml;
+mod wasm_stubs;
 
 use std::path::PathBuf;
 
