@@ -1,50 +1,17 @@
 use std::sync::Arc;
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
-
 use crate::interfaces::crypto::{handler, service::CryptoService};
 
-/// Unified crypto block. Wraps any `CryptoService` implementation.
-pub struct CryptoBlock {
-    service: Arc<dyn CryptoService>,
-}
-
-impl CryptoBlock {
-    /// Wrap the given `CryptoService` implementation as a `CryptoBlock`.
-    pub fn new(service: Arc<dyn CryptoService>) -> Self {
-        Self { service }
-    }
-}
-
-#[wafer_async_trait]
-impl Block for CryptoBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/crypto",
-            "0.0.1",
-            "crypto@v1",
-            "Cryptographic operations (hashing, JWT, random bytes)",
-        )
-        .category(BlockCategory::Service)
-    }
-
-    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), ctx.caller_id(), &msg, &body)
-    }
-}
-
-/// Register the unified crypto block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn CryptoService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/crypto", Arc::new(CryptoBlock::new(service)))
+crate::service_block! {
+    /// Unified crypto block. Wraps any `CryptoService` implementation.
+    block: pub CryptoBlock,
+    name: "wafer-run/crypto",
+    version: "0.0.1",
+    interface: "crypto@v1",
+    description: "Cryptographic operations (hashing, JWT, random bytes)",
+    category: Service,
+    fields: { service: Arc<dyn CryptoService> },
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx.caller_id(), &msg, &body)
+    },
 }

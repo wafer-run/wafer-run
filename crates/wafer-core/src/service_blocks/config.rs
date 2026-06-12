@@ -1,50 +1,57 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use wafer_block::{
-    block::Block,
-    context::Context,
-    streams::{input::InputStream, output::OutputStream},
-    types::BlockInfo,
-    BlockRegistry, RuntimeError, *,
-};
-use wafer_block_macro::wafer_async_trait;
+use parking_lot::RwLock;
 
 use crate::interfaces::config::{handler, service::ConfigService};
 
-/// Unified config block. Wraps any `ConfigService` implementation.
-pub struct ConfigBlock {
-    service: Arc<dyn ConfigService>,
+crate::service_block! {
+    /// Unified config block. Wraps any `ConfigService` implementation.
+    block: pub ConfigBlock,
+    name: "wafer-run/config",
+    version: "0.0.1",
+    interface: "config@v1",
+    description: "Configuration key-value access",
+    category: Service,
+    fields: { service: Arc<dyn ConfigService> },
+    handle: |this, _ctx, msg, body| handler::handle_message(this.service.as_ref(), &msg, &body),
 }
 
-impl ConfigBlock {
-    /// Wrap the given `ConfigService` implementation as a `ConfigBlock`.
-    pub fn new(service: Arc<dyn ConfigService>) -> Self {
-        Self { service }
+/// Environment-variable backed [`ConfigService`] implementation.
+///
+/// Lookups check in-process runtime overrides first, then fall back to
+/// `std::env::var`. Writes go to the override map, not the real environment.
+pub struct EnvConfigService {
+    overrides: RwLock<HashMap<String, String>>,
+}
+
+impl EnvConfigService {
+    /// Create an empty service that reads from the process environment, with no overrides set.
+    pub fn new() -> Self {
+        Self {
+            overrides: RwLock::new(HashMap::new()),
+        }
     }
 }
 
-#[wafer_async_trait]
-impl Block for ConfigBlock {
-    fn info(&self) -> BlockInfo {
-        BlockInfo::new(
-            "wafer-run/config",
-            "0.0.1",
-            "config@v1",
-            "Configuration key-value access",
-        )
-        .category(BlockCategory::Service)
-    }
-
-    async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
-        handler::handle_message(self.service.as_ref(), &msg, &body)
+impl Default for EnvConfigService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// Register the unified config block with the given service.
-pub fn register_with(
-    w: &mut dyn BlockRegistry,
-    service: Arc<dyn ConfigService>,
-) -> Result<(), RuntimeError> {
-    w.register_block("wafer-run/config", Arc::new(ConfigBlock::new(service)))
+impl ConfigService for EnvConfigService {
+    fn get(&self, key: &str) -> Option<String> {
+        // Check overrides first
+        if let Some(val) = self.overrides.read().get(key) {
+            return Some(val.clone());
+        }
+        // Then environment
+        std::env::var(key).ok()
+    }
+
+    fn set(&self, key: &str, value: &str) {
+        self.overrides
+            .write()
+            .insert(key.to_string(), value.to_string());
+    }
 }
