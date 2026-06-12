@@ -14,9 +14,6 @@ pub mod image;
 pub mod llm;
 /// Logger interface: `LoggerService` trait + the `log.*` message handler.
 pub mod logger;
-/// Model-management types (`ModelStatus`, `ModelState`, `LoadProgress`) shared
-/// by the LLM and image interfaces.
-pub mod model_common;
 /// Network interface: `NetworkService` trait + the `network.*` message handler.
 pub mod network;
 /// Storage interface: `StorageService` trait, object types, and the `storage.*` handler.

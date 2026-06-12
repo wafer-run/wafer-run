@@ -1,84 +1,18 @@
 //! Vector storage and embedding generation interfaces.
+//!
+//! The data types (`VectorEntry`, `VectorIndexConfig`, `SearchMode`, …) are
+//! the canonical wire types from `wafer_block::wire::vector`, re-exported
+//! here so service impls and wire-level consumers share one definition —
+//! there is no separate service-side representation and no conversion layer.
+//! Only the genuinely service-side items (`VectorService`,
+//! `EmbeddingService`, `VectorError`) live in this module.
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wafer_block_macro::wafer_async_trait;
 
-/// A single record stored in a vector index.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct VectorEntry {
-    /// Caller-supplied id (must be unique within the index).
-    pub id: String,
-    /// Embedding vector for this entry.
-    pub vector: Vec<f32>,
-    /// Optional opaque metadata stored alongside the vector.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    /// Required when the index has `keyword_search: true`; ignored otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-}
-
-/// One result row from a vector / keyword / hybrid query.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct VectorMatch {
-    /// Id of the matched entry.
-    pub id: String,
-    /// Score under the index's configured `DistanceMetric` (higher = better).
-    pub score: f32,
-    /// Metadata copied from the stored entry, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-}
-
-/// Distance metric used to score query matches.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DistanceMetric {
-    /// Cosine similarity.
-    Cosine,
-    /// Negated Euclidean distance.
-    Euclidean,
-    /// Dot product.
-    DotProduct,
-}
-
-/// Strategy used to rank query results.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchMode {
-    /// Pure vector similarity over the query embedding.
-    Vector,
-    /// Pure keyword search over the stored `text` field.
-    Keyword,
-    /// Vector + keyword fused via Reciprocal Rank Fusion.
-    Hybrid,
-}
-
-/// Configuration for [`VectorService::create_index`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct VectorIndexConfig {
-    /// Index name (unique within the backend).
-    pub name: String,
-    /// Embedding model id this index expects (e.g. `bge-m3`).
-    pub model: String,
-    /// Embedding dimensionality the index will store.
-    pub dimensions: u32,
-    /// Distance metric used at query time.
-    pub metric: DistanceMetric,
-    /// When `true`, entries must include `text` and the backend maintains a keyword index over it.
-    #[serde(default)]
-    pub keyword_search: bool,
-}
-
-/// Simple equality filter: each field must equal the given JSON value.
-/// Nested paths use dot notation (`"user.id"` → matches `metadata.user.id`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct MetadataFilter {
-    /// Equality conditions; all must match for the entry to be included.
-    #[serde(default)]
-    pub equals: std::collections::BTreeMap<String, serde_json::Value>,
-}
+pub use wafer_block::wire::vector::{
+    DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+};
 
 /// Errors returned by [`VectorService`] and [`EmbeddingService`] operations.
 #[derive(Error, Debug)]
@@ -178,43 +112,6 @@ pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn serialize_search_mode() {
-        assert_eq!(
-            serde_json::to_string(&SearchMode::Vector).unwrap(),
-            "\"vector\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SearchMode::Keyword).unwrap(),
-            "\"keyword\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SearchMode::Hybrid).unwrap(),
-            "\"hybrid\""
-        );
-    }
-
-    #[test]
-    fn index_config_roundtrip() {
-        let cfg = VectorIndexConfig {
-            name: "docs".into(),
-            model: "bge-m3".into(),
-            dimensions: 1024,
-            metric: DistanceMetric::Cosine,
-            keyword_search: true,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let parsed: VectorIndexConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, cfg);
-    }
-
-    #[test]
-    fn keyword_search_defaults_false() {
-        let json = r#"{"name":"i","model":"m","dimensions":1,"metric":"cosine"}"#;
-        let cfg: VectorIndexConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.keyword_search);
-    }
 
     #[test]
     fn default_count_tokens_is_whitespace_split() {

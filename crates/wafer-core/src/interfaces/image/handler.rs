@@ -7,6 +7,10 @@
 //! codec-encoded (MessagePack) and emitted as its own `Chunk` event, and
 //! cancellation from the consumer is forwarded straight through to the
 //! service's cancel token.
+//!
+//! The service trait operates directly on the `wafer_block::wire::image`
+//! types (re-exported from `super::service`), so request/response values pass
+//! straight through — only `ImageError` needs mapping onto wire error codes.
 
 use std::sync::Arc;
 
@@ -19,97 +23,17 @@ use wafer_block::{
     *,
 };
 
-use super::service::{self, ImageService};
+use super::service::{ImageError, ImageService};
 use crate::interfaces::handler_util::{decode_or_err, to_output};
 
-// ---------- Wire <-> service conversions ----------
-//
-// Field-identical types — conversion is mechanical. We keep them in the
-// handler rather than implementing `From` on the service crate because the
-// service trait is intentionally agnostic of the wire representation.
-
-fn wire_request_to_service(req: wire::ImageRequest) -> service::ImageRequest {
-    service::ImageRequest {
-        backend_id: req.backend_id,
-        model: req.model,
-        prompt: req.prompt,
-        params: wire_params_to_service(req.params),
-        extra: req.extra,
-    }
-}
-
-fn wire_params_to_service(p: wire::ImageParams) -> service::ImageParams {
-    service::ImageParams {
-        negative_prompt: p.negative_prompt,
-        width: p.width,
-        height: p.height,
-        steps: p.steps,
-        guidance_scale: p.guidance_scale,
-        seed: p.seed,
-    }
-}
-
-fn service_response_to_wire(resp: service::ImageResponse) -> wire::ImageResponse {
-    wire::ImageResponse {
-        images: resp
-            .images
-            .into_iter()
-            .map(|img| wire::GeneratedImage {
-                bytes: img.bytes,
-                mime_type: img.mime_type,
-            })
-            .collect(),
-    }
-}
-
-fn service_model_info_to_wire(info: service::ModelInfo) -> wire::ModelInfo {
-    wire::ModelInfo {
-        backend_id: info.backend_id,
-        model_id: info.model_id,
-        display_name: info.display_name,
-        capabilities: wire::ModelCapabilities {
-            max_width: info.capabilities.max_width,
-            max_height: info.capabilities.max_height,
-            supports_negative_prompt: info.capabilities.supports_negative_prompt,
-            max_steps: info.capabilities.max_steps,
-        },
-    }
-}
-
-fn service_status_to_wire(s: service::ModelStatus) -> wire::ModelStatus {
-    wire::ModelStatus {
-        state: service_state_to_wire(s.state),
-        progress: s.progress,
-    }
-}
-
-fn service_state_to_wire(s: service::ModelState) -> wire::ModelState {
-    match s {
-        service::ModelState::Ready => wire::ModelState::Ready,
-        service::ModelState::Loading => wire::ModelState::Loading,
-        service::ModelState::Unloaded => wire::ModelState::Unloaded,
-        service::ModelState::Error { message } => wire::ModelState::Error { message },
-    }
-}
-
-fn service_progress_to_wire(p: service::LoadProgress) -> wire::LoadProgress {
-    wire::LoadProgress {
-        stage: p.stage,
-        bytes_downloaded: p.bytes_downloaded,
-        bytes_total: p.bytes_total,
-    }
-}
-
-fn image_error_to_block_error(e: service::ImageError) -> (ErrorCode, String) {
+fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
     match e {
-        service::ImageError::NotSupported => {
-            (ErrorCode::Unimplemented, "not supported".to_string())
-        }
-        service::ImageError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
-        service::ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
-        service::ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
-        service::ImageError::Network(msg) => (ErrorCode::Internal, format!("network: {msg}")),
-        service::ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
+        ImageError::NotSupported => (ErrorCode::Unimplemented, "not supported".to_string()),
+        ImageError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
+        ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
+        ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
+        ImageError::Network(msg) => (ErrorCode::Internal, format!("network: {msg}")),
+        ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
 
@@ -143,14 +67,13 @@ pub async fn handle_message(
 // ---- Buffered ops ----
 
 async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let wire_req = decode_or_err!(body, wire::ImageRequest, "image.generate");
-    let req = wire_request_to_service(wire_req);
+    let req = decode_or_err!(body, wire::ImageRequest, "image.generate");
     // `generate` is not streaming — the whole response arrives at once.
     // Use a fresh cancel token (no client-side cancel propagation needed for
     // buffered ops; the OutputStream wraps the result immediately).
     let cancel = tokio_util::sync::CancellationToken::new();
     match service.generate(req, cancel).await {
-        Ok(resp) => to_output(service_response_to_wire(resp)),
+        Ok(resp) => to_output(resp),
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("image.generate: {msg}")))
@@ -160,11 +83,7 @@ async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
 
 async fn list_models(service: &dyn ImageService) -> OutputStream {
     match service.list_models().await {
-        Ok(models) => {
-            let wire_models: Vec<wire::ModelInfo> =
-                models.into_iter().map(service_model_info_to_wire).collect();
-            to_output(wire_models)
-        }
+        Ok(models) => to_output(models),
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("image.list_models: {msg}")))
@@ -175,7 +94,7 @@ async fn list_models(service: &dyn ImageService) -> OutputStream {
 async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
     let req = decode_or_err!(body, wire::StatusRequest, "image.status");
     match service.status(&req.backend_id, &req.model_id).await {
-        Ok(s) => to_output(service_status_to_wire(s)),
+        Ok(s) => to_output(s),
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("image.status: {msg}")))
@@ -205,7 +124,7 @@ fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
         let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel);
         while let Some(item) = stream.next().await {
             let progress = match item {
-                Ok(p) => service_progress_to_wire(p),
+                Ok(p) => p,
                 Err(e) => {
                     let (code, msg) = image_error_to_block_error(e);
                     let _ = sink
