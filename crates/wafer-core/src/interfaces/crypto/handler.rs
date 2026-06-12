@@ -22,7 +22,7 @@ fn check_op(msg: &Message, expected: &str) -> Result<(), WaferError> {
         Ok(())
     } else {
         Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
+            ErrorCode::PermissionDenied,
             format!("WRAP: wrap.resource meta '{supplied}' does not match crypto op '{expected}'"),
         ))
     }
@@ -32,13 +32,13 @@ fn check_op(msg: &Message, expected: &str) -> Result<(), WaferError> {
 
 fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     match e {
-        CryptoError::HashError(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
+        CryptoError::HashError(msg) => WaferError::new(ErrorCode::Internal, msg),
         CryptoError::PasswordMismatch => {
-            WaferError::new(ErrorCode::UNAUTHENTICATED, "password mismatch")
+            WaferError::new(ErrorCode::Unauthenticated, "password mismatch")
         }
-        CryptoError::SignError(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
-        CryptoError::VerifyError(msg) => WaferError::new(ErrorCode::UNAUTHENTICATED, msg),
-        CryptoError::Other(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
+        CryptoError::SignError(msg) => WaferError::new(ErrorCode::Internal, msg),
+        CryptoError::VerifyError(msg) => WaferError::new(ErrorCode::Unauthenticated, msg),
+        CryptoError::Other(msg) => WaferError::new(ErrorCode::Internal, msg),
     }
 }
 
@@ -114,7 +114,7 @@ pub fn handle_message(
             const MAX_RANDOM_BYTES: usize = 1_048_576;
             if req.n > MAX_RANDOM_BYTES {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
+                    ErrorCode::InvalidArgument,
                     format!(
                         "random_bytes n={} exceeds maximum of {}",
                         req.n, MAX_RANDOM_BYTES
@@ -127,7 +127,7 @@ pub fn handle_message(
             }
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown crypto operation: {other}"),
         )),
     }

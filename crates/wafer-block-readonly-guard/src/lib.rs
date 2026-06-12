@@ -136,7 +136,7 @@ mod tests {
             .await
         {
             Err(TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::PERMISSION_DENIED);
+                assert_eq!(e.code, ErrorCode::PermissionDenied);
             }
             other => panic!("expected PermissionDenied for action '{action}', got {other:?}"),
         }

@@ -85,7 +85,7 @@ impl FilterOp {
             "is_null" => Ok(Self::IsNull),
             "is_not_null" => Ok(Self::IsNotNull),
             other => Err(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
+                ErrorCode::InvalidArgument,
                 format!("unknown filter operator: {other:?}"),
             )),
         }
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn parse_wire_rejects_unknown() {
         let err = FilterOp::parse_wire("bogus").expect_err("unknown op must be rejected");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
         assert!(
             err.message.contains("unknown filter operator"),
             "message: {}",
@@ -148,10 +148,10 @@ mod tests {
 
         // Empty string also rejected (was previously coerced to Equal).
         let err = FilterOp::parse_wire("").expect_err("empty op must be rejected");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
 
         // Casing matters: the wire grammar is lowercase-only.
         let err = FilterOp::parse_wire("Equal").expect_err("non-wire casing must be rejected");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 }

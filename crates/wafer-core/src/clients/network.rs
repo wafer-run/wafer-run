@@ -167,7 +167,7 @@ impl Stream for NativeNetworkResponseStream {
                 Poll::Ready(None) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "network response stream ended without terminal event",
                     ))));
                 }
@@ -186,21 +186,21 @@ impl Stream for NativeNetworkResponseStream {
                 Poll::Ready(Some(StreamEvent::Drop)) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "network handler returned Drop",
                     ))));
                 }
                 Poll::Ready(Some(StreamEvent::Continue(msg))) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!("network handler returned Continue (kind: {})", msg.kind),
                     ))));
                 }
                 Poll::Ready(Some(StreamEvent::Halt { .. })) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "network handler returned Halt",
                     ))));
                 }

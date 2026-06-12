@@ -52,7 +52,7 @@ impl FakeCrypto {
     }
 
     /// Switch the fake into a failure mode so subsequent dispatches return
-    /// `ErrorCode::INTERNAL` — used to exercise caller error handling.
+    /// `ErrorCode::Internal` — used to exercise caller error handling.
     pub fn set_failure(&self, mode: FailureMode) {
         self.state.lock().failure = mode;
     }
@@ -90,7 +90,7 @@ impl Block for FakeCrypto {
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         if self.should_fail() {
             return OutputStream::error(WaferError::new(
-                ErrorCode::INTERNAL,
+                ErrorCode::Internal,
                 "fake-crypto unavailable",
             ));
         }
@@ -100,7 +100,7 @@ impl Block for FakeCrypto {
             Ok(v) => v,
             Err(e) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
+                    ErrorCode::InvalidArgument,
                     format!("fake-crypto: bad request: {e}"),
                 ));
             }
@@ -124,7 +124,7 @@ impl Block for FakeCrypto {
             "crypto.jwt_verify" | "crypto.verify" => self.handle_jwt_verify(&req),
             "crypto.hash" => self.handle_hash(&req),
             other => OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
+                ErrorCode::InvalidArgument,
                 format!("fake-crypto: action '{other}' not implemented"),
             )),
         }
@@ -161,7 +161,7 @@ impl FakeCrypto {
             Some(t) => t,
             None => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
+                    ErrorCode::InvalidArgument,
                     "fake-crypto: missing token",
                 ))
             }
@@ -169,7 +169,7 @@ impl FakeCrypto {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() != 3 {
             return OutputStream::error(WaferError::new(
-                ErrorCode::UNAUTHENTICATED,
+                ErrorCode::Unauthenticated,
                 "invalid signature",
             ));
         }
@@ -178,7 +178,7 @@ impl FakeCrypto {
             Ok(b) => b,
             Err(_) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::UNAUTHENTICATED,
+                    ErrorCode::Unauthenticated,
                     "invalid signature",
                 ))
             }
@@ -189,7 +189,7 @@ impl FakeCrypto {
         mac.update(signing_input.as_bytes());
         if mac.verify_slice(&sig_bytes).is_err() {
             return OutputStream::error(WaferError::new(
-                ErrorCode::UNAUTHENTICATED,
+                ErrorCode::Unauthenticated,
                 "invalid signature",
             ));
         }
@@ -198,7 +198,7 @@ impl FakeCrypto {
             Ok(b) => b,
             Err(_) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::UNAUTHENTICATED,
+                    ErrorCode::Unauthenticated,
                     "invalid claims",
                 ))
             }
@@ -207,7 +207,7 @@ impl FakeCrypto {
             Ok(v) => v,
             Err(_) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::UNAUTHENTICATED,
+                    ErrorCode::Unauthenticated,
                     "invalid claims",
                 ))
             }
@@ -328,7 +328,7 @@ mod tests {
             .await;
         match verify_out.collect_buffered().await {
             Err(TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::UNAUTHENTICATED);
+                assert_eq!(e.code, ErrorCode::Unauthenticated);
             }
             other => panic!("expected signature failure, got {other:?}"),
         }

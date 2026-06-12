@@ -1095,82 +1095,14 @@ impl RequestAction {
 }
 
 // ---------------------------------------------------------------------------
-// ErrorCode backward-compatible constants
-// ---------------------------------------------------------------------------
-
-/// Backward-compatible `SCREAMING_CASE` aliases for [`crate::ErrorCode`]
-/// variants. Newer code should prefer the variant names directly.
-impl crate::ErrorCode {
-    /// Alias for [`Self::Ok`].
-    pub const OK: Self = Self::Ok;
-    /// Alias for [`Self::Cancelled`].
-    pub const CANCELLED: Self = Self::Cancelled;
-    /// Alias for [`Self::Unknown`].
-    pub const UNKNOWN: Self = Self::Unknown;
-    /// Alias for [`Self::InvalidArgument`].
-    pub const INVALID_ARGUMENT: Self = Self::InvalidArgument;
-    /// Alias for [`Self::DeadlineExceeded`].
-    pub const DEADLINE_EXCEEDED: Self = Self::DeadlineExceeded;
-    /// Alias for [`Self::NotFound`].
-    pub const NOT_FOUND: Self = Self::NotFound;
-    /// Alias for [`Self::AlreadyExists`].
-    pub const ALREADY_EXISTS: Self = Self::AlreadyExists;
-    /// Alias for [`Self::PermissionDenied`].
-    pub const PERMISSION_DENIED: Self = Self::PermissionDenied;
-    /// Alias for [`Self::ResourceExhausted`].
-    pub const RESOURCE_EXHAUSTED: Self = Self::ResourceExhausted;
-    /// Alias for [`Self::FailedPrecondition`].
-    pub const FAILED_PRECONDITION: Self = Self::FailedPrecondition;
-    /// Alias for [`Self::Aborted`].
-    pub const ABORTED: Self = Self::Aborted;
-    /// Alias for [`Self::OutOfRange`].
-    pub const OUT_OF_RANGE: Self = Self::OutOfRange;
-    /// Alias for [`Self::Unimplemented`].
-    pub const UNIMPLEMENTED: Self = Self::Unimplemented;
-    /// Alias for [`Self::Internal`].
-    pub const INTERNAL: Self = Self::Internal;
-    /// Alias for [`Self::Unavailable`].
-    pub const UNAVAILABLE: Self = Self::Unavailable;
-    /// Alias for [`Self::DataLoss`].
-    pub const DATA_LOSS: Self = Self::DataLoss;
-    /// Alias for [`Self::Unauthenticated`].
-    pub const UNAUTHENTICATED: Self = Self::Unauthenticated;
-}
-
-impl From<&str> for crate::ErrorCode {
-    fn from(s: &str) -> Self {
-        match s {
-            "ok" => Self::Ok,
-            "cancelled" => Self::Cancelled,
-            "unknown" => Self::Unknown,
-            "invalid_argument" | "invalid-argument" | "bad_request" => Self::InvalidArgument,
-            "deadline_exceeded" | "deadline-exceeded" => Self::DeadlineExceeded,
-            "not_found" | "not-found" => Self::NotFound,
-            "already_exists" | "already-exists" => Self::AlreadyExists,
-            "permission_denied" | "permission-denied" => Self::PermissionDenied,
-            "resource_exhausted" | "resource-exhausted" => Self::ResourceExhausted,
-            "failed_precondition" | "failed-precondition" => Self::FailedPrecondition,
-            "aborted" => Self::Aborted,
-            "out_of_range" | "out-of-range" => Self::OutOfRange,
-            "unimplemented" | "not_implemented" => Self::Unimplemented,
-            "internal" => Self::Internal,
-            "unavailable" => Self::Unavailable,
-            "data_loss" | "data-loss" => Self::DataLoss,
-            "unauthenticated" => Self::Unauthenticated,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // WaferError helpers
 // ---------------------------------------------------------------------------
 
 impl crate::WaferError {
     /// Create a new error with the given code and message (empty meta).
-    pub fn new(code: impl Into<crate::ErrorCode>, message: impl Into<String>) -> Self {
+    pub fn new(code: crate::ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
             meta: Vec::new(),
         }

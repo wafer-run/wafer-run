@@ -242,7 +242,7 @@ async fn execute_without_matching_grant_returns_permission_denied() {
         .expect("expected PERMISSION_DENIED error");
     assert_eq!(
         err.code,
-        ErrorCode::PERMISSION_DENIED,
+        ErrorCode::PermissionDenied,
         "expected PERMISSION_DENIED, got {:?}: {}",
         err.code,
         err.message
@@ -302,7 +302,7 @@ async fn query_without_matching_grant_returns_permission_denied() {
         .expect("expected PERMISSION_DENIED error");
     assert_eq!(
         err.code,
-        ErrorCode::PERMISSION_DENIED,
+        ErrorCode::PermissionDenied,
         "expected PERMISSION_DENIED, got {:?}: {}",
         err.code,
         err.message
@@ -345,7 +345,7 @@ fn wrap_check_access_denies_write_op_with_read_only_grant() {
     let err = result.unwrap_err();
     assert_eq!(
         err.code,
-        ErrorCode::PERMISSION_DENIED,
+        ErrorCode::PermissionDenied,
         "expected PERMISSION_DENIED when executing with read-only grant; got {:?}: {}",
         err.code,
         err.message

@@ -112,7 +112,7 @@ async fn storage_put_rejects_mismatched_resource() {
     );
     let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn storage_delete_rejects_mismatched_resource() {
     );
     let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn storage_list_rejects_mismatched_folder() {
     let msg = msg_with_meta(ServiceOp::STORAGE_LIST, "decoy", "read", "storage");
     let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn storage_create_folder_rejects_mismatched_name() {
     );
     let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ async fn crypto_sign_rejects_mismatched_op() {
     let msg = msg_with_meta(ServiceOp::CRYPTO_SIGN, "random_bytes", "read", "crypto");
     let out = wafer_core::interfaces::crypto::handler::handle_message(&svc, None, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -259,7 +259,7 @@ async fn crypto_random_bytes_rejects_mismatched_op() {
     let msg = msg_with_meta(ServiceOp::CRYPTO_RANDOM_BYTES, "sign", "read", "crypto");
     let out = wafer_core::interfaces::crypto::handler::handle_message(&svc, None, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ async fn database_get_rejects_mismatched_collection() {
     let msg = msg_with_meta(ServiceOp::DATABASE_GET, "decoy_table", "read", "db");
     let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -431,7 +431,7 @@ async fn database_create_rejects_mismatched_collection() {
     let msg = msg_with_meta(ServiceOp::DATABASE_CREATE, "decoy", "write", "db");
     let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -446,7 +446,7 @@ async fn database_update_where_rejects_mismatched_collection() {
     let msg = msg_with_meta(ServiceOp::DATABASE_UPDATE_WHERE, "decoy", "write", "db");
     let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -467,7 +467,7 @@ async fn database_increment_field_where_rejects_mismatched_collection() {
     );
     let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +497,7 @@ async fn config_get_rejects_mismatched_key() {
     let msg = msg_with_meta(ServiceOp::CONFIG_GET, "DECOY_KEY", "read", "config");
     let out = wafer_core::interfaces::config::handler::handle_message(&svc, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 #[tokio::test]
@@ -511,7 +511,7 @@ async fn config_set_rejects_mismatched_key() {
     let msg = msg_with_meta(ServiceOp::CONFIG_SET, "DECOY_KEY", "write", "config");
     let out = wafer_core::interfaces::config::handler::handle_message(&svc, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
 
 // ---------------------------------------------------------------------------
@@ -556,5 +556,5 @@ async fn network_do_rejects_mismatched_url() {
     );
     let out = wafer_core::interfaces::network::handler::handle_message(&svc, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
-    assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
 }

@@ -164,7 +164,7 @@ pub fn check_access(
             return match caller_id {
                 Some(c) if c == admin_block => Ok(()),
                 _ => Err(WaferError::new(
-                    ErrorCode::PERMISSION_DENIED,
+                    ErrorCode::PermissionDenied,
                     format!(
                         "WRAP: raw SQL access denied (caller: {caller_id:?}, admin: {admin_block})"
                     ),
@@ -181,7 +181,7 @@ pub fn check_access(
             return match caller_id {
                 Some(_) => Ok(()),
                 None => Err(WaferError::new(
-                    ErrorCode::PERMISSION_DENIED,
+                    ErrorCode::PermissionDenied,
                     "WRAP: DDL requires an attributable caller (caller: None)".to_string(),
                 )),
             };
@@ -201,7 +201,7 @@ pub fn check_access(
                 return match caller_id {
                     Some(c) if c == admin_block => Ok(()),
                     _ => Err(WaferError::new(
-                        ErrorCode::PERMISSION_DENIED,
+                        ErrorCode::PermissionDenied,
                         format!(
                             "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {caller_id:?})"
                         ),
@@ -211,7 +211,7 @@ pub fn check_access(
             return match caller_id {
                 Some(_) => Ok(()),
                 None => Err(WaferError::new(
-                    ErrorCode::PERMISSION_DENIED,
+                    ErrorCode::PermissionDenied,
                     format!(
                         "WRAP: SOLOBASE_SHARED__ read denied for anonymous caller (resource: {resource})"
                     ),
@@ -245,14 +245,14 @@ pub fn check_access(
         // Rule 6: unnamespaced resource → deny
         if owner.is_none() {
             return Err(WaferError::new(
-                ErrorCode::PERMISSION_DENIED,
+                ErrorCode::PermissionDenied,
                 format!("WRAP: unnamespaced resource '{resource}' denied (caller: {caller_id:?})"),
             ));
         }
 
         // Rule 7: no match → deny
         return Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
+            ErrorCode::PermissionDenied,
             format!("WRAP: access denied on '{resource}' (caller: {caller_id:?})"),
         ));
     }
@@ -321,7 +321,7 @@ pub fn check_access(
     // Default deny — surface the original (possibly `@`-prefixed) resource
     // so error messages match what callers passed in.
     Err(WaferError::new(
-        ErrorCode::PERMISSION_DENIED,
+        ErrorCode::PermissionDenied,
         format!(
             "WRAP: access denied on '{resource}' (caller: {caller_id:?}, type: {resource_type:?})"
         ),

@@ -525,7 +525,7 @@ async fn run_block_enforces_requires_read_from_snapshot() {
         Err(TerminalNotResponse::Error(e)) => {
             assert_eq!(
                 e.code,
-                ErrorCode::PERMISSION_DENIED,
+                ErrorCode::PermissionDenied,
                 "call_block to a block outside the declared requires list must be denied"
             );
         }
@@ -876,7 +876,7 @@ impl Block for FailBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
-        OutputStream::error(WaferError::new("test_error", "intentional failure"))
+        OutputStream::error(WaferError::new(ErrorCode::Unknown, "intentional failure"))
     }
 }
 
@@ -939,7 +939,7 @@ async fn test_on_error_continue() {
             _input: InputStream,
         ) -> OutputStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            OutputStream::error(WaferError::new("test_error", "intentional failure"))
+            OutputStream::error(WaferError::new(ErrorCode::Unknown, "intentional failure"))
         }
     }
 
@@ -983,7 +983,7 @@ async fn test_on_error_continue_no_more_nodes() {
             _msg: Message,
             _input: InputStream,
         ) -> OutputStream {
-            OutputStream::error(WaferError::new("terminal_error", "error at tail"))
+            OutputStream::error(WaferError::new(ErrorCode::Unknown, "error at tail"))
         }
     }
 
@@ -1292,7 +1292,7 @@ async fn test_start_and_stop() {
 
 #[test]
 fn test_wafer_error_meta() {
-    let mut err = WaferError::new("not_found", "user not found");
+    let mut err = WaferError::new(ErrorCode::NotFound, "user not found");
     err.meta.set("resource".to_string(), "users".to_string());
     err.meta.set("id".to_string(), "42".to_string());
 

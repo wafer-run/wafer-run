@@ -23,14 +23,14 @@ pub fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
 /// Usage: `let req = decode_or_err!(body, MyRequest, "service.operation");`
 ///
 /// On decode failure, returns early from the enclosing function with an
-/// `OutputStream::error` containing `ErrorCode::INVALID_ARGUMENT`.
+/// `OutputStream::error` containing `ErrorCode::InvalidArgument`.
 macro_rules! decode_or_err {
     ($body:expr, $ty:ty, $op_name:expr) => {
         match wafer_block::codec::decode::<$ty>($body) {
             Ok(r) => r,
             Err(e) => {
                 return OutputStream::error(wafer_block::WaferError::new(
-                    wafer_block::common::ErrorCode::INVALID_ARGUMENT,
+                    wafer_block::common::ErrorCode::InvalidArgument,
                     format!("invalid {} request: {}", $op_name, e.message),
                 ))
             }
@@ -54,7 +54,7 @@ pub fn check_wrap_resource(msg: &Message, expected: &str, noun: &str) -> Result<
         Ok(())
     } else {
         Err(WaferError::new(
-            ErrorCode::PERMISSION_DENIED,
+            ErrorCode::PermissionDenied,
             format!(
                 "WRAP: wrap.resource meta '{supplied}' does not match payload {noun} '{expected}'"
             ),
@@ -93,7 +93,7 @@ mod tests {
     fn mismatched_meta_returns_permission_denied_with_noun() {
         let msg = msg_with_resource("decoy-key");
         let err = check_wrap_resource(&msg, "real-key", "key").expect_err("mismatch must error");
-        assert_eq!(err.code, ErrorCode::PERMISSION_DENIED);
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
         assert!(
             err.message.contains("key"),
             "error message should contain the noun 'key', got: {}",

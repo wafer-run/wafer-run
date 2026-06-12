@@ -71,9 +71,9 @@ fn service_match_to_wire(m: service::VectorMatch) -> wire::VectorMatch {
 
 fn vector_error_to_wafer(e: VectorError) -> WaferError {
     match e {
-        VectorError::IndexNotFound(_) => WaferError::new(ErrorCode::NOT_FOUND, e.to_string()),
+        VectorError::IndexNotFound(_) => WaferError::new(ErrorCode::NotFound, e.to_string()),
         VectorError::IndexAlreadyExists(_) => {
-            WaferError::new(ErrorCode::ALREADY_EXISTS, e.to_string())
+            WaferError::new(ErrorCode::AlreadyExists, e.to_string())
         }
         VectorError::KeywordSearchNotEnabled
         | VectorError::DimensionMismatch { .. }
@@ -81,11 +81,11 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::TextRequired
         | VectorError::KeywordQueryRequired(_)
         | VectorError::InvalidIndexName(_) => {
-            WaferError::new(ErrorCode::INVALID_ARGUMENT, e.to_string())
+            WaferError::new(ErrorCode::InvalidArgument, e.to_string())
         }
         VectorError::Internal(msg) => {
             tracing::error!(error = %msg, "vector internal error");
-            WaferError::new(ErrorCode::INTERNAL, "internal vector error")
+            WaferError::new(ErrorCode::Internal, "internal vector error")
         }
     }
 }
@@ -163,7 +163,7 @@ pub async fn handle_message(
             }
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown vector operation: {other}"),
         )),
     }
@@ -194,7 +194,7 @@ pub async fn handle_embedding_message(
             })
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown embedding operation: {other}"),
         )),
     }

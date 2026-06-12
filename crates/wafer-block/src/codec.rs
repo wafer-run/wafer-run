@@ -9,7 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::{ErrorCode, WaferError};
 
 /// Encode `v` as MessagePack bytes using named-map field encoding for forward
-/// compatibility. Returns a [`WaferError`] with [`ErrorCode::INTERNAL`] on
+/// compatibility. Returns a [`WaferError`] with [`ErrorCode::Internal`] on
 /// serialization failure.
 pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     // `to_vec_named` (not `to_vec`) encodes structs as named maps rather than
@@ -20,19 +20,19 @@ pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     // `unknown_field_is_forward_compatible` test below.
     rmp_serde::to_vec_named(v).map_err(|e| {
         WaferError::new(
-            ErrorCode::INTERNAL,
+            ErrorCode::Internal,
             format!("codec encode error in {}: {e}", std::any::type_name::<T>()),
         )
     })
 }
 
 /// Decode MessagePack bytes into `T`. Unknown fields are ignored (forward
-/// compatibility). Returns a [`WaferError`] with [`ErrorCode::INTERNAL`] on
+/// compatibility). Returns a [`WaferError`] with [`ErrorCode::Internal`] on
 /// deserialization failure.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WaferError> {
     rmp_serde::from_slice(bytes).map_err(|e| {
         WaferError::new(
-            ErrorCode::INTERNAL,
+            ErrorCode::Internal,
             format!("codec decode error in {}: {e}", std::any::type_name::<T>()),
         )
     })

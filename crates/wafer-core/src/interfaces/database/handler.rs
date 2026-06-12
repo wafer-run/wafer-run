@@ -78,24 +78,24 @@ fn is_preserved_db_error(msg: &str) -> bool {
 
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     match e {
-        DatabaseError::NotFound => WaferError::new(ErrorCode::NOT_FOUND, "record not found"),
+        DatabaseError::NotFound => WaferError::new(ErrorCode::NotFound, "record not found"),
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
-                WaferError::new(ErrorCode::INTERNAL, msg)
+                WaferError::new(ErrorCode::Internal, msg)
             } else {
                 tracing::error!(error = %msg, "database internal error");
-                WaferError::new(ErrorCode::INTERNAL, "internal database error")
+                WaferError::new(ErrorCode::Internal, "internal database error")
             }
         }
         DatabaseError::Other(err) => {
             let msg = err.to_string();
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
-                WaferError::new(ErrorCode::INTERNAL, msg)
+                WaferError::new(ErrorCode::Internal, msg)
             } else {
                 tracing::error!(error = %msg, "database error");
-                WaferError::new(ErrorCode::INTERNAL, "internal database error")
+                WaferError::new(ErrorCode::Internal, "internal database error")
             }
         }
     }
@@ -328,7 +328,7 @@ pub async fn handle_message(
             }
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown database operation: {other}"),
         )),
     }
@@ -345,7 +345,7 @@ pub async fn handle_lifecycle(
             tracing::debug!("no schema tables configured — skipping migration");
         } else {
             service.ensure_schema_tables(tables).await.map_err(|e| {
-                WaferError::new(ErrorCode::INTERNAL, format!("schema migration failed: {e}"))
+                WaferError::new(ErrorCode::Internal, format!("schema migration failed: {e}"))
             })?;
             tracing::info!(tables = tables.len(), "database schema migrations applied");
         }
@@ -363,7 +363,7 @@ mod tests {
         let w = db_error_to_wafer(DatabaseError::Internal(
             "duplicate column name: block".to_string(),
         ));
-        assert_eq!(w.code, ErrorCode::INTERNAL);
+        assert_eq!(w.code, ErrorCode::Internal);
         assert!(
             w.message.contains("duplicate column name"),
             "expected preserved message, got: {}",
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn not_found_stays_descriptive() {
         let w = db_error_to_wafer(DatabaseError::NotFound);
-        assert_eq!(w.code, ErrorCode::NOT_FOUND);
+        assert_eq!(w.code, ErrorCode::NotFound);
         assert_eq!(w.message, "record not found");
     }
 
@@ -415,6 +415,6 @@ mod tests {
             },
         ];
         let err = convert_filters(defs).expect_err("bad op should fail conversion");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 }

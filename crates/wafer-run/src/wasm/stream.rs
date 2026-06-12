@@ -190,14 +190,14 @@ impl StreamState {
                 Some(StreamEvent::Drop) => {
                     self.response_stream = None;
                     let err =
-                        WaferError::new(ErrorCode::ABORTED, "target block dropped the request");
+                        WaferError::new(ErrorCode::Aborted, "target block dropped the request");
                     self.last_error = Some(err.clone());
                     return Err(err);
                 }
                 Some(StreamEvent::Halt { .. }) => {
                     self.response_stream = None;
                     let err = WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "unexpected Halt terminal — call_block does not bridge Halt to guest",
                     );
                     self.last_error = Some(err.clone());
@@ -206,7 +206,7 @@ impl StreamState {
                 Some(StreamEvent::Continue(next_msg)) => {
                     self.response_stream = None;
                     let err = WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!(
                             "unexpected Continue terminal (kind: {}) — call_block does not bridge Continue",
                             next_msg.kind,
@@ -264,7 +264,7 @@ impl Drop for StreamState {
 /// Build a `FailedPrecondition` error with a fixed prefix.
 fn precondition_err(message: &str) -> WaferError {
     WaferError::new(
-        ErrorCode::FAILED_PRECONDITION,
+        ErrorCode::FailedPrecondition,
         format!("stream ABI misuse: {message}"),
     )
 }
@@ -408,7 +408,7 @@ mod tests {
     async fn error_terminal_captured_for_take_error() {
         let mut state = StreamState::new("test/target".into(), msg());
         let (_, _, _) = state.take_finish_request().unwrap();
-        let err = WaferError::new(ErrorCode::INTERNAL, "boom");
+        let err = WaferError::new(ErrorCode::Internal, "boom");
         state.finish_with_stream(OutputStream::error(err.clone()));
 
         let res = state.next_chunk().await;
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn record_error_and_close_transitions_to_closed() {
         let mut state = StreamState::new("test/target".into(), msg());
-        let err = WaferError::new(ErrorCode::PERMISSION_DENIED, "no");
+        let err = WaferError::new(ErrorCode::PermissionDenied, "no");
         state.record_error_and_close(err);
         assert_eq!(state.phase(), Phase::Closed);
         let took = state.take_error().expect("error should be present");

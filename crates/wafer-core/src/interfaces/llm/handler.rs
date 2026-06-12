@@ -215,14 +215,14 @@ fn service_load_progress_to_wire(p: service::LoadProgress) -> wire::LoadProgress
 /// status instead of collapsing everything to `INTERNAL`.
 fn llm_error_to_block_error(e: service::LlmError) -> (ErrorCode, String) {
     match e {
-        service::LlmError::NotSupported => (ErrorCode::UNIMPLEMENTED, "not supported".to_string()),
-        service::LlmError::InvalidRequest(msg) => (ErrorCode::INVALID_ARGUMENT, msg),
-        service::LlmError::BackendError(msg) => (ErrorCode::INTERNAL, msg),
-        service::LlmError::ModelNotFound(msg) => (ErrorCode::NOT_FOUND, msg),
-        service::LlmError::RateLimited => (ErrorCode::UNAVAILABLE, "rate limited".to_string()),
-        service::LlmError::Unauthorized => (ErrorCode::UNAUTHENTICATED, "unauthorized".to_string()),
-        service::LlmError::Network(msg) => (ErrorCode::INTERNAL, format!("network: {msg}")),
-        service::LlmError::Cancelled => (ErrorCode::CANCELLED, "cancelled".to_string()),
+        service::LlmError::NotSupported => (ErrorCode::Unimplemented, "not supported".to_string()),
+        service::LlmError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
+        service::LlmError::BackendError(msg) => (ErrorCode::Internal, msg),
+        service::LlmError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
+        service::LlmError::RateLimited => (ErrorCode::Unavailable, "rate limited".to_string()),
+        service::LlmError::Unauthorized => (ErrorCode::Unauthenticated, "unauthorized".to_string()),
+        service::LlmError::Network(msg) => (ErrorCode::Internal, format!("network: {msg}")),
+        service::LlmError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
 
@@ -247,7 +247,7 @@ pub async fn handle_message(
         ServiceOp::LLM_LOAD_MODEL => load_model(service, body),
         ServiceOp::LLM_UNLOAD_MODEL => unload_model(service.as_ref(), body).await,
         other => OutputStream::error(WaferError::new(
-            ErrorCode::INVALID_ARGUMENT,
+            ErrorCode::InvalidArgument,
             format!("unknown llm operation: {other}"),
         )),
     }
@@ -285,7 +285,7 @@ fn chat(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
                 Err(e) => {
                     let _ = sink
                         .error(WaferError::new(
-                            ErrorCode::INTERNAL,
+                            ErrorCode::Internal,
                             format!("encoding chat chunk: {}", e.message),
                         ))
                         .await;
@@ -325,7 +325,7 @@ fn load_model(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
                 Err(e) => {
                     let _ = sink
                         .error(WaferError::new(
-                            ErrorCode::INTERNAL,
+                            ErrorCode::Internal,
                             format!("encoding load progress: {}", e.message),
                         ))
                         .await;

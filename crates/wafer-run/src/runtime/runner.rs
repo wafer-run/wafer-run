@@ -88,7 +88,7 @@ impl Wafer {
     pub async fn run(&self, flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
         let Some(flow) = self.flows.get(flow_id) else {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NOT_FOUND,
+                ErrorCode::NotFound,
                 format!("flow not found: {flow_id}"),
             ));
         };
@@ -143,7 +143,7 @@ impl Wafer {
         // Resolve alias + look up the target block in one step.
         let Some((resolved, block)) = self.registration.lookup_with_alias(block_name) else {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NOT_FOUND,
+                ErrorCode::NotFound,
                 format!("block not found: {block_name}"),
             ));
         };
@@ -294,7 +294,7 @@ pub async fn run_block_with_recovery(
                     "unknown panic".to_string()
                 };
                 OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("block panicked: {panic_msg}"),
                 ))
             }

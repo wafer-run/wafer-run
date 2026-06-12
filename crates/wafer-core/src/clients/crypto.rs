@@ -44,7 +44,7 @@ dual_api! {
         if resp.matches {
             Ok(())
         } else {
-            Err(WaferError::new(ErrorCode::UNAUTHENTICATED, "password mismatch"))
+            Err(WaferError::new(ErrorCode::Unauthenticated, "password mismatch"))
         }
     }
 

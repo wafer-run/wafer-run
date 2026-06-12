@@ -175,18 +175,18 @@ async fn collect_response_body(out: OutputStream) -> Result<Vec<u8>, WaferError>
         Ok(buf) => Ok(buf.body),
         Err(TerminalNotResponse::Error(e)) => Err(e),
         Err(TerminalNotResponse::Drop) => {
-            Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
+            Err(WaferError::new(ErrorCode::Internal, "block returned Drop"))
         }
         Err(TerminalNotResponse::Halt(_)) => Err(WaferError::new(
-            ErrorCode::INTERNAL,
+            ErrorCode::Internal,
             "block returned Halt (service clients do not short-circuit flows)",
         )),
         Err(TerminalNotResponse::Continue(_)) => Err(WaferError::new(
-            ErrorCode::INTERNAL,
+            ErrorCode::Internal,
             "block returned Continue",
         )),
         Err(TerminalNotResponse::Malformed) => Err(WaferError::new(
-            ErrorCode::INTERNAL,
+            ErrorCode::Internal,
             "malformed output stream",
         )),
     }
@@ -446,7 +446,7 @@ mod wasm_streaming {
 /// Deserialize MessagePack bytes into a typed value.
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, WaferError> {
     codec::decode(data)
-        .map_err(|e| WaferError::new(ErrorCode::INTERNAL, format!("decode error: {}", e.message)))
+        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("decode error: {}", e.message)))
 }
 
 /// Pull events from `out` until the first `Chunk` (the header frame), decode
@@ -478,13 +478,13 @@ where
             StreamEvent::Error(e) => return Err(*e),
             StreamEvent::Drop => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: block dropped before header frame"),
                 ));
             }
             StreamEvent::Continue(msg) => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!(
                         "{context}: unexpected Continue before header frame (kind: {})",
                         msg.kind
@@ -493,20 +493,20 @@ where
             }
             StreamEvent::Halt { .. } => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: block halted before header frame"),
                 ));
             }
             StreamEvent::Complete { .. } => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: stream complete before header frame"),
                 ));
             }
         }
     }
     Err(WaferError::new(
-        ErrorCode::INTERNAL,
+        ErrorCode::Internal,
         format!("{context}: stream ended before header frame"),
     ))
 }
@@ -538,26 +538,26 @@ where
             StreamEvent::Error(e) => return Err(*e),
             StreamEvent::Drop => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: block dropped"),
                 ));
             }
             StreamEvent::Halt { .. } => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: block halted"),
                 ));
             }
             StreamEvent::Continue(msg) => {
                 return Err(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!("{context}: unexpected Continue (kind: {})", msg.kind),
                 ));
             }
         }
     }
     Err(WaferError::new(
-        ErrorCode::INTERNAL,
+        ErrorCode::Internal,
         format!("{context}: stream ended without terminal event"),
     ))
 }
@@ -620,7 +620,7 @@ where
                 Poll::Ready(None) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!("{}: stream ended without terminal event", self.context),
                     ))));
                 }
@@ -642,14 +642,14 @@ where
                 Poll::Ready(Some(StreamEvent::Drop)) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!("{}: handler returned Drop", self.context),
                     ))));
                 }
                 Poll::Ready(Some(StreamEvent::Continue(msg))) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!(
                             "{}: handler returned Continue (kind: {})",
                             self.context, msg.kind
@@ -659,7 +659,7 @@ where
                 Poll::Ready(Some(StreamEvent::Halt { .. })) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!("{}: handler returned Halt", self.context),
                     ))));
                 }

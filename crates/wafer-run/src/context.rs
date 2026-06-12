@@ -147,7 +147,7 @@ impl RuntimeContext {
 
         if depth >= self.max_call_depth {
             return err_output(
-                ErrorCode::RESOURCE_EXHAUSTED,
+                ErrorCode::ResourceExhausted,
                 format!(
                     "call_block depth exceeded maximum of {} (calling '{}')",
                     self.max_call_depth, block_name
@@ -157,7 +157,7 @@ impl RuntimeContext {
 
         // Cancellation check
         if self.is_cancelled() {
-            return err_output(ErrorCode::CANCELLED, "execution cancelled");
+            return err_output(ErrorCode::Cancelled, "execution cancelled");
         }
 
         // Resolve the alias once up front. This canonical name is the caller
@@ -177,7 +177,7 @@ impl RuntimeContext {
                 .any(|r| r == block_name || r == resolved_block_name)
             {
                 return err_output(
-                    ErrorCode::PERMISSION_DENIED,
+                    ErrorCode::PermissionDenied,
                     format!("block '{block_name}' not in requires list — call_block denied"),
                 );
             }
@@ -220,7 +220,7 @@ impl RuntimeContext {
                 // would never match and produce a false denial.
                 if !caps.allows_call_block(resolved_block_name) {
                     return err_output(
-                        ErrorCode::PERMISSION_DENIED,
+                        ErrorCode::PermissionDenied,
                         format!("block capability denies call to '{block_name}'"),
                     );
                 }
@@ -252,7 +252,7 @@ impl RuntimeContext {
                     };
                     if !allowed {
                         return err_output(
-                            ErrorCode::PERMISSION_DENIED,
+                            ErrorCode::PermissionDenied,
                             format!(
                                 "block capability denies access to {wrap_rt} '{wrap_resource}'"
                             ),
@@ -274,7 +274,7 @@ impl RuntimeContext {
             Some(b) => b.clone(),
             None => {
                 return err_output(
-                    ErrorCode::NOT_FOUND,
+                    ErrorCode::NotFound,
                     format!("block '{block_name}' not found"),
                 );
             }
@@ -310,7 +310,7 @@ impl RuntimeContext {
             ) {
                 crate::runtime::validation::ActionCheck::Valid => {}
                 crate::runtime::validation::ActionCheck::Invalid { message } => {
-                    return err_output(ErrorCode::INVALID_ARGUMENT, message);
+                    return err_output(ErrorCode::InvalidArgument, message);
                 }
                 crate::runtime::validation::ActionCheck::UnknownInterface => {
                     crate::runtime::validation::warn_once_unknown_interface(

@@ -69,18 +69,18 @@ pub async fn execute(
     while current < steps.len() {
         if step_count >= max_steps {
             return OutputStream::error(WaferError::new(
-                ErrorCode::RESOURCE_EXHAUSTED,
+                ErrorCode::ResourceExhausted,
                 format!("max steps ({max_steps}) exceeded in flow '{}'", flow.id),
             ));
         }
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return OutputStream::error(WaferError::new(ErrorCode::CANCELLED, "flow cancelled"));
+            return OutputStream::error(WaferError::new(ErrorCode::Cancelled, "flow cancelled"));
         }
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::DEADLINE_EXCEEDED,
+                    ErrorCode::DeadlineExceeded,
                     format!("flow '{}' timed out", flow.id),
                 ));
             }
@@ -99,14 +99,14 @@ pub async fn execute(
                         Ok(data) => current_body = data,
                         Err(e) => {
                             return OutputStream::error(WaferError::new(
-                                ErrorCode::INTERNAL,
+                                ErrorCode::Internal,
                                 format!("failed to serialize input for step '{}': {}", step.id, e),
                             ));
                         }
                     },
                     Err(e) => {
                         return OutputStream::error(WaferError::new(
-                            ErrorCode::INVALID_ARGUMENT,
+                            ErrorCode::InvalidArgument,
                             format!("input resolution failed in step '{}': {}", step.id, e),
                         ));
                     }
@@ -125,7 +125,7 @@ pub async fn execute(
             Some((resolved, block)) => (resolved.to_string(), block),
             None => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::NOT_FOUND,
+                    ErrorCode::NotFound,
                     format!("block '{}' not found in step '{}'", step.block, step.id),
                 ));
             }
@@ -231,7 +231,7 @@ pub async fn execute(
             }
             Err(TerminalNotResponse::Malformed) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
+                    ErrorCode::Internal,
                     format!(
                         "block '{}' in step '{}' produced malformed output stream",
                         step.block, step.id
@@ -258,7 +258,7 @@ pub async fn execute(
                             }
                             None => {
                                 return OutputStream::error(WaferError::new(
-                                    ErrorCode::NOT_FOUND,
+                                    ErrorCode::NotFound,
                                     format!("next target step '{target_step}' not found"),
                                 ));
                             }

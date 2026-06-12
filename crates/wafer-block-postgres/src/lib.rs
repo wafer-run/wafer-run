@@ -19,8 +19,8 @@ use std::{
 
 use service::PostgresDatabaseService;
 use wafer_block::{
-    Block, BlockCategory, BlockConfig, BlockInfo, ConfigVar, Context, InputStream, LifecycleEvent,
-    LifecycleType, Message, OutputStream, WaferError,
+    Block, BlockCategory, BlockConfig, BlockInfo, ConfigVar, Context, ErrorCode, InputStream,
+    LifecycleEvent, LifecycleType, Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -99,7 +99,7 @@ impl Block for PostgresDatabaseBlock {
                     match serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()) {
                         Ok(colls) => collections_to_tables(&colls).map_err(|e| {
                             WaferError::new(
-                                "config",
+                                ErrorCode::FailedPrecondition,
                                 format!("wafer-run/postgres: invalid collections config: {e}"),
                             )
                         })?,
@@ -118,14 +118,14 @@ impl Block for PostgresDatabaseBlock {
 
             let url = std::env::var(DATABASE_URL_ENV).map_err(|_| {
                 WaferError::new(
-                    "config",
+                    ErrorCode::FailedPrecondition,
                     format!("wafer-run/postgres: {DATABASE_URL_ENV} must be set"),
                 )
             })?;
 
-            let svc = PostgresDatabaseService::connect(&url)
-                .await
-                .map_err(|e| WaferError::new("init", format!("wafer-run/postgres: {e}")))?;
+            let svc = PostgresDatabaseService::connect(&url).await.map_err(|e| {
+                WaferError::new(ErrorCode::Internal, format!("wafer-run/postgres: {e}"))
+            })?;
             tracing::info!("PostgreSQL database connected");
             self.service.set(Arc::new(svc)).ok();
         }
