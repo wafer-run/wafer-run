@@ -249,6 +249,7 @@ fn check_wafer_lock_sync(dir: &Path) -> anyhow::Result<()> {
     if !lock_path.is_file() {
         return Ok(());
     }
+    use crate::lockfile::LockfileToml as _;
     let wt = crate::wafer_toml::WaferToml::read(&toml_path)?;
     let lf = crate::lockfile::Lockfile::load(&lock_path)?
         .ok_or_else(|| anyhow::anyhow!("wafer.lock exists but failed to load (unreachable)"))?;

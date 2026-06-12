@@ -1,24 +1,11 @@
-//! `wafer.lock` parser + serializer.
+//! `wafer.lock` TOML parsing/serialization + atomic file IO.
 //!
-//! Format (v1):
-//!
-//! ```toml
-//! version = 1
-//!
-//! [[package]]
-//! name = "acme/widget"
-//! version = "0.3.1"
-//! sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-//! source = "registry+https://wafer.run"
-//! ```
-//!
-//! - Top-level `version = 1` is the schema version; unknown values are
-//!   rejected on parse.
-//! - `[[package]]` entries are stored sorted by `name`. `insert_or_replace`
-//!   + `to_toml_string` preserve that invariant so any consumer can rely on
-//!     deterministic output regardless of insertion order.
-//! - `source` follows the Cargo convention `registry+<base-url>` — forward-
-//!   compatible with future multi-registry support.
+//! The schema types ([`Lockfile`], [`LockfilePackage`], the schema-version
+//! constant, and the sorted-by-name invariant) live in
+//! [`wafer_block::lockfile`] — shared with wafer-run's registry loader so
+//! the on-disk contract is defined exactly once. This module owns the CLI
+//! side: TOML (de)serialization, the schema-version gate on load, and the
+//! atomic write. See the shared module's docs for the format specification.
 
 use std::{
     fs,
@@ -26,37 +13,36 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use wafer_block::lockfile::SCHEMA_VERSION;
+pub use wafer_block::lockfile::{Lockfile, LockfilePackage};
 
-const SCHEMA_VERSION: u32 = 1;
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct LockfilePackage {
-    pub name: String,
-    pub version: String,
-    pub sha256: String,
-    pub source: String,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct Lockfile {
-    pub version: u32,
-    #[serde(default, rename = "package")]
-    pub packages: Vec<LockfilePackage>,
-}
-
-impl Lockfile {
-    /// Empty v1 lockfile (for when no `wafer.lock` exists on disk yet).
-    pub fn new() -> Self {
-        Self {
-            version: SCHEMA_VERSION,
-            packages: Vec::new(),
-        }
-    }
-
+/// TOML parsing/serialization + atomic file IO for [`Lockfile`].
+///
+/// Extension trait because the schema type is defined in
+/// `wafer_block::lockfile` (shared with wafer-run); the TOML + filesystem
+/// side is CLI-owned and must not leak into the wasm32-clean types crate.
+pub trait LockfileToml: Sized {
     /// Read + parse `wafer.lock` from `path`. Missing file yields `Ok(None)`
     /// so callers can distinguish "no lockfile yet" from "parse error".
-    pub fn load(path: &Path) -> Result<Option<Self>> {
+    fn load(path: &Path) -> Result<Option<Self>>;
+
+    /// Serialize to canonical TOML text. Packages emitted in sorted order,
+    /// trailing newline.
+    fn to_toml_string(&self) -> Result<String>;
+
+    /// Atomically (w.r.t. concurrent readers on the same filesystem) write the
+    /// lockfile to `path` via a temp file + rename. Creates parent directories
+    /// as needed.
+    ///
+    /// Not crash-atomic — a power loss between the temp write and the rename
+    /// can leave the temp file behind, and the Linux kernel does not fsync the
+    /// parent directory on rename. For a lockfile this is acceptable: the
+    /// next `wafer install` re-derives the entry.
+    fn write_atomic(&self, path: &Path) -> Result<()>;
+}
+
+impl LockfileToml for Lockfile {
+    fn load(path: &Path) -> Result<Option<Self>> {
         match fs::read_to_string(path) {
             Ok(body) => {
                 let parsed: Lockfile =
@@ -75,19 +61,7 @@ impl Lockfile {
         }
     }
 
-    /// Insert or replace a package entry, keeping `packages` sorted by name.
-    pub fn insert_or_replace(&mut self, pkg: LockfilePackage) {
-        if let Some(existing) = self.packages.iter_mut().find(|p| p.name == pkg.name) {
-            *existing = pkg;
-        } else {
-            self.packages.push(pkg);
-        }
-        self.packages.sort_by(|a, b| a.name.cmp(&b.name));
-    }
-
-    /// Serialize to canonical TOML text. Packages emitted in sorted order,
-    /// trailing newline.
-    pub fn to_toml_string(&self) -> Result<String> {
+    fn to_toml_string(&self) -> Result<String> {
         let mut ordered = self.clone();
         ordered.packages.sort_by(|a, b| a.name.cmp(&b.name));
         let mut out = toml::to_string(&ordered).context("serialise lockfile")?;
@@ -97,15 +71,7 @@ impl Lockfile {
         Ok(out)
     }
 
-    /// Atomically (w.r.t. concurrent readers on the same filesystem) write the
-    /// lockfile to `path` via a temp file + rename. Creates parent directories
-    /// as needed.
-    ///
-    /// Not crash-atomic — a power loss between the temp write and the rename
-    /// can leave the temp file behind, and the Linux kernel does not fsync the
-    /// parent directory on rename. For a lockfile this is acceptable: the
-    /// next `wafer install` re-derives the entry.
-    pub fn write_atomic(&self, path: &Path) -> Result<()> {
+    fn write_atomic(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)
@@ -145,13 +111,6 @@ mod tests {
             sha256: "a".repeat(64),
             source: "registry+https://wafer.run".into(),
         }
-    }
-
-    #[test]
-    fn empty_new_has_version_1() {
-        let lf = Lockfile::new();
-        assert_eq!(lf.version, 1);
-        assert!(lf.packages.is_empty());
     }
 
     #[test]
@@ -199,25 +158,6 @@ source = "registry+https://wafer.run"
     }
 
     #[test]
-    fn insert_or_replace_inserts_in_sorted_order() {
-        let mut lf = Lockfile::new();
-        lf.insert_or_replace(pkg("zeta/z", "0.1.0"));
-        lf.insert_or_replace(pkg("acme/widget", "0.3.1"));
-        lf.insert_or_replace(pkg("mid/m", "1.0.0"));
-        let names: Vec<_> = lf.packages.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["acme/widget", "mid/m", "zeta/z"]);
-    }
-
-    #[test]
-    fn insert_or_replace_replaces_existing() {
-        let mut lf = Lockfile::new();
-        lf.insert_or_replace(pkg("a/b", "0.1.0"));
-        lf.insert_or_replace(pkg("a/b", "0.2.0"));
-        assert_eq!(lf.packages.len(), 1);
-        assert_eq!(lf.packages[0].version, "0.2.0");
-    }
-
-    #[test]
     fn to_toml_string_is_sorted_with_trailing_newline() {
         let mut lf = Lockfile::new();
         lf.insert_or_replace(pkg("b/b", "0.1.0"));
@@ -259,10 +199,61 @@ source = "registry+https://wafer.run"
         let path = tmp.path().join("wafer.lock");
         fs::write(&path, body).unwrap();
         let err = format!("{:#}", Lockfile::load(&path).unwrap_err());
-        // With Default gone, serde reports the missing field directly.
+        // The shared schema keeps `version` non-defaulted, so serde reports
+        // the missing field directly.
         assert!(
             err.contains("missing field") && err.contains("version"),
             "expected missing-version diagnostic, got: {err}"
         );
+    }
+
+    /// Cross-consumer contract pin: the exact TOML the CLI serializer emits
+    /// is part of the shared on-disk contract. Pinning the bytes here locks
+    /// the `[[package]]` section name and every field name, and proves the
+    /// pinned text decodes identically through the shared
+    /// `wafer_block::lockfile` types — the same types wafer-run's registry
+    /// loader deserializes with. If this test breaks, the lockfile format
+    /// changed: bump `SCHEMA_VERSION` and update both consumers.
+    #[test]
+    fn serialized_fixture_pins_shared_schema_contract() {
+        let mut lf = Lockfile::new();
+        lf.insert_or_replace(LockfilePackage {
+            name: "acme/widget".into(),
+            version: "0.3.1".into(),
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            source: "registry+https://wafer.run".into(),
+        });
+        lf.insert_or_replace(LockfilePackage {
+            name: "suppers-ai/auth".into(),
+            version: "1.2.0".into(),
+            sha256: "a".repeat(64),
+            source: "path+./local".into(),
+        });
+
+        let expected = format!(
+            r#"version = 1
+
+[[package]]
+name = "acme/widget"
+version = "0.3.1"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+source = "registry+https://wafer.run"
+
+[[package]]
+name = "suppers-ai/auth"
+version = "1.2.0"
+sha256 = "{}"
+source = "path+./local"
+"#,
+            "a".repeat(64)
+        );
+        let serialized = lf.to_toml_string().unwrap();
+        assert_eq!(serialized, expected, "on-disk contract drifted");
+
+        // Decode the pinned text through the shared types (the wafer-run
+        // reader path) and require structural equality with the original.
+        let decoded: wafer_block::lockfile::Lockfile = toml::from_str(&expected).unwrap();
+        assert_eq!(decoded, lf);
+        assert_eq!(decoded.version, wafer_block::lockfile::SCHEMA_VERSION);
     }
 }

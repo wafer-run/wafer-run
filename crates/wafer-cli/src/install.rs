@@ -28,7 +28,7 @@ use tar::{Archive, EntryType};
 use crate::{
     block_name::parse_org_block,
     cache::CacheRoot,
-    lockfile::{Lockfile, LockfilePackage},
+    lockfile::{Lockfile, LockfilePackage, LockfileToml},
     registry_client::{self, Registry, VersionDetail, VersionSummary},
 };
 
