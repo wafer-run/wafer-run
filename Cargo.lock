@@ -6314,11 +6314,9 @@ dependencies = [
 name = "wafer-ffi"
 version = "0.1.0"
 dependencies = [
- "base64ct",
  "serde_json",
  "tokio",
  "tracing",
- "wafer-block",
  "wafer-run",
 ]
 
