@@ -77,10 +77,8 @@ crates/
 examples/                Runnable demos. See examples/README.md.
 sdks/rust/               wafer-sdk for guest WASM blocks (consumes #[wafer_block])
 packages/wafer-client-js/JS/TS client. See its README.
-registry/                Block manifests served by the registry.
 docs/specs/              Design specs (one per initiative)
 docs/plans/              Implementation plans (one per spec)
-common/                  Shared resources. See its README.
 go/                      Go bindings.
 ```
 

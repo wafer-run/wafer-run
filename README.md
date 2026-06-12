@@ -57,9 +57,7 @@ crates/        Rust crates (runtime, blocks, CLI, SDK)
 examples/      Runnable demos — start with hello-world
 sdks/          Guest SDKs (Rust today)
 packages/      JS/TS client (wafer-client-js)
-registry/      Block manifests for the wafer-run registry
 docs/          Specs (docs/specs/) and plans (docs/plans/)
-common/        Shared resources (see common/README.md)
 go/            Go bindings
 ```
 
