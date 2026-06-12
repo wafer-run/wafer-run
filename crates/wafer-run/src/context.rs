@@ -355,32 +355,24 @@ impl RuntimeContext {
             att_arc.clone().unwrap_or_else(|| Arc::new(BTreeMap::new()))
         };
 
+        // The sub-context is a clone of this frame with only the four
+        // caller/callee-identity fields overridden — every shared snapshot
+        // (config, blocks, slots, WRAP state, breadcrumbs, ...) is inherited
+        // via `RuntimeContext::clone` (cheap: Arc/Copy/String fields only):
+        //   - node_id: the callee's identity for downstream WRAP attribution
+        //     (resource owner is `{org}/{block}`). It must be the resolved
+        //     canonical name, not the raw alias the caller wrote — otherwise
+        //     an aliased callee performing its own resource access would be
+        //     attributed to the alias and falsely denied.
+        //   - caller_requires: the callee's own `requires` allowlist.
+        //   - caller_id: this frame's node becomes the callee's caller.
+        //   - current_attachments: the per-call inbound attachment map.
         let sub_ctx = RuntimeContext {
-            flow_id: self.flow_id.clone(),
-            // node_id is the callee's identity for downstream WRAP attribution
-            // (resource owner is `{org}/{block}`). It must be the resolved
-            // canonical name, not the raw alias the caller wrote — otherwise an
-            // aliased callee performing its own resource access would be
-            // attributed to the alias and falsely denied.
             node_id: resolved_block_name.to_string(),
-            config: self.config.clone(),
-            config_snapshot: self.config_snapshot.clone(),
-            cancelled: self.cancelled.clone(),
-            deadline: self.deadline,
-            all_blocks: self.all_blocks.clone(),
-            call_depth: self.call_depth.clone(),
-            max_call_depth: self.max_call_depth,
-            snapshot: self.snapshot.clone(),
-            warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
-            aliases: self.aliases.clone(),
             caller_requires: called_requires,
             caller_id: Some(self.node_id.clone()),
-            wrap_grants: self.wrap_grants.clone(),
-            wrap_admin_block: self.wrap_admin_block.clone(),
             current_attachments: sub_attachments,
-            init_breadcrumbs: self.init_breadcrumbs.clone(),
-            slots: self.slots.clone(),
-            config_source: self.config_source.clone(),
+            ..self.clone()
         };
 
         // Lazy init: ensure lifecycle(Init) has run on the callee before
@@ -523,37 +515,18 @@ impl Context for RuntimeContext {
     }
 
     async fn validate_all_block_configs(&self) -> wafer_block::ValidationReport {
-        use crate::runtime::config_source::ConfigError;
-
-        let mut report = wafer_block::ValidationReport {
-            ok: Vec::new(),
-            broken: Vec::new(),
-        };
-        for (name, block) in self.all_blocks.iter() {
-            let info = block.info();
-            match self
-                .config_source
-                .load_for_block(name, &info.config_keys)
-                .await
-            {
-                Ok(_) => report.ok.push(name.clone()),
-                Err(ConfigError::MissingRequired { block, key }) => {
-                    report.broken.push(wafer_block::BrokenBlock {
-                        block,
-                        missing_keys: vec![key],
-                    });
-                }
-                Err(ConfigError::Transient { block, .. }) => {
-                    report.broken.push(wafer_block::BrokenBlock {
-                        block,
-                        missing_keys: vec!["<transient: source unreachable>".to_string()],
-                    });
-                }
-            }
-        }
-        report.ok.sort();
-        report.broken.sort_by(|a, b| a.block.cmp(&b.block));
-        report
+        // `all_blocks` contains registered blocks AND alias keys pointing at
+        // the same instances. Filter the alias keys out so the shared
+        // validator sees the canonical view — otherwise aliased blocks would
+        // be validated and reported twice (once per name). Collected up front
+        // because a borrowed `filter` closure does not generalize across the
+        // validator's async boundary.
+        let canonical: Vec<(&String, &Arc<dyn Block>)> = self
+            .all_blocks
+            .iter()
+            .filter(|(name, _)| !self.aliases.contains_key(*name))
+            .collect();
+        crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
     }
 }
 

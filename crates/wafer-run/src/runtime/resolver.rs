@@ -5,10 +5,19 @@ use std::{
 
 use super::Wafer;
 #[cfg(feature = "wasm")]
-use super::{parse_unversioned_block, parse_versioned_block, RegistryManifest, ABI_VERSION};
+use super::{
+    parse_unversioned_block, parse_versioned_block, RegistryManifest, RemoteBlockRef, VersionEntry,
+    ABI_VERSION,
+};
 #[cfg(feature = "wasm")]
 use crate::block::Block;
 use crate::error::{BlockReferenceError, BlockReferenceSource, RuntimeError};
+
+/// Base URL for raw registry manifest fetches
+/// (`{base}/{org}/{block}/manifest.json`).
+#[cfg(feature = "wasm")]
+const REGISTRY_MANIFEST_BASE_URL: &str =
+    "https://raw.githubusercontent.com/wafer-run/registry/main";
 
 impl Wafer {
     /// Gather `"uses"` contributions from all block configs and deep-merge them
@@ -237,8 +246,7 @@ impl Wafer {
         // declare its own config-held references via the trait.
         // BTreeMap (vs HashMap) so iteration over missing references yields
         // canonical-name-sorted order, giving stable `Display` output for
-        // `BlocksNotFound` across boots. Matches the deterministic-order
-        // pattern already used by `runtime/validation.rs::format_missing_config`.
+        // `BlocksNotFound` across boots.
         let mut references: BTreeMap<String, Vec<BlockReferenceSource>> = BTreeMap::new();
 
         for (flow_id, flow) in &self.flows {
@@ -377,62 +385,10 @@ impl Wafer {
                 continue;
             };
 
-            let manifest_url = format!(
-                "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
-                remote_ref.org, remote_ref.block
-            );
-
-            let resp = client
-                .get(&manifest_url)
-                .header("User-Agent", "wafer-run/0.1.0")
-                .send()
-                .await
-                .map_err(|e| {
-                    RuntimeError::Registry(format!(
-                        "failed to fetch registry manifest for {name}: {e}"
-                    ))
-                })?;
-
-            if resp.status().as_u16() == 404 {
+            let Some(entry) = fetch_manifest_entry(&client, &remote_ref, &name).await? else {
+                // Not in the registry (404) — skip this candidate.
                 continue;
-            }
-            if resp.status().as_u16() != 200 {
-                return Err(RuntimeError::Registry(format!(
-                    "failed to fetch registry manifest for {}: HTTP {}",
-                    name,
-                    resp.status().as_u16()
-                )));
-            }
-
-            let manifest_bytes = resp.bytes().await.map_err(|e| {
-                RuntimeError::Registry(format!("failed to read manifest for {name}: {e}"))
-            })?;
-            let manifest: RegistryManifest =
-                serde_json::from_slice(&manifest_bytes).map_err(|e| {
-                    RuntimeError::Registry(format!(
-                        "failed to parse registry manifest for {name}: {e}"
-                    ))
-                })?;
-
-            let version = if remote_ref.version == "latest" {
-                manifest.latest.clone()
-            } else {
-                remote_ref.version.clone()
             };
-
-            let entry = manifest.versions.get(&version).ok_or_else(|| {
-                RuntimeError::Registry(format!(
-                    "version {version} not found in registry for {name}"
-                ))
-            })?;
-
-            if entry.abi != ABI_VERSION {
-                return Err(RuntimeError::AbiMismatch {
-                    name: name.clone(),
-                    required: entry.abi,
-                    supported: ABI_VERSION,
-                });
-            }
 
             if let Some(flow_url) = &entry.flow_url {
                 let flow = self
@@ -583,57 +539,9 @@ impl Wafer {
             return Ok(None);
         };
 
-        let manifest_url = format!(
-            "https://raw.githubusercontent.com/wafer-run/registry/main/{}/{}/manifest.json",
-            remote_ref.org, remote_ref.block
-        );
-
-        let resp = client
-            .get(&manifest_url)
-            .header("User-Agent", "wafer-run/0.1.0")
-            .send()
-            .await
-            .map_err(|e| {
-                RuntimeError::Registry(format!("failed to fetch registry manifest for {name}: {e}"))
-            })?;
-
-        if resp.status().as_u16() == 404 {
+        let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
             return Ok(None);
-        }
-        if resp.status().as_u16() != 200 {
-            return Err(RuntimeError::Registry(format!(
-                "failed to fetch registry manifest for {}: HTTP {}",
-                name,
-                resp.status().as_u16()
-            )));
-        }
-
-        let manifest_bytes = resp.bytes().await.map_err(|e| {
-            RuntimeError::Registry(format!("failed to read manifest for {name}: {e}"))
-        })?;
-        let manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
-            RuntimeError::Registry(format!("failed to parse registry manifest for {name}: {e}"))
-        })?;
-
-        let version = if remote_ref.version == "latest" {
-            manifest.latest.clone()
-        } else {
-            remote_ref.version.clone()
         };
-
-        let entry = manifest.versions.get(&version).ok_or_else(|| {
-            RuntimeError::Registry(format!(
-                "version {version} not found in registry for {name}"
-            ))
-        })?;
-
-        if entry.abi != ABI_VERSION {
-            return Err(RuntimeError::AbiMismatch {
-                name: name.to_string(),
-                required: entry.abi,
-                supported: ABI_VERSION,
-            });
-        }
 
         if let Some(wasm_url) = &entry.wasm_url {
             let block = self.download_wasm_from_url(client, wasm_url, name).await?;
@@ -665,6 +573,80 @@ impl Wafer {
             .as_ref()
             .expect("wasm_engine initialized above"))
     }
+}
+
+/// Fetch the registry manifest for `remote_ref`, select the requested version
+/// (resolving `"latest"` through the manifest's `latest` field), and check ABI
+/// compatibility.
+///
+/// Returns `Ok(None)` when the registry has no manifest for the block (HTTP
+/// 404) so callers decide how to proceed (skip the candidate / report
+/// not-found). Any other non-200 status, parse failure, unknown version, or
+/// ABI mismatch is an error.
+///
+/// Shared by [`Wafer::resolve_remote_entries`] and
+/// [`Wafer::resolve_remote_block`], which keep only their flow/wasm download
+/// branching.
+#[cfg(feature = "wasm")]
+async fn fetch_manifest_entry(
+    client: &reqwest::Client,
+    remote_ref: &RemoteBlockRef,
+    name: &str,
+) -> Result<Option<VersionEntry>, RuntimeError> {
+    let manifest_url = format!(
+        "{REGISTRY_MANIFEST_BASE_URL}/{}/{}/manifest.json",
+        remote_ref.org, remote_ref.block
+    );
+
+    let resp = client
+        .get(&manifest_url)
+        .header("User-Agent", "wafer-run/0.1.0")
+        .send()
+        .await
+        .map_err(|e| {
+            RuntimeError::Registry(format!("failed to fetch registry manifest for {name}: {e}"))
+        })?;
+
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if resp.status().as_u16() != 200 {
+        return Err(RuntimeError::Registry(format!(
+            "failed to fetch registry manifest for {}: HTTP {}",
+            name,
+            resp.status().as_u16()
+        )));
+    }
+
+    let manifest_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| RuntimeError::Registry(format!("failed to read manifest for {name}: {e}")))?;
+    let mut manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
+        RuntimeError::Registry(format!("failed to parse registry manifest for {name}: {e}"))
+    })?;
+
+    let version = if remote_ref.version == "latest" {
+        manifest.latest.clone()
+    } else {
+        remote_ref.version.clone()
+    };
+
+    let entry = manifest.versions.remove(&version).ok_or_else(|| {
+        RuntimeError::Registry(format!(
+            "version {version} not found in registry for {name}"
+        ))
+    })?;
+
+    if entry.abi != ABI_VERSION {
+        return Err(RuntimeError::AbiMismatch {
+            name: name.to_string(),
+            required: entry.abi,
+            supported: ABI_VERSION,
+        });
+    }
+
+    Ok(Some(entry))
 }
 
 fn log_widening_attempts(

@@ -29,75 +29,6 @@ use meta::*;
 const DEFAULT_FUEL: u64 = 100_000_000;
 
 // ---------------------------------------------------------------------------
-// Spike test entry point
-// ---------------------------------------------------------------------------
-
-/// Spike-only helper exposed to `tests/streaming_spike.rs`.
-///
-/// Compiles the supplied `wasm_bytes` (the spike guest), instantiates it
-/// with the `wafer_spike::*` host imports wired up, calls
-/// `spike_set_target(target_chunks)` followed by `read_all_chunks(chunk_size)`,
-/// and returns `(total_bytes_read, elapsed_during_read)`.
-///
-/// The elapsed measurement isolates the streaming-loop cost — module
-/// compilation, instantiation and target-config calls are NOT included.
-#[cfg(feature = "spike")]
-pub fn run_spike(
-    wasm_bytes: &[u8],
-    target_chunks: i32,
-    chunk_size: i32,
-) -> Result<(i64, std::time::Duration), RuntimeError> {
-    let mut config = wasmi::Config::default();
-    // No fuel metering for the spike — we want raw overhead numbers.
-    config.consume_fuel(false);
-    let engine = Engine::new(&config);
-
-    let module = Module::new(&engine, wasm_bytes)
-        .map_err(|e| RuntimeError::Wasm(format!("compiling spike guest: {e}")))?;
-
-    let mut linker = Linker::<WasmiHostState>::new(&engine);
-    register_spike_imports(&mut linker)?;
-
-    let host_state = WasmiHostState {
-        context: None,
-        capabilities: BlockCapabilities::unrestricted(),
-        streams: StreamRegistry::new(),
-        pending_stream_finish: None,
-        pending_stream_read: None,
-        pending_stream_take_error: None,
-        pending_load_asset: None,
-        current_attachments: None,
-    };
-    let mut store = Store::new(&engine, host_state);
-
-    let pre = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| RuntimeError::Wasm(format!("instantiating spike guest: {e}")))?;
-    let instance = pre
-        .start(&mut store)
-        .map_err(|e| RuntimeError::Wasm(format!("starting spike guest: {e}")))?;
-
-    let set_target_fn = instance
-        .get_typed_func::<i32, ()>(&store, "spike_set_target")
-        .map_err(|e| RuntimeError::Wasm(format!("getting spike_set_target: {e}")))?;
-    let read_all_fn = instance
-        .get_typed_func::<i32, i64>(&store, "read_all_chunks")
-        .map_err(|e| RuntimeError::Wasm(format!("getting read_all_chunks: {e}")))?;
-
-    set_target_fn
-        .call(&mut store, target_chunks)
-        .map_err(|e| RuntimeError::Wasm(format!("calling spike_set_target: {e}")))?;
-
-    let start = std::time::Instant::now();
-    let total = read_all_fn
-        .call(&mut store, chunk_size)
-        .map_err(|e| RuntimeError::Wasm(format!("calling read_all_chunks: {e}")))?;
-    let elapsed = start.elapsed();
-
-    Ok((total, elapsed))
-}
-
-// ---------------------------------------------------------------------------
 // Instantiation helper
 // ---------------------------------------------------------------------------
 
@@ -535,10 +466,16 @@ impl WasmiBlock {
             TypedResumableCall::Resumable(inv) => inv,
         };
 
-        // Resolve pending calls in a loop.
+        // Resolve pending calls in a loop. Each branch resolves its pending
+        // host call and yields the resume `Val` (the return value of the
+        // trapped host function) plus a label for resume-error messages; the
+        // single shared resume+match at the bottom of the loop drives the
+        // guest to either completion or its next trap.
         loop {
             // Dispatch based on which pending field is set by the host import.
-            if let Some(handle) = scope.store_mut().data_mut().pending_stream_finish.take() {
+            let (resume_val, resumed_after): (Val, &str) = if let Some(handle) =
+                scope.store_mut().data_mut().pending_stream_finish.take()
+            {
                 // Pull the request out of the StreamState, dispatch via
                 // Context::call_block, install the resulting OutputStream on
                 // the StreamState. Resume with i32 0 on success, negative
@@ -591,19 +528,7 @@ impl WasmiBlock {
                     None => error_code_to_neg_i32(ErrorCode::NotFound),
                 };
 
-                match resumable
-                    .resume(scope.store_mut(), &[Val::I32(resume_code)])
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!("resuming guest after stream_finish: {e}"))
-                    })? {
-                    TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed)?;
-                        return read_guest_bytes(scope.store(), memory, ptr, len);
-                    }
-                    TypedResumableCall::Resumable(next) => {
-                        resumable = next;
-                    }
-                }
+                (Val::I32(resume_code), "stream_finish")
             } else if let Some(handle) = scope.store_mut().data_mut().pending_stream_read.take() {
                 // Drive the response stream's next frame. On Chunk: allocate
                 // guest memory + write bytes, resume with packed (ptr, len).
@@ -634,19 +559,7 @@ impl WasmiBlock {
                     Err(e) => error_code_to_neg_i64(e.code),
                 };
 
-                match resumable
-                    .resume(scope.store_mut(), &[Val::I64(resume_packed)])
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!("resuming guest after stream_read: {e}"))
-                    })? {
-                    TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed)?;
-                        return read_guest_bytes(scope.store(), memory, ptr, len);
-                    }
-                    TypedResumableCall::Resumable(next) => {
-                        resumable = next;
-                    }
-                }
+                (Val::I64(resume_packed), "stream_read")
             } else if let Some(handle) = scope
                 .store_mut()
                 .data_mut()
@@ -683,19 +596,7 @@ impl WasmiBlock {
                     None => 0,
                 };
 
-                match resumable
-                    .resume(scope.store_mut(), &[Val::I64(resume_packed)])
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!("resuming guest after stream_take_error: {e}"))
-                    })? {
-                    TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed)?;
-                        return read_guest_bytes(scope.store(), memory, ptr, len);
-                    }
-                    TypedResumableCall::Resumable(next) => {
-                        resumable = next;
-                    }
-                }
+                (Val::I64(resume_packed), "stream_take_error")
             } else if let Some(asset_id) = scope.store_mut().data_mut().pending_load_asset.take() {
                 debug!(asset = asset_id, "resolving load_asset from WASM guest");
 
@@ -707,27 +608,29 @@ impl WasmiBlock {
                     crate::asset_loader::AssetLoadStatus::Failed(_) => 2,
                 };
 
-                // Resume with the status code as the return value of the
-                // trapped host function. wasmi's resumable.resume value IS
-                // the return value — no re-entry into the host fn.
-                match resumable
-                    .resume(scope.store_mut(), &[Val::I32(code)])
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!("resuming guest after load_asset: {e}"))
-                    })? {
-                    TypedResumableCall::Finished(packed) => {
-                        let (ptr, len) = unpack_ptr_len(packed)?;
-                        return read_guest_bytes(scope.store(), memory, ptr, len);
-                    }
-                    TypedResumableCall::Resumable(next) => {
-                        resumable = next;
-                    }
-                }
+                (Val::I32(code), "load_asset")
             } else {
                 return Err(RuntimeError::Wasm(format!(
                     "guest trapped but no pending host call (host error: {})",
                     resumable.host_error()
                 )));
+            };
+
+            // Resume with the computed value as the return value of the
+            // trapped host function. wasmi's resumable.resume value IS the
+            // return value — no re-entry into the host fn.
+            match resumable
+                .resume(scope.store_mut(), &[resume_val])
+                .map_err(|e| {
+                    RuntimeError::Wasm(format!("resuming guest after {resumed_after}: {e}"))
+                })? {
+                TypedResumableCall::Finished(packed) => {
+                    let (ptr, len) = unpack_ptr_len(packed)?;
+                    return read_guest_bytes(scope.store(), memory, ptr, len);
+                }
+                TypedResumableCall::Resumable(next) => {
+                    resumable = next;
+                }
             }
         }
     }
