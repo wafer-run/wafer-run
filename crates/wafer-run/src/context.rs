@@ -523,37 +523,18 @@ impl Context for RuntimeContext {
     }
 
     async fn validate_all_block_configs(&self) -> wafer_block::ValidationReport {
-        use crate::runtime::config_source::ConfigError;
-
-        let mut report = wafer_block::ValidationReport {
-            ok: Vec::new(),
-            broken: Vec::new(),
-        };
-        for (name, block) in self.all_blocks.iter() {
-            let info = block.info();
-            match self
-                .config_source
-                .load_for_block(name, &info.config_keys)
-                .await
-            {
-                Ok(_) => report.ok.push(name.clone()),
-                Err(ConfigError::MissingRequired { block, key }) => {
-                    report.broken.push(wafer_block::BrokenBlock {
-                        block,
-                        missing_keys: vec![key],
-                    });
-                }
-                Err(ConfigError::Transient { block, .. }) => {
-                    report.broken.push(wafer_block::BrokenBlock {
-                        block,
-                        missing_keys: vec!["<transient: source unreachable>".to_string()],
-                    });
-                }
-            }
-        }
-        report.ok.sort();
-        report.broken.sort_by(|a, b| a.block.cmp(&b.block));
-        report
+        // `all_blocks` contains registered blocks AND alias keys pointing at
+        // the same instances. Filter the alias keys out so the shared
+        // validator sees the canonical view — otherwise aliased blocks would
+        // be validated and reported twice (once per name). Collected up front
+        // because a borrowed `filter` closure does not generalize across the
+        // validator's async boundary.
+        let canonical: Vec<(&String, &Arc<dyn Block>)> = self
+            .all_blocks
+            .iter()
+            .filter(|(name, _)| !self.aliases.contains_key(*name))
+            .collect();
+        crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
     }
 }
 

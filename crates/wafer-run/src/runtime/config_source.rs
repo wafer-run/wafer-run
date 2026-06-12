@@ -135,6 +135,49 @@ impl ConfigSource for StaticConfigSource {
     }
 }
 
+/// Walk the given blocks' [`BlockInfo::config_keys`](wafer_block::BlockInfo)
+/// declarations and ask `source` to load values, reporting which blocks have
+/// missing required keys or unreachable sources.
+///
+/// Shared by `Wafer::validate_all_block_configs` and the
+/// [`Context::validate_all_block_configs`](wafer_block::context::Context)
+/// impl on [`RuntimeContext`](crate::context::RuntimeContext) so the two
+/// surfaces cannot drift. Callers must pass the **canonical** block view
+/// (registered names only, no aliases) so aliased blocks aren't validated
+/// and reported twice.
+///
+/// Does **not** invoke any block's `lifecycle` or `handle`.
+pub(crate) async fn validate_block_configs<'a>(
+    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn crate::block::Block>)>,
+    source: &Arc<dyn ConfigSource>,
+) -> wafer_block::ValidationReport {
+    let mut report = wafer_block::ValidationReport {
+        ok: Vec::new(),
+        broken: Vec::new(),
+    };
+    for (name, block) in blocks {
+        let info = block.info();
+        match source.load_for_block(name, &info.config_keys).await {
+            Ok(_) => report.ok.push(name.clone()),
+            Err(ConfigError::MissingRequired { block, key }) => {
+                report.broken.push(wafer_block::BrokenBlock {
+                    block,
+                    missing_keys: vec![key],
+                });
+            }
+            Err(ConfigError::Transient { block, .. }) => {
+                report.broken.push(wafer_block::BrokenBlock {
+                    block,
+                    missing_keys: vec!["<transient: source unreachable>".to_string()],
+                });
+            }
+        }
+    }
+    report.ok.sort();
+    report.broken.sort_by(|a, b| a.block.cmp(&b.block));
+    report
+}
+
 /// The runtime's config state: the lazy per-block [`ConfigSource`] consulted
 /// on first init, plus the embedder-supplied synchronous config snapshot
 /// layered under per-call config. Bundled together because both are the

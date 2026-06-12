@@ -552,38 +552,11 @@ impl Wafer {
     /// to carry `Vec<String>`; that's intentionally out of scope for this
     /// change.
     pub async fn validate_all_block_configs(&self) -> ValidationReport {
-        use crate::runtime::config_source::ConfigError;
-
-        let mut report = ValidationReport {
-            ok: Vec::new(),
-            broken: Vec::new(),
-        };
-        for (name, block) in self.registration.blocks.iter() {
-            let info = block.info();
-            match self
-                .config
-                .source
-                .load_for_block(name, &info.config_keys)
-                .await
-            {
-                Ok(_) => report.ok.push(name.clone()),
-                Err(ConfigError::MissingRequired { block, key }) => {
-                    report.broken.push(BrokenBlock {
-                        block,
-                        missing_keys: vec![key],
-                    });
-                }
-                Err(ConfigError::Transient { block, .. }) => {
-                    report.broken.push(BrokenBlock {
-                        block,
-                        missing_keys: vec!["<transient: source unreachable>".to_string()],
-                    });
-                }
-            }
-        }
-        report.ok.sort();
-        report.broken.sort_by(|a, b| a.block.cmp(&b.block));
-        report
+        crate::runtime::config_source::validate_block_configs(
+            self.registration.blocks.iter(),
+            &self.config.source,
+        )
+        .await
     }
 
     /// Rebuild the all_blocks map from registered blocks + aliases.
