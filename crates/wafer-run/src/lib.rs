@@ -64,7 +64,7 @@ pub use wafer_block::{
     types::{
         AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime, CollectionSchema,
         ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet, MetaSet,
-        RequestAction, ResourceGrant, ResourceType, UiRoute,
+        RequestAction, ResourceGrant, ResourceType,
     },
     wrap, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
 };

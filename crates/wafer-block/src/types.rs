@@ -1011,44 +1011,6 @@ impl FieldSchema {
     }
 }
 
-/// A UI route declared by a block for SSR page serving.
-///
-/// Blocks declare their page routes via `Block::ui_routes()`. The router
-/// automatically prefixes each path with `/b/{block_short_name}`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct UiRoute {
-    /// Relative path (e.g., "/login", "/dashboard", "/").
-    pub path: String,
-    /// Required roles to access this route.
-    /// Empty = public, `["*"]` = any authenticated user, `["admin"]` = admin only.
-    pub roles: Vec<String>,
-}
-
-impl UiRoute {
-    /// Build a UI route with an explicit list of required role names.
-    pub fn new(path: &str, roles: &[&str]) -> Self {
-        Self {
-            path: path.to_string(),
-            roles: roles.iter().map(|r| r.to_string()).collect(),
-        }
-    }
-
-    /// Public route — no authentication required.
-    pub fn public(path: &str) -> Self {
-        Self::new(path, &[])
-    }
-
-    /// Authenticated route — any logged-in user.
-    pub fn authenticated(path: &str) -> Self {
-        Self::new(path, &["*"])
-    }
-
-    /// Admin-only route.
-    pub fn admin(path: &str) -> Self {
-        Self::new(path, &["admin"])
-    }
-}
-
 /// HTTP-level request action mapped from method to WAFER semantics.
 ///
 /// The associated `&str` constants ([`Self::RETRIEVE`] etc.) are the

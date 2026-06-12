@@ -26,7 +26,7 @@ pub use types::{
     ActionSpec, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockInfoError, BlockRuntime,
     CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema, InputType,
     InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceGrant, ResourceType, SkillRole,
-    SkillTool, UiRoute, SOLOBASE_SHARED_PREFIX,
+    SkillTool, SOLOBASE_SHARED_PREFIX,
 };
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 

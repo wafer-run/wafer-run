@@ -7,7 +7,7 @@ use crate::{
     context::Context,
     core_types::{LifecycleEvent, Message, WaferError},
     streams::{input::InputStream, output::OutputStream},
-    types::{BlockInfo, UiRoute},
+    types::BlockInfo,
 };
 
 /// Block is the core interface every WAFER block must implement.
@@ -78,12 +78,6 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     /// every subsequent host-import check uses the effective set.
     fn runtime_capabilities_mut(&self, _new: BlockCapabilities) {
         // Default: no-op. Native blocks are trusted and do not enforce caps.
-    }
-
-    /// Declare UI routes this block serves (SSR pages).
-    /// The router auto-prefixes each path with `/b/{block_short_name}`.
-    fn ui_routes(&self) -> Vec<UiRoute> {
-        Vec::new()
     }
 
     /// Return `self` as `&dyn std::any::Any` for runtime downcasting.
