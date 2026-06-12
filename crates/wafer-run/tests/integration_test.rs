@@ -1206,8 +1206,8 @@ async fn test_start_and_stop() {
     let result = run_flow(&w, "lifecycle-test", Message::new("test"), vec![]).await;
     assert!(result.is_respond(), "expected respond, got: {result:?}");
 
-    // Stop calls lifecycle(Stop) on all resolved blocks
-    w.stop().await;
+    // Shutdown calls lifecycle(Stop) on all resolved blocks
+    w.shutdown().await;
 }
 
 // ===========================================================================

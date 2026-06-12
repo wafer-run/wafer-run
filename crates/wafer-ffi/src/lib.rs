@@ -375,7 +375,7 @@ pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime, cb: WaferDoneCb, user_
         let inner = runtime.inner.clone();
         let ud = UserData(user_data);
         runtime.rt.spawn(async move {
-            inner.write().await.stop().await;
+            inner.write().await.shutdown().await;
             invoke_done(cb, None, ud);
         });
     }));

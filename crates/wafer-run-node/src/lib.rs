@@ -138,7 +138,7 @@ mod bindings {
         /// handles, etc.). Drop will log a warning if this method was not called.
         #[napi]
         pub async fn stop(&self) {
-            self.inner.write().await.stop().await;
+            self.inner.write().await.shutdown().await;
             self.started.store(false, Ordering::Relaxed);
         }
 

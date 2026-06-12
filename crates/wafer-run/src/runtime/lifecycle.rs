@@ -328,6 +328,11 @@ impl Wafer {
     }
 
     /// Shut down all resolved block instances (works through `Arc`).
+    ///
+    /// Each block gets its own context (`node_id` = block name) so WRAP sees
+    /// the correct caller when a block accesses its own resources during
+    /// `lifecycle(Stop)` — a single shared sentinel context would attribute
+    /// every access to a literal name no grants match and falsely deny.
     pub async fn shutdown(&self) {
         for (name, block) in &self.registration.blocks {
             let ctx = self.make_context(
@@ -338,32 +343,6 @@ impl Wafer {
                 None,
                 crate::runtime::init_stack::InitStack::new(),
             );
-            if let Err(e) = block
-                .lifecycle(
-                    &ctx,
-                    LifecycleEvent {
-                        event_type: LifecycleType::Stop,
-                        data: Vec::new(),
-                    },
-                )
-                .await
-            {
-                tracing::error!(block = %name, error = %e, "block stop lifecycle failed");
-            }
-        }
-    }
-
-    /// Stop shuts down all resolved block instances (requires `&mut self`).
-    pub async fn stop(&mut self) {
-        let ctx = self.make_context(
-            "shutdown",
-            "shutdown",
-            HashMap::new(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-            crate::runtime::init_stack::InitStack::new(),
-        );
-        for (name, block) in &self.registration.blocks {
             if let Err(e) = block
                 .lifecycle(
                     &ctx,
