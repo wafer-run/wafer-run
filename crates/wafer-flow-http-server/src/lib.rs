@@ -25,13 +25,13 @@
 // `[dependencies]` entry isn't always enough — see the inventory tests in
 // `wafer-run/tests/inventory_registration.rs` for the same pattern.
 wafer_block::use_static_blocks!(
-    cors,
-    http_listener,
-    ip_rate_limit,
-    monitoring,
-    readonly_guard,
-    router,
-    security_headers,
+    wafer_block_cors,
+    wafer_block_http_listener,
+    wafer_block_ip_rate_limit,
+    wafer_block_monitoring,
+    wafer_block_readonly_guard,
+    wafer_block_router,
+    wafer_block_security_headers,
 );
 
 /// Flow id — the value `Wafer::add_block_config` keys composite config under.

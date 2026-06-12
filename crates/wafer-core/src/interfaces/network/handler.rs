@@ -15,8 +15,8 @@ use crate::interfaces::handler_util::check_wrap_resource;
 
 fn network_error_to_wafer(e: NetworkError) -> WaferError {
     match e {
-        NetworkError::RequestError(msg) => WaferError::new(ErrorCode::UNAVAILABLE, msg),
-        NetworkError::Other(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
+        NetworkError::RequestError(msg) => WaferError::new(ErrorCode::Unavailable, msg),
+        NetworkError::Other(msg) => WaferError::new(ErrorCode::Internal, msg),
     }
 }
 
@@ -42,7 +42,7 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(e) => {
                     return OutputStream::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
+                        ErrorCode::InvalidArgument,
                         format!("invalid network.do request: {e}"),
                     ))
                 }
@@ -72,7 +72,7 @@ pub async fn handle_message(
                             Err(e) => {
                                 let _ = sink
                                     .error(WaferError::new(
-                                        ErrorCode::INTERNAL,
+                                        ErrorCode::Internal,
                                         format!("encoding network response header: {e}"),
                                     ))
                                     .await;
@@ -95,7 +95,7 @@ pub async fn handle_message(
             }
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown network operation: {other}"),
         )),
     }

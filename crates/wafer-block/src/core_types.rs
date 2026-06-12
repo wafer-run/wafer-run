@@ -105,6 +105,38 @@ impl ErrorCode {
         }
     }
 
+    /// Parse a snake_case (or hyphenated) wire string into an `ErrorCode`.
+    ///
+    /// For wire-decode boundaries that receive string-encoded codes from
+    /// external sources (HTTP query forms, hand-written config). Returns
+    /// `None` for unrecognized strings — callers decide how to handle the
+    /// miss instead of silently degrading to [`ErrorCode::Unknown`] (the
+    /// lossy behavior the removed `From<&str>` impl had).
+    ///
+    /// Rust code constructing errors should name the enum variant directly.
+    pub fn parse(s: &str) -> Option<ErrorCode> {
+        match s {
+            "ok" => Some(Self::Ok),
+            "cancelled" => Some(Self::Cancelled),
+            "unknown" => Some(Self::Unknown),
+            "invalid_argument" | "invalid-argument" | "bad_request" => Some(Self::InvalidArgument),
+            "deadline_exceeded" | "deadline-exceeded" => Some(Self::DeadlineExceeded),
+            "not_found" | "not-found" => Some(Self::NotFound),
+            "already_exists" | "already-exists" => Some(Self::AlreadyExists),
+            "permission_denied" | "permission-denied" => Some(Self::PermissionDenied),
+            "resource_exhausted" | "resource-exhausted" => Some(Self::ResourceExhausted),
+            "failed_precondition" | "failed-precondition" => Some(Self::FailedPrecondition),
+            "aborted" => Some(Self::Aborted),
+            "out_of_range" | "out-of-range" => Some(Self::OutOfRange),
+            "unimplemented" | "not_implemented" => Some(Self::Unimplemented),
+            "internal" => Some(Self::Internal),
+            "unavailable" => Some(Self::Unavailable),
+            "data_loss" | "data-loss" => Some(Self::DataLoss),
+            "unauthenticated" => Some(Self::Unauthenticated),
+            _ => None,
+        }
+    }
+
     /// Inverse of [`ErrorCode::to_ordinal`]. Unknown ordinals fall back to
     /// [`ErrorCode::Internal`] (the streaming ABI guarantees full structured
     /// detail is still retrievable via `take_error`, so an unrecognised tag
@@ -251,6 +283,30 @@ mod tests {
         assert_eq!(ErrorCode::Unimplemented.to_ordinal(), 12);
         assert_eq!(ErrorCode::Internal.to_ordinal(), 13);
         assert_eq!(ErrorCode::Unauthenticated.to_ordinal(), 16);
+    }
+
+    #[test]
+    fn error_code_parse_accepts_wire_vocabulary() {
+        assert_eq!(ErrorCode::parse("not_found"), Some(ErrorCode::NotFound));
+        assert_eq!(ErrorCode::parse("not-found"), Some(ErrorCode::NotFound));
+        assert_eq!(
+            ErrorCode::parse("bad_request"),
+            Some(ErrorCode::InvalidArgument)
+        );
+        assert_eq!(
+            ErrorCode::parse("unauthenticated"),
+            Some(ErrorCode::Unauthenticated)
+        );
+    }
+
+    #[test]
+    fn error_code_parse_rejects_unknown_strings() {
+        // Explicitly NOT the lossy `From<&str>` behavior — unknown strings
+        // surface as None, not ErrorCode::Unknown.
+        assert_eq!(ErrorCode::parse("definitely_not_a_code"), None);
+        assert_eq!(ErrorCode::parse(""), None);
+        // Variant (CamelCase) names are the serde wire format, not this one.
+        assert_eq!(ErrorCode::parse("NotFound"), None);
     }
 
     #[test]

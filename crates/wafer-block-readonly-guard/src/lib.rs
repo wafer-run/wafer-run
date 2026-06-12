@@ -74,14 +74,6 @@ impl Block for ReadonlyGuardBlock {
 
         OutputStream::continue_with(msg)
     }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
-    }
 }
 
 wafer_block::register_static_block!("wafer-run/readonly-guard", ReadonlyGuardBlock);
@@ -136,7 +128,7 @@ mod tests {
             .await
         {
             Err(TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::PERMISSION_DENIED);
+                assert_eq!(e.code, ErrorCode::PermissionDenied);
             }
             other => panic!("expected PermissionDenied for action '{action}', got {other:?}"),
         }

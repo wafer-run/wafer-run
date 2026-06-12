@@ -18,9 +18,9 @@ use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_out
 
 fn storage_error_to_wafer(e: StorageError) -> WaferError {
     match e {
-        StorageError::NotFound => WaferError::new(ErrorCode::NOT_FOUND, "object not found"),
-        StorageError::Internal(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
-        StorageError::Other(err) => WaferError::new(ErrorCode::INTERNAL, err.to_string()),
+        StorageError::NotFound => WaferError::new(ErrorCode::NotFound, "object not found"),
+        StorageError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
+        StorageError::Other(err) => WaferError::new(ErrorCode::Internal, err.to_string()),
     }
 }
 
@@ -100,7 +100,7 @@ pub async fn handle_message(
                             Err(e) => {
                                 let _ = sink
                                     .error(WaferError::new(
-                                        ErrorCode::INTERNAL,
+                                        ErrorCode::Internal,
                                         format!("encoding storage GET header: {}", e.message),
                                     ))
                                     .await;
@@ -180,7 +180,7 @@ pub async fn handle_message(
             Err(e) => OutputStream::error(storage_error_to_wafer(e)),
         },
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown storage operation: {other}"),
         )),
     }

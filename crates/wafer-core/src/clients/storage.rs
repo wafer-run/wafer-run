@@ -154,7 +154,7 @@ pub async fn get(
 pub fn get(folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), WaferError> {
     let _ = (folder, key);
     Err(WaferError::new(
-        ErrorCode::UNIMPLEMENTED,
+        ErrorCode::Unimplemented,
         "wasm-component storage::get not yet implemented for streaming protocol",
     ))
 }
@@ -232,7 +232,7 @@ impl Stream for NativeStorageGetStream {
                 Poll::Ready(None) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "storage GET stream ended without terminal event",
                     ))));
                 }
@@ -251,21 +251,21 @@ impl Stream for NativeStorageGetStream {
                 Poll::Ready(Some(StreamEvent::Drop)) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "storage handler returned Drop",
                     ))));
                 }
                 Poll::Ready(Some(StreamEvent::Continue(msg))) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         format!("storage handler returned Continue (kind: {})", msg.kind),
                     ))));
                 }
                 Poll::Ready(Some(StreamEvent::Halt { .. })) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
-                        ErrorCode::INTERNAL,
+                        ErrorCode::Internal,
                         "storage handler returned Halt",
                     ))));
                 }

@@ -311,127 +311,6 @@ fn test_pattern_matching_http_style() {
 }
 
 // ===========================================================================
-// 5. Router
-// ===========================================================================
-
-#[tokio::test]
-async fn test_router_basic() {
-    let mut router = Router::new();
-
-    router.retrieve("/items", |_ctx, _msg: Message, _input: InputStream| {
-        let body = serde_json::to_vec(&serde_json::json!({"items": []})).unwrap();
-        OutputStream::respond(body)
-    });
-
-    router.create("/items", |_ctx, _msg: Message, _input: InputStream| {
-        let body = serde_json::to_vec(&serde_json::json!({"id": "new-1"})).unwrap();
-        OutputStream::respond(body)
-    });
-
-    router.retrieve("/items/{id}", |_ctx, msg: Message, _input: InputStream| {
-        let id = msg.var("id").to_string();
-        let body = serde_json::to_vec(&serde_json::json!({"id": id})).unwrap();
-        OutputStream::respond(body)
-    });
-
-    // Simulate a GET /items request
-    let ctx = make_test_context();
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "retrieve");
-    msg.set_meta("req.resource", "/items");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
-    assert_eq!(body["items"], serde_json::json!([]));
-
-    // Simulate POST /items
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "create");
-    msg.set_meta("req.resource", "/items");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
-    assert_eq!(body["id"], "new-1");
-
-    // Simulate GET /items/42
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "retrieve");
-    msg.set_meta("req.resource", "/items/42");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
-    assert_eq!(body["id"], "42");
-}
-
-#[tokio::test]
-async fn test_router_not_found() {
-    let router = Router::new();
-    let ctx = make_test_context();
-
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "retrieve");
-    msg.set_meta("req.resource", "/nonexistent");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    match result {
-        Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::NotFound),
-        other => panic!("expected error, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn test_router_update_delete() {
-    let mut router = Router::new();
-
-    router.update("/items/{id}", |_ctx, msg: Message, _input: InputStream| {
-        let id = msg.var("id").to_string();
-        let body = serde_json::to_vec(&serde_json::json!({"updated": id})).unwrap();
-        OutputStream::respond(body)
-    });
-
-    router.delete("/items/{id}", |_ctx, _msg: Message, _input: InputStream| {
-        OutputStream::drop_request()
-    });
-
-    let ctx = make_test_context();
-
-    // Update
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "update");
-    msg.set_meta("req.resource", "/items/99");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    let body: serde_json::Value = serde_json::from_slice(&result.unwrap().body).unwrap();
-    assert_eq!(body["updated"], "99");
-
-    // Delete
-    let mut msg = Message::new("http.request");
-    msg.set_meta("req.action", "delete");
-    msg.set_meta("req.resource", "/items/99");
-
-    let result = router
-        .route(&ctx, msg, InputStream::empty())
-        .collect_buffered()
-        .await;
-    assert!(matches!(result, Err(TerminalNotResponse::Drop)));
-}
-
-// ===========================================================================
 // 6. OutputStream helpers
 // ===========================================================================
 
@@ -525,7 +404,7 @@ async fn run_block_enforces_requires_read_from_snapshot() {
         Err(TerminalNotResponse::Error(e)) => {
             assert_eq!(
                 e.code,
-                ErrorCode::PERMISSION_DENIED,
+                ErrorCode::PermissionDenied,
                 "call_block to a block outside the declared requires list must be denied"
             );
         }
@@ -876,7 +755,7 @@ impl Block for FailBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
-        OutputStream::error(WaferError::new("test_error", "intentional failure"))
+        OutputStream::error(WaferError::new(ErrorCode::Unknown, "intentional failure"))
     }
 }
 
@@ -939,7 +818,7 @@ async fn test_on_error_continue() {
             _input: InputStream,
         ) -> OutputStream {
             self.0.fetch_add(1, Ordering::SeqCst);
-            OutputStream::error(WaferError::new("test_error", "intentional failure"))
+            OutputStream::error(WaferError::new(ErrorCode::Unknown, "intentional failure"))
         }
     }
 
@@ -983,7 +862,7 @@ async fn test_on_error_continue_no_more_nodes() {
             _msg: Message,
             _input: InputStream,
         ) -> OutputStream {
-            OutputStream::error(WaferError::new("terminal_error", "error at tail"))
+            OutputStream::error(WaferError::new(ErrorCode::Unknown, "error at tail"))
         }
     }
 
@@ -1292,7 +1171,7 @@ async fn test_start_and_stop() {
 
 #[test]
 fn test_wafer_error_meta() {
-    let mut err = WaferError::new("not_found", "user not found");
+    let mut err = WaferError::new(ErrorCode::NotFound, "user not found");
     err.meta.set("resource".to_string(), "users".to_string());
     err.meta.set("id".to_string(), "42".to_string());
 
@@ -1300,43 +1179,6 @@ fn test_wafer_error_meta() {
     assert_eq!(err.message, "user not found");
     assert_eq!(err.meta.get("resource").unwrap(), "users");
     assert_eq!(err.meta.get("id").unwrap(), "42");
-}
-
-// ===========================================================================
-// Test context helper (minimal Context implementation for router tests)
-// ===========================================================================
-
-#[derive(Clone)]
-struct TestContext;
-
-#[async_trait::async_trait]
-impl Context for TestContext {
-    async fn call_block(
-        &self,
-        _block_name: &str,
-        _msg: Message,
-        input: InputStream,
-    ) -> OutputStream {
-        // Simple mock: echo back body
-        let body = input.collect_to_bytes().await;
-        OutputStream::respond(body)
-    }
-
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn config_get(&self, _key: &str) -> Option<&str> {
-        None
-    }
-
-    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
-        std::sync::Arc::new(self.clone())
-    }
-}
-
-fn make_test_context() -> TestContext {
-    TestContext
 }
 
 // ===========================================================================

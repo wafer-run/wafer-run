@@ -33,8 +33,7 @@ use std::{
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, LifecycleEvent, Message,
-    OutputStream, WaferError,
+    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -248,14 +247,6 @@ impl Block for RateLimitBlock {
         out_msg.set_meta("resp.header.X-RateLimit-Remaining", remaining.to_string());
 
         OutputStream::continue_with(out_msg)
-    }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
     }
 }
 

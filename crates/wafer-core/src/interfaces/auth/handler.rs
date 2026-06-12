@@ -20,11 +20,11 @@ use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 fn err_to_wafer(e: AuthError) -> WaferError {
     match e {
-        AuthError::Unauthorized => WaferError::new(ErrorCode::UNAUTHENTICATED, "unauthorized"),
-        AuthError::Forbidden => WaferError::new(ErrorCode::PERMISSION_DENIED, "forbidden"),
-        AuthError::ProviderDown(m) => WaferError::new(ErrorCode::UNAVAILABLE, m),
-        AuthError::NotFound => WaferError::new(ErrorCode::NOT_FOUND, "not found"),
-        AuthError::Internal(m) => WaferError::new(ErrorCode::INTERNAL, m),
+        AuthError::Unauthorized => WaferError::new(ErrorCode::Unauthenticated, "unauthorized"),
+        AuthError::Forbidden => WaferError::new(ErrorCode::PermissionDenied, "forbidden"),
+        AuthError::ProviderDown(m) => WaferError::new(ErrorCode::Unavailable, m),
+        AuthError::NotFound => WaferError::new(ErrorCode::NotFound, "not found"),
+        AuthError::Internal(m) => WaferError::new(ErrorCode::Internal, m),
     }
 }
 
@@ -69,7 +69,7 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
                 "" | "publish" => TokenScope::Publish,
                 other => {
                     return OutputStream::error(WaferError::new(
-                        ErrorCode::INVALID_ARGUMENT,
+                        ErrorCode::InvalidArgument,
                         format!("unknown scope: {other}"),
                     ))
                 }
@@ -97,7 +97,7 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
             }
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown auth op: {other}"),
         )),
     }

@@ -311,7 +311,7 @@ dual_api! {
             .records
             .into_iter()
             .next()
-            .ok_or_else(|| WaferError::new(ErrorCode::NOT_FOUND, "record not found"))
+            .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))
     }
 
     /// Update the record in `collection` whose `field == value`, or insert `data` if none exists.
@@ -324,7 +324,7 @@ dual_api! {
     ) -> Result<Record, WaferError> {
         match svc_fn!(ctx, get_by_field(collection, field, value)) {
             Ok(existing) => svc_fn!(ctx, update(collection, &existing.id, data)),
-            Err(e) if e.code == ErrorCode::NOT_FOUND => svc_fn!(ctx, create(collection, data)),
+            Err(e) if e.code == ErrorCode::NotFound => svc_fn!(ctx, create(collection, data)),
             Err(e) => Err(e),
         }
     }

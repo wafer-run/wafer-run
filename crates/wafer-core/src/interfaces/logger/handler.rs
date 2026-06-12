@@ -63,7 +63,7 @@ pub fn handle_message(service: &dyn LoggerService, msg: &Message, body: &[u8]) -
             OutputStream::respond(vec![])
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown logger operation: {other}"),
         )),
     }

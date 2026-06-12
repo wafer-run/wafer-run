@@ -13,6 +13,9 @@ json-schema = ["schemars"]
 
 [dependencies]
 chrono = { workspace = true }
+# Random correlation IDs for `response::err_internal`. Diagnostic-grade only;
+# falls back to a timestamp when the OS source is unavailable.
+getrandom = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -45,7 +48,10 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 
 # wasm-bindgen-futures is only needed for the browser (wasm32-unknown-unknown).
 # wasm32-wasip1 (WASI) blocks are synchronous and must not pull in wbindgen.
+# getrandom needs the JS backend on wasm32-unknown-unknown (wasip1 has a
+# native WASI source).
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4"
 
 [lints]

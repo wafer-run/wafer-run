@@ -39,14 +39,6 @@ impl Block for CryptoBlock {
         let body = input.collect_to_bytes().await;
         handler::handle_message(self.service.as_ref(), ctx.caller_id(), &msg, &body)
     }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
-    }
 }
 
 /// Register the unified crypto block with the given service.

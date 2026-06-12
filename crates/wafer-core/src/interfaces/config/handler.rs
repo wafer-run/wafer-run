@@ -30,7 +30,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
                     let meta_key = msg.get_meta("key");
                     if meta_key.is_empty() {
                         return OutputStream::error(WaferError::new(
-                            ErrorCode::INVALID_ARGUMENT,
+                            ErrorCode::InvalidArgument,
                             "config.get requires a 'key' in data or meta",
                         ));
                     }
@@ -44,7 +44,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             service.get(&key).map_or_else(
                 || {
                     OutputStream::error(WaferError::new(
-                        ErrorCode::NOT_FOUND,
+                        ErrorCode::NotFound,
                         format!("config key not found: {key}"),
                     ))
                 },
@@ -60,7 +60,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             OutputStream::respond(vec![])
         }
         other => OutputStream::error(WaferError::new(
-            ErrorCode::UNIMPLEMENTED,
+            ErrorCode::Unimplemented,
             format!("unknown config operation: {other}"),
         )),
     }

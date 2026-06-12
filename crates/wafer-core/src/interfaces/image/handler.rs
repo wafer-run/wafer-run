@@ -103,13 +103,13 @@ fn service_progress_to_wire(p: service::LoadProgress) -> wire::LoadProgress {
 fn image_error_to_block_error(e: service::ImageError) -> (ErrorCode, String) {
     match e {
         service::ImageError::NotSupported => {
-            (ErrorCode::UNIMPLEMENTED, "not supported".to_string())
+            (ErrorCode::Unimplemented, "not supported".to_string())
         }
-        service::ImageError::InvalidRequest(msg) => (ErrorCode::INVALID_ARGUMENT, msg),
-        service::ImageError::BackendError(msg) => (ErrorCode::INTERNAL, msg),
-        service::ImageError::ModelNotFound(msg) => (ErrorCode::NOT_FOUND, msg),
-        service::ImageError::Network(msg) => (ErrorCode::INTERNAL, format!("network: {msg}")),
-        service::ImageError::Cancelled => (ErrorCode::CANCELLED, "cancelled".to_string()),
+        service::ImageError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
+        service::ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
+        service::ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
+        service::ImageError::Network(msg) => (ErrorCode::Internal, format!("network: {msg}")),
+        service::ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
 
@@ -134,7 +134,7 @@ pub async fn handle_message(
         ServiceOp::IMAGE_LOAD_MODEL => load_model(service, body),
         ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service.as_ref(), body).await,
         other => OutputStream::error(WaferError::new(
-            ErrorCode::INVALID_ARGUMENT,
+            ErrorCode::InvalidArgument,
             format!("unknown image operation: {other}"),
         )),
     }
@@ -219,7 +219,7 @@ fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
                 Err(e) => {
                     let _ = sink
                         .error(WaferError::new(
-                            ErrorCode::INTERNAL,
+                            ErrorCode::Internal,
                             format!("encoding load progress: {}", e.message),
                         ))
                         .await;

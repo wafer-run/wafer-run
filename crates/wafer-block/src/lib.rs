@@ -26,7 +26,7 @@ pub use types::{
     ActionSpec, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockInfoError, BlockRuntime,
     CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema, InputType,
     InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceGrant, ResourceType, SkillRole,
-    SkillTool, UiRoute, SOLOBASE_SHARED_PREFIX,
+    SkillTool, SOLOBASE_SHARED_PREFIX,
 };
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 
@@ -43,11 +43,10 @@ pub mod context;
 pub mod db;
 pub mod executor;
 pub mod hash;
-pub mod helpers;
 pub mod interfaces;
 pub mod introspection;
 pub mod registry;
-pub mod router;
+pub mod response;
 pub mod runtime;
 pub mod spawn;
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,14 +67,16 @@ pub use executor::{extract_path_vars, match_path, matches_pattern};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
 pub use hash::{hex_encode, sha256, sha256_hex};
-pub use helpers::*;
 pub use introspection::FlowIntrospection;
 // Re-export linkme so `register_static_block!` expansions in consumer crates
 // can refer to `$crate::linkme` without adding linkme to their own Cargo.toml.
 #[cfg(not(target_arch = "wasm32"))]
 pub use linkme;
 pub use registry::BlockRegistry;
-pub use router::Router;
+pub use response::{
+    err_bad_request, err_conflict, err_forbidden, err_internal, err_internal_no_cause,
+    err_not_found, err_unauthorized, ok_empty, ok_json, ResponseBuilder,
+};
 pub use runtime::Runtime;
 pub use spawn::spawn_producer;
 #[cfg(not(target_arch = "wasm32"))]
@@ -142,105 +143,31 @@ macro_rules! register_static_block {
     ($name:expr, $ty:ty) => {};
 }
 
-/// Force-link a set of standard `wafer-block-*` battery crates so each
-/// crate's `register_static_block!` entry survives the linker.
+/// Force-link a set of block crates so each crate's
+/// `register_static_block!` entry survives the linker.
 ///
-/// Takes a comma-separated list of short identifiers (e.g. `cors`,
-/// `http_listener`). Each identifier expands to
-/// `use ::wafer_block_<ident> as _;`. The consumer's `Cargo.toml` must
-/// declare each named crate as a dependency — the macro generates
-/// use-statements, not Cargo entries.
+/// Takes a comma-separated list of **crate names** (underscored, e.g.
+/// `wafer_block_cors`). Each name expands to `use ::<name> as _;`, which
+/// pulls the crate's object file into the binary so its
+/// `linkme::distributed_slice` registration entries are retained. The
+/// consumer's `Cargo.toml` must declare each named crate as a dependency —
+/// the macro generates use-statements, not Cargo entries.
+///
+/// The consumer supplies the block list; this macro is just the linking
+/// machinery and works for any block crate (first- or third-party), not a
+/// hardcoded battery roster.
 ///
 /// # Example
 ///
 /// ```ignore
-/// wafer_block::use_static_blocks!(cors, router, security_headers);
+/// wafer_block::use_static_blocks!(wafer_block_cors, wafer_block_security_headers);
 /// // expands to:
 /// // use ::wafer_block_cors as _;
-/// // use ::wafer_block_router as _;
 /// // use ::wafer_block_security_headers as _;
-/// ```
-///
-/// Unknown names produce a compile-time error pointing at the offending
-/// identifier. To add a new battery, add an arm to
-/// `__use_static_block!` in `wafer-block/src/lib.rs`.
-///
-/// ```compile_fail
-/// // Unknown identifier — produces `compile_error!`:
-/// wafer_block::use_static_blocks!(definitely_not_a_block);
 /// ```
 #[macro_export]
 macro_rules! use_static_blocks {
-    ($($name:ident),* $(,)?) => {
-        $( $crate::__use_static_block!($name); )*
-    };
-}
-
-/// Implementation detail of [`use_static_blocks!`] — maps short
-/// identifiers to the concrete `wafer-block-*` crate names. Adding a new
-/// battery crate to the recognized set means adding one arm here.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __use_static_block {
-    (config) => {
-        use ::wafer_block_config as _;
-    };
-    (cors) => {
-        use ::wafer_block_cors as _;
-    };
-    (crypto) => {
-        use ::wafer_block_crypto as _;
-    };
-    (fastembed) => {
-        use ::wafer_block_fastembed as _;
-    };
-    (http_listener) => {
-        use ::wafer_block_http_listener as _;
-    };
-    (inspector) => {
-        use ::wafer_block_inspector as _;
-    };
-    (ip_rate_limit) => {
-        use ::wafer_block_ip_rate_limit as _;
-    };
-    (local_storage) => {
-        use ::wafer_block_local_storage as _;
-    };
-    (logger) => {
-        use ::wafer_block_logger as _;
-    };
-    (monitoring) => {
-        use ::wafer_block_monitoring as _;
-    };
-    (network) => {
-        use ::wafer_block_network as _;
-    };
-    (postgres) => {
-        use ::wafer_block_postgres as _;
-    };
-    (readonly_guard) => {
-        use ::wafer_block_readonly_guard as _;
-    };
-    (router) => {
-        use ::wafer_block_router as _;
-    };
-    (s3) => {
-        use ::wafer_block_s3 as _;
-    };
-    (security_headers) => {
-        use ::wafer_block_security_headers as _;
-    };
-    (sqlite) => {
-        use ::wafer_block_sqlite as _;
-    };
-    (web) => {
-        use ::wafer_block_web as _;
-    };
-    ($other:ident) => {
-        compile_error!(concat!(
-            "use_static_blocks!: unknown block name `",
-            stringify!($other),
-            "`. Add an arm to `__use_static_block!` in wafer-block/src/lib.rs."
-        ));
+    ($($krate:ident),* $(,)?) => {
+        $( use ::$krate as _; )*
     };
 }

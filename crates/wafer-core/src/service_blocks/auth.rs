@@ -54,8 +54,8 @@ impl Block for AuthBlock {
         use crate::interfaces::auth::service::AuthError;
         if matches!(event.event_type, LifecycleType::Init) {
             self.service.init(ctx).await.map_err(|e| match e {
-                AuthError::Internal(msg) => WaferError::new(ErrorCode::INTERNAL, msg),
-                other => WaferError::new(ErrorCode::INTERNAL, format!("auth init: {other}")),
+                AuthError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
+                other => WaferError::new(ErrorCode::Internal, format!("auth init: {other}")),
             })?;
         }
         Ok(())

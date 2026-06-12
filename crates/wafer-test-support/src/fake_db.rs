@@ -15,7 +15,7 @@ use wafer_block::{
 pub enum FailureMode {
     /// Fake handles requests normally.
     None,
-    /// Every request returns `ErrorCode::INTERNAL`.
+    /// Every request returns `ErrorCode::Internal`.
     Unavailable,
     /// Next `N` requests fail, then reset to `None`.
     FailNextCall(u32),
@@ -75,7 +75,7 @@ impl FakeDb {
     }
 
     /// Switch the fake into a failure mode so subsequent dispatches return
-    /// `ErrorCode::INTERNAL` — used to exercise caller error handling.
+    /// `ErrorCode::Internal` — used to exercise caller error handling.
     pub fn set_failure(&self, mode: FailureMode) {
         self.state.lock().failure = mode;
     }
@@ -122,7 +122,7 @@ impl Block for FakeDb {
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         if self.should_fail() {
             return OutputStream::error(WaferError::new(
-                ErrorCode::INTERNAL,
+                ErrorCode::Internal,
                 "fake-db unavailable",
             ));
         }
@@ -132,7 +132,7 @@ impl Block for FakeDb {
             Ok(v) => v,
             Err(e) => {
                 return OutputStream::error(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
+                    ErrorCode::InvalidArgument,
                     format!("fake-db: bad request: {e}"),
                 ));
             }
@@ -146,7 +146,7 @@ impl Block for FakeDb {
             "database.delete" => self.handle_delete(&req),
             "database.count" => self.handle_count(&req),
             other => OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
+                ErrorCode::InvalidArgument,
                 format!("fake-db: action '{other}' not implemented"),
             )),
         }
@@ -223,7 +223,7 @@ impl FakeDb {
                 OutputStream::respond(body)
             }
             None => OutputStream::error(WaferError::new(
-                ErrorCode::NOT_FOUND,
+                ErrorCode::NotFound,
                 format!("fake-db: {collection}/{id} not found"),
             )),
         }
@@ -256,7 +256,7 @@ impl FakeDb {
             .and_then(|rows| rows.iter_mut().find(|r| r["id"].as_str() == Some(id)));
         let Some(row) = row else {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NOT_FOUND,
+                ErrorCode::NotFound,
                 format!("fake-db: {collection}/{id} not found"),
             ));
         };
@@ -283,7 +283,7 @@ impl FakeDb {
         });
         if !removed {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NOT_FOUND,
+                ErrorCode::NotFound,
                 format!("fake-db: {collection}/{id} not found"),
             ));
         }
@@ -346,7 +346,7 @@ fn row_matches_filters(
             }
             other => {
                 return Err(WaferError::new(
-                    ErrorCode::INVALID_ARGUMENT,
+                    ErrorCode::InvalidArgument,
                     format!("fake-db: filter operator {other:?} not implemented (only Equal)"),
                 ));
             }
@@ -428,7 +428,7 @@ mod tests {
         }));
         match out.collect_buffered().await {
             Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::NOT_FOUND);
+                assert_eq!(e.code, ErrorCode::NotFound);
             }
             other => panic!("expected NOT_FOUND error terminal, got {other:?}"),
         }
@@ -451,7 +451,7 @@ mod tests {
         let out = db.handle_delete(&json!({"collection": "users", "id": "u1"}));
         match out.collect_buffered().await {
             Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::NOT_FOUND);
+                assert_eq!(e.code, ErrorCode::NotFound);
             }
             other => panic!("expected NOT_FOUND error terminal, got {other:?}"),
         }
@@ -470,7 +470,7 @@ mod tests {
         }));
         match out.collect_buffered().await {
             Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::INVALID_ARGUMENT);
+                assert_eq!(e.code, ErrorCode::InvalidArgument);
             }
             other => panic!("expected INVALID_ARGUMENT error terminal, got {other:?}"),
         }
@@ -483,7 +483,7 @@ mod tests {
         }));
         match out.collect_buffered().await {
             Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
-                assert_eq!(e.code, ErrorCode::INVALID_ARGUMENT);
+                assert_eq!(e.code, ErrorCode::InvalidArgument);
                 assert!(
                     e.message.contains("not implemented"),
                     "message: {}",
