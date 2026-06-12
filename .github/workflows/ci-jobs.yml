@@ -1,0 +1,104 @@
+# Shared CI jobs, called by ci.yml (pull requests) and ci-main.yml (main).
+#
+# The commands themselves live in scripts/check.sh — the single
+# definition of "green". Each job here only does GitHub-specific setup
+# (toolchains, caches) and then invokes the script's named steps.
+name: CI Jobs
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip1
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --component rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: check
+
+      # clippy --all-targets compiles tests that include_bytes! the
+      # echo fixture, so fixtures must exist before linting.
+      - name: Build wasm test fixtures
+        run: ./scripts/check.sh fixtures
+
+      - name: Check formatting
+        run: ./scripts/check.sh fmt
+
+      - name: Run clippy
+        run: ./scripts/check.sh clippy
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test-v2
+
+      - name: Build wasm test fixtures
+        run: ./scripts/check.sh fixtures
+
+      - name: Run tests
+        run: ./scripts/check.sh test
+
+  wasm:
+    name: Wasm & Feature Builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm
+
+      # Covers: guest SDK on wasm32-wasip1, wafer-run with
+      # --no-default-features (wasmi off), and the wafer-core
+      # wasm-component guest path. See run_wasm in scripts/check.sh.
+      - name: Wasm & feature builds
+        run: ./scripts/check.sh wasm
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --quiet
+
+      - name: Run audit
+        run: ./scripts/check.sh audit

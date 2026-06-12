@@ -1,41 +1,83 @@
 #!/usr/bin/env bash
-# Single definition of "green" for wafer-run — run this before opening a PR.
+# Single definition of "green" for wafer-run.
 #
-# Mirrors .github/workflows/ci.yml (the `check`, `test`, and `wasm` jobs).
-# If CI changes, this script must change too, and vice versa.
+# CI (.github/workflows/ci-jobs.yml) runs these same steps as parallel
+# jobs by invoking this script with step names; running it with no
+# arguments runs everything in sequence — do that before opening a PR.
 #
-# The `audit` job is advisory: CI runs `cargo audit` with
-# continue-on-error, so a failure here warns but does not fail the script.
+# Usage:
+#   ./scripts/check.sh              # run all steps
+#   ./scripts/check.sh <step>...    # run only the named steps
 #
-# Usage: ./scripts/check.sh
+# Steps: fixtures fmt clippy test wasm audit
+#
+# The audit step is advisory in the full run (CI marks its audit job
+# continue-on-error; a local full run mirrors that and only warns). When
+# named explicitly, audit propagates cargo-audit's exit code so the CI
+# job surfaces failures.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-echo "==> Build wasm test fixtures"
-./scripts/build-fixtures.sh
+run_fixtures() {
+    echo "==> Build wasm test fixtures"
+    ./scripts/build-fixtures.sh
+}
 
-echo "==> Format (nightly rustfmt)"
-cargo +nightly fmt --all -- --check
+run_fmt() {
+    echo "==> Format (nightly rustfmt)"
+    cargo +nightly fmt --all -- --check
+}
 
-echo "==> Clippy"
-cargo clippy --workspace --all-targets -- -D warnings
+run_clippy() {
+    echo "==> Clippy"
+    cargo clippy --workspace --all-targets -- -D warnings
+}
 
-echo "==> Tests"
-cargo test --workspace
+run_test() {
+    echo "==> Tests"
+    cargo test --workspace
+}
 
-echo "==> Guest SDK builds to wasm32-wasip1"
-cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
+run_wasm() {
+    echo "==> Guest SDK builds to wasm32-wasip1"
+    cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
 
-echo "==> Runtime builds with --no-default-features (wasmi off)"
-cargo check -p wafer-run --no-default-features
+    echo "==> Runtime builds with --no-default-features (wasmi off)"
+    cargo check -p wafer-run --no-default-features
 
-echo "==> Guest service-client path (wafer-core wasm-component → wasm32)"
-cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
+    echo "==> Guest service-client path (wafer-core wasm-component → wasm32)"
+    cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
+}
 
-echo "==> Security audit (advisory — CI runs this continue-on-error)"
-if ! cargo audit; then
-    echo "warning: cargo audit reported issues (non-blocking, matches CI)" >&2
+run_audit() {
+    echo "==> Security audit"
+    cargo audit
+}
+
+if [ "$#" -eq 0 ]; then
+    run_fixtures
+    run_fmt
+    run_clippy
+    run_test
+    run_wasm
+    if ! run_audit; then
+        echo "warning: cargo audit reported issues (non-blocking, matches CI)" >&2
+    fi
+    echo "==> All checks passed."
+else
+    for step in "$@"; do
+        case "$step" in
+            fixtures) run_fixtures ;;
+            fmt) run_fmt ;;
+            clippy) run_clippy ;;
+            test) run_test ;;
+            wasm) run_wasm ;;
+            audit) run_audit ;;
+            *)
+                echo "error: unknown step '$step' (valid: fixtures fmt clippy test wasm audit)" >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
-
-echo "==> All checks passed."

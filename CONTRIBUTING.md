@@ -21,6 +21,10 @@ If you're new to wafer as a *user*, read [wafer.run/docs/core-concepts](https://
 
 ## Build & test
 
+`./scripts/check.sh` is the single definition of "green" — CI's jobs
+(`.github/workflows/ci-jobs.yml`) invoke its named steps, and running it
+with no arguments runs the full sequence locally before a PR.
+
 The default test command **mirrors CI**:
 
 ```
