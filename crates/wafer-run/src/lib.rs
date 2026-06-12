@@ -7,52 +7,34 @@
 #![warn(missing_docs)]
 
 pub mod asset_loader;
-pub mod block;
-/// Shared identifiers (error codes, service names) used across host/guest boundaries.
-pub mod common;
-pub mod compat;
-pub mod config;
 pub mod context;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;
 /// Shared helpers for embedder bindings (`wafer-ffi`, `wafer-run-node`): the
 /// `{"action": ...}` JSON wire format and registration-from-path policy.
 pub mod embed;
-pub mod error;
-pub mod executor;
-pub mod helpers;
-/// Re-exports of the canonical metadata constants defined in `wafer-block`.
-pub mod meta;
 /// Observability hooks: pluggable callbacks fired on flow/block lifecycle events.
 pub mod observability;
 pub mod platform;
 mod registry_loader;
-pub mod router;
 /// Top-level runtime: the `Wafer` instance, block slots, config sources and validation.
 pub mod runtime;
 pub mod snapshot;
-/// Re-exports of the core runtime value types (`Message`, `MetaEntry`, `WaferError`, …) from `wafer-block`.
-pub mod types;
 /// Executor for `WaferFlow` definitions — runs a sequence of blocks against an input message.
 pub mod waferflow;
 /// WASM block loader and host capabilities (gated by the `wasmi` feature on native targets).
 pub mod wasm;
 
-// Re-export the WRAP access control module from wafer-block
-// Re-exports for convenience
+// Re-exports of the canonical shared types defined in `wafer-block`. One
+// canonical `wafer_run::X` path per item — the former 1-2 line mirror
+// modules (`types`, `meta`, `block`, `error`, ...) are gone.
 pub use asset_loader::{AssetLoadError, AssetLoadStatus, LoadAssetCallback, NoopAssetLoader};
-pub use block::{Block, BlockCategory, BlockInfo, BlockRuntime, UiRoute};
-pub use compat::{MaybeSend, MaybeSync};
-pub use config::{BlockConfig, DispatchTarget};
 pub use context::{Context, RuntimeContext};
-pub use error::RuntimeError;
-pub use executor::{extract_path_vars, match_path, matches_pattern};
-#[cfg(not(target_arch = "wasm32"))]
-pub use helpers::expand_env_vars;
-pub use helpers::sha256_hex;
-pub use meta::*;
 pub use observability::{ObservabilityBus, ObservabilityContext};
-pub use router::Router;
+#[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
+pub use runtime::remote::{
+    parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::RuntimeHandle;
 pub use runtime::{
@@ -60,23 +42,34 @@ pub use runtime::{
     slot::{BlockSlot, InitError, InitializedState},
     BrokenBlock, ValidationReport, Wafer,
 };
-#[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
-pub use runtime::{parse_unversioned_block, parse_versioned_block, RemoteBlockRef, ABI_VERSION};
-mod builder;
-pub use builder::WaferBuilder;
-pub use types::{
-    AuthLevel, ErrorCode, HttpMethod, InstanceMode, LifecycleEvent, LifecycleType, Message,
-    MetaEntry, RequestAction, ResourceGrant, ResourceType, WaferError,
-};
+#[cfg(not(target_arch = "wasm32"))]
+pub use wafer_block::expand_env_vars;
 pub use wafer_block::{
+    block::Block,
+    common,
+    compat::{MaybeSend, MaybeSync},
+    config::{BlockConfig, DispatchTarget},
+    error::{
+        AliasError, BlockReferenceError, BlockReferenceSource, GrantValidationError, RuntimeError,
+    },
+    executor::{extract_path_vars, match_path, matches_pattern},
+    meta::*,
     registry::BlockRegistry,
-    streams,
+    router::Router,
+    sha256_hex, streams,
     streams::{
         input::InputStream,
         output::{OutputSink, OutputStream, TerminalNotResponse},
     },
-    wrap,
+    types::{
+        AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime, CollectionSchema,
+        ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet, MetaSet,
+        RequestAction, ResourceGrant, ResourceType, UiRoute,
+    },
+    wrap, ErrorCode, InstanceMode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError,
 };
+mod builder;
+pub use builder::WaferBuilder;
 pub use wasm::capabilities::BlockCapabilities;
 #[cfg(feature = "wasmi")]
 pub use wasm::WasmiBlock;

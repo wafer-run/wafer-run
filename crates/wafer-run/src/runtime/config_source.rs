@@ -8,10 +8,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use thiserror::Error;
-use wafer_block::ConfigVar;
+use wafer_block::{
+    compat::{MaybeSend, MaybeSync},
+    ConfigVar,
+};
 use wafer_block_macro::wafer_async_trait;
-
-use crate::compat::{MaybeSend, MaybeSync};
 
 /// The env-var config payload returned for a single block on lazy init.
 ///
@@ -148,7 +149,7 @@ impl ConfigSource for StaticConfigSource {
 ///
 /// Does **not** invoke any block's `lifecycle` or `handle`.
 pub(crate) async fn validate_block_configs<'a>(
-    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn crate::block::Block>)>,
+    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn wafer_block::Block>)>,
     source: &Arc<dyn ConfigSource>,
 ) -> wafer_block::ValidationReport {
     let mut report = wafer_block::ValidationReport {

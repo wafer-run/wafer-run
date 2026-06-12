@@ -14,15 +14,13 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use wafer_block::types::ConfigVar;
 use wafer_run::{
-    block::{Block, BlockInfo},
     context::Context,
     runtime::config_source::{ConfigSource, StaticConfigSource},
     streams::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::{ErrorCode, InstanceMode, Message},
-    Wafer,
+    Block, BlockInfo, ErrorCode, InstanceMode, Message, Wafer,
 };
 
 // ---------------------------------------------------------------------------

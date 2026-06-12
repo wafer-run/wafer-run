@@ -1,17 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
-use wafer_block::streams::{input::InputStream, output::OutputStream};
+use wafer_block::{
+    core_types::*,
+    error::RuntimeError,
+    streams::{input::InputStream, output::OutputStream},
+    types::*,
+    Block,
+};
 use wafer_block_macro::wafer_async_trait;
 use wasmi::{Engine, Linker, Module, Store, TypedResumableCall, Val};
 
 use super::{capabilities::BlockCapabilities, host::ContextGuard, stream::StreamRegistry};
-use crate::{
-    block::{Block, BlockInfo},
-    context::Context,
-    error::RuntimeError,
-    types::*,
-};
+use crate::context::Context;
 
 mod abi;
 mod imports;
@@ -699,7 +700,7 @@ impl Block for WasmiBlock {
 
         match result {
             Ok(mut info) => {
-                info.runtime = crate::block::BlockRuntime::Wasm;
+                info.runtime = wafer_block::BlockRuntime::Wasm;
                 if let Ok(mut guard) = self.info_cache.lock() {
                     *guard = Some(info.clone());
                 }
@@ -821,7 +822,7 @@ mod capabilities_update_tests {
 
         // Apply a narrower capability set via the Block trait method.
         let narrowed = BlockCapabilities::none();
-        use crate::block::Block;
+        use wafer_block::Block;
         block.runtime_capabilities_mut(narrowed);
 
         // Confirm the update is visible.

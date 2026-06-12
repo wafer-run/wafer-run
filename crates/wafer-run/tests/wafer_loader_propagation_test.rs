@@ -13,9 +13,8 @@ mod tests {
 
     use wafer_run::{
         asset_loader::{AssetLoadStatus, LoadAssetCallback},
-        types::Message,
         wasm::WasmiBlock,
-        Block, InputStream, OutputStream,
+        Block, InputStream, Message, OutputStream,
     };
 
     // -----------------------------------------------------------------------
@@ -63,7 +62,7 @@ mod tests {
             _msg: Message,
             _input: InputStream,
         ) -> OutputStream {
-            use wafer_run::types::{ErrorCode, WaferError};
+            use wafer_run::{ErrorCode, WaferError};
             OutputStream::error(WaferError::new(
                 ErrorCode::Unimplemented,
                 "mock context: call_block not supported",

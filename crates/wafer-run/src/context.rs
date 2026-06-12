@@ -8,13 +8,14 @@ use std::{
 // Re-export the trait from wafer-block.
 pub use wafer_block::context::Context;
 use wafer_block::{
-    core_types::Attachment,
+    core_types::*,
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceGrant,
+    types::*,
+    Block,
 };
 use wafer_block_macro::wafer_async_trait;
 
-use crate::{block::Block, platform::Instant, types::*};
+use crate::platform::Instant;
 
 /// RuntimeContext implements Context for blocks.
 ///
@@ -90,19 +91,17 @@ pub struct RuntimeContext {
     /// consulted by `dispatch_call` to drive lazy init of `call_block`
     /// callees.
     pub(crate) config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
+    /// Observability hook bus, `Arc`-shared with the [`Wafer`] that produced
+    /// this context. Consulted by `dispatch_call` so nested block-to-block
+    /// calls fire the same `block_start`/`block_end` hooks as the top-level
+    /// dispatch paths.
+    pub(crate) hooks: Arc<crate::observability::ObservabilityBus>,
 }
 
 // --- Output helpers (used by RuntimeContext impl) ---
 
 fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
     OutputStream::error(WaferError::new(code, message))
-}
-
-/// Convert an init-pipeline error into an OutputStream terminal error.
-/// Shares the `Permanent` / `Transient` / `Cycle` → code mapping with
-/// `Wafer::run_block`'s top-level path.
-fn err_output_from_init(block: &str, e: crate::runtime::slot::InitError) -> OutputStream {
-    OutputStream::error(crate::runtime::init_error_to_wafer_error(block, e))
 }
 
 /// RAII guard that decrements `call_depth` on drop, even if the block panics.
@@ -375,10 +374,11 @@ impl RuntimeContext {
             ..self.clone()
         };
 
-        // Lazy init: ensure lifecycle(Init) has run on the callee before
-        // dispatching `handle`. Inherits `self.init_breadcrumbs` so a cycle
+        // Lazy init + observability bracket via the shared dispatch scaffold
+        // (`run_resolved`, shared with `Wafer::run_block` and the flow
+        // executor). Init inherits `self.init_breadcrumbs` so a cycle
         // (block A.init -> A.handle -> call_block(B) where B.init -> ... -> A)
-        // is detected. The init pipeline pushes `resolved_block_name` onto
+        // is detected; the init pipeline pushes `resolved_block_name` onto
         // the stack inside `run_init_pipeline`.
         //
         // Every registered block has a paired slot (`register_block_inner` /
@@ -387,23 +387,17 @@ impl RuntimeContext {
         // `self.slots` — a runtime invariant violation, so panic loudly
         // rather than silently constructing a fresh slot (which would let
         // concurrent callers each run `lifecycle(Init)` independently).
-        let init_slot = self
-            .slots
-            .get(resolved_block_name)
-            .cloned()
-            .expect("slot must exist for any registered block");
-        if let Err(e) = crate::runtime::run_init_pipeline(
-            resolved_block_name,
-            block.clone(),
-            init_slot,
-            self.config_source.clone(),
-            sub_ctx.clone(),
-            &self.init_breadcrumbs,
-        )
-        .await
-        {
-            return err_output_from_init(resolved_block_name, e);
-        }
+        let init = crate::runtime::runner::DispatchInit {
+            block: block.clone(),
+            slot: self
+                .slots
+                .get(resolved_block_name)
+                .cloned()
+                .expect("slot must exist for any registered block"),
+            config_source: self.config_source.clone(),
+            init_ctx: sub_ctx.clone(),
+            stack: &self.init_breadcrumbs,
+        };
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
@@ -414,20 +408,36 @@ impl RuntimeContext {
         // Because sub_ctx holds an *empty* Arc (not a clone of att_arc), the
         // Arc::try_unwrap below succeeds without a deep clone — att_arc is the
         // sole holder of the BTreeMap at this point.
-        #[cfg(feature = "wasmi")]
-        if let Some(arc) = att_arc {
-            if let Some(any) = block.as_any() {
-                if let Some(wasmi_block) = any.downcast_ref::<crate::wasm::WasmiBlock>() {
-                    let map = Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone());
-                    return wasmi_block
-                        .handle_with_attachments(&sub_ctx, msg, input, map)
-                        .await;
-                }
-            }
-        }
-
+        //
         // _depth_guard drops after this, decrementing counter.
-        block.handle(&sub_ctx, msg, input).await
+        crate::runtime::runner::run_resolved(
+            &self.hooks,
+            crate::runtime::runner::DispatchObs {
+                flow_id: &self.flow_id,
+                node_path: resolved_block_name,
+                block_name,
+            },
+            resolved_block_name,
+            init,
+            msg,
+            input,
+            move |msg, input| async move {
+                #[cfg(feature = "wasmi")]
+                if let Some(arc) = att_arc {
+                    if let Some(any) = block.as_any() {
+                        if let Some(wasmi_block) = any.downcast_ref::<crate::wasm::WasmiBlock>() {
+                            let map = Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone());
+                            return wasmi_block
+                                .handle_with_attachments(&sub_ctx, msg, input, map)
+                                .await;
+                        }
+                    }
+                }
+                block.handle(&sub_ctx, msg, input).await
+            },
+        )
+        .await
+        .unwrap_or_else(|init_failure| init_failure)
     }
 }
 
@@ -490,7 +500,7 @@ impl Context for RuntimeContext {
             .map(|s| s.as_str())
     }
 
-    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
+    fn registered_blocks(&self) -> Vec<wafer_block::BlockInfo> {
         self.snapshot.blocks.clone()
     }
 

@@ -11,9 +11,8 @@ mod tests {
 
     use wafer_run::{
         asset_loader::{AssetLoadError, AssetLoadStatus, LoadAssetCallback},
-        types::{ErrorCode, Message, WaferError},
         wasm::WasmiBlock,
-        Block, InputStream, OutputStream,
+        Block, ErrorCode, InputStream, Message, OutputStream, WaferError,
     };
 
     const LOAD_ASSET_WAT: &str = include_str!("fixtures/load_asset_block.wat");

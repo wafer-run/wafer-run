@@ -11,12 +11,7 @@ use wafer_block::{
         output::{OutputStream, TerminalNotResponse},
     },
 };
-use wafer_run::{
-    block::{Block, BlockInfo},
-    context::Context,
-    types::*,
-    Wafer,
-};
+use wafer_run::{context::Context, Block, BlockInfo, ErrorCode, Message, Wafer, WaferError};
 
 // ---------------------------------------------------------------------------
 // Test blocks

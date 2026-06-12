@@ -18,7 +18,7 @@ use wafer_block::{
 // the `wafer-run/router` entry never reaches `STATIC_BLOCK_REGISTRATIONS`,
 // leaving these tests with no router registered.
 use wafer_block_router as _;
-use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
+use wafer_run::{RuntimeError, StaticConfigSource, Wafer};
 
 // ---------------------------------------------------------------------------
 // Test fixtures

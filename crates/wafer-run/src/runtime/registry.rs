@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use wafer_block::{error::RuntimeError, Block};
+
 use super::Wafer;
-use crate::{block::Block, error::RuntimeError};
 
 impl Wafer {
     /// Add a named registrar function. Registrars are called by
@@ -79,7 +80,7 @@ impl Wafer {
         let data = std::fs::read_to_string(path)
             .map_err(|e| RuntimeError::Config(format!("read blocks.json {path}: {e}")))?;
 
-        let expanded = crate::helpers::expand_env_vars(&data);
+        let expanded = wafer_block::expand_env_vars(&data);
 
         let mut map: std::collections::HashMap<String, serde_json::Value> =
             serde_json::from_str(&expanded)
@@ -218,7 +219,7 @@ mod tests {
     struct NoopBlock;
 
     #[wafer_async_trait]
-    impl crate::block::Block for NoopBlock {
+    impl wafer_block::Block for NoopBlock {
         fn info(&self) -> BlockInfo {
             BlockInfo::new("noop", "0.0.1", "noop.handle", "noop block for testing")
         }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use wafer_block::Block;
-use wafer_run::{error::RuntimeError, Wafer};
+use wafer_run::{RuntimeError, Wafer};
 
 use crate::{fake_crypto::FakeCrypto, fake_db::FakeDb};
 

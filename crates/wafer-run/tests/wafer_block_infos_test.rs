@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use wafer_block::{BlockInfo, ExternalAsset};
-use wafer_run::{block::Block, context::Context, types::Message, InputStream, OutputStream, Wafer};
+use wafer_run::{context::Context, Block, InputStream, Message, OutputStream, Wafer};
 
 struct StubBlock {
     name: &'static str,

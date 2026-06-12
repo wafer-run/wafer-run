@@ -5,9 +5,9 @@
 mod tests {
     use wafer_block::streams::output::TerminalNotResponse;
     use wafer_run::{
-        types::{ErrorCode, LifecycleEvent, LifecycleType, Message, MetaEntry, WaferError},
         wasm::{capabilities::BlockCapabilities, WasmiBlock},
-        Block, InputStream, OutputStream,
+        Block, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry,
+        OutputStream, WaferError,
     };
 
     const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");

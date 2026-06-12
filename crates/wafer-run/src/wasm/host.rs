@@ -83,7 +83,7 @@ impl Context for ContextWrapper {
     fn config_get(&self, key: &str) -> Option<&str> {
         unsafe { &*self.0 }.config_get(key)
     }
-    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
+    fn registered_blocks(&self) -> Vec<wafer_block::BlockInfo> {
         unsafe { &*self.0 }.registered_blocks()
     }
     fn flow_introspection(&self) -> Option<&dyn wafer_block::introspection::FlowIntrospection> {

@@ -28,3 +28,21 @@ impl WasmState {
         }
     }
 }
+
+#[cfg(feature = "wasmi")]
+impl super::Wafer {
+    /// Get or create the shared WASM engine.
+    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, wafer_block::error::RuntimeError> {
+        if self.wasm.engine.is_none() {
+            let mut config = wasmi::Config::default();
+            config.consume_fuel(true);
+            let engine = wasmi::Engine::new(&config);
+            self.wasm.engine = Some(Arc::new(engine));
+        }
+        Ok(self
+            .wasm
+            .engine
+            .as_ref()
+            .expect("wasm_engine initialized above"))
+    }
+}

@@ -14,9 +14,7 @@
 #[cfg(feature = "wasm")]
 mod tests {
     use wafer_run::{
-        types::{ErrorCode, Message, WaferError},
-        wasm::WasmiBlock,
-        Block, InputStream, OutputStream,
+        wasm::WasmiBlock, Block, ErrorCode, InputStream, Message, OutputStream, WaferError,
     };
 
     #[derive(Clone)]

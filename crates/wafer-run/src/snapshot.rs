@@ -10,9 +10,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use wafer_block::InterfaceSpec;
-
-use crate::block::BlockInfo;
+use wafer_block::{BlockInfo, InterfaceSpec};
 
 /// Immutable bundle of post-startup metadata. Populated at the end of
 /// [`crate::runtime::Wafer::seal`].

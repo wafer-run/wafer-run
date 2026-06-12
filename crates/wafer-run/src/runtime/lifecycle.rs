@@ -3,8 +3,9 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
+use wafer_block::{core_types::*, error::RuntimeError, types::*};
+
 use super::Wafer;
-use crate::{block::BlockInfo, error::RuntimeError, types::*};
 
 /// Collect `BlockInfo`s into a Vec sorted by their stable `name`, so consumers
 /// (admin pages, snapshot consumers) see deterministic order regardless of the
@@ -27,7 +28,7 @@ pub(crate) struct GrantValidationOutcome {
     /// Grants that were rejected — typed grant from non-admin block.
     /// Each entry is a structured rejection that `Wafer::start()` aggregates
     /// into `RuntimeError::GrantsRejected`.
-    pub(crate) rejected: Vec<crate::error::GrantValidationError>,
+    pub(crate) rejected: Vec<wafer_block::error::GrantValidationError>,
 }
 
 /// Validate a single block's WRAP grant declarations and return the subset
@@ -93,7 +94,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     admin = %admin_block,
                     "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
                 );
-                rejected.push(crate::error::GrantValidationError {
+                rejected.push(wafer_block::error::GrantValidationError {
                     block: block_info.name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
@@ -125,7 +126,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     block = %block_info.name, resource = %grant.resource, owner = %owner,
                     "WRAP: rejecting grant for resource not owned by declaring block"
                 );
-                rejected.push(crate::error::GrantValidationError {
+                rejected.push(wafer_block::error::GrantValidationError {
                     block: block_info.name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
@@ -148,7 +149,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     }
                     _ => "`{org}__{block}__*` (Db tables)",
                 };
-                rejected.push(crate::error::GrantValidationError {
+                rejected.push(wafer_block::error::GrantValidationError {
                     block: block_info.name.to_string(),
                     grant: grant.clone(),
                     reason: format!(

@@ -7,11 +7,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
-    block::Block,
-    error::RuntimeError,
-    platform::{ConfigExpanderFn, RegistrarFn},
-};
+use wafer_block::{error::RuntimeError, Block};
+
+use crate::platform::{ConfigExpanderFn, RegistrarFn};
 
 /// WRAP (resource-access) state, nested inside [`RegistrationCore`] because it
 /// is collected and rebuilt during block registration.
@@ -31,7 +29,7 @@ pub(crate) struct WrapState {
     /// Accumulator for grant-validation failures; drained + checked by
     /// `Wafer::start()`, which fails boot with `RuntimeError::GrantsRejected`
     /// if non-empty.
-    pub(crate) validation_errors: Vec<crate::error::GrantValidationError>,
+    pub(crate) validation_errors: Vec<wafer_block::error::GrantValidationError>,
 }
 
 impl WrapState {
@@ -108,21 +106,21 @@ impl RegistrationCore {
 
 impl RegistrationCore {
     /// Register an alias mapping (single-hop; chained aliases rejected so
-    /// lookup stays O(1)). See [`crate::error::AliasError`] for rejection
+    /// lookup stays O(1)). See [`wafer_block::error::AliasError`] for rejection
     /// reasons.
     pub(crate) fn add_alias(
         &mut self,
         alias: String,
         target: String,
-    ) -> Result<(), crate::error::AliasError> {
+    ) -> Result<(), wafer_block::error::AliasError> {
         if alias == target {
-            return Err(crate::error::AliasError::Cycle { alias });
+            return Err(wafer_block::error::AliasError::Cycle { alias });
         }
         if self.aliases.contains_key(&target) {
-            return Err(crate::error::AliasError::TargetIsAlias { alias, target });
+            return Err(wafer_block::error::AliasError::TargetIsAlias { alias, target });
         }
         if self.aliases.values().any(|t| t == &alias) {
-            return Err(crate::error::AliasError::AliasIsExistingTarget { alias });
+            return Err(wafer_block::error::AliasError::AliasIsExistingTarget { alias });
         }
         Arc::make_mut(&mut self.aliases).insert(alias, target);
         Ok(())
@@ -222,7 +220,7 @@ impl RegistrationCore {
         &mut self,
         name: &str,
         block: Arc<dyn Block>,
-        info: &crate::block::BlockInfo,
+        info: &wafer_block::BlockInfo,
     ) {
         // Validate this block's WRAP grants and append the accepted ones.
         // Typed grants declared before `set_admin_block` are deferred — that
