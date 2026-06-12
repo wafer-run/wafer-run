@@ -117,7 +117,6 @@ export async function send(config: WaferConfig, request: TransportRequest): Prom
   const waferResponse: WaferResponse = {
     data,
     rawData,
-    meta: responseHeaders,
     status: res.status,
     contentType,
     headers: responseHeaders,

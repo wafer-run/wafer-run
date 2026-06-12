@@ -21,6 +21,10 @@ If you're new to wafer as a *user*, read [wafer.run/docs/core-concepts](https://
 
 ## Build & test
 
+`./scripts/check.sh` is the single definition of "green" — CI's jobs
+(`.github/workflows/ci-jobs.yml`) invoke its named steps, and running it
+with no arguments runs the full sequence locally before a PR.
+
 The default test command **mirrors CI**:
 
 ```
@@ -77,10 +81,8 @@ crates/
 examples/                Runnable demos. See examples/README.md.
 sdks/rust/               wafer-sdk for guest WASM blocks (consumes #[wafer_block])
 packages/wafer-client-js/JS/TS client. See its README.
-registry/                Block manifests served by the registry.
 docs/specs/              Design specs (one per initiative)
 docs/plans/              Implementation plans (one per spec)
-common/                  Shared resources. See its README.
 go/                      Go bindings.
 ```
 

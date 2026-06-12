@@ -388,6 +388,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
+name = "linkme"
+version = "0.3.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e83272d46373fb8decca684579ac3e7c8f3d71d4cc3aa693df8759e260ae41cf"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32d59e20403c7d08fe62b4376edfe5c7fb2ef1e6b1465379686d0f21c8df444b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,6 +741,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "linkme",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -732,7 +753,6 @@ dependencies = [
  "tracing",
  "url",
  "wafer-block-macro",
- "wafer-flow",
  "wasm-bindgen-futures",
 ]
 
@@ -742,6 +762,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
 ]
 
@@ -752,15 +773,6 @@ dependencies = [
  "serde_json",
  "wafer-block",
  "wafer-sdk",
-]
-
-[[package]]
-name = "wafer-flow"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

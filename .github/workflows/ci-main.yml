@@ -1,3 +1,6 @@
+# Push-to-main trigger shim. The actual jobs live in ci-jobs.yml and the
+# commands they run live in scripts/check.sh; this workflow additionally
+# runs the coverage job, which only makes sense on main.
 name: CI Main
 
 on:
@@ -9,136 +12,24 @@ on:
       - 'examples/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'scripts/check.sh'
+      - 'scripts/build-fixtures.sh'
       - '.github/workflows/ci-main.yml'
+      - '.github/workflows/ci-jobs.yml'
 
 concurrency:
   group: ci-main
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
-    name: Format & Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: wasm32-wasip1
-
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --component rustfmt
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: check
-
-      - name: Build echo_block.wasm test fixture
-        run: |
-          (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
-          mkdir -p crates/wafer-run/testdata
-          cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
-             crates/wafer-run/testdata/echo_block.wasm
-
-      - name: Check formatting
-        run: cargo +nightly fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: test
-
-      - name: Build wasm test fixtures
-        run: |
-          (cd examples/wasmi-block && cargo build --release --target wasm32-wasip1)
-          mkdir -p crates/wafer-run/testdata
-          cp examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm \
-             crates/wafer-run/testdata/echo_block.wasm
-          cargo build --release --target wasm32-wasip1 \
-            --manifest-path crates/wafer-run/tests/attachment_dispatch/Cargo.toml
-          cargo build --release --target wasm32-wasip1 \
-            --manifest-path crates/wafer-run/tests/dispatch_guest/Cargo.toml
-          cargo build --release --target wasm32-wasip1 \
-            --manifest-path crates/wafer-run/tests/service_client_guest/Cargo.toml
-
-      - name: Run tests
-        run: cargo test --workspace
-
-  wasm:
-    name: Wasm & Feature Builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: wasm
-
-      # Guest-facing SDK must keep compiling to wasm — every compiled block
-      # depends on these two crates. Today this is only proven *incidentally*
-      # by the echo-fixture build (a separate workspace); assert it directly so
-      # the coverage can't silently disappear if the fixtures change.
-      - name: Guest SDK builds to wasm32-wasip1
-        run: cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
-
-      # The wasmi-off code path (wafer-run without its default `wasm` feature)
-      # is otherwise never compiled in CI — clippy/test run with default
-      # features on. Catches `#[cfg(feature = "wasmi")]` gating regressions.
-      - name: Runtime builds with --no-default-features (wasmi off)
-        run: cargo check -p wafer-run --no-default-features
-
-      # The wafer-core `wasm-component` guest path (sync typed service clients,
-      # incl. the `call_service` streaming-ABI driver) is compiled by nothing
-      # else in CI — default features leave it off. Compile it on the real
-      # wasm32 target so extern-signature drift or FFI regressions surface here.
-      - name: Guest service-client path (wafer-core wasm-component → wasm32)
-        run: cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
-
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --quiet
-
-      - name: Run audit
-        run: cargo audit
+  ci:
+    uses: ./.github/workflows/ci-jobs.yml
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
