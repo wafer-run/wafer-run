@@ -1,5 +1,3 @@
-import type { WaferMeta } from './message';
-
 /**
  * Parsed HTTP response from a Wafer instance.
  */
@@ -8,13 +6,11 @@ export interface WaferResponse {
   data: unknown;
   /** Raw response body as string */
   rawData: string;
-  /** Response meta/headers from Wafer */
-  meta: WaferMeta;
   /** HTTP status code */
   status: number;
   /** Response Content-Type header */
   contentType: string;
-  /** All response headers */
+  /** All response headers (Wafer meta is delivered as response headers) */
   headers: Record<string, string>;
 }
 
