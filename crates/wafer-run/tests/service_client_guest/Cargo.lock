@@ -858,7 +858,6 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
- "serde_json",
  "syn",
 ]
 
@@ -887,7 +886,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -905,7 +903,6 @@ version = "0.1.0"
 dependencies = [
  "sea-query",
  "serde_json",
- "thiserror",
  "wafer-block",
  "wafer-schema",
 ]
