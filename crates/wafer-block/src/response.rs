@@ -197,8 +197,7 @@ impl ResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::output::TerminalNotResponse;
-    use crate::types::MetaGet;
+    use crate::{streams::output::TerminalNotResponse, types::MetaGet};
 
     #[tokio::test]
     async fn ok_json_sets_json_content_type() {
