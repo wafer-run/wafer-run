@@ -50,14 +50,6 @@ impl Block for VectorBlock {
             _ => handler::handle_message(self.vector.as_ref(), &msg, &body).await,
         }
     }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
-    }
 }
 
 /// Register the unified vector block with the given service pair.

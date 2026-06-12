@@ -39,14 +39,6 @@ impl Block for LoggerBlock {
         let body = input.collect_to_bytes().await;
         handler::handle_message(self.service.as_ref(), &msg, &body)
     }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
-    }
 }
 
 /// Register the unified logger block with the given service.

@@ -74,14 +74,6 @@ impl Block for ReadonlyGuardBlock {
 
         OutputStream::continue_with(msg)
     }
-
-    async fn lifecycle(
-        &self,
-        _ctx: &dyn Context,
-        _event: LifecycleEvent,
-    ) -> std::result::Result<(), WaferError> {
-        Ok(())
-    }
 }
 
 wafer_block::register_static_block!("wafer-run/readonly-guard", ReadonlyGuardBlock);
