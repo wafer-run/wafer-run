@@ -5,6 +5,9 @@
 //!         is provided via ConfigSource.
 //! Test C: call_block rejects an action not in a known interface.
 //! Test D: call_block allows an unknown (custom) interface with a warning.
+//! Test E: dispatch validation accepts every ServiceOp op for its interface
+//!         (drift guard), and call_block delivers the database ops that the
+//!         hand-maintained catalog used to reject.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -137,8 +140,8 @@ impl Block for DbBlock {
         BlockInfo::new("test-org/db-block", "0.1.0", "database@v1", "DbBlock")
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
-        // This should never be reached in Test C — the validator should reject
-        // the action before handle is called.
+        // Never reached in Test C — the validator rejects the action before
+        // handle is called. Test E reaches it with valid database ops.
         OutputStream::respond(b"db-response".to_vec())
     }
 }
@@ -289,6 +292,110 @@ async fn call_block_allows_custom_interface_with_warning() {
         }
         Err(other) => {
             panic!("expected successful response from custom-interface block, got: {other:?}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test E — drift guard: dispatch validation accepts every ServiceOp op
+//
+// The interface action catalogs in wafer_block::interfaces are derived from
+// the ServiceOp op-family slices. This pins the dispatch-level contract: the
+// exact validator call_block uses must accept every canonical op for its
+// interface (the 2026-06-10 audit found 5 database ops being rejected).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dispatch_validation_accepts_every_service_op() {
+    use wafer_block::common::ServiceOp;
+    use wafer_run::runtime::validation::{check_action_interface, ActionCheck};
+
+    let specs = wafer_block::interfaces::all();
+    for (interface, ops) in [
+        ("database@v1", ServiceOp::DATABASE_OPS),
+        ("storage@v1", ServiceOp::STORAGE_OPS),
+        ("crypto@v1", ServiceOp::CRYPTO_OPS),
+        ("http-client@v1", ServiceOp::NETWORK_OPS),
+        ("logger@v1", ServiceOp::LOGGER_OPS),
+        ("config@v1", ServiceOp::CONFIG_OPS),
+    ] {
+        for op in ops {
+            assert_eq!(
+                check_action_interface("test-org/any", interface, op, &specs),
+                ActionCheck::Valid,
+                "dispatch validation rejects canonical op '{op}' for interface '{interface}'"
+            );
+        }
+    }
+}
+
+/// A caller block that forwards a message whose kind is taken from the
+/// incoming `target-op` meta — mirroring the SDK service-client path where
+/// `kind` carries the service op and no `req.action` meta is set.
+struct OpForwardingCallerBlock;
+
+#[async_trait]
+impl Block for OpForwardingCallerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test-org/op-forwarding-caller",
+            "0.1.0",
+            "service@v1",
+            "OpForwardingCaller",
+        )
+        .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        let op = msg.get_meta("target-op").to_string();
+        ctx.call_block("test-org/db-block", Message::new(op), input)
+            .await
+    }
+}
+
+/// End-to-end regression for the 2026-06-10 audit finding: these five ops are
+/// implemented by the database handler but were missing from the hand-written
+/// database@v1 catalog, so call_block rejected them with INVALID_ARGUMENT
+/// before the block was ever invoked.
+#[tokio::test]
+async fn call_block_delivers_previously_rejected_database_ops() {
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
+    w.register_block("test-org/db-block", Arc::new(DbBlock))
+        .unwrap();
+    w.register_block(
+        "test-org/op-forwarding-caller",
+        Arc::new(OpForwardingCallerBlock),
+    )
+    .unwrap();
+
+    w.seal().await.expect("start should succeed");
+
+    for op in [
+        "database.query",
+        "database.execute",
+        "database.take_where",
+        "database.delete_where_count",
+        "database.increment_field_where",
+    ] {
+        let mut trigger = Message::new("trigger");
+        trigger.set_meta("target-op", op);
+        let output = w
+            .run_block(
+                "test-org/op-forwarding-caller",
+                trigger,
+                InputStream::empty(),
+            )
+            .await;
+
+        match output.collect_buffered().await {
+            Ok(buf) => assert_eq!(
+                buf.body, b"db-response",
+                "op '{op}' did not reach the database block"
+            ),
+            Err(other) => panic!("op '{op}' was rejected before dispatch: {other:?}"),
         }
     }
 }
