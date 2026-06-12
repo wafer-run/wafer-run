@@ -20,42 +20,23 @@ use axum::{
 };
 use parking_lot::Mutex;
 use wafer_block::{
-    common::ErrorCode,
-    meta::*,
-    types::{ConfigVar, MetaGet},
-    Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputStream,
-    RequestAction, WaferError,
+    http_codec, types::ConfigVar, Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType,
+    Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
 // ---------------------------------------------------------------------------
-// HTTP <-> Message conversion
+// HTTP <-> Message conversion — thin axum glue over wafer_block::http_codec
 // ---------------------------------------------------------------------------
-
-fn http_method_to_action(method: &Method) -> &'static str {
-    match *method {
-        Method::GET | Method::HEAD => RequestAction::RETRIEVE,
-        Method::POST => RequestAction::CREATE,
-        Method::PUT | Method::PATCH => RequestAction::UPDATE,
-        Method::DELETE => RequestAction::DELETE,
-        _ => RequestAction::EXECUTE,
-    }
-}
 
 /// Convert an HTTP request head into a WAFER [`Message`].
 ///
-/// The body is **not** placed on the message — it flows separately via
-/// [`InputStream`]. Each header is copied to meta as
-/// `http.header.{lowercased-name}`, each query parameter as both
-/// `http.query.{name}` and `{META_REQ_QUERY_PREFIX}{name}` (with `+`/`%XX`
-/// decoded via `form_urlencoded::parse`). Method/path/remote-addr are
-/// mirrored into normalized request meta keys (`META_REQ_ACTION`,
-/// `META_REQ_RESOURCE`, `META_REQ_CLIENT_IP`, `META_REQ_CONTENT_TYPE`) so
-/// downstream blocks need not know the request originated over HTTP.
-///
-/// HTTP method maps to a WAFER `RequestAction`:
-/// `GET`/`HEAD` → `RETRIEVE`, `POST` → `CREATE`, `PUT`/`PATCH` → `UPDATE`,
-/// `DELETE` → `DELETE`, everything else → `EXECUTE`.
+/// Axum adaptation of [`wafer_block::http_codec::build_http_message`] — the
+/// canonical request-head → [`Message`] mapping (`http.*` meta, normalized
+/// `req.*` meta, lowercased `http.header.*`, decoded `http.query.*` +
+/// `req.query.*`) lives there. The body is **not** placed on the message —
+/// it flows separately via [`InputStream`]. Headers whose values are not
+/// valid UTF-8 are skipped.
 pub fn http_to_message(
     method: &Method,
     uri_path: &str,
@@ -63,246 +44,36 @@ pub fn http_to_message(
     headers: &HeaderMap,
     remote_addr: &str,
 ) -> Message {
-    let mut msg = Message::new(format!("{method}:{uri_path}"));
-
-    // HTTP-specific meta
-    msg.set_meta("http.method", method.to_string());
-    msg.set_meta("http.path", uri_path);
-    msg.set_meta("http.raw_query", raw_query);
-    msg.set_meta("http.remote_addr", remote_addr);
-    msg.set_meta(
-        "http.content_type",
+    http_codec::build_http_message(
+        method.as_str(),
+        uri_path,
+        raw_query,
+        remote_addr,
         headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(""),
-    );
-    msg.set_meta(
-        "http.host",
-        headers
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(""),
-    );
-
-    // Normalized request meta
-    msg.set_meta(META_REQ_ACTION, http_method_to_action(method));
-    msg.set_meta(META_REQ_RESOURCE, uri_path);
-    msg.set_meta(META_REQ_CLIENT_IP, remote_addr);
-    msg.set_meta(
-        META_REQ_CONTENT_TYPE,
-        headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(""),
-    );
-
-    // Copy headers to meta (normalize names to lowercase for case-insensitive lookup)
-    for (name, value) in headers {
-        if let Ok(v) = value.to_str() {
-            msg.set_meta(format!("http.header.{}", name.as_str().to_lowercase()), v);
-        }
-    }
-
-    // Copy URL query params to meta. form_urlencoded handles both `+` → space
-    // and `%XX` decoding.
-    if !raw_query.is_empty() {
-        for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
-            let key = key.into_owned();
-            let value = value.into_owned();
-            msg.set_meta(format!("http.query.{key}"), value.clone());
-            msg.set_meta(format!("{META_REQ_QUERY_PREFIX}{key}"), value);
-        }
-    }
-
-    msg
-}
-
-fn apply_response_meta(
-    builder: axum::http::response::Builder,
-    meta: &[MetaEntry],
-) -> axum::http::response::Builder {
-    let mut builder = builder;
-    for entry in meta {
-        let k = entry.key.as_str();
-        let v = &entry.value;
-        match k {
-            k if k == META_RESP_STATUS => continue,
-            k if k.starts_with(META_RESP_COOKIE_PREFIX) => {
-                builder = builder.header("Set-Cookie", v);
-            }
-            k if k.starts_with(META_RESP_HEADER_PREFIX) => {
-                let header_name = &k[META_RESP_HEADER_PREFIX.len()..];
-                builder = builder.header(header_name, v);
-            }
-            k if k == META_RESP_CONTENT_TYPE => {
-                builder = builder.header("Content-Type", v);
-            }
-            _ => {}
-        }
-    }
-    builder
-}
-
-/// Map a semantic error code to an HTTP status code.
-fn error_code_to_http_status(code: &ErrorCode) -> u16 {
-    match code {
-        ErrorCode::Ok => 200,
-        ErrorCode::Cancelled => 499,
-        ErrorCode::InvalidArgument => 400,
-        ErrorCode::DeadlineExceeded => 504,
-        ErrorCode::NotFound => 404,
-        ErrorCode::AlreadyExists => 409,
-        ErrorCode::PermissionDenied => 403,
-        ErrorCode::ResourceExhausted => 429,
-        ErrorCode::FailedPrecondition => 412,
-        ErrorCode::Aborted => 409,
-        ErrorCode::OutOfRange => 400,
-        ErrorCode::Unimplemented => 501,
-        ErrorCode::Internal => 500,
-        ErrorCode::Unavailable => 503,
-        ErrorCode::DataLoss => 500,
-        ErrorCode::Unauthenticated => 401,
-        _ => 500,
-    }
-}
-
-fn get_status_code(meta: &[MetaEntry], default_code: u16) -> u16 {
-    // Explicit override takes precedence
-    if let Some(code) = MetaGet::get(meta, META_RESP_STATUS) {
-        if let Ok(n) = code.parse::<u16>() {
-            return n;
-        }
-    }
-    default_code
-}
-
-fn get_error_status_code(error: Option<&WaferError>, meta: &[MetaEntry]) -> u16 {
-    // Explicit override in meta takes precedence
-    let from_meta = get_status_code(meta, 0);
-    if from_meta > 0 {
-        return from_meta;
-    }
-    // Derive from error code
-    if let Some(err) = error {
-        return error_code_to_http_status(&err.code);
-    }
-    500
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
+    )
 }
 
 /// Collect a WAFER [`OutputStream`] and turn the terminal event into an
 /// HTTP response.
 ///
-/// Buffered: the full output body is read into memory before any bytes are
-/// written to the wire (no streaming response). The terminal-event mapping
-/// is:
-///
-/// - `Ok(buffered)` → `200` (or `META_RESP_STATUS` override) with the
-///   collected body; meta keys prefixed with `META_RESP_HEADER_PREFIX` /
-///   `META_RESP_COOKIE_PREFIX` become response headers / `Set-Cookie`
-///   entries, defaulting `Content-Type: application/json`.
-/// - `TerminalNotResponse::Error(WaferError)` → status derived from
-///   [`ErrorCode`] (e.g. `NotFound` → 404, `PermissionDenied` → 403),
-///   overridable via `META_RESP_STATUS`, body
-///   `{"error": <code>, "message": <msg>}`.
-/// - `TerminalNotResponse::Drop` → `204 No Content`.
-/// - `TerminalNotResponse::Halt(buf)` → same as `Ok(buf)` — block produced a
-///   response and requested flow short-circuit; at the HTTP boundary the
-///   body+meta are served as-is (the halt signal was for the flow executor).
-/// - `TerminalNotResponse::Continue` → empty `200` (the HTTP boundary has
-///   nowhere further to forward).
-/// - `TerminalNotResponse::Malformed` → `500` (stream ended without a
-///   terminal event; logged at `tracing::error`).
+/// Axum adaptation of [`wafer_block::http_codec::collect_http_response`],
+/// which owns the canonical terminal-event mapping (`Complete`/`Halt` →
+/// body+meta, `Error` → status from [`wafer_block::ErrorCode`] + JSON body,
+/// `Drop` → `204`, `Continue` → empty `200`, `Malformed` → `500`). This
+/// wrapper only rebuilds the transport-neutral parts as an
+/// `axum::http::Response`.
 pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
-    use wafer_block::streams::output::TerminalNotResponse;
-
-    match output.collect_buffered().await {
-        Ok(buf) => {
-            // Successful body response
-            let status_code = get_status_code(&buf.meta, 200);
-            let mut builder = axum::http::Response::builder()
-                .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
-
-            builder = apply_response_meta(builder, &buf.meta);
-
-            // Set default content-type if not set
-            let has_ct = MetaGet::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
-            if !has_ct {
-                builder = builder.header("Content-Type", "application/json");
-            }
-
-            builder
-                .body(Body::from(buf.body))
-                .unwrap_or_else(|_| internal_error_response())
-        }
-
-        Err(TerminalNotResponse::Error(err)) => {
-            let err_meta = &err.meta;
-            let status_code = get_error_status_code(Some(&err), err_meta);
-            let mut builder = axum::http::Response::builder().status(
-                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            );
-
-            builder = apply_response_meta(builder, err_meta);
-            builder = builder.header("Content-Type", "application/json");
-
-            let body = serde_json::json!({
-                "error": err.code,
-                "message": err.message,
-            })
-            .to_string();
-
-            builder
-                .body(Body::from(body))
-                .unwrap_or_else(|_| internal_error_response())
-        }
-
-        Err(TerminalNotResponse::Drop) => {
-            // HTTP 204 No Content
-            axum::http::Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Body::empty())
-                .unwrap_or_else(|_| internal_error_response())
-        }
-
-        Err(TerminalNotResponse::Halt(buf)) => {
-            // Block produced a response AND requested flow short-circuit.
-            // The HTTP boundary serves the body+meta exactly like a normal
-            // response — the halt signal was for the flow executor, not the
-            // HTTP layer.
-            let status_code = get_status_code(&buf.meta, 200);
-            let mut builder = axum::http::Response::builder()
-                .status(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
-
-            builder = apply_response_meta(builder, &buf.meta);
-
-            let has_ct = MetaGet::contains_key(&buf.meta, META_RESP_CONTENT_TYPE);
-            if !has_ct {
-                builder = builder.header("Content-Type", "application/json");
-            }
-
-            builder
-                .body(Body::from(buf.body))
-                .unwrap_or_else(|_| internal_error_response())
-        }
-
-        Err(TerminalNotResponse::Continue(msg)) => {
-            // Continue means the flow should keep processing, but we're at the
-            // top-level HTTP boundary — treat as an empty 200.
-            let mut builder = axum::http::Response::builder().status(StatusCode::OK);
-            builder = apply_response_meta(builder, &msg.meta);
-            builder = builder.header("Content-Type", "application/json");
-
-            builder
-                .body(Body::empty())
-                .unwrap_or_else(|_| internal_error_response())
-        }
-
-        Err(TerminalNotResponse::Malformed) => {
-            tracing::error!("wafer-run/http-listener: stream ended without terminal event");
-            internal_error_response()
-        }
+    let parts = http_codec::collect_http_response(output).await;
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::from_u16(parts.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    for (name, value) in &parts.headers {
+        builder = builder.header(name, value);
     }
+    builder
+        .body(Body::from(parts.body))
+        .unwrap_or_else(|_| internal_error_response())
 }
 
 fn internal_error_response() -> axum::http::Response<Body> {
@@ -550,45 +321,6 @@ impl Block for HttpListenerBlock {
 
 wafer_block::register_static_block!("wafer-run/http-listener", HttpListenerBlock);
 
-#[cfg(test)]
-mod url_decode_tests {
-    /// Pins the wire-equivalent semantics of the (now-removed)
-    /// hand-rolled urlencoding_decode against the upstream
-    /// form_urlencoded::parse. If a future refactor changes how
-    /// query params are decoded, these tests should fail.
-    fn decode_via_form_urlencoded(raw_query: &str) -> Vec<(String, String)> {
-        form_urlencoded::parse(raw_query.as_bytes())
-            .into_owned()
-            .collect()
-    }
-
-    #[test]
-    fn plus_decodes_to_space() {
-        let out = decode_via_form_urlencoded("q=hello+world");
-        assert_eq!(out, vec![("q".into(), "hello world".into())]);
-    }
-
-    #[test]
-    fn percent_xx_decodes() {
-        let out = decode_via_form_urlencoded("q=hello%20world");
-        assert_eq!(out, vec![("q".into(), "hello world".into())]);
-    }
-
-    #[test]
-    fn invalid_percent_sequence_does_not_panic() {
-        let _ = decode_via_form_urlencoded("q=hello%ZZworld");
-    }
-
-    #[test]
-    fn multiple_pairs_round_trip() {
-        let out = decode_via_form_urlencoded("a=1&b=hello+world&c=%2Fpath");
-        assert_eq!(
-            out,
-            vec![
-                ("a".into(), "1".into()),
-                ("b".into(), "hello world".into()),
-                ("c".into(), "/path".into()),
-            ]
-        );
-    }
-}
+// Query-decoding semantics (`+` → space, `%XX`, invalid-sequence tolerance)
+// are pinned by table-driven tests next to the single implementation in
+// `wafer_block::http_codec` (the former `url_decode_tests` moved there).
