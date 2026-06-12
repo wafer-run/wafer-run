@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 use wafer_block::{
     common::ErrorCode,
+    db::FilterOp,
     streams::{input::InputStream, output::OutputStream},
     Block, BlockCategory, BlockInfo, Context, InstanceMode, LifecycleEvent, Message, WaferError,
 };
@@ -30,6 +31,12 @@ pub(crate) struct FakeDbState {
 /// Implements `database@v1`'s `database.get`, `database.list`, `database.create`,
 /// `database.update`, `database.delete`, `database.count` actions. Any other
 /// action returns `InvalidArgument` so fixture gaps surface loudly.
+///
+/// Filter operators are parsed with [`FilterOp::parse_wire`] — the same parser
+/// the production database handler uses — so unknown spellings are rejected
+/// with `InvalidArgument` exactly like a real backend. Only `Equal` matching
+/// is implemented; other (valid) operators also return `InvalidArgument`
+/// rather than silently matching nothing.
 pub struct FakeDb {
     pub(crate) state: Arc<Mutex<FakeDbState>>,
 }
@@ -184,19 +191,16 @@ impl FakeDb {
         let state = self.state.lock();
         let empty = Vec::new();
         let rows = state.collections.get(collection).unwrap_or(&empty);
-        // Filter and convert to `{id, data}` wire format expected by `RecordList`.
-        let matching: Vec<serde_json::Value> = rows
-            .iter()
-            .filter(|r| row_matches_filters(r, &filters))
-            .take(limit)
-            .map(to_record)
-            .collect();
-        let total_count = rows
-            .iter()
-            .filter(|r| row_matches_filters(r, &filters))
-            .count() as i64;
+        let matching = match matching_rows(rows, &filters) {
+            Ok(m) => m,
+            Err(e) => return OutputStream::error(e),
+        };
+        let total_count = matching.len() as i64;
+        // Convert to `{id, data}` wire format expected by `RecordList`.
+        let records: Vec<serde_json::Value> =
+            matching.into_iter().take(limit).map(to_record).collect();
         let body = serde_json::to_vec(&serde_json::json!({
-            "records": matching,
+            "records": records,
             "total_count": total_count,
             "page": 0_i64,
             "page_size": limit as i64,
@@ -241,12 +245,50 @@ impl FakeDb {
         OutputStream::respond(body)
     }
 
-    fn handle_update(&self, _req: &serde_json::Value) -> OutputStream {
-        OutputStream::respond(b"{}".to_vec())
+    fn handle_update(&self, req: &serde_json::Value) -> OutputStream {
+        let collection = req["collection"].as_str().unwrap_or("");
+        let id = req["id"].as_str().unwrap_or("");
+        let data = req["data"].as_object().cloned().unwrap_or_default();
+        let mut state = self.state.lock();
+        let row = state
+            .collections
+            .get_mut(collection)
+            .and_then(|rows| rows.iter_mut().find(|r| r["id"].as_str() == Some(id)));
+        let Some(row) = row else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::NOT_FOUND,
+                format!("fake-db: {collection}/{id} not found"),
+            ));
+        };
+        // Merge the patch into the stored flat row — fields absent from
+        // `data` are retained, mirroring the production `UPDATE … SET` path.
+        if let Some(obj) = row.as_object_mut() {
+            for (k, v) in data {
+                obj.insert(k, v);
+            }
+        }
+        // Respond with the updated record in wire format, like production.
+        let body = serde_json::to_vec(&to_record(row)).unwrap();
+        OutputStream::respond(body)
     }
 
-    fn handle_delete(&self, _req: &serde_json::Value) -> OutputStream {
-        OutputStream::respond(b"{}".to_vec())
+    fn handle_delete(&self, req: &serde_json::Value) -> OutputStream {
+        let collection = req["collection"].as_str().unwrap_or("");
+        let id = req["id"].as_str().unwrap_or("");
+        let mut state = self.state.lock();
+        let removed = state.collections.get_mut(collection).is_some_and(|rows| {
+            let before = rows.len();
+            rows.retain(|r| r["id"].as_str() != Some(id));
+            rows.len() < before
+        });
+        if !removed {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::NOT_FOUND,
+                format!("fake-db: {collection}/{id} not found"),
+            ));
+        }
+        // Production `database.delete` responds with an empty body.
+        OutputStream::respond(Vec::new())
     }
 
     fn handle_count(&self, req: &serde_json::Value) -> OutputStream {
@@ -255,33 +297,62 @@ impl FakeDb {
         let state = self.state.lock();
         let empty = Vec::new();
         let rows = state.collections.get(collection).unwrap_or(&empty);
-        let n = rows
-            .iter()
-            .filter(|r| row_matches_filters(r, &filters))
-            .count();
+        let n = match matching_rows(rows, &filters) {
+            Ok(m) => m.len(),
+            Err(e) => return OutputStream::error(e),
+        };
         let body = serde_json::to_vec(&serde_json::json!({ "count": n })).unwrap();
         OutputStream::respond(body)
     }
 }
 
-fn row_matches_filters(row: &serde_json::Value, filters: &[serde_json::Value]) -> bool {
-    for f in filters {
-        let field = f["field"].as_str().unwrap_or("");
-        let op = f["operator"]
-            .as_str()
-            .or_else(|| f["op"].as_str())
-            .unwrap_or("eq");
-        let expected = &f["value"];
-        let actual = &row[field];
-        let matched = match op {
-            "eq" | "Equal" | "=" => actual == expected,
-            _ => false,
-        };
-        if !matched {
-            return false;
+/// Collect the rows matching all wire-format filters, in seed order.
+fn matching_rows<'a>(
+    rows: &'a [serde_json::Value],
+    filters: &[serde_json::Value],
+) -> Result<Vec<&'a serde_json::Value>, WaferError> {
+    let mut matching = Vec::new();
+    for row in rows {
+        if row_matches_filters(row, filters)? {
+            matching.push(row);
         }
     }
-    true
+    Ok(matching)
+}
+
+/// Evaluate production wire-format filters against a flat seeded row.
+///
+/// Operator strings go through [`FilterOp::parse_wire`] — the parser the
+/// production database handler uses — so unknown spellings fail with
+/// `INVALID_ARGUMENT` instead of silently matching nothing. The fake only
+/// implements `Equal`; any other (valid) operator also errors loudly so a
+/// fixture gap can't masquerade as an empty result set.
+fn row_matches_filters(
+    row: &serde_json::Value,
+    filters: &[serde_json::Value],
+) -> Result<bool, WaferError> {
+    for f in filters {
+        let field = f["field"].as_str().unwrap_or("");
+        // A missing operator defaults to `eq`, matching the serde default on
+        // the production `wire::FilterDef`.
+        let op = FilterOp::parse_wire(f["operator"].as_str().unwrap_or("eq"))?;
+        let expected = &f["value"];
+        let actual = &row[field];
+        match op {
+            FilterOp::Equal => {
+                if actual != expected {
+                    return Ok(false);
+                }
+            }
+            other => {
+                return Err(WaferError::new(
+                    ErrorCode::INVALID_ARGUMENT,
+                    format!("fake-db: filter operator {other:?} not implemented (only Equal)"),
+                ));
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Very small id generator — good enough for tests; not cryptographically random.
@@ -310,6 +381,117 @@ mod tests {
         let db = FakeDb::new();
         db.set_failure(FailureMode::Unavailable);
         assert!(matches!(db.state.lock().failure, FailureMode::Unavailable));
+    }
+
+    #[test]
+    fn equal_filter_matches() {
+        let row = json!({"id": "u1", "age": 30});
+        let eq = json!({"field": "age", "operator": "eq", "value": 30});
+        assert!(row_matches_filters(&row, &[eq]).unwrap());
+        let ne = json!({"field": "age", "operator": "=", "value": 31});
+        assert!(!row_matches_filters(&row, &[ne]).unwrap());
+        // Missing operator defaults to `eq`, like `wire::FilterDef`.
+        let default_op = json!({"field": "id", "value": "u1"});
+        assert!(row_matches_filters(&row, &[default_op]).unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_mutates_row_and_returns_record() {
+        let db = FakeDb::new();
+        db.seed(
+            "users",
+            vec![json!({"id": "u1", "name": "Alice", "age": 30})],
+        );
+        let out = db.handle_update(&json!({
+            "collection": "users",
+            "id": "u1",
+            "data": {"name": "Bob"},
+        }));
+        let buf = out.collect_buffered().await.expect("update should succeed");
+        let resp: serde_json::Value = serde_json::from_slice(&buf.body).unwrap();
+        assert_eq!(resp["id"], "u1");
+        assert_eq!(resp["data"]["name"], "Bob");
+        assert_eq!(resp["data"]["age"], 30, "untouched fields are retained");
+
+        // The stored row actually changed.
+        let state = db.state.lock();
+        assert_eq!(state.collections["users"][0]["name"], "Bob");
+    }
+
+    #[tokio::test]
+    async fn update_missing_row_is_not_found() {
+        let db = FakeDb::new();
+        let out = db.handle_update(&json!({
+            "collection": "users",
+            "id": "nope",
+            "data": {"name": "Bob"},
+        }));
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::NOT_FOUND);
+            }
+            other => panic!("expected NOT_FOUND error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_removes_row_and_missing_is_not_found() {
+        let db = FakeDb::new();
+        db.seed("users", vec![json!({"id": "u1"}), json!({"id": "u2"})]);
+
+        let out = db.handle_delete(&json!({"collection": "users", "id": "u1"}));
+        let buf = out.collect_buffered().await.expect("delete should succeed");
+        assert!(
+            buf.body.is_empty(),
+            "production database.delete responds with an empty body"
+        );
+        assert_eq!(db.state.lock().collections["users"].len(), 1);
+
+        // Deleting the same row again fails loudly.
+        let out = db.handle_delete(&json!({"collection": "users", "id": "u1"}));
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::NOT_FOUND);
+            }
+            other => panic!("expected NOT_FOUND error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn filters_reject_unknown_and_unimplemented_operators() {
+        let db = FakeDb::new();
+        db.seed("users", vec![json!({"id": "u1", "age": 30})]);
+
+        // Unknown operator spelling → INVALID_ARGUMENT (same as production;
+        // the old fake accepted "Equal" and an undocumented "op" key).
+        let out = db.handle_list(&json!({
+            "collection": "users",
+            "filters": [{"field": "age", "operator": "Equal", "value": 30}],
+        }));
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::INVALID_ARGUMENT);
+            }
+            other => panic!("expected INVALID_ARGUMENT error terminal, got {other:?}"),
+        }
+
+        // Valid operator the fake doesn't implement → loud error, not
+        // "matches nothing".
+        let out = db.handle_count(&json!({
+            "collection": "users",
+            "filters": [{"field": "age", "operator": "gt", "value": 10}],
+        }));
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::INVALID_ARGUMENT);
+                assert!(
+                    e.message.contains("not implemented"),
+                    "message: {}",
+                    e.message
+                );
+            }
+            other => panic!("expected INVALID_ARGUMENT error terminal, got {other:?}"),
+        }
     }
 
     use wafer_run::Wafer;
