@@ -9,12 +9,28 @@
 
 #![warn(missing_docs)]
 
-mod mime;
-
 use std::{path::Path, sync::OnceLock};
 
 use wafer_block::*;
 use wafer_core::clients::storage as store;
+
+/// Default values for the block's six config keys.
+///
+/// Single source of truth: rendered into the [`ConfigVar`] declarations in
+/// [`Block::info`], applied by [`WebConfig::from_block_config`] when a key
+/// is unset, and used via [`WebConfig::default`] when `handle()` runs
+/// before `lifecycle(Init)` resolved a config.
+const DEFAULT_WEB_ROOT: &str = "public";
+/// Default URL prefix (none stripped).
+const DEFAULT_WEB_PREFIX: &str = "";
+/// Default SPA mode (off — missing paths 404).
+const DEFAULT_WEB_SPA: bool = false;
+/// Default index file name.
+const DEFAULT_WEB_INDEX: &str = "index.html";
+/// Default Cache-Control max-age (seconds) for unhashed assets.
+const DEFAULT_CACHE_MAX_AGE: u32 = 3600;
+/// Default Cache-Control max-age (seconds) for content-hashed assets.
+const DEFAULT_IMMUTABLE_MAX_AGE: u32 = 31_536_000;
 
 /// HTTP-handler block that serves static files from `wafer-run/storage`
 /// with caching, clean-URL resolution, and optional SPA fallback.
@@ -88,7 +104,7 @@ impl WebBlock {
                 let content_type = if info.content_type.is_empty()
                     || info.content_type == "application/octet-stream"
                 {
-                    mime::mime_for_ext(Path::new(key)).to_string()
+                    wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
                 } else {
                     info.content_type
                 };
@@ -126,23 +142,34 @@ struct WebConfig {
     immutable_max_age: u32,
 }
 
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            folder: DEFAULT_WEB_ROOT.to_string(),
+            prefix: DEFAULT_WEB_PREFIX.to_string(),
+            spa: DEFAULT_WEB_SPA,
+            index_file: DEFAULT_WEB_INDEX.to_string(),
+            cache_max_age: DEFAULT_CACHE_MAX_AGE,
+            immutable_max_age: DEFAULT_IMMUTABLE_MAX_AGE,
+        }
+    }
+}
+
 impl WebConfig {
     fn from_block_config(config: &BlockConfig) -> Self {
-        let str_or = |key: &str, default: &str| -> String {
-            let v = config.str(key);
-            if v.is_empty() {
-                default.to_string()
-            } else {
-                v.to_string()
-            }
-        };
         Self {
-            folder: str_or("web_root", "public"),
+            folder: config.str_or("web_root", DEFAULT_WEB_ROOT).to_string(),
             prefix: config.str("web_prefix").to_string(),
-            spa: config.str("web_spa").parse::<bool>().unwrap_or(false),
-            index_file: str_or("web_index", "index.html"),
-            cache_max_age: config.str("cache_max_age").parse().unwrap_or(3600),
-            immutable_max_age: config.str("immutable_max_age").parse().unwrap_or(31536000),
+            spa: config.bool("web_spa").unwrap_or(DEFAULT_WEB_SPA),
+            index_file: config.str_or("web_index", DEFAULT_WEB_INDEX).to_string(),
+            cache_max_age: config
+                .str("cache_max_age")
+                .parse()
+                .unwrap_or(DEFAULT_CACHE_MAX_AGE),
+            immutable_max_age: config
+                .str("immutable_max_age")
+                .parse()
+                .unwrap_or(DEFAULT_IMMUTABLE_MAX_AGE),
         }
     }
 }
@@ -283,40 +310,40 @@ impl Block for WebBlock {
             ConfigVar::new(
                 "web_root",
                 "Storage folder under which static files are served.",
-                "public",
+                DEFAULT_WEB_ROOT,
             )
             .name("Web Root"),
             ConfigVar::new(
                 "web_prefix",
                 "Optional URL path prefix that must precede every served \
                  file (stripped before the storage lookup).",
-                "",
+                DEFAULT_WEB_PREFIX,
             )
             .name("URL Prefix"),
             ConfigVar::new(
                 "web_spa",
                 "When true, requests for non-existent files fall back to \
                  the index file instead of 404 (single-page-app mode).",
-                "false",
+                &DEFAULT_WEB_SPA.to_string(),
             )
             .name("SPA Mode"),
             ConfigVar::new(
                 "web_index",
                 "File served at the prefix root and as the SPA fallback.",
-                "index.html",
+                DEFAULT_WEB_INDEX,
             )
             .name("Index File"),
             ConfigVar::new(
                 "cache_max_age",
                 "Cache-Control max-age (seconds) for unhashed assets.",
-                "3600",
+                &DEFAULT_CACHE_MAX_AGE.to_string(),
             )
             .name("Cache Max Age"),
             ConfigVar::new(
                 "immutable_max_age",
                 "Cache-Control max-age (seconds) for content-hashed assets, \
                  which also receive the `immutable` directive.",
-                "31536000",
+                &DEFAULT_IMMUTABLE_MAX_AGE.to_string(),
             )
             .name("Immutable Max Age"),
         ])
@@ -333,14 +360,7 @@ impl Block for WebBlock {
             });
         }
 
-        let config = self.config.get().cloned().unwrap_or_else(|| WebConfig {
-            folder: "public".to_string(),
-            prefix: String::new(),
-            spa: false,
-            index_file: "index.html".to_string(),
-            cache_max_age: 3600,
-            immutable_max_age: 31536000,
-        });
+        let config = self.config.get().cloned().unwrap_or_default();
 
         Self::serve_file(ctx, &msg, &config).await
     }
@@ -454,6 +474,28 @@ mod tests {
             message: msg.to_string(),
             meta: vec![],
         }
+    }
+
+    #[test]
+    fn declared_config_defaults_match_web_config_default() {
+        let info = WebBlock::new().info();
+        let default_of = |key: &str| {
+            info.flow_config
+                .iter()
+                .find(|v| v.key == key)
+                .map(|v| v.default.clone())
+                .expect("ConfigVar must be declared")
+        };
+        let cfg = WebConfig::default();
+        assert_eq!(default_of("web_root"), cfg.folder);
+        assert_eq!(default_of("web_prefix"), cfg.prefix);
+        assert_eq!(default_of("web_spa"), cfg.spa.to_string());
+        assert_eq!(default_of("web_index"), cfg.index_file);
+        assert_eq!(default_of("cache_max_age"), cfg.cache_max_age.to_string());
+        assert_eq!(
+            default_of("immutable_max_age"),
+            cfg.immutable_max_age.to_string(),
+        );
     }
 
     #[tokio::test]

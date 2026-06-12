@@ -8,5 +8,3 @@
 #![warn(missing_docs)]
 
 pub mod service;
-#[cfg(feature = "toml")]
-pub mod toml;

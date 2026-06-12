@@ -34,6 +34,44 @@ impl BlockConfig {
             .unwrap_or("")
     }
 
+    /// Return the string-typed value for `key`, or `default` when the key
+    /// is missing, not a JSON string, or empty.
+    pub fn str_or<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
+        let v = self.str(key);
+        if v.is_empty() {
+            default
+        } else {
+            v
+        }
+    }
+
+    /// Return the boolean value for `key`. Accepts a JSON boolean or a
+    /// string `"true"` / `"false"` — block config arrives in both shapes
+    /// (typed JSON from `add_block_config`, stringified values from
+    /// flow-step config; `parse_config_map` already treats them as
+    /// interchangeable). Returns `None` when the key is missing or the
+    /// value is neither shape.
+    pub fn bool(&self, key: &str) -> Option<bool> {
+        match self.get(key)? {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Return the string entries of the JSON array at `key`, or `None`
+    /// when the key is missing or not an array. Non-string entries are
+    /// dropped.
+    pub fn str_array(&self, key: &str) -> Option<Vec<String>> {
+        let items = self.get(key)?.as_array()?;
+        Some(
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        )
+    }
+
     /// Return the raw JSON value for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.inner.as_ref().and_then(|c| c.get(key))
@@ -134,5 +172,78 @@ impl DispatchTarget {
             return Some(DispatchTarget::Flow(flow.to_string()));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LifecycleType;
+
+    fn config_from(json: &serde_json::Value) -> BlockConfig {
+        BlockConfig::from_event(&LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&json).expect("serialize test config"),
+        })
+    }
+
+    fn empty_config() -> BlockConfig {
+        BlockConfig::from_event(&LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn str_or_falls_back_on_missing_empty_or_non_string() {
+        let cfg = config_from(&serde_json::json!({
+            "set": "value",
+            "empty": "",
+            "number": 7,
+        }));
+        assert_eq!(cfg.str_or("set", "default"), "value");
+        assert_eq!(cfg.str_or("empty", "default"), "default");
+        assert_eq!(cfg.str_or("number", "default"), "default");
+        assert_eq!(cfg.str_or("missing", "default"), "default");
+        assert_eq!(empty_config().str_or("any", "default"), "default");
+    }
+
+    #[test]
+    fn bool_accepts_json_bool_and_string_forms() {
+        let cfg = config_from(&serde_json::json!({
+            "typed_true": true,
+            "typed_false": false,
+            "string_true": "true",
+            "string_false": "false",
+            "garbage": "yes",
+            "number": 1,
+        }));
+        assert_eq!(cfg.bool("typed_true"), Some(true));
+        assert_eq!(cfg.bool("typed_false"), Some(false));
+        assert_eq!(cfg.bool("string_true"), Some(true));
+        assert_eq!(cfg.bool("string_false"), Some(false));
+        assert_eq!(cfg.bool("garbage"), None);
+        assert_eq!(cfg.bool("number"), None);
+        assert_eq!(cfg.bool("missing"), None);
+        assert_eq!(empty_config().bool("any"), None);
+    }
+
+    #[test]
+    fn str_array_keeps_strings_and_drops_other_entries() {
+        let cfg = config_from(&serde_json::json!({
+            "roles": ["admin", "developer"],
+            "mixed": [42, "kept", true],
+            "empty": [],
+            "not_array": "admin",
+        }));
+        assert_eq!(
+            cfg.str_array("roles"),
+            Some(vec!["admin".to_string(), "developer".to_string()]),
+        );
+        assert_eq!(cfg.str_array("mixed"), Some(vec!["kept".to_string()]));
+        assert_eq!(cfg.str_array("empty"), Some(Vec::new()));
+        assert_eq!(cfg.str_array("not_array"), None);
+        assert_eq!(cfg.str_array("missing"), None);
+        assert_eq!(empty_config().str_array("any"), None);
     }
 }

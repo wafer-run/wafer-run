@@ -5,7 +5,8 @@
 //! flows, and interface specs, plus a small static HTML UI for browsing them.
 //! Intended for operators and developers; access defaults to the `admin` role.
 
-use parking_lot::RwLock;
+use std::sync::OnceLock;
+
 use wafer_block::*;
 
 /// Access control policy for the inspector.
@@ -23,6 +24,12 @@ enum AccessPolicy {
     Roles(Vec<String>),
 }
 
+/// The policy applied when `lifecycle(Init)` supplied no override:
+/// require the `admin` role.
+fn default_policy() -> AccessPolicy {
+    AccessPolicy::Roles(vec!["admin".to_string()])
+}
+
 /// Read-only HTTP block that exposes the runtime's registered blocks, flows,
 /// and interface specs as JSON, plus a small HTML UI at `/ui`.
 ///
@@ -30,7 +37,10 @@ enum AccessPolicy {
 /// `/app`, `/blocks`, `/blocks/{name}`, `/flows`, `/flows/{id}`,
 /// `/interfaces`, `/ui`; any other path returns a counts summary.
 pub struct InspectorBlock {
-    policy: RwLock<AccessPolicy>,
+    /// Init-resolved access policy (write-once); [`default_policy`] applies
+    /// when Init supplied no override. Same `OnceLock` pattern as the other
+    /// infrastructure blocks.
+    policy: OnceLock<AccessPolicy>,
 }
 
 impl Default for InspectorBlock {
@@ -46,7 +56,7 @@ impl InspectorBlock {
     /// `{ "allow_anonymous": true }` or `{ "allowed_roles": ["..."] }`.
     pub fn new() -> Self {
         Self {
-            policy: RwLock::new(AccessPolicy::Roles(vec!["admin".to_string()])),
+            policy: OnceLock::new(),
         }
     }
 }
@@ -108,8 +118,8 @@ impl Block for InspectorBlock {
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Access control
         {
-            let policy = self.policy.read();
-            match &*policy {
+            let policy = self.policy.get_or_init(default_policy);
+            match policy {
                 AccessPolicy::Anonymous => {}
                 AccessPolicy::Authenticated => {
                     if msg.get_meta("auth.user_id").is_empty() {
@@ -259,28 +269,18 @@ impl Block for InspectorBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            if let Ok(config) = serde_json::from_slice::<serde_json::Value>(&event.data) {
-                // "allow_anonymous": true  → anyone can access
-                if config
-                    .get("allow_anonymous")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    *self.policy.write() = AccessPolicy::Anonymous;
-                    tracing::warn!(
-                        "inspector: anonymous access enabled — do not use in production"
-                    );
-                }
-                // "allowed_roles": ["admin", "developer"]  → only these roles
-                else if let Some(roles) = config.get("allowed_roles").and_then(|v| v.as_array()) {
-                    let role_list: Vec<String> = roles
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    if !role_list.is_empty() {
-                        tracing::info!("inspector: access restricted to roles: {:?}", role_list);
-                        *self.policy.write() = AccessPolicy::Roles(role_list);
-                    }
+            let config = BlockConfig::from_event(&event);
+            // "allow_anonymous": true  → anyone can access
+            if config.bool("allow_anonymous").unwrap_or(false) {
+                tracing::warn!("inspector: anonymous access enabled — do not use in production");
+                // Write-once: Init fires a single time per registration.
+                let _ = self.policy.set(AccessPolicy::Anonymous);
+            }
+            // "allowed_roles": ["admin", "developer"]  → only these roles
+            else if let Some(role_list) = config.str_array("allowed_roles") {
+                if !role_list.is_empty() {
+                    tracing::info!("inspector: access restricted to roles: {:?}", role_list);
+                    let _ = self.policy.set(AccessPolicy::Roles(role_list));
                 }
             }
         }
