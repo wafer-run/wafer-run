@@ -6389,12 +6389,10 @@ dependencies = [
 name = "wafer-run-node"
 version = "0.1.0"
 dependencies = [
- "base64ct",
  "napi",
  "napi-derive",
  "serde_json",
  "tokio",
- "wafer-block",
  "wafer-flow",
  "wafer-run",
 ]

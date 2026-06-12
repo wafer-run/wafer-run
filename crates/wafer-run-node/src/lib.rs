@@ -23,7 +23,7 @@ mod bindings {
     use napi::bindgen_prelude::*;
     use napi_derive::napi;
     use tokio::sync::RwLock;
-    use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
+    use wafer_run::{Message, StaticConfigSource, Wafer};
 
     /// The WAFER runtime, exposed as a JavaScript class.
     ///
@@ -76,23 +76,13 @@ mod bindings {
         /// Register a block or flow definition from a file path.
         ///
         /// If `path` ends with `.wasm`, registers a WASM block with the given name.
-        /// Otherwise, reads the file as a JSON flow definition.
+        /// Otherwise, reads the file as a JSON flow definition. See
+        /// [`wafer_run::embed::register_path`] for the dispatch rule.
         #[napi]
         pub async fn register(&self, name: String, path: String) -> Result<()> {
             let mut inner = self.inner.write().await;
-            if path.ends_with(".wasm") {
-                let block = WasmiBlock::load(&path)
-                    .map_err(|e| Error::from_reason(format!("failed to load WASM block: {e}")))?;
-                inner
-                    .register_block(&name, Arc::new(block))
-                    .map_err(|e| Error::from_reason(e.to_string()))?;
-            } else {
-                let json = std::fs::read_to_string(&path)
-                    .map_err(|e| Error::from_reason(format!("failed to read file: {e}")))?;
-                inner
-                    .add_flow_json(&json)
-                    .map_err(|e| Error::from_reason(format!("invalid WaferFlow JSON: {e}")))?;
-            }
+            wafer_run::embed::register_path(&mut inner, &name, &path)
+                .map_err(Error::from_reason)?;
             drop(inner);
             Ok(())
         }
@@ -147,12 +137,9 @@ mod bindings {
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
         /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
         ///
-        /// Note: `halt` payloads always use `body_base64` (Base64-encoded bytes)
-        /// instead of a `body` string — Halt may carry non-UTF-8 or empty bodies.
-        /// A `respond` payload carries `body` (a UTF-8 string) when the body is
-        /// valid UTF-8; when it is not, it carries `body_base64` (Base64-encoded
-        /// bytes) instead so binary bodies are never collapsed to `""`. Exactly
-        /// one of `body` / `body_base64` is present on a `respond`.
+        /// The wire format (including the `body` vs `body_base64` rules for
+        /// `respond` and `halt`) is documented on
+        /// [`wafer_run::embed::output_to_json`], which produces it.
         #[napi]
         pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
             let msg: Message = serde_json::from_str(&message_json)
@@ -164,83 +151,7 @@ mod bindings {
                 inner.run(&flow_id, msg, input).await
             };
 
-            let json = match output.collect_buffered().await {
-                Ok(buf) => {
-                    let meta_obj: serde_json::Value = buf
-                        .meta
-                        .iter()
-                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
-                        .collect::<serde_json::Map<_, _>>()
-                        .into();
-                    // Emit `body` for valid UTF-8 (the common case, human-readable
-                    // wire shape); fall back to `body_base64` for non-UTF-8 bodies
-                    // so binary responses are not silently collapsed to "". This
-                    // mirrors the `halt` branch, which always base64-encodes.
-                    match String::from_utf8(buf.body) {
-                        Ok(body_str) => serde_json::json!({
-                            "action": "respond",
-                            "body": body_str,
-                            "meta": meta_obj,
-                        })
-                        .to_string(),
-                        Err(e) => {
-                            use base64ct::{Base64, Encoding};
-                            let body_b64 = Base64::encode_string(e.as_bytes());
-                            serde_json::json!({
-                                "action": "respond",
-                                "body_base64": body_b64,
-                                "meta": meta_obj,
-                            })
-                            .to_string()
-                        }
-                    }
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Error(err)) => {
-                    serde_json::json!({
-                        "action": "error",
-                        "error": {
-                            "code": format!("{:?}", err.code),
-                            "message": err.message,
-                        }
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
-                    serde_json::json!({ "action": "drop" }).to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Halt(buf)) => {
-                    use base64ct::{Base64, Encoding};
-                    let body_b64 = Base64::encode_string(&buf.body);
-                    let meta_obj: serde_json::Value = buf
-                        .meta
-                        .iter()
-                        .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
-                        .collect::<serde_json::Map<_, _>>()
-                        .into();
-                    serde_json::json!({
-                        "action": "halt",
-                        "body_base64": body_b64,
-                        "meta": meta_obj,
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => {
-                    serde_json::json!({
-                        "action": "continue",
-                        "message": serde_json::to_value(&msg).unwrap_or_default(),
-                    })
-                    .to_string()
-                }
-                Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => {
-                    serde_json::json!({
-                        "action": "error",
-                        "error": { "code": "Internal", "message": "stream ended without terminal event" }
-                    })
-                    .to_string()
-                }
-            };
-
-            Ok(json)
+            Ok(wafer_run::embed::output_to_json(output).await)
         }
 
         /// Get info about all registered flows as a JSON array.
