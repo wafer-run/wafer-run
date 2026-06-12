@@ -71,15 +71,19 @@ impl Block for NotFoundBlock {
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let path = msg.path().to_string();
-        let mut out_msg = msg;
-        out_msg.set_meta("resp.status", "404");
         let body = serde_json::to_vec(&serde_json::json!({
             "error": "not found",
             "path": path,
             "endpoints": ["/greet?name=Alice", "/health", "/_inspector/ui"]
         }))
         .unwrap_or_default();
-        OutputStream::respond(body)
+        OutputStream::respond_with_meta(
+            body,
+            vec![MetaEntry {
+                key: META_RESP_STATUS.to_string(),
+                value: "404".to_string(),
+            }],
+        )
     }
 }
 
