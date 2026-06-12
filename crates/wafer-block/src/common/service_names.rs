@@ -145,4 +145,77 @@ impl ServiceOp {
     pub const AUTH_REQUIRE_ROLE: &str = "auth.require_role";
     /// Fetch the authenticated user's profile.
     pub const AUTH_USER_PROFILE: &str = "auth.user_profile";
+
+    // -----------------------------------------------------------------------
+    // Op-family slices — the canonical per-service op lists.
+    //
+    // These are the single source of truth for the interface action catalogs
+    // in `crate::interfaces` (and through them the dispatcher's action
+    // validation in `wafer-run`). Adding a new op constant to one of these
+    // families requires adding it to the family slice AND declaring an
+    // `ActionSpec` for it in the matching `*_action_spec` fn in
+    // `crate::interfaces`; the drift tests there enforce slice ↔ catalog
+    // agreement. Families without a well-known interface catalog (vector,
+    // embedding, llm, image, auth) intentionally have no slice yet.
+    // -----------------------------------------------------------------------
+
+    /// Every `database.*` op — drives the `database@v1` action catalog in
+    /// [`crate::interfaces::database_v1`].
+    pub const DATABASE_OPS: &[&str] = &[
+        Self::DATABASE_GET,
+        Self::DATABASE_LIST,
+        Self::DATABASE_CREATE,
+        Self::DATABASE_UPDATE,
+        Self::DATABASE_UPDATE_WHERE,
+        Self::DATABASE_DELETE,
+        Self::DATABASE_DELETE_WHERE,
+        Self::DATABASE_DELETE_WHERE_COUNT,
+        Self::DATABASE_TAKE_WHERE,
+        Self::DATABASE_COUNT,
+        Self::DATABASE_SUM,
+        Self::DATABASE_INCREMENT_FIELD_WHERE,
+        Self::DATABASE_QUERY,
+        Self::DATABASE_QUERY_RAW,
+        Self::DATABASE_EXECUTE,
+        Self::DATABASE_EXEC_RAW,
+    ];
+
+    /// Every `storage.*` op — drives the `storage@v1` action catalog in
+    /// [`crate::interfaces::storage_v1`].
+    pub const STORAGE_OPS: &[&str] = &[
+        Self::STORAGE_PUT,
+        Self::STORAGE_GET,
+        Self::STORAGE_DELETE,
+        Self::STORAGE_LIST,
+        Self::STORAGE_CREATE_FOLDER,
+        Self::STORAGE_DELETE_FOLDER,
+        Self::STORAGE_LIST_FOLDERS,
+    ];
+
+    /// Every `crypto.*` op — drives the `crypto@v1` action catalog in
+    /// [`crate::interfaces::crypto_v1`].
+    pub const CRYPTO_OPS: &[&str] = &[
+        Self::CRYPTO_HASH,
+        Self::CRYPTO_COMPARE_HASH,
+        Self::CRYPTO_SIGN,
+        Self::CRYPTO_VERIFY,
+        Self::CRYPTO_RANDOM_BYTES,
+    ];
+
+    /// Every `network.*` op — drives the `http-client@v1` action catalog in
+    /// [`crate::interfaces::http_client_v1`].
+    pub const NETWORK_OPS: &[&str] = &[Self::NETWORK_DO_REQUEST];
+
+    /// Every `logger.*` op — drives the `logger@v1` action catalog in
+    /// [`crate::interfaces::logger_v1`].
+    pub const LOGGER_OPS: &[&str] = &[
+        Self::LOGGER_DEBUG,
+        Self::LOGGER_INFO,
+        Self::LOGGER_WARN,
+        Self::LOGGER_ERROR,
+    ];
+
+    /// Every `config.*` op — drives the `config@v1` action catalog in
+    /// [`crate::interfaces::config_v1`].
+    pub const CONFIG_OPS: &[&str] = &[Self::CONFIG_GET, Self::CONFIG_SET];
 }
