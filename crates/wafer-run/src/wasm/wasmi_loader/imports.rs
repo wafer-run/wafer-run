@@ -1,7 +1,7 @@
 //! Host-side wasmi imports: [`build_linker`] registers every `func_wrap`
-//! the guest can call (the `wafer` ABI, streaming call ABI, and WASI shims),
-//! plus the development `register_spike_imports`. Split out of the loader so
-//! the registration code lives apart from the [`super::WasmiBlock`] runtime.
+//! the guest can call (the `wafer` ABI, streaming call ABI, and WASI shims).
+//! Split out of the loader so the registration code lives apart from the
+//! [`super::WasmiBlock`] runtime.
 
 use tracing::warn;
 use wasmi::{Caller, Engine, Error as WasmiError, Linker};
@@ -99,6 +99,12 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
     // Synchronous host imports (no trap): init, write_chunk, close.
     // Trap+resume host imports (need async dispatch or guest allocation):
     // finish, read_chunk, take_error.
+    //
+    // Performance envelope (measured by the pre-implementation spike harness,
+    // removed once this ABI landed): per-resumable-call dispatch overhead
+    // < 100 µs/chunk at 1 KiB chunks; sustained host→guest throughput
+    // ≥ 100 MiB/s at 512 KiB chunks (empirical ceiling ~140 MiB/s —
+    // `memory.write` into linear memory dominates at large chunk sizes).
 
     // __wafer_host_stream_init(name_ptr, name_len, msg_ptr, msg_len) -> i64
     //
@@ -621,107 +627,5 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking random_get stub: {e}")))?;
 
-    // ---- Spike-only host imports (gated behind the `spike` feature) ----
-    //
-    // These imports exist solely to measure per-chunk overhead of the
-    // proposed streaming ABI design. They are NOT part of the production
-    // ABI and are removed when the real `__wafer_host_stream_*` imports
-    // land in Task 7.
-    #[cfg(feature = "spike")]
-    register_spike_imports(&mut linker)?;
-
     Ok(linker)
-}
-
-// ---------------------------------------------------------------------------
-// Spike host imports (gate validation only)
-// ---------------------------------------------------------------------------
-
-/// Throwaway host imports used by `tests/streaming_spike.rs` to measure
-/// per-chunk overhead of N back-to-back host→guest data transfers.
-///
-/// The host writes a recognisable byte pattern (`b[i] = i % 256`) into a
-/// guest-provided buffer. The guest verifies the pattern and accumulates the
-/// total bytes read. When the host's per-thread call counter reaches the
-/// configured target, `next_chunk` returns 0 (end-of-stream) and resets state.
-///
-/// This deliberately avoids re-entering `__wafer_alloc` from inside a host
-/// call — the streaming ABI design assumes the host writes into a buffer the
-/// guest has pre-allocated. Recursive guest calls inside a wasmi host
-/// function would also be a poor stand-in for the real ABI's straight-line
-/// per-chunk cost.
-#[cfg(feature = "spike")]
-pub(super) fn register_spike_imports(
-    linker: &mut Linker<WasmiHostState>,
-) -> Result<(), RuntimeError> {
-    use std::cell::RefCell;
-
-    thread_local! {
-        /// (current chunk count, target chunk count). Reset to (0, target)
-        /// by `set_target` and incremented by each `next_chunk` call. When
-        /// `current == target` the next `next_chunk` returns 0 and resets.
-        static SPIKE_STATE: RefCell<(u32, u32)> = const { RefCell::new((0, 100)) };
-    }
-
-    // wafer_spike::set_target(n: i32)
-    //
-    // Resets the per-thread chunk counter and sets the target number of
-    // chunks before `next_chunk` returns end-of-stream.
-    linker
-        .func_wrap(
-            "wafer_spike",
-            "set_target",
-            |_caller: Caller<WasmiHostState>, n: i32| {
-                SPIKE_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    *s = (0, n.max(0) as u32);
-                });
-            },
-        )
-        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::set_target: {e}")))?;
-
-    // wafer_spike::next_chunk(buf_ptr: i32, chunk_size: i32) -> i32
-    //
-    // If `current < target`: writes `chunk_size` bytes of the pattern
-    // `b[i] = i % 256` to guest memory at `buf_ptr`, increments the counter,
-    // returns 1.
-    // Otherwise: resets the counter to 0 (target preserved) and returns 0.
-    linker
-        .func_wrap(
-            "wafer_spike",
-            "next_chunk",
-            |mut caller: Caller<WasmiHostState>, buf_ptr: i32, chunk_size: i32| -> i32 {
-                let done = SPIKE_STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    if st.0 >= st.1 {
-                        st.0 = 0;
-                        true
-                    } else {
-                        st.0 += 1;
-                        false
-                    }
-                });
-                if done {
-                    return 0;
-                }
-                let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
-                    return 0;
-                };
-                // Build the recognisable pattern. For 512 KiB this allocates
-                // a 512 KiB Vec per call — that's exactly the cost we want
-                // to measure (host-side encode + guest write).
-                let n = chunk_size.max(0) as usize;
-                let mut buf = vec![0u8; n];
-                for (i, b) in buf.iter_mut().enumerate() {
-                    *b = (i % 256) as u8;
-                }
-                if memory.write(&mut caller, buf_ptr as usize, &buf).is_err() {
-                    return 0;
-                }
-                1
-            },
-        )
-        .map_err(|e| RuntimeError::Wasm(format!("linking wafer_spike::next_chunk: {e}")))?;
-
-    Ok(())
 }
