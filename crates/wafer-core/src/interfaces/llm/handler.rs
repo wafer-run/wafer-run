@@ -20,6 +20,7 @@ use wafer_block::{
 };
 
 use super::service::{self, LlmService};
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 // ---------- Wire <-> service conversions ----------
 //
@@ -257,15 +258,7 @@ pub async fn handle_message(
 fn chat(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
     // Decode up front — failures become an error stream rather than a malformed
     // chunk halfway through.
-    let wire_req: wire::ChatRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid llm.chat request: {}", e.message),
-            ));
-        }
-    };
+    let wire_req = decode_or_err!(body, wire::ChatRequest, "llm.chat");
     let req = wire_chat_request_to_service(wire_req);
 
     // The producer closure must be `'static`; clone the `Arc` into it.
@@ -310,15 +303,7 @@ fn chat(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
 }
 
 fn load_model(service: &Arc<dyn LlmService>, body: &[u8]) -> OutputStream {
-    let req: wire::LoadModelRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid llm.load_model request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::LoadModelRequest, "llm.load_model");
 
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);
@@ -361,13 +346,7 @@ async fn list_models(service: &dyn LlmService) -> OutputStream {
         Ok(models) => {
             let wire_models: Vec<wire::ModelInfo> =
                 models.into_iter().map(service_model_info_to_wire).collect();
-            match codec::encode(&wire_models) {
-                Ok(bytes) => OutputStream::respond(bytes),
-                Err(e) => OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("encoding list_models response: {}", e.message),
-                )),
-            }
+            to_output(wire_models)
         }
         Err(e) => {
             let (code, msg) = llm_error_to_block_error(e);
@@ -377,26 +356,9 @@ async fn list_models(service: &dyn LlmService) -> OutputStream {
 }
 
 async fn status(service: &dyn LlmService, body: &[u8]) -> OutputStream {
-    let req: wire::StatusRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid llm.status request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::StatusRequest, "llm.status");
     match service.status(&req.backend_id, &req.model_id).await {
-        Ok(s) => {
-            let wire_status = service_model_status_to_wire(s);
-            match codec::encode(&wire_status) {
-                Ok(bytes) => OutputStream::respond(bytes),
-                Err(e) => OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("encoding status response: {}", e.message),
-                )),
-            }
-        }
+        Ok(s) => to_output(service_model_status_to_wire(s)),
         Err(e) => {
             let (code, msg) = llm_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("status: {msg}")))
@@ -405,15 +367,7 @@ async fn status(service: &dyn LlmService, body: &[u8]) -> OutputStream {
 }
 
 async fn unload_model(service: &dyn LlmService, body: &[u8]) -> OutputStream {
-    let req: wire::UnloadModelRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid llm.unload_model request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::UnloadModelRequest, "llm.unload_model");
     match service.unload_model(&req.backend_id, &req.model_id).await {
         Ok(()) => OutputStream::respond(vec![]),
         Err(e) => {
