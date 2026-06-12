@@ -17,37 +17,12 @@ use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_out
 
 // --- Helpers ---
 
-/// Parse a wire-format filter operator string into the typed [`FilterOp`].
-///
-/// Returns `Err` for unknown operators so the handler can surface
-/// `INVALID_ARGUMENT` to the caller rather than silently coercing unknown
-/// operators to `Equal` (which would change semantics of every malformed
-/// query into a `WHERE field = value` match — see SEC-021).
-fn parse_filter_op(op: &str) -> Result<FilterOp, WaferError> {
-    match op {
-        "eq" | "=" | "equal" => Ok(FilterOp::Equal),
-        "neq" | "!=" | "not_equal" => Ok(FilterOp::NotEqual),
-        "gt" | ">" | "greater_than" => Ok(FilterOp::GreaterThan),
-        "gte" | ">=" | "greater_equal" => Ok(FilterOp::GreaterEqual),
-        "lt" | "<" | "less_than" => Ok(FilterOp::LessThan),
-        "lte" | "<=" | "less_equal" => Ok(FilterOp::LessEqual),
-        "like" => Ok(FilterOp::Like),
-        "in" => Ok(FilterOp::In),
-        "is_null" => Ok(FilterOp::IsNull),
-        "is_not_null" => Ok(FilterOp::IsNotNull),
-        other => Err(WaferError::new(
-            ErrorCode::INVALID_ARGUMENT,
-            format!("unknown filter operator: {other:?}"),
-        )),
-    }
-}
-
 fn convert_filters(defs: Vec<wire::FilterDef>) -> Result<Vec<Filter>, WaferError> {
     defs.into_iter()
         .map(|f| {
             Ok(Filter {
                 field: f.field,
-                operator: parse_filter_op(&f.operator)?,
+                operator: FilterOp::parse_wire(&f.operator)?,
                 value: f.value,
             })
         })
@@ -423,30 +398,8 @@ mod tests {
         assert_eq!(w.message, "record not found");
     }
 
-    #[test]
-    fn parse_filter_op_known_ops() {
-        assert!(matches!(parse_filter_op("eq"), Ok(FilterOp::Equal)));
-        assert!(matches!(parse_filter_op("="), Ok(FilterOp::Equal)));
-        assert!(matches!(parse_filter_op("neq"), Ok(FilterOp::NotEqual)));
-        assert!(matches!(parse_filter_op("like"), Ok(FilterOp::Like)));
-        assert!(matches!(parse_filter_op("is_null"), Ok(FilterOp::IsNull)));
-    }
-
-    #[test]
-    fn parse_filter_op_rejects_unknown() {
-        let err = parse_filter_op("bogus").expect_err("unknown op must be rejected");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
-        assert!(
-            err.message.contains("unknown filter operator"),
-            "message: {}",
-            err.message
-        );
-
-        // Empty string also rejected (was previously coerced to Equal).
-        let err = parse_filter_op("").expect_err("empty op must be rejected");
-        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
-    }
-
+    // `FilterOp::parse_wire` unit tests live next to the parser in
+    // `wafer-block/src/db.rs`; this covers the handler's use of it.
     #[test]
     fn convert_filters_rejects_bad_op() {
         let defs = vec![

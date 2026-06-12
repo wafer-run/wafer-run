@@ -5,6 +5,8 @@
 //! arise if `wafer-sql-utils` depended on `wafer-core` for `Filter` etc.
 //! while `wafer-core` needed `wafer-sql-utils` for the `Statement` type.
 
+use crate::{common::ErrorCode, WaferError};
+
 /// Configures a list query (filters, sort, pagination).
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
@@ -60,6 +62,35 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
+    /// Parse a wire-format filter operator string into the typed [`FilterOp`].
+    ///
+    /// This is the single owner of the `database@v1` wire operator grammar —
+    /// the runtime database handler and test fakes both parse through here so
+    /// the accepted spellings cannot drift.
+    ///
+    /// Returns `Err` for unknown operators so callers can surface
+    /// `INVALID_ARGUMENT` rather than silently coercing unknown operators to
+    /// `Equal` (which would change semantics of every malformed query into a
+    /// `WHERE field = value` match — see SEC-021).
+    pub fn parse_wire(op: &str) -> Result<Self, WaferError> {
+        match op {
+            "eq" | "=" | "equal" => Ok(Self::Equal),
+            "neq" | "!=" | "not_equal" => Ok(Self::NotEqual),
+            "gt" | ">" | "greater_than" => Ok(Self::GreaterThan),
+            "gte" | ">=" | "greater_equal" => Ok(Self::GreaterEqual),
+            "lt" | "<" | "less_than" => Ok(Self::LessThan),
+            "lte" | "<=" | "less_equal" => Ok(Self::LessEqual),
+            "like" => Ok(Self::Like),
+            "in" => Ok(Self::In),
+            "is_null" => Ok(Self::IsNull),
+            "is_not_null" => Ok(Self::IsNotNull),
+            other => Err(WaferError::new(
+                ErrorCode::INVALID_ARGUMENT,
+                format!("unknown filter operator: {other:?}"),
+            )),
+        }
+    }
+
     /// Render the operator as its SQL keyword form.
     pub fn as_sql(&self) -> &'static str {
         match self {
@@ -84,4 +115,43 @@ pub struct SortField {
     pub field: String,
     /// `true` for descending order, `false` for ascending.
     pub desc: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_wire_known_ops() {
+        assert!(matches!(FilterOp::parse_wire("eq"), Ok(FilterOp::Equal)));
+        assert!(matches!(FilterOp::parse_wire("="), Ok(FilterOp::Equal)));
+        assert!(matches!(
+            FilterOp::parse_wire("neq"),
+            Ok(FilterOp::NotEqual)
+        ));
+        assert!(matches!(FilterOp::parse_wire("like"), Ok(FilterOp::Like)));
+        assert!(matches!(
+            FilterOp::parse_wire("is_null"),
+            Ok(FilterOp::IsNull)
+        ));
+    }
+
+    #[test]
+    fn parse_wire_rejects_unknown() {
+        let err = FilterOp::parse_wire("bogus").expect_err("unknown op must be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+        assert!(
+            err.message.contains("unknown filter operator"),
+            "message: {}",
+            err.message
+        );
+
+        // Empty string also rejected (was previously coerced to Equal).
+        let err = FilterOp::parse_wire("").expect_err("empty op must be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+
+        // Casing matters: the wire grammar is lowercase-only.
+        let err = FilterOp::parse_wire("Equal").expect_err("non-wire casing must be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_ARGUMENT);
+    }
 }
