@@ -11,7 +11,7 @@ use wafer_block::{
     streams::{input::InputStream, output::OutputStream},
     Block, BlockInfo,
 };
-use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
+use wafer_run::{RuntimeError, StaticConfigSource, Wafer};
 
 // ---------------------------------------------------------------------------
 // Test fixtures

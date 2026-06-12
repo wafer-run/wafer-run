@@ -5,8 +5,9 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use wafer_block::error::{BlockReferenceError, BlockReferenceSource, RuntimeError};
+
 use super::Wafer;
-use crate::error::{BlockReferenceError, BlockReferenceSource, RuntimeError};
 
 impl Wafer {
     /// Finalize runtime configuration before serving traffic.

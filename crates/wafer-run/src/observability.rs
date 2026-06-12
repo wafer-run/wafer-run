@@ -1,10 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use parking_lot::RwLock;
-
-use crate::{
+use wafer_block::{
     compat::{MaybeSend, MaybeSync},
-    types::*,
+    Message,
 };
 
 /// ObservabilityContext provides metadata for observability hooks.

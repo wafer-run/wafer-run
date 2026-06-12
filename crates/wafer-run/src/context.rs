@@ -8,13 +8,14 @@ use std::{
 // Re-export the trait from wafer-block.
 pub use wafer_block::context::Context;
 use wafer_block::{
-    core_types::Attachment,
+    core_types::*,
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceGrant,
+    types::*,
+    Block,
 };
 use wafer_block_macro::wafer_async_trait;
 
-use crate::{block::Block, platform::Instant, types::*};
+use crate::platform::Instant;
 
 /// RuntimeContext implements Context for blocks.
 ///
@@ -499,7 +500,7 @@ impl Context for RuntimeContext {
             .map(|s| s.as_str())
     }
 
-    fn registered_blocks(&self) -> Vec<crate::block::BlockInfo> {
+    fn registered_blocks(&self) -> Vec<wafer_block::BlockInfo> {
         self.snapshot.blocks.clone()
     }
 

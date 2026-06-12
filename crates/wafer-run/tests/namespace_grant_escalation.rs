@@ -13,7 +13,7 @@ use wafer_block::{
     types::ResourceGrant,
     Block, BlockInfo,
 };
-use wafer_run::{error::RuntimeError, StaticConfigSource, Wafer};
+use wafer_run::{RuntimeError, StaticConfigSource, Wafer};
 
 // ---------------------------------------------------------------------------
 // Test fixtures

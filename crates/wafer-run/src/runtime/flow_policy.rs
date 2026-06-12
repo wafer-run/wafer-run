@@ -6,9 +6,8 @@
 
 use std::time::Duration;
 
+use wafer_block::config::parse_duration;
 use wafer_flow::FlowConfig;
-
-use crate::config::parse_duration;
 
 /// Resolve flow-level execution policy from a [`FlowConfig`].
 pub(crate) trait FlowConfigExt {

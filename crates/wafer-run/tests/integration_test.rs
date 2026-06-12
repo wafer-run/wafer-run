@@ -10,7 +10,7 @@ use wafer_block::{
     streams::output::TerminalNotResponse,
     types::{MetaGet, MetaSet},
 };
-use wafer_run::{types::ErrorCode, *};
+use wafer_run::{ErrorCode, *};
 
 // ---------------------------------------------------------------------------
 // Helper: empty Wafer instance

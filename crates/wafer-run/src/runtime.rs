@@ -3,10 +3,9 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use crate::{
-    block::Block, context::RuntimeContext, error::RuntimeError, observability::ObservabilityBus,
-    platform::Instant, types::*,
-};
+use wafer_block::{core_types::*, error::RuntimeError, Block};
+
+use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
 
 /// Config-expansion passes run during `seal()` (composite configs,
 /// declarative flow configs, `uses` contributions).
@@ -231,13 +230,13 @@ impl Wafer {
     /// The alias map is constrained to a forest of depth 1 — chained
     /// aliases are rejected at registration time so lookup is always
     /// O(1) and the canonical-name resolution rule is the same at
-    /// `seal()` and at runtime. See [`crate::error::AliasError`] for
+    /// `seal()` and at runtime. See [`wafer_block::error::AliasError`] for
     /// rejection reasons.
     pub fn add_alias(
         &mut self,
         alias: impl Into<String>,
         target: impl Into<String>,
-    ) -> Result<(), crate::error::AliasError> {
+    ) -> Result<(), wafer_block::error::AliasError> {
         self.registration.add_alias(alias.into(), target.into())
     }
 
@@ -309,7 +308,7 @@ impl Wafer {
     /// Sorted by block `name` for deterministic order across processes
     /// (independent of HashMap's SipHash randomisation). The returned list
     /// is a snapshot — later registrations are not reflected.
-    pub fn block_infos(&self) -> Vec<crate::block::BlockInfo> {
+    pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
         lifecycle::sorted_snapshot(self.registration.blocks.values().map(|b| b.info()))
     }
 
@@ -684,7 +683,11 @@ impl wafer_block::registry::BlockRegistry for Wafer {
             .register_block_inner(name, block, &self.wasm.asset_loader)
     }
 
-    fn add_alias(&mut self, alias: &str, target: &str) -> Result<(), crate::error::AliasError> {
+    fn add_alias(
+        &mut self,
+        alias: &str,
+        target: &str,
+    ) -> Result<(), wafer_block::error::AliasError> {
         self.registration
             .add_alias(alias.to_string(), target.to_string())
     }
@@ -739,7 +742,7 @@ mod tests {
     }
 
     #[wafer_async_trait]
-    impl crate::block::Block for NoopBlock {
+    impl wafer_block::Block for NoopBlock {
         fn info(&self) -> wafer_block::BlockInfo {
             self.info.clone()
         }
@@ -928,7 +931,7 @@ mod tests {
             std::sync::Arc::new(crate::StaticConfigSource::default());
         let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
         match wafer.add_alias("x", "x") {
-            Err(crate::error::AliasError::Cycle { alias }) => assert_eq!(alias, "x"),
+            Err(wafer_block::error::AliasError::Cycle { alias }) => assert_eq!(alias, "x"),
             other => panic!("expected Cycle error, got {other:?}"),
         }
     }
@@ -942,7 +945,7 @@ mod tests {
             .add_alias("intermediate", "wafer-run/router")
             .expect("first registration succeeds");
         match wafer.add_alias("my-router", "intermediate") {
-            Err(crate::error::AliasError::TargetIsAlias { alias, target }) => {
+            Err(wafer_block::error::AliasError::TargetIsAlias { alias, target }) => {
                 assert_eq!(alias, "my-router");
                 assert_eq!(target, "intermediate");
             }
@@ -959,7 +962,7 @@ mod tests {
             .add_alias("my-router", "intermediate")
             .expect("first registration succeeds");
         match wafer.add_alias("intermediate", "wafer-run/router") {
-            Err(crate::error::AliasError::AliasIsExistingTarget { alias }) => {
+            Err(wafer_block::error::AliasError::AliasIsExistingTarget { alias }) => {
                 assert_eq!(alias, "intermediate");
             }
             other => panic!("expected AliasIsExistingTarget error, got {other:?}"),

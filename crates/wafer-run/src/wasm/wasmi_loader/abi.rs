@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
+use wafer_block::{core_types::*, error::RuntimeError};
 use wasmi::Store;
 
 use crate::{
     context::Context,
-    error::RuntimeError,
-    types::*,
     wasm::{capabilities::BlockCapabilities, stream::StreamRegistry},
 };
 

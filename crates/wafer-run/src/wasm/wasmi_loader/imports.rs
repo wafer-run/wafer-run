@@ -4,10 +4,11 @@
 //! [`super::WasmiBlock`] runtime.
 
 use tracing::warn;
+use wafer_block::{core_types::*, error::RuntimeError};
 use wasmi::{Caller, Engine, Error as WasmiError, Linker};
 
 use super::abi::*;
-use crate::{error::RuntimeError, types::*, wasm::stream::StreamState};
+use crate::wasm::stream::StreamState;
 
 // ---------------------------------------------------------------------------
 // WASI errno constants (wasi_snapshot_preview1)

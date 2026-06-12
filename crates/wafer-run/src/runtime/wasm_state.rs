@@ -32,7 +32,7 @@ impl WasmState {
 #[cfg(feature = "wasmi")]
 impl super::Wafer {
     /// Get or create the shared WASM engine.
-    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, crate::error::RuntimeError> {
+    pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, wafer_block::error::RuntimeError> {
         if self.wasm.engine.is_none() {
             let mut config = wasmi::Config::default();
             config.consume_fuel(true);

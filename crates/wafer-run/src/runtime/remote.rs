@@ -4,8 +4,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use wafer_block::{error::RuntimeError, Block};
+
 use super::Wafer;
-use crate::{block::Block, error::RuntimeError};
 
 /// ABI version for WASM block compatibility.
 pub const ABI_VERSION: u32 = 1;

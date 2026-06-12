@@ -1,12 +1,13 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
-use wafer_block::streams::{input::InputStream, output::OutputStream};
+use wafer_block::{
+    core_types::*,
+    streams::{input::InputStream, output::OutputStream},
+    Block,
+};
 
 use super::{flow_policy::FlowConfigExt, Wafer};
-use crate::{
-    block::Block, context::RuntimeContext, observability::ObservabilityBus, platform::Instant,
-    types::*,
-};
+use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
 
 /// Identity fields for the observability bracket around one block dispatch.
 pub(crate) struct DispatchObs<'a> {
@@ -172,7 +173,7 @@ impl Wafer {
             .block_configs
             .get(resolved)
             .or_else(|| self.snapshot.block_configs.get(block_name))
-            .map(crate::config::parse_config_map)
+            .map(wafer_block::config::parse_config_map)
             .unwrap_or_default();
 
         // `node_id` is what the runtime uses to attribute WRAP access on

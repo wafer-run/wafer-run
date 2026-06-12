@@ -1,12 +1,16 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
-use wafer_block::streams::{
-    input::InputStream,
-    output::{OutputStream, TerminalNotResponse},
+use wafer_block::{
+    config::parse_config_map,
+    core_types::*,
+    streams::{
+        input::InputStream,
+        output::{OutputStream, TerminalNotResponse},
+    },
 };
 use wafer_flow::{Accumulator, WaferFlow};
 
-use crate::{config::parse_config_map, platform::Instant, runtime::Wafer, types::*};
+use crate::{platform::Instant, runtime::Wafer};
 
 /// Execute a WaferFlow definition.
 ///

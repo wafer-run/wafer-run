@@ -2,7 +2,9 @@
 //! and the [`super::WasmiBlock`] dispatch. WASM blocks may only read/write
 //! header-derived meta keys they have been granted via `HeaderPolicy`.
 
-use crate::{types::*, wasm::capabilities::BlockCapabilities};
+use wafer_block::core_types::*;
+
+use crate::wasm::capabilities::BlockCapabilities;
 
 // ---------------------------------------------------------------------------
 // Guest meta sanitisation
