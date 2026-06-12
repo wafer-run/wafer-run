@@ -6049,10 +6049,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "form_urlencoded",
  "http-body-util",
  "parking_lot",
- "serde_json",
  "tokio",
  "tracing",
  "wafer-block",

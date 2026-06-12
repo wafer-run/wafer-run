@@ -36,14 +36,16 @@
 //! meta key) are **not** recognized — same key, same format, everywhere. See
 //! the `legacy_keys_are_ignored` test for the pinned drift table.
 
-use crate::core_types::{ErrorCode, Message, MetaEntry, WaferError};
-use crate::meta::{
-    META_REQ_ACTION, META_REQ_CLIENT_IP, META_REQ_CONTENT_TYPE, META_REQ_QUERY_PREFIX,
-    META_REQ_RESOURCE, META_RESP_CONTENT_TYPE, META_RESP_COOKIE_PREFIX, META_RESP_HEADER_PREFIX,
-    META_RESP_STATUS,
+use crate::{
+    core_types::{ErrorCode, Message, MetaEntry, WaferError},
+    meta::{
+        META_REQ_ACTION, META_REQ_CLIENT_IP, META_REQ_CONTENT_TYPE, META_REQ_QUERY_PREFIX,
+        META_REQ_RESOURCE, META_RESP_CONTENT_TYPE, META_RESP_COOKIE_PREFIX,
+        META_RESP_HEADER_PREFIX, META_RESP_STATUS,
+    },
+    streams::output::{BufferedResponse, OutputStream, TerminalNotResponse},
+    types::{MetaGet, RequestAction},
 };
-use crate::streams::output::{BufferedResponse, OutputStream, TerminalNotResponse};
-use crate::types::{MetaGet, RequestAction};
 
 // ---------------------------------------------------------------------------
 // HTTP-transport meta keys (`http.*` family)
