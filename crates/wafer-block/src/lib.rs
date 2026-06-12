@@ -10,6 +10,7 @@
 pub mod codec;
 pub mod core_types;
 pub mod error;
+pub mod http_codec;
 pub mod meta;
 pub mod types;
 pub mod wire;

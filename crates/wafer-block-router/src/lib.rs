@@ -20,18 +20,12 @@ use wafer_block::*;
 
 /// Normalizes an action token to the standard [`RequestAction`] vocabulary,
 /// accepting either canonical action names (`"retrieve"`, `"create"`, …) or
-/// HTTP methods (`GET`/`HEAD` → retrieve, `POST` → create, `PUT`/`PATCH` →
-/// update, `DELETE` → delete, `OPTIONS` → execute). Unknown tokens are
-/// passed through lowercased.
+/// HTTP methods via the shared wire-contract table in
+/// [`wafer_block::http_codec`] (`GET`/`HEAD` → retrieve, `POST` → create,
+/// `PUT`/`PATCH` → update, `DELETE` → delete, `OPTIONS` → execute). Tokens
+/// that are not HTTP methods are passed through lowercased.
 fn normalize_action(s: &str) -> String {
-    match s.to_uppercase().as_str() {
-        "GET" | "HEAD" => RequestAction::RETRIEVE.to_string(),
-        "POST" => RequestAction::CREATE.to_string(),
-        "PUT" | "PATCH" => RequestAction::UPDATE.to_string(),
-        "DELETE" => RequestAction::DELETE.to_string(),
-        "OPTIONS" => RequestAction::EXECUTE.to_string(),
-        _ => s.to_lowercase(),
-    }
+    http_codec::try_action_for_http_method(s).map_or_else(|| s.to_lowercase(), ToString::to_string)
 }
 
 /// A single route entry parsed from block config.
@@ -267,6 +261,28 @@ mod tests {
         // Route 2: no actions/methods -> both empty
         assert!(routes[2].raw_actions.is_empty());
         assert!(routes[2].actions.is_empty());
+    }
+
+    #[test]
+    fn normalize_action_maps_methods_and_lowercases_other_tokens() {
+        use serde_json::json;
+        let cfg = json!({
+            "routes": [
+                {"path": "/m", "block": "m-block",
+                 "methods": ["GET", "post", "Put", "PATCH", "DELETE", "OPTIONS"]},
+                {"path": "/t", "block": "t-block",
+                 "actions": ["retrieve", "LIST", "Custom-Op"]}
+            ]
+        });
+        let routes = super::parse_routes(&cfg);
+        // HTTP methods (any case) go through the shared http_codec table.
+        assert_eq!(
+            routes[0].actions,
+            vec!["retrieve", "create", "update", "update", "delete", "execute"]
+        );
+        // Non-method tokens pass through lowercased — config accepts
+        // canonical action names and custom vocabularies.
+        assert_eq!(routes[1].actions, vec!["retrieve", "list", "custom-op"]);
     }
 
     #[test]
