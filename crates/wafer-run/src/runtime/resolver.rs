@@ -246,8 +246,7 @@ impl Wafer {
         // declare its own config-held references via the trait.
         // BTreeMap (vs HashMap) so iteration over missing references yields
         // canonical-name-sorted order, giving stable `Display` output for
-        // `BlocksNotFound` across boots. Matches the deterministic-order
-        // pattern already used by `runtime/validation.rs::format_missing_config`.
+        // `BlocksNotFound` across boots.
         let mut references: BTreeMap<String, Vec<BlockReferenceSource>> = BTreeMap::new();
 
         for (flow_id, flow) in &self.flows {
