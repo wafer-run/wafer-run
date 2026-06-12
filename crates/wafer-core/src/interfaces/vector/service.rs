@@ -89,6 +89,15 @@ pub enum VectorError {
     /// `create_index` called with a name that already exists.
     #[error("vector index already exists: {0}")]
     IndexAlreadyExists(String),
+    /// Index name is not a plain identifier (`[A-Za-z0-9_]`, non-empty).
+    ///
+    /// Index names become SQL table names in the SQLite backend, so a
+    /// non-identifier name is rejected fail-closed rather than silently
+    /// rewritten into a different valid name.
+    #[error(
+        "invalid vector index name: {0:?} (only ASCII alphanumerics and underscore are allowed)"
+    )]
+    InvalidIndexName(String),
     /// Caller requested keyword / hybrid search on a vector-only index.
     #[error("keyword search is not enabled on this index")]
     KeywordSearchNotEnabled,

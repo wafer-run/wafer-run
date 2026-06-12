@@ -79,7 +79,8 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::DimensionMismatch { .. }
         | VectorError::UnknownModel(_)
         | VectorError::TextRequired
-        | VectorError::KeywordQueryRequired(_) => {
+        | VectorError::KeywordQueryRequired(_)
+        | VectorError::InvalidIndexName(_) => {
             WaferError::new(ErrorCode::INVALID_ARGUMENT, e.to_string())
         }
         VectorError::Internal(msg) => {

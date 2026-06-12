@@ -10,26 +10,28 @@
 //!
 //! The vec0 `MATCH` operator, FTS5 `bm25` function, and `CREATE VIRTUAL
 //! TABLE USING vec0/fts5` syntax are SQLite-only and cannot be modelled
-//! by sea-query, so these builders emit SQL strings directly. Table
-//! names are pre-sanitised via [`crate::ident::sanitize_ident`], so the
-//! `format!()` interpolation in the bodies is injection-safe.
+//! by sea-query, so these builders emit SQL strings directly. Index names
+//! are validated by [`VectorIndexSchema::new`] via
+//! [`crate::ident::validate_ident`] (fail-closed: non-identifier names
+//! are rejected, not stripped), so the `format!()` interpolation in the
+//! bodies is injection-safe.
 //!
 //! Parameter binding (the `?N` placeholders) is the caller's
 //! responsibility — the builders only emit the SQL template.
 
-use crate::ident::sanitize_ident;
+use crate::{ident::validate_ident, SqlBuildError};
 
 /// Pre-computed table names for a vector index. Construct once per
 /// operation via [`VectorIndexSchema::new`]; pass `&self` to the
-/// builders so the table names don't have to be re-sanitised on every
+/// builders so the index name doesn't have to be re-validated on every
 /// SQL emission.
 #[derive(Debug, Clone)]
 pub struct VectorIndexSchema {
-    /// `{sanitised_name}_vec` — the vec0 virtual table.
+    /// `{name}_vec` — the vec0 virtual table.
     pub vec_table: String,
-    /// `{sanitised_name}_meta` — the metadata side-table.
+    /// `{name}_meta` — the metadata side-table.
     pub meta_table: String,
-    /// `{sanitised_name}_fts` — the FTS5 virtual table (only present if
+    /// `{name}_fts` — the FTS5 virtual table (only present if
     /// keyword search is enabled; the name is always pre-computed so
     /// callers can use it in `sqlite_master` existence probes without
     /// recomputing).
@@ -37,16 +39,19 @@ pub struct VectorIndexSchema {
 }
 
 impl VectorIndexSchema {
-    /// Compute the three table names for an index. `name` is sanitised
-    /// to alphanumeric + underscore to ensure the result is safe to
-    /// interpolate into a SQL identifier position.
-    pub fn new(name: &str) -> Self {
-        let ident = sanitize_ident(name);
-        Self {
+    /// Compute the three table names for an index.
+    ///
+    /// `name` is interpolated into SQL identifier positions, so it must be a
+    /// plain identifier (`[A-Za-z0-9_]`, non-empty). Anything else is
+    /// rejected with [`SqlBuildError::InvalidIdentifier`] — fail-closed
+    /// rather than silently renaming the index by stripping characters.
+    pub fn new(name: &str) -> Result<Self, SqlBuildError> {
+        let ident = validate_ident(name)?;
+        Ok(Self {
             vec_table: format!("{ident}_vec"),
             meta_table: format!("{ident}_meta"),
             fts_table: format!("{ident}_fts"),
-        }
+        })
     }
 
     // ---------- Private helpers ----------
@@ -268,11 +273,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_names_are_sanitised() {
-        let s = VectorIndexSchema::new("docs; DROP TABLE");
-        assert_eq!(s.vec_table, "docsDROPTABLE_vec");
-        assert_eq!(s.meta_table, "docsDROPTABLE_meta");
-        assert_eq!(s.fts_table, "docsDROPTABLE_fts");
+    fn schema_names_derive_from_valid_identifier() {
+        let s = VectorIndexSchema::new("docs_v2").expect("plain identifier");
+        assert_eq!(s.vec_table, "docs_v2_vec");
+        assert_eq!(s.meta_table, "docs_v2_meta");
+        assert_eq!(s.fts_table, "docs_v2_fts");
+    }
+
+    #[test]
+    fn schema_rejects_non_identifier_names() {
+        // Fail-closed: previously this was silently stripped to
+        // `docsDROPTABLE_*`; now it is rejected so a hostile or mistyped
+        // index name can't be laundered into a different valid one.
+        let err = VectorIndexSchema::new("docs; DROP TABLE")
+            .expect_err("non-identifier index name must be rejected");
+        assert!(matches!(
+            err,
+            crate::SqlBuildError::InvalidIdentifier { .. }
+        ));
+        assert!(VectorIndexSchema::new("").is_err());
     }
 
     #[test]
@@ -284,7 +303,7 @@ mod tests {
 
     #[test]
     fn create_vec_and_meta_uses_table_names() {
-        let s = VectorIndexSchema::new("docs");
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
         let stmt = s.build_create_vec_and_meta(384);
         let sql = stmt.sql;
         assert!(sql.contains("CREATE VIRTUAL TABLE docs_vec USING vec0(embedding float[384])"));
@@ -294,7 +313,7 @@ mod tests {
 
     #[test]
     fn drop_all_returns_three_statements_in_order() {
-        let s = VectorIndexSchema::new("docs");
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
         let drops = s.build_drop_all();
         assert_eq!(drops[0].sql, "DROP TABLE IF EXISTS docs_vec;");
         assert_eq!(drops[1].sql, "DROP TABLE IF EXISTS docs_fts;");
@@ -306,7 +325,7 @@ mod tests {
 
     #[test]
     fn in_clause_select_metadata() {
-        let s = VectorIndexSchema::new("docs");
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
         let stmt = s.build_select_metadata_in(3);
         assert_eq!(
             stmt.sql,
@@ -317,7 +336,7 @@ mod tests {
 
     #[test]
     fn vec_knn_select_uses_both_tables() {
-        let s = VectorIndexSchema::new("docs");
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
         let stmt = s.build_vec_knn_select();
         let sql = stmt.sql;
         assert!(sql.contains("FROM docs_vec"));
@@ -329,7 +348,7 @@ mod tests {
 
     #[test]
     fn fts_bm25_select_uses_fts_table() {
-        let s = VectorIndexSchema::new("docs");
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
         let stmt = s.build_fts_bm25_select();
         let sql = stmt.sql;
         assert!(sql.contains("bm25(docs_fts)"));

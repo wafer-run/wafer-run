@@ -16,8 +16,8 @@ pub mod base64;
 /// COLUMN`, `DROP TABLE`, with dialect-specific type mapping.
 pub mod ddl;
 /// Identifier helpers — a runtime [`sea_query::Iden`] implementation and
-/// an alphanumeric-only sanitiser for table / column names that have to
-/// be interpolated rather than parameter-bound.
+/// a fail-closed validator for table / column names that have to be
+/// interpolated rather than parameter-bound.
 pub mod ident;
 /// Introspection queries — list user tables, fetch column info, count
 /// rows. Each emits the dialect-specific catalog query for SQLite or

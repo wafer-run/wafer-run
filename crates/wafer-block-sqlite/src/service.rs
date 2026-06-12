@@ -144,7 +144,8 @@ fn ensure_columns_from_data(
 /// `PRAGMA table_info` shape is fixed), so we surface it rather than silently
 /// dropping the column from the set.
 fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseError> {
-    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite)
+        .map_err(|e| DatabaseError::Internal(format!("table_info {table}: {e}")))?;
     let mut stmt = db
         .prepare(&sql)
         .map_err(|e| DatabaseError::Internal(format!("prepare table_info {table}: {e}")))?;
@@ -163,7 +164,9 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseEr
 
 /// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
 fn has_integer_pk(db: &Connection, table: &str) -> bool {
-    let (sql, _) = introspect::build_table_info(table, Backend::Sqlite);
+    let Ok((sql, _)) = introspect::build_table_info(table, Backend::Sqlite) else {
+        return false;
+    };
     let Ok(mut stmt) = db.prepare(&sql) else {
         return false;
     };
@@ -698,7 +701,8 @@ impl DatabaseService for SQLiteDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite);
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite)
+                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
             db.execute_batch(&idx_stmt.sql)
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }

@@ -1,6 +1,6 @@
 use wafer_schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
-use crate::{ident::sanitize_ident, Backend, SqlBuildError};
+use crate::{ident::validate_ident, Backend, SqlBuildError};
 
 /// Quote an identifier for use in DDL (double-quote escaping).
 fn quote_ident(name: &str) -> String {
@@ -170,7 +170,18 @@ pub fn build_create_table(
 }
 
 /// Generate a CREATE INDEX IF NOT EXISTS statement.
-pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> crate::Statement {
+///
+/// The index name — caller-supplied via `idx.name`, or synthesised as
+/// `idx_{table}_{columns}` when empty — is spliced into the DDL unquoted, so
+/// every component must be a plain identifier (`[A-Za-z0-9_]`). Anything else
+/// is rejected with [`SqlBuildError::InvalidIdentifier`] rather than silently
+/// stripped (stripping would quietly create an index under a different name).
+/// The `ON` table and column list are quoted and need no validation.
+pub fn build_create_index(
+    table_name: &str,
+    idx: &Index,
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
     let _ = backend; // identical across backends
     let mut sql = String::from("CREATE ");
     if idx.unique {
@@ -179,17 +190,14 @@ pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> cr
     sql.push_str("INDEX IF NOT EXISTS ");
 
     let name = if idx.name.is_empty() {
-        format!(
-            "idx_{}_{}",
-            sanitize_ident(table_name),
-            idx.columns
-                .iter()
-                .map(|c| sanitize_ident(c))
-                .collect::<Vec<_>>()
-                .join("_")
-        )
+        let mut name = format!("idx_{}", validate_ident(table_name)?);
+        for col in &idx.columns {
+            name.push('_');
+            name.push_str(validate_ident(col)?);
+        }
+        name
     } else {
-        sanitize_ident(&idx.name)
+        validate_ident(&idx.name)?.to_string()
     };
     sql.push_str(&name);
     sql.push_str(" ON ");
@@ -199,7 +207,7 @@ pub fn build_create_index(table_name: &str, idx: &Index, backend: Backend) -> cr
     sql.push_str(&quoted_cols.join(", "));
     sql.push(')');
 
-    crate::Statement::new(sql, vec![], table_name)
+    Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
 /// Generate an ALTER TABLE ADD COLUMN statement.
@@ -436,11 +444,51 @@ mod tests {
             columns: vec!["email".into()],
             unique: true,
         };
-        let stmt = build_create_index("users", &idx, Backend::Sqlite);
+        let stmt = build_create_index("users", &idx, Backend::Sqlite).expect("valid identifiers");
         let sql = stmt.sql;
         assert!(sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS"));
         assert!(sql.contains("idx_users_email"));
         assert!(sql.contains("ON \"users\""));
         assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn test_create_index_multi_column_name() {
+        let idx = Index {
+            name: "".into(),
+            columns: vec!["org_id".into(), "name".into()],
+            unique: false,
+        };
+        let stmt = build_create_index("orgs", &idx, Backend::Postgres).expect("valid identifiers");
+        assert!(stmt.sql.contains("idx_orgs_org_id_name"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("(\"org_id\", \"name\")"), "{}", stmt.sql);
+    }
+
+    #[test]
+    fn test_create_index_rejects_non_identifier_name() {
+        // Fail-closed: a caller-supplied index name outside [A-Za-z0-9_] is
+        // rejected, not stripped into a different-but-valid name.
+        let idx = Index {
+            name: "idx; DROP TABLE users".into(),
+            columns: vec!["email".into()],
+            unique: false,
+        };
+        let err = build_create_index("users", &idx, Backend::Sqlite)
+            .expect_err("non-identifier index name must be rejected");
+        assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+    }
+
+    #[test]
+    fn test_create_index_rejects_non_identifier_synthesis_components() {
+        // When the name is synthesised from table + columns, those components
+        // are spliced unquoted into the index name and must also be plain.
+        let idx = Index {
+            name: "".into(),
+            columns: vec!["weird\"col".into()],
+            unique: false,
+        };
+        let err = build_create_index("users", &idx, Backend::Sqlite)
+            .expect_err("non-identifier column in synthesised name must be rejected");
+        assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
     }
 }

@@ -175,7 +175,8 @@ impl PostgresDatabaseService {
 
         // Ensure indexes
         for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres);
+            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres)
+                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
             sqlx::query(&idx_stmt.sql)
                 .execute(&self.pool)
                 .await

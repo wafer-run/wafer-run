@@ -2,7 +2,7 @@ use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
 use wafer_block::db::{Filter, SortField};
 
 use crate::{
-    ident::DynCol,
+    ident::{validate_ident, DynCol},
     query::{apply_order, build_condition},
     Backend, SqlBuildError,
 };
@@ -82,14 +82,7 @@ pub fn build_daily_count(
     // ANSI double-quoting (works for both SQLite and Postgres), so it cannot be
     // parameter-bound. Reject anything that isn't a plain identifier rather
     // than risk it escaping the surrounding expression.
-    if !date_field
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err(SqlBuildError::InvalidIdentifier {
-            value: date_field.to_string(),
-        });
-    }
+    let date_field = validate_ident(date_field)?;
     let date_expr_sql: String = match backend {
         Backend::Sqlite => format!("date(\"{date_field}\")"),
         Backend::Postgres => {
