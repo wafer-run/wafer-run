@@ -1,12 +1,24 @@
-//! Cryptographic service implementations for WAFER.
+//! Cryptographic primitives and service implementations for WAFER.
 //!
-//! Provides `Argon2JwtCryptoService` (argon2id + HMAC-SHA256 JWT) for native use.
-//! The `CryptoService` trait is re-exported from `wafer_core::interfaces::crypto`.
+//! - [`primitives`] — pure, wasm32-safe building blocks (base64url,
+//!   HMAC-SHA256, HS256 JWT sign/verify with explicit `exp` policy, HKDF
+//!   per-block key derivation, argon2id password hashing, constant-time
+//!   comparison, CSPRNG bytes). The single source of truth for the WAFER
+//!   crypto stack — consumers build thin policy wrappers over it instead
+//!   of re-implementing the algorithms.
+//! - [`service`] — `Argon2JwtCryptoService`, the native [`CryptoService`]
+//!   implementation built on those primitives. The `CryptoService` trait is
+//!   re-exported from `wafer_core::interfaces::crypto`.
 //!
 //! Use `wafer_core::service_blocks::crypto::register_with()` to register.
+//!
+//! [`CryptoService`]: service::CryptoService
 
 #![warn(missing_docs)]
 
-/// Concrete `CryptoService` implementation: argon2id password hashing and
-/// HMAC-SHA256 (HS256) JWT signing, with per-block keys derived via HKDF-SHA256.
+pub mod primitives;
+
+/// `Argon2JwtCryptoService`: the native `CryptoService` implementation —
+/// a thin policy wrapper (argon2id at default cost, HS256 JWT with
+/// required `exp`, HKDF per-block keys) over [`primitives`].
 pub mod service;

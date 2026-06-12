@@ -98,6 +98,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hkdf = "0.12"
 base64ct = { version = "1", features = ["alloc"] }
+subtle = "2"
 
 # Storage
 aws-sdk-s3 = "1"
