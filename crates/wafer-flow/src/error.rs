@@ -21,6 +21,12 @@ pub enum ValidationError {
     #[error("duplicate step id: {0}")]
     DuplicateStepId(String),
 
+    /// A step uses a reserved accumulator key as its `id`. `input` holds the
+    /// caller's payload and `each` holds the per-item fan-out binding
+    /// (`$.each.item` / `$.each.index`), so steps may not claim those names.
+    #[error("step id '{0}' is reserved (accumulator key owned by the runtime)")]
+    ReservedStepId(String),
+
     /// A `next` entry points at a `step` id that does not exist in the flow.
     #[error("step '{from}' references unknown step '{target}' in next")]
     UnknownNextTarget {

@@ -36,6 +36,17 @@ impl Accumulator {
         self.data.get(step_id)
     }
 
+    /// Remove a stored value (used by the executor to drop the transient
+    /// `each` binding after a fan-out step completes).
+    pub fn remove(&mut self, step_id: &str) {
+        self.data.remove(step_id);
+    }
+
+    /// Iterate over the step ids currently stored.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.data.keys().map(String::as_str)
+    }
+
     /// Resolve a path expression like `$.step-id.field.nested` to a value.
     pub fn resolve(&self, path: &str) -> Result<Value, ExprError> {
         let segments = expr::parse_path(path)?;
