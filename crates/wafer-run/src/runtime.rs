@@ -8,6 +8,9 @@ use crate::{
     platform::Instant, types::*,
 };
 
+/// Config-expansion passes run during `seal()` (composite configs,
+/// declarative flow configs, `uses` contributions).
+pub(crate) mod config_expand;
 pub mod config_source;
 /// Flow-level execution policy (timeout resolution) for the dispatch path.
 pub(crate) mod flow_policy;
@@ -19,10 +22,14 @@ pub mod lifecycle;
 pub(crate) mod registration;
 /// Block registry — name-to-instance map populated via `Wafer::register_block`.
 pub mod registry;
-/// Block-name resolver: aliases → registered native → URL → registry manifest.
-pub mod resolver;
+/// Remote-block machinery: reference parsing, registry manifest fetch, and
+/// `.wasm` / `.flow.json` download (wasm feature).
+#[cfg(feature = "wasm")]
+pub(crate) mod remote;
 /// Per-block runner with cancellation, timeout and observability hook wiring.
 pub mod runner;
+/// `seal()` — the once-per-boot finalization pipeline.
+pub(crate) mod seal;
 pub mod slot;
 /// Post-registration validation of declared interfaces and block configs.
 pub mod validation;
@@ -35,95 +42,11 @@ pub use runner::run_block_with_recovery;
 /// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
 const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
 
-/// ABI version for WASM block compatibility.
-pub const ABI_VERSION: u32 = 1;
-
 // Re-export so consumers continue to write `wafer_run::ValidationReport` /
 // `wafer_run::BrokenBlock`. The canonical definitions now live in
 // `wafer-block` (alongside the `Context` trait whose
 // `validate_all_block_configs` method returns them).
 pub use wafer_block::{BrokenBlock, ValidationReport};
-
-/// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
-#[cfg(feature = "wasm")]
-#[derive(Debug, Clone, PartialEq)]
-pub struct RemoteBlockRef {
-    /// Org slug (left-hand side of `org/block`).
-    pub org: String,
-    /// Block name (right-hand side of `org/block`).
-    pub block: String,
-    /// Semver-style version following `@`.
-    pub version: String,
-}
-
-/// Parse a block name into a versioned `RemoteBlockRef` if it matches the
-/// `{org}/{block}@{version}` convention.
-///
-/// Returns `None` for local block names (no `/`, no version,
-/// wrong number of segments, or empty version).
-#[cfg(feature = "wasm")]
-pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
-    let at_pos = name.rfind('@')?;
-    let path = &name[..at_pos];
-    let version = &name[at_pos + 1..];
-    if version.is_empty() || version == "latest" {
-        return None;
-    }
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
-        return None;
-    }
-    Some(RemoteBlockRef {
-        org: segments[0].to_string(),
-        block: segments[1].to_string(),
-        version: version.to_string(),
-    })
-}
-
-/// Parse a block name into an unversioned `RemoteBlockRef` if it matches the
-/// `{org}/{block}` convention. No `@version` suffix.
-///
-/// Returns `None` when the name has a version, no `/`, or wrong
-/// number of segments.
-#[cfg(feature = "wasm")]
-pub fn parse_unversioned_block(name: &str) -> Option<RemoteBlockRef> {
-    // Strip optional @latest suffix
-    let name = name.strip_suffix("@latest").unwrap_or(name);
-    if name.contains('@') {
-        return None;
-    }
-    let segments: Vec<&str> = name.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
-        return None;
-    }
-    Some(RemoteBlockRef {
-        org: segments[0].to_string(),
-        block: segments[1].to_string(),
-        version: "latest".to_string(),
-    })
-}
-
-/// Registry manifest format for resolving remote blocks.
-#[cfg(feature = "wasm")]
-#[derive(serde::Deserialize)]
-pub(crate) struct RegistryManifest {
-    #[expect(
-        dead_code,
-        reason = "deserialized for round-trip fidelity; cross-checked elsewhere"
-    )]
-    pub(crate) name: String,
-    pub(crate) latest: String,
-    pub(crate) versions: HashMap<String, VersionEntry>,
-}
-
-/// A single version entry in a registry manifest.
-#[cfg(feature = "wasm")]
-#[derive(serde::Deserialize)]
-pub(crate) struct VersionEntry {
-    pub(crate) abi: u32,
-    pub(crate) wasm_url: Option<String>,
-    pub(crate) flow_url: Option<String>,
-}
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
 /// Native-only: requires `Block::bind()` which is not available on wasm32.
@@ -680,21 +603,6 @@ pub(crate) async fn run_init_pipeline(
         Ok(crate::runtime::slot::InitializedState::new())
     })
     .await
-}
-
-/// Deep-merge `src` into `dst`. For objects, keys are combined recursively.
-/// For non-object values, `dst`'s existing value wins (contributors cannot
-/// override the target block's own scalar values).
-pub(crate) fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
-    if let (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) = (dst, src) {
-        for (key, src_val) in src_map {
-            if let Some(dst_val) = dst_map.get_mut(key) {
-                deep_merge(dst_val, src_val);
-            } else {
-                dst_map.insert(key.clone(), src_val.clone());
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
