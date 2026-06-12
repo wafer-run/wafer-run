@@ -9,8 +9,6 @@
 
 #![warn(missing_docs)]
 
-mod mime;
-
 use std::{path::Path, sync::OnceLock};
 
 use wafer_block::*;
@@ -88,7 +86,7 @@ impl WebBlock {
                 let content_type = if info.content_type.is_empty()
                     || info.content_type == "application/octet-stream"
                 {
-                    mime::mime_for_ext(Path::new(key)).to_string()
+                    wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
                 } else {
                     info.content_type
                 };
