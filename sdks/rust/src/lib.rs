@@ -23,7 +23,6 @@ pub mod attachment;
 #[cfg(target_arch = "wasm32")]
 pub mod clients;
 pub mod core_abi;
-pub mod pure;
 pub mod stream;
 
 // Re-export everything from wafer-block (types, traits, helpers, macros).

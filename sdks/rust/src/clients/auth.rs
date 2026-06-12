@@ -5,17 +5,15 @@
 //!
 //! The three `require_*` ops carry their parameters in `Message::meta`
 //! headers (`http.header.x-auth-scope`, `http.header.x-auth-role`) rather
-//! than a request body — see
-//! [`crate::clients::common::open_no_body_with_meta`]. The
+//! than a request body — they go through `call_no_body`. The
 //! `user_profile` op uses the standard buffered request/response shape.
 
 use wafer_block::{
-    codec,
     wire::auth::{UserIdResponse, UserProfileRequest, UserProfileResponse},
     MetaEntry, ServiceOp, WaferError,
 };
 
-use super::common::{collect_single_frame, open_buffered, open_no_body_with_meta};
+use super::common::{call, call_no_body};
 
 const BLOCK: &str = "suppers-ai/auth";
 
@@ -28,14 +26,7 @@ const ROLE_META_KEY: &str = "http.header.x-auth-role";
 /// in-flight request meta (cookies, bearer tokens, etc.). Returns the
 /// resolved user id.
 pub fn require_user() -> Result<UserIdResponse, WaferError> {
-    let mut response_stream = open_no_body_with_meta(BLOCK, ServiceOp::AUTH_REQUIRE_USER, vec![])?;
-    let body = collect_single_frame(&mut response_stream, "auth REQUIRE_USER")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding auth REQUIRE_USER response: {}", e.message),
-        )
-    })
+    call_no_body(BLOCK, ServiceOp::AUTH_REQUIRE_USER, vec![])
 }
 
 /// Buffered: require a token whose scope matches `scope`.
@@ -48,14 +39,7 @@ pub fn require_token(scope: &str) -> Result<UserIdResponse, WaferError> {
         key: SCOPE_META_KEY.into(),
         value: scope.into(),
     }];
-    let mut response_stream = open_no_body_with_meta(BLOCK, ServiceOp::AUTH_REQUIRE_TOKEN, meta)?;
-    let body = collect_single_frame(&mut response_stream, "auth REQUIRE_TOKEN")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding auth REQUIRE_TOKEN response: {}", e.message),
-        )
-    })
+    call_no_body(BLOCK, ServiceOp::AUTH_REQUIRE_TOKEN, meta)
 }
 
 /// Buffered: require the current user to hold `role`.
@@ -68,26 +52,11 @@ pub fn require_role(role: &str) -> Result<UserIdResponse, WaferError> {
         key: ROLE_META_KEY.into(),
         value: role.into(),
     }];
-    let mut response_stream = open_no_body_with_meta(BLOCK, ServiceOp::AUTH_REQUIRE_ROLE, meta)?;
-    let body = collect_single_frame(&mut response_stream, "auth REQUIRE_ROLE")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding auth REQUIRE_ROLE response: {}", e.message),
-        )
-    })
+    call_no_body(BLOCK, ServiceOp::AUTH_REQUIRE_ROLE, meta)
 }
 
 /// Buffered: fetch the full profile for a user id, including their
 /// org memberships.
 pub fn user_profile(request: &UserProfileRequest) -> Result<UserProfileResponse, WaferError> {
-    let req_bytes = codec::encode(request)?;
-    let mut response_stream = open_buffered(BLOCK, ServiceOp::AUTH_USER_PROFILE, &req_bytes)?;
-    let body = collect_single_frame(&mut response_stream, "auth USER_PROFILE")?;
-    codec::decode(&body).map_err(|e| {
-        WaferError::new(
-            e.code,
-            format!("decoding auth USER_PROFILE response: {}", e.message),
-        )
-    })
+    call(BLOCK, ServiceOp::AUTH_USER_PROFILE, request)
 }
