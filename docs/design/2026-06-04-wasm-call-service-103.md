@@ -130,9 +130,9 @@ call_service(block, kind, data, resource, is_write, resource_type):
 - **wafer-run** (wasm host): expected **no change** — the host imports + resume loop already
   exist. Confirm during implementation that a guest-initiated `stream_init/finish/read`
   cycle from `call_service` exercises the same path as the guest-facing API.
-- **Guest SDK glue**: the Rust-guest path uses `wafer-core`'s `extern` decls directly. The Go
-  SDK (`sdks/go/`) would need matching `//go:wasmimport` declarations if Go guests are to use
-  typed clients (separate, SDK-side follow-up).
+- **Guest SDK glue**: the Rust-guest path uses `wafer-core`'s `extern` decls directly. (The
+  ABI-drifted Go SDK that lived at `sdks/go/` was removed in 2026-06; a future Go SDK would
+  need matching `//go:wasmimport` declarations to use typed clients.)
 - **Tests**: a compiled guest fixture that calls a service client (e.g. `crypto`/`auth`) plus
   an integration test in `crates/wafer-run/tests/wasmi_block_test.rs` with a mock context
   providing the target service. **This fixture is new work** (there is no existing guest that
