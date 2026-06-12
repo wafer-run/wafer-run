@@ -1,20 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{credentials, registry_client};
-
-#[derive(serde::Deserialize)]
-struct CargoPackageRelease {
-    org: String,
-    name: String,
-    version: String,
-}
-
-#[derive(serde::Deserialize)]
-struct WaferTomlMin {
-    package: CargoPackageRelease,
-}
+use crate::{credentials, registry_client, wafer_toml::WaferToml};
 
 /// Body of a successful `POST /registry/api/publish` response.
 ///
@@ -30,19 +18,15 @@ struct PublishResponse {
 }
 
 pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool) -> Result<()> {
-    let cwd_toml =
-        std::fs::read_to_string("wafer.toml").context("wafer.toml not found in current dir")?;
-    let parsed: WaferTomlMin = toml::from_str(&cwd_toml).context("parse wafer.toml")?;
+    let pkg = WaferToml::read(Path::new("wafer.toml"))
+        .context("wafer.toml not found in current dir")?
+        .package()?;
 
-    let tarball_path = file.unwrap_or_else(|| {
-        PathBuf::from(format!(
-            "target/wafer/{}-{}.wafer",
-            parsed.package.name, parsed.package.version
-        ))
-    });
+    let tarball_path = file
+        .unwrap_or_else(|| crate::package::tarball_path(Path::new("."), &pkg.name, &pkg.version));
     if !tarball_path.exists() {
         anyhow::bail!(
-            "tarball not found at {}. Run `wafer build` first.",
+            "tarball not found at {}. Run `wafer package` first.",
             tarball_path.display()
         );
     }
@@ -54,9 +38,9 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     if dry_run {
         println!(
             "\u{2714} Dry-run OK: {}/{}@{} ({} bytes)",
-            parsed.package.org,
-            parsed.package.name,
-            parsed.package.version,
+            pkg.org,
+            pkg.name,
+            pkg.version,
             bytes.len()
         );
         return Ok(());

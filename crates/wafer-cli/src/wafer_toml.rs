@@ -26,8 +26,35 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item, Value};
+
+/// Typed view of the `[package]` table — the single source of package
+/// metadata for scaffold/build/package/publish. Field set mirrors what the
+/// registry server validates on publish (`site` repo,
+/// `blocks/registry/tarball.rs`).
+#[derive(Debug, Clone)]
+pub struct Package {
+    /// Org segment of the `{org}/{name}` block name.
+    pub org: String,
+    /// Block segment of the `{org}/{name}` block name.
+    pub name: String,
+    /// SemVer version string.
+    pub version: String,
+    /// WAFER ABI major the block targets (>= 1).
+    pub abi: i64,
+    /// One-line human-readable summary, if declared.
+    pub summary: Option<String>,
+    /// SPDX license id, if declared.
+    pub license: Option<String>,
+}
+
+impl Package {
+    /// Canonical `{org}/{name}` block name.
+    pub fn full_name(&self) -> String {
+        format!("{}/{}", self.org, self.name)
+    }
+}
 
 /// An in-memory representation of `wafer.toml` that can be mutated and
 /// written back with formatting preserved.
@@ -46,6 +73,49 @@ impl WaferToml {
             .parse()
             .with_context(|| format!("parse {}", path.display()))?;
         Ok(Self { doc })
+    }
+
+    /// Typed accessor for the `[package]` table. Errors if the table or any
+    /// required field (`org`, `name`, `version`, `abi`) is missing or has
+    /// the wrong type — every command that needs package identity must fail
+    /// loudly on a malformed manifest rather than guessing.
+    pub fn package(&self) -> Result<Package> {
+        let pkg = self
+            .doc
+            .get("package")
+            .and_then(Item::as_table_like)
+            .ok_or_else(|| anyhow!("wafer.toml: missing [package] table"))?;
+        let required_str = |key: &str| -> Result<String> {
+            pkg.get(key)
+                .and_then(Item::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("wafer.toml: [package].{key} must be a non-empty string"))
+                .and_then(|s| {
+                    if s.is_empty() {
+                        Err(anyhow!(
+                            "wafer.toml: [package].{key} must be a non-empty string"
+                        ))
+                    } else {
+                        Ok(s)
+                    }
+                })
+        };
+        let optional_str = |key: &str| pkg.get(key).and_then(Item::as_str).map(str::to_string);
+        let abi = pkg
+            .get("abi")
+            .and_then(Item::as_integer)
+            .ok_or_else(|| anyhow!("wafer.toml: [package].abi must be an integer"))?;
+        if abi < 1 {
+            anyhow::bail!("wafer.toml: [package].abi must be >= 1, got {abi}");
+        }
+        Ok(Package {
+            org: required_str("org")?,
+            name: required_str("name")?,
+            version: required_str("version")?,
+            abi,
+            summary: optional_str("summary"),
+            license: optional_str("license"),
+        })
     }
 
     /// Iterate `[dependencies]` as `(name, version)` pairs. Returns an
@@ -141,6 +211,78 @@ abi = 1
         write(&p, BASE);
         let wt = WaferToml::read(&p).unwrap();
         assert!(wt.dependencies().is_empty());
+    }
+
+    #[test]
+    fn package_reads_required_and_optional_fields() {
+        let body = "[package]\norg = \"mine\"\nname = \"myblock\"\nversion = \"0.1.0\"\nabi = 1\nsummary = \"A block.\"\nlicense = \"MIT\"\n";
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("wafer.toml");
+        write(&p, body);
+        let pkg = WaferToml::read(&p).unwrap().package().unwrap();
+        assert_eq!(pkg.org, "mine");
+        assert_eq!(pkg.name, "myblock");
+        assert_eq!(pkg.version, "0.1.0");
+        assert_eq!(pkg.abi, 1);
+        assert_eq!(pkg.summary.as_deref(), Some("A block."));
+        assert_eq!(pkg.license.as_deref(), Some("MIT"));
+        assert_eq!(pkg.full_name(), "mine/myblock");
+    }
+
+    #[test]
+    fn package_optional_fields_default_to_none() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("wafer.toml");
+        write(&p, BASE);
+        let pkg = WaferToml::read(&p).unwrap().package().unwrap();
+        assert!(pkg.summary.is_none() && pkg.license.is_none());
+    }
+
+    #[test]
+    fn package_missing_table_errors() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("wafer.toml");
+        write(&p, "[dependencies]\n");
+        let err = WaferToml::read(&p).unwrap().package().unwrap_err();
+        assert!(err.to_string().contains("missing [package]"), "{err}");
+    }
+
+    #[test]
+    fn package_missing_or_empty_required_field_errors() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("wafer.toml");
+        write(
+            &p,
+            "[package]\norg = \"mine\"\nversion = \"0.1.0\"\nabi = 1\n",
+        );
+        let err = WaferToml::read(&p).unwrap().package().unwrap_err();
+        assert!(err.to_string().contains("[package].name"), "{err}");
+
+        write(
+            &p,
+            "[package]\norg = \"\"\nname = \"x\"\nversion = \"0.1.0\"\nabi = 1\n",
+        );
+        let err = WaferToml::read(&p).unwrap().package().unwrap_err();
+        assert!(err.to_string().contains("[package].org"), "{err}");
+    }
+
+    #[test]
+    fn package_bad_abi_errors() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("wafer.toml");
+        write(
+            &p,
+            "[package]\norg = \"a\"\nname = \"b\"\nversion = \"0.1.0\"\nabi = \"one\"\n",
+        );
+        let err = WaferToml::read(&p).unwrap().package().unwrap_err();
+        assert!(err.to_string().contains("[package].abi"), "{err}");
+
+        write(
+            &p,
+            "[package]\norg = \"a\"\nname = \"b\"\nversion = \"0.1.0\"\nabi = 0\n",
+        );
+        let err = WaferToml::read(&p).unwrap().package().unwrap_err();
+        assert!(err.to_string().contains(">= 1"), "{err}");
     }
 
     #[test]

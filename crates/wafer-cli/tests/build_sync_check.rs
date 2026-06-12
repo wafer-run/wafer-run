@@ -1,9 +1,9 @@
 //! Verify `wafer build`'s sync check errors on drift without requiring
 //! any network or toolchain.
 //!
-//! `wafer build` fails in our tempdirs because no manifest.json exists,
-//! but that's a different error — so we can distinguish "sync check
-//! fired" from "sync check didn't fire" by looking at stderr.
+//! `wafer build` eventually fails in our tempdirs because no toolchain or
+//! source exists, but that's a different error — so we can distinguish
+//! "sync check fired" from "sync check didn't fire" by looking at stderr.
 
 use std::fs;
 
@@ -28,13 +28,6 @@ fn build_drift_errors_with_hint() {
         "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
         "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.2.0\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
     );
-    // Also need manifest.json so that Manifest::load succeeds (otherwise
-    // we'd bail before the sync check). Seed a minimal one.
-    fs::write(
-        cwd.join("manifest.json"),
-        "{\"name\":\"me/me\",\"version\":\"0.0.1\",\"interface\":\"handler@v1\",\"summary\":\"x\"}",
-    )
-    .unwrap();
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)
         .arg("build")
@@ -56,11 +49,6 @@ fn build_in_sync_proceeds_past_sync_check() {
         "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
         "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
     );
-    fs::write(
-        cwd.join("manifest.json"),
-        "{\"name\":\"me/me\",\"version\":\"0.0.1\",\"interface\":\"handler@v1\",\"summary\":\"x\"}",
-    )
-    .unwrap();
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)
         .arg("build")
@@ -83,11 +71,6 @@ fn build_without_wafer_toml_skips_sync_check() {
         cwd.join("wafer.lock"),
         "version = 1\n\n[[package]]\nname = \"a/b\"\nversion = \"1.0.0\"\nsha256 = \"a\"\nsource = \"registry+http://x\"\n",
     ).unwrap();
-    fs::write(
-        cwd.join("manifest.json"),
-        "{\"name\":\"me/me\",\"version\":\"0.0.1\",\"interface\":\"handler@v1\",\"summary\":\"x\"}",
-    )
-    .unwrap();
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)
         .arg("build")

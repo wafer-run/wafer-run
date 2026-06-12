@@ -15,7 +15,6 @@ mod credentials;
 mod detect;
 mod install;
 mod lockfile;
-mod manifest;
 mod package;
 mod registry_client;
 mod registry_error;
@@ -64,7 +63,8 @@ enum Commands {
         /// Path to a test fixture or directory (default: ./tests/).
         path: Option<String>,
     },
-    /// Package the built block for publishing.
+    /// Package the built block into a publishable .wafer tarball
+    /// (target/wafer/{name}-{version}.wafer).
     Package,
     /// Log in to a WAFER registry.
     Login {
