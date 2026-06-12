@@ -162,20 +162,30 @@ pub(crate) async fn call_service(
 ) -> Result<Vec<u8>, WaferError> {
     let out =
         call_service_streaming(ctx, block, kind, data, resource, is_write, resource_type).await?;
+    collect_response_body(out).await
+}
+
+/// Buffer an [`OutputStream`] and return the response body, mapping every
+/// non-`Response` terminal onto a `WaferError`. Shared by [`call_service`] and
+/// [`call_service_with_msg`] — the two native buffered call paths.
+#[cfg(not(feature = "wasm-component"))]
+async fn collect_response_body(out: OutputStream) -> Result<Vec<u8>, WaferError> {
+    use wafer_block::streams::output::TerminalNotResponse;
     match out.collect_buffered().await {
         Ok(buf) => Ok(buf.body),
-        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => Err(e),
-        Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
+        Err(TerminalNotResponse::Error(e)) => Err(e),
+        Err(TerminalNotResponse::Drop) => {
             Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
         }
-        Err(wafer_block::streams::output::TerminalNotResponse::Halt(_)) => Err(WaferError::new(
+        Err(TerminalNotResponse::Halt(_)) => Err(WaferError::new(
             ErrorCode::INTERNAL,
             "block returned Halt (service clients do not short-circuit flows)",
         )),
-        Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
-            WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
-        ),
-        Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => Err(WaferError::new(
+        Err(TerminalNotResponse::Continue(_)) => Err(WaferError::new(
+            ErrorCode::INTERNAL,
+            "block returned Continue",
+        )),
+        Err(TerminalNotResponse::Malformed) => Err(WaferError::new(
             ErrorCode::INTERNAL,
             "malformed output stream",
         )),
@@ -250,24 +260,7 @@ pub(crate) async fn call_service_with_msg(
     let out = ctx
         .call_block(block, msg, InputStream::from_bytes(Vec::new()))
         .await;
-    match out.collect_buffered().await {
-        Ok(buf) => Ok(buf.body),
-        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => Err(e),
-        Err(wafer_block::streams::output::TerminalNotResponse::Drop) => {
-            Err(WaferError::new(ErrorCode::INTERNAL, "block returned Drop"))
-        }
-        Err(wafer_block::streams::output::TerminalNotResponse::Halt(_)) => Err(WaferError::new(
-            ErrorCode::INTERNAL,
-            "block returned Halt (service clients do not short-circuit flows)",
-        )),
-        Err(wafer_block::streams::output::TerminalNotResponse::Continue(_)) => Err(
-            WaferError::new(ErrorCode::INTERNAL, "block returned Continue"),
-        ),
-        Err(wafer_block::streams::output::TerminalNotResponse::Malformed) => Err(WaferError::new(
-            ErrorCode::INTERNAL,
-            "malformed output stream",
-        )),
-    }
+    collect_response_body(out).await
 }
 
 /// WASM-component variant of [`call_service_with_msg`]. Currently

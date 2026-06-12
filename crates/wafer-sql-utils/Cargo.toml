@@ -8,7 +8,7 @@ description = "Shared SQL query builders for WAFER database backends"
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-schema = { workspace = true }
-sea-query = "0.32"
+sea-query = { version = "0.32", features = ["with-json"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

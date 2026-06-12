@@ -20,6 +20,7 @@ use wafer_block::{
 };
 
 use super::service::{self, ImageService};
+use crate::interfaces::handler_util::{decode_or_err, to_output};
 
 // ---------- Wire <-> service conversions ----------
 //
@@ -142,31 +143,14 @@ pub async fn handle_message(
 // ---- Buffered ops ----
 
 async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let wire_req: wire::ImageRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid image.generate request: {}", e.message),
-            ));
-        }
-    };
+    let wire_req = decode_or_err!(body, wire::ImageRequest, "image.generate");
     let req = wire_request_to_service(wire_req);
     // `generate` is not streaming — the whole response arrives at once.
     // Use a fresh cancel token (no client-side cancel propagation needed for
     // buffered ops; the OutputStream wraps the result immediately).
     let cancel = tokio_util::sync::CancellationToken::new();
     match service.generate(req, cancel).await {
-        Ok(resp) => {
-            let wire_resp = service_response_to_wire(resp);
-            match codec::encode(&wire_resp) {
-                Ok(bytes) => OutputStream::respond(bytes),
-                Err(e) => OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("encoding image.generate response: {}", e.message),
-                )),
-            }
-        }
+        Ok(resp) => to_output(service_response_to_wire(resp)),
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("image.generate: {msg}")))
@@ -179,13 +163,7 @@ async fn list_models(service: &dyn ImageService) -> OutputStream {
         Ok(models) => {
             let wire_models: Vec<wire::ModelInfo> =
                 models.into_iter().map(service_model_info_to_wire).collect();
-            match codec::encode(&wire_models) {
-                Ok(bytes) => OutputStream::respond(bytes),
-                Err(e) => OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("encoding image.list_models response: {}", e.message),
-                )),
-            }
+            to_output(wire_models)
         }
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
@@ -195,26 +173,9 @@ async fn list_models(service: &dyn ImageService) -> OutputStream {
 }
 
 async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let req: wire::StatusRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid image.status request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::StatusRequest, "image.status");
     match service.status(&req.backend_id, &req.model_id).await {
-        Ok(s) => {
-            let wire_status = service_status_to_wire(s);
-            match codec::encode(&wire_status) {
-                Ok(bytes) => OutputStream::respond(bytes),
-                Err(e) => OutputStream::error(WaferError::new(
-                    ErrorCode::INTERNAL,
-                    format!("encoding image.status response: {}", e.message),
-                )),
-            }
-        }
+        Ok(s) => to_output(service_status_to_wire(s)),
         Err(e) => {
             let (code, msg) = image_error_to_block_error(e);
             OutputStream::error(WaferError::new(code, format!("image.status: {msg}")))
@@ -223,15 +184,7 @@ async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
 }
 
 async fn unload_model(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let req: wire::UnloadModelRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid image.unload_model request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::UnloadModelRequest, "image.unload_model");
     match service.unload_model(&req.backend_id, &req.model_id).await {
         Ok(()) => OutputStream::respond(vec![]),
         Err(e) => {
@@ -244,15 +197,7 @@ async fn unload_model(service: &dyn ImageService, body: &[u8]) -> OutputStream {
 // ---- Streaming ops ----
 
 fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
-    let req: wire::LoadModelRequest = match codec::decode(body) {
-        Ok(r) => r,
-        Err(e) => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::INVALID_ARGUMENT,
-                format!("invalid image.load_model request: {}", e.message),
-            ));
-        }
-    };
+    let req = decode_or_err!(body, wire::LoadModelRequest, "image.load_model");
 
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);

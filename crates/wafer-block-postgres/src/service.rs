@@ -2,15 +2,17 @@ use std::collections::HashMap;
 
 use base64ct::{Base64, Encoding};
 use sqlx::{postgres::PgRow, PgPool, Row};
+use wafer_block::db::{Filter, ListOptions};
 #[cfg(test)]
-use wafer_block::db::FilterOp;
-use wafer_block::db::{Filter, ListOptions, SortField};
+use wafer_block::db::{FilterOp, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::{
     exec::DbExec,
     service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
 };
-use wafer_sql_utils::{ddl, ident::sanitize_ident, value::sea_values_to_json, Backend};
+use wafer_sql_utils::{ddl, introspect, Backend};
+#[cfg(test)]
+use wafer_sql_utils::{ident::sanitize_ident, value::sea_values_to_json};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -31,132 +33,6 @@ impl PostgresDatabaseService {
     /// Create a service from an existing connection pool.
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
-    }
-
-    // -----------------------------------------------------------------
-    // Async internals
-    // -----------------------------------------------------------------
-
-    async fn create_async(
-        &self,
-        collection: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        let table = sanitize_ident(collection);
-        let mut data = data;
-
-        // Auto-generate ID if not provided
-        if !data.contains_key("id") {
-            data.insert(
-                "id".to_string(),
-                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
-            );
-        }
-
-        // Auto-set timestamps
-        let now = chrono::Utc::now().to_rfc3339();
-        if !data.contains_key("created_at") {
-            data.insert(
-                "created_at".to_string(),
-                serde_json::Value::String(now.clone()),
-            );
-        }
-        if !data.contains_key("updated_at") {
-            data.insert("updated_at".to_string(), serde_json::Value::String(now));
-        }
-
-        // Ensure any new columns exist (matches the `update` / `update_where`
-        // paths). Table creation itself is the responsibility of the block's
-        // migration files, not lazy on-insert DDL.
-        self.ensure_columns_from_data(&table, &data).await?;
-
-        // Sorted-key iteration so the generated INSERT is stable across
-        // process starts. HashMap order is randomized by RandomState; without
-        // sorting, every restart produces a fresh prepared statement.
-        let mut columns: Vec<String> = data.keys().cloned().collect();
-        columns.sort();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
-        let values: Vec<&serde_json::Value> = columns.iter().map(|k| &data[k]).collect();
-
-        let col_names: Vec<String> = columns.iter().map(|c| sanitize_ident(c)).collect();
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table,
-            col_names.join(", "),
-            placeholders.join(", ")
-        );
-
-        let mut q = sqlx::query(&sql);
-        for v in &values {
-            q = bind_json_value_query(q, v);
-        }
-        q.execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        let id = match data.get("id") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => String::new(),
-        };
-
-        Ok(Record { id, data })
-    }
-
-    async fn update_async(
-        &self,
-        collection: &str,
-        id: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        let table = sanitize_ident(collection);
-        let mut data = data;
-
-        // Auto-update timestamp
-        if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-            );
-        }
-
-        // Ensure any new columns exist
-        self.ensure_columns_from_data(&table, &data).await?;
-
-        // Sorted-key iteration — see `create_async` above for the rationale.
-        let mut keys: Vec<String> = data.keys().cloned().collect();
-        keys.sort();
-        let set_clauses: Vec<String> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, k)| format!("{} = ${}", sanitize_ident(k), i + 1))
-            .collect();
-
-        let id_param = keys.len() + 1;
-        let sql = format!(
-            "UPDATE {} SET {} WHERE id = ${}",
-            table,
-            set_clauses.join(", "),
-            id_param
-        );
-
-        let mut q = sqlx::query(&sql);
-        for k in &keys {
-            q = bind_json_value_query(q, &data[k]);
-        }
-        q = q.bind(id.to_string());
-
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(DatabaseError::NotFound);
-        }
-
-        // Fetch the updated record
-        DbExec::get(self, collection, id).await
     }
 
     // -----------------------------------------------------------------
@@ -183,17 +59,13 @@ impl PostgresDatabaseService {
         }
 
         // Create indexes for columns with foreign keys
-        for col in &table.columns {
-            if col.references.is_some() {
-                let tbl = sanitize_ident(&table.name);
-                let c = sanitize_ident(&col.name);
-                let idx_name = format!("idx_{tbl}_{c}");
-                let sql = format!("CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({c})");
-                sqlx::query(&sql)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
-            }
+        let fk_stmts = ddl::build_fk_indexes(table, Backend::Postgres)
+            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
+        for stmt in fk_stmts {
+            sqlx::query(&stmt.sql)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
         }
 
         Ok(())
@@ -218,110 +90,6 @@ impl PostgresDatabaseService {
             .execute(&self.pool)
             .await
             .map_err(|e| DatabaseError::Internal(format!("add_column: {e}")))?;
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------
-    // Table/column introspection helpers
-    // -----------------------------------------------------------------
-
-    async fn table_exists_async(&self, table: &str) -> Result<bool, DatabaseError> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)",
-        )
-        .bind(table)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DatabaseError::Internal(format!("table_exists: {e}")))?;
-        Ok(exists)
-    }
-
-    async fn get_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
-        )
-        .bind(table)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DatabaseError::Internal(format!("get_columns: {e}")))?;
-        Ok(rows
-            .into_iter()
-            .map(|(name,)| name.to_lowercase())
-            .collect())
-    }
-
-    /// Add any columns that exist in `data` but not yet in the table.
-    ///
-    /// Sanitises the table name itself (defence in depth — callers must not
-    /// rely on having pre-sanitised it).
-    async fn ensure_columns_from_data(
-        &self,
-        table: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        let safe_table = sanitize_ident(table);
-        let existing = self.get_columns(&safe_table).await?;
-        for (key, value) in data {
-            if !existing.contains(&key.to_lowercase()) {
-                let pg_type = pg_type_for_json_value(value);
-                let alter = ddl::build_add_column_with_type(
-                    &safe_table,
-                    &sanitize_ident(key),
-                    pg_type,
-                    Backend::Postgres,
-                );
-                sqlx::query(&alter.sql)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| DatabaseError::Internal(format!("add column {key}: {e}")))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Ensure columns referenced in filters and sorts exist (adds them as TEXT
-    /// if missing, so they default to NULL).
-    ///
-    /// Sanitises the table name itself (defence in depth — callers must not
-    /// rely on having pre-sanitised it).
-    async fn ensure_columns_for_query(
-        &self,
-        table: &str,
-        filters: &[Filter],
-        sort: &[SortField],
-    ) -> Result<(), DatabaseError> {
-        let safe_table = sanitize_ident(table);
-        let existing = self.get_columns(&safe_table).await?;
-        for f in filters {
-            if !existing.contains(&f.field.to_lowercase()) {
-                let alter = ddl::build_add_text_column(
-                    &safe_table,
-                    &sanitize_ident(&f.field),
-                    Backend::Postgres,
-                );
-                sqlx::query(&alter.sql)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| {
-                        DatabaseError::Internal(format!("add filter column {}: {e}", f.field))
-                    })?;
-            }
-        }
-        for s in sort {
-            if !existing.contains(&s.field.to_lowercase()) {
-                let alter = ddl::build_add_text_column(
-                    &safe_table,
-                    &sanitize_ident(&s.field),
-                    Backend::Postgres,
-                );
-                sqlx::query(&alter.sql)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| {
-                        DatabaseError::Internal(format!("add sort column {}: {e}", s.field))
-                    })?;
-            }
-        }
         Ok(())
     }
 }
@@ -417,16 +185,14 @@ impl DbExec for PostgresDatabaseService {
     }
 
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        self.table_exists_async(table).await
-    }
-
-    async fn ensure_query_columns(
-        &self,
-        table: &str,
-        filters: &[Filter],
-        sort: &[SortField],
-    ) -> Result<(), DatabaseError> {
-        self.ensure_columns_for_query(table, filters, sort).await
+        let (sql, params) = introspect::build_table_exists(table, Backend::Postgres);
+        let mut q = sqlx::query_scalar::<_, bool>(&sql);
+        for p in &params {
+            q = bind_json_value(q, p);
+        }
+        q.fetch_one(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(format!("table_exists: {e}")))
     }
 }
 
@@ -449,7 +215,7 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        self.create_async(collection, data).await
+        DbExec::create(self, collection, data).await
     }
 
     async fn update(
@@ -458,7 +224,7 @@ impl DatabaseService for PostgresDatabaseService {
         id: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        self.update_async(collection, id, data).await
+        DbExec::update(self, collection, id, data).await
     }
 
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
@@ -517,15 +283,7 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(());
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await?;
-        Ok(())
+        DbExec::delete_where(self, collection, filters).await
     }
 
     async fn delete_where_count(
@@ -533,14 +291,7 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(0);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Backend::Postgres);
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::delete_where_count(self, collection, filters).await
     }
 
     async fn take_where(
@@ -548,18 +299,7 @@ impl DatabaseService for PostgresDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(vec![]);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let stmt = wafer_sql_utils::query::build_delete_where_returning(
-            &table,
-            filters,
-            Backend::Postgres,
-        );
-        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::take_where(self, collection, filters).await
     }
 
     async fn update_where(
@@ -568,30 +308,7 @@ impl DatabaseService for PostgresDatabaseService {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Err(DatabaseError::NotFound);
-        }
-        let mut data = data;
-        if !data.contains_key("updated_at") {
-            data.insert(
-                "updated_at".to_string(),
-                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-            );
-        }
-        self.ensure_columns_from_data(&table, &data).await?;
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let mut data_pairs: Vec<(String, serde_json::Value)> = data.into_iter().collect();
-        data_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let stmt = wafer_sql_utils::query::build_update_where(
-            &table,
-            &data_pairs,
-            filters,
-            Backend::Postgres,
-        );
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await?;
-        Ok(())
+        DbExec::update_where(self, collection, filters, data).await
     }
 
     async fn increment_field_where(
@@ -601,20 +318,7 @@ impl DatabaseService for PostgresDatabaseService {
         delta: i64,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
-            return Ok(0);
-        }
-        self.ensure_columns_for_query(&table, filters, &[]).await?;
-        let stmt = wafer_sql_utils::query::build_increment_field_where(
-            &table,
-            col,
-            delta,
-            filters,
-            Backend::Postgres,
-        );
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        DbExec::increment_field_where(self, collection, col, delta, filters).await
     }
 }
 
@@ -622,20 +326,33 @@ impl DatabaseService for PostgresDatabaseService {
 // Free functions: query building, type mapping, row conversion
 // ---------------------------------------------------------------------------
 
-/// Map a `serde_json::Value` to the appropriate PostgreSQL column type name.
-fn pg_type_for_json_value(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "TEXT",
-        serde_json::Value::Bool(_) => "BOOLEAN",
-        serde_json::Value::Number(n) => {
-            if n.is_i64() || n.is_u64() {
-                "BIGINT"
-            } else {
-                "DOUBLE PRECISION"
-            }
+/// Decode column `ordinal` as `Option<T>`, mapping a present value through
+/// `to_json`.
+///
+/// Owns the `Ok(Some)`/`Ok(None)`/`Err` triple shared by every `row_to_record`
+/// type arm: a `try_get` `Err` means the column's stored type didn't match the
+/// decoder picked from the SQL type name — a genuine data/schema problem, not
+/// a SQL NULL. We keep the NULL fallback (so a single bad column doesn't sink
+/// the whole row) but log it via `tracing::warn!` so it's observable,
+/// mirroring the SQLite read path's skip-and-warn. `Ok(None)` is a real NULL
+/// and stays silent.
+fn decode_col<'r, T>(
+    row: &'r PgRow,
+    ordinal: usize,
+    col_name: &str,
+    type_name: &str,
+    to_json: impl FnOnce(T) -> serde_json::Value,
+) -> serde_json::Value
+where
+    T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    match row.try_get::<Option<T>, _>(ordinal) {
+        Ok(Some(v)) => to_json(v),
+        Ok(None) => serde_json::Value::Null,
+        Err(e) => {
+            tracing::warn!(column = %col_name, sql_type = %type_name, error = %e, "failed to decode column; substituting NULL");
+            serde_json::Value::Null
         }
-        serde_json::Value::String(_) => "TEXT",
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => "JSONB",
     }
 }
 
@@ -650,127 +367,71 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     for col in columns {
         let col_name = col.name().to_string();
         let type_name = col.type_info().name();
-
-        // Decode-failure logging: a `try_get` `Err` means the column's stored
-        // type didn't match the decoder we picked from `type_name` — a genuine
-        // data/schema problem, not a SQL NULL. We keep the NULL fallback (so a
-        // single bad column doesn't sink the whole row) but log it via
-        // `tracing::warn!` so it's observable, mirroring the SQLite read path's
-        // skip-and-warn. `Ok(None)` is a real NULL and stays silent.
-        let warn_decode = |e: &sqlx::Error| {
-            tracing::warn!(column = %col_name, sql_type = %type_name, error = %e, "failed to decode column; substituting NULL");
-        };
+        let ordinal = col.ordinal();
 
         let value: serde_json::Value = match type_name {
-            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => {
-                match row.try_get::<Option<String>, _>(col.ordinal()) {
-                    Ok(Some(s)) => serde_json::Value::String(s),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => {
-                        warn_decode(&e);
-                        serde_json::Value::Null
-                    }
-                }
-            }
-            "INT2" | "INT4" => match row.try_get::<Option<i32>, _>(col.ordinal()) {
-                Ok(Some(n)) => serde_json::Value::Number(n.into()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
-            "INT8" | "BIGINT" => match row.try_get::<Option<i64>, _>(col.ordinal()) {
-                Ok(Some(n)) => serde_json::Value::Number(n.into()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
-            "FLOAT4" => match row.try_get::<Option<f32>, _>(col.ordinal()) {
-                Ok(Some(f)) => serde_json::Number::from_f64(f64::from(f))
-                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
+            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => decode_col(
+                row,
+                ordinal,
+                &col_name,
+                type_name,
+                serde_json::Value::String,
+            ),
+            "INT2" | "INT4" => decode_col(row, ordinal, &col_name, type_name, |n: i32| {
+                serde_json::Value::Number(n.into())
+            }),
+            "INT8" | "BIGINT" => decode_col(row, ordinal, &col_name, type_name, |n: i64| {
+                serde_json::Value::Number(n.into())
+            }),
+            "FLOAT4" => decode_col(row, ordinal, &col_name, type_name, |f: f32| {
+                serde_json::Number::from_f64(f64::from(f))
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number)
+            }),
             "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => {
-                match row.try_get::<Option<f64>, _>(col.ordinal()) {
-                    Ok(Some(f)) => serde_json::Number::from_f64(f)
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => {
-                        warn_decode(&e);
-                        serde_json::Value::Null
-                    }
-                }
+                decode_col(row, ordinal, &col_name, type_name, |f: f64| {
+                    serde_json::Number::from_f64(f)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number)
+                })
             }
-            "BOOL" | "BOOLEAN" => match row.try_get::<Option<bool>, _>(col.ordinal()) {
-                Ok(Some(b)) => serde_json::Value::Bool(b),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
-            "JSON" | "JSONB" => match row.try_get::<Option<serde_json::Value>, _>(col.ordinal()) {
-                Ok(Some(v)) => v,
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
-            "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(col.ordinal()) {
-                Ok(Some(bytes)) => serde_json::Value::String(Base64::encode_string(&bytes)),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
+            "BOOL" | "BOOLEAN" => {
+                decode_col(row, ordinal, &col_name, type_name, serde_json::Value::Bool)
+            }
+            "JSON" | "JSONB" => {
+                decode_col(row, ordinal, &col_name, type_name, |v: serde_json::Value| v)
+            }
+            "BYTEA" => decode_col(row, ordinal, &col_name, type_name, |b: Vec<u8>| {
+                serde_json::Value::String(Base64::encode_string(&b))
+            }),
             "TIMESTAMPTZ" | "TIMESTAMP" => {
                 // Try as a string first; a string-decode error here is not yet
                 // a failure — Postgres returns these as a native type, so we
-                // fall through to the chrono decoder and only warn if THAT also
-                // fails to decode a non-NULL value.
-                match row.try_get::<Option<String>, _>(col.ordinal()) {
+                // fall through to the chrono decoder, whose failure on a
+                // non-NULL value is the one that warns.
+                match row.try_get::<Option<String>, _>(ordinal) {
                     Ok(Some(s)) => serde_json::Value::String(s),
                     Ok(None) => serde_json::Value::Null,
-                    Err(_) => {
-                        // Try chrono DateTime
-                        match row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col.ordinal())
-                        {
-                            Ok(Some(dt)) => serde_json::Value::String(dt.to_rfc3339()),
-                            Ok(None) => serde_json::Value::Null,
-                            Err(e) => {
-                                warn_decode(&e);
-                                serde_json::Value::Null
-                            }
-                        }
-                    }
+                    Err(_) => decode_col(
+                        row,
+                        ordinal,
+                        &col_name,
+                        type_name,
+                        |dt: chrono::DateTime<chrono::Utc>| {
+                            serde_json::Value::String(dt.to_rfc3339())
+                        },
+                    ),
                 }
             }
-            "UUID" => match row.try_get::<Option<uuid::Uuid>, _>(col.ordinal()) {
-                Ok(Some(u)) => serde_json::Value::String(u.to_string()),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
+            "UUID" => decode_col(row, ordinal, &col_name, type_name, |u: uuid::Uuid| {
+                serde_json::Value::String(u.to_string())
+            }),
             // Fallback: try as string
-            _ => match row.try_get::<Option<String>, _>(col.ordinal()) {
-                Ok(Some(s)) => serde_json::Value::String(s),
-                Ok(None) => serde_json::Value::Null,
-                Err(e) => {
-                    warn_decode(&e);
-                    serde_json::Value::Null
-                }
-            },
+            _ => decode_col(
+                row,
+                ordinal,
+                &col_name,
+                type_name,
+                serde_json::Value::String,
+            ),
         };
 
         if col_name == "id" {
@@ -787,49 +448,42 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     Ok(Record { id, data })
 }
 
-/// Bind a serde_json::Value to a `sqlx::query_scalar` query.
-fn bind_json_value<'q, O>(
-    q: sqlx::query::QueryScalar<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>,
-    v: &'q serde_json::Value,
-) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments> {
-    match v {
-        serde_json::Value::Null => q.bind(None::<String>),
-        serde_json::Value::Bool(b) => q.bind(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
+/// `sqlx::query` and `sqlx::query_scalar` builders expose an identical `bind`
+/// method but share no trait, so one definition generates both bind helpers.
+macro_rules! generate_bind {
+    ($(#[$meta:meta])* fn $name:ident<$lt:lifetime $(, $gen:ident)?>($qty:ty)) => {
+        $(#[$meta])*
+        fn $name<$lt $(, $gen)?>(q: $qty, v: &$lt serde_json::Value) -> $qty {
+            match v {
+                serde_json::Value::Null => q.bind(None::<String>),
+                serde_json::Value::Bool(b) => q.bind(*b),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        q.bind(i)
+                    } else if let Some(f) = n.as_f64() {
+                        q.bind(f)
+                    } else {
+                        q.bind(n.to_string())
+                    }
+                }
+                serde_json::Value::String(s) => q.bind(s.as_str()),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
             }
         }
-        serde_json::Value::String(s) => q.bind(s.as_str()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
-    }
+    };
 }
 
-/// Bind a serde_json::Value to a `sqlx::query` (non-scalar).
-fn bind_json_value_query<'q>(
-    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    v: &'q serde_json::Value,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match v {
-        serde_json::Value::Null => q.bind(None::<String>),
-        serde_json::Value::Bool(b) => q.bind(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
-            }
-        }
-        serde_json::Value::String(s) => q.bind(s.as_str()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
-    }
-}
+generate_bind!(
+    /// Bind a serde_json::Value to a `sqlx::query_scalar` query.
+    fn bind_json_value<'q, O>(
+        sqlx::query::QueryScalar<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>
+    )
+);
+
+generate_bind!(
+    /// Bind a serde_json::Value to a `sqlx::query` (non-scalar).
+    fn bind_json_value_query<'q>(sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>)
+);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1034,32 +688,8 @@ mod tests {
         assert_eq!(params.len(), 3);
     }
 
-    #[test]
-    #[expect(
-        clippy::approx_constant,
-        reason = "test literal happens to look like PI; not an approximation"
-    )]
-    fn test_pg_type_for_json_value() {
-        assert_eq!(pg_type_for_json_value(&serde_json::Value::Null), "TEXT");
-        assert_eq!(
-            pg_type_for_json_value(&serde_json::Value::Bool(true)),
-            "BOOLEAN"
-        );
-        assert_eq!(pg_type_for_json_value(&serde_json::json!(42)), "BIGINT");
-        assert_eq!(
-            pg_type_for_json_value(&serde_json::json!(3.14)),
-            "DOUBLE PRECISION"
-        );
-        assert_eq!(pg_type_for_json_value(&serde_json::json!("hello")), "TEXT");
-        assert_eq!(
-            pg_type_for_json_value(&serde_json::json!([1, 2, 3])),
-            "JSONB"
-        );
-        assert_eq!(
-            pg_type_for_json_value(&serde_json::json!({"key": "val"})),
-            "JSONB"
-        );
-    }
+    // pg type mapping for lazy column-add now lives in
+    // wafer_sql_utils::ddl::column_type_for_value (tested there).
 
     #[test]
     fn test_sanitize_ident() {
