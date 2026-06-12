@@ -131,7 +131,6 @@ dependencies = [
  "tracing-subscriber",
  "wafer-block",
  "wafer-block-inspector",
- "wafer-block-logger",
  "wafer-block-sqlite",
  "wafer-core",
  "wafer-flow-http-server",
@@ -5990,18 +5989,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wafer-block-config"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "parking_lot",
- "serde",
- "serde_json",
- "tracing",
- "wafer-core",
-]
-
-[[package]]
 name = "wafer-block-cors"
 version = "0.1.0"
 dependencies = [
@@ -6092,17 +6079,6 @@ dependencies = [
  "chrono",
  "tracing",
  "wafer-block-macro",
- "wafer-core",
-]
-
-[[package]]
-name = "wafer-block-logger"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tracing",
  "wafer-core",
 ]
 

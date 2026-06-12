@@ -8,13 +8,11 @@ edition = "2021"
 #   wafer-run = { version = "0.1", features = ["full"] }
 #   wafer-flow-http-server = "0.1"
 #   wafer-block-sqlite = "0.1"
-#   wafer-block-logger = "0.1"
 wafer-block = { path = "../../crates/wafer-block" }
 wafer-run  = { path = "../../crates/wafer-run", features = ["full"] }
 wafer-core = { path = "../../crates/wafer-core" }
 wafer-flow-http-server = { path = "../../crates/wafer-flow-http-server" }
 wafer-block-sqlite = { path = "../../crates/wafer-block-sqlite" }
-wafer-block-logger = { path = "../../crates/wafer-block-logger" }
 wafer-block-inspector = { path = "../../crates/wafer-block-inspector" }
 
 tokio = { version = "1", features = ["full"] }

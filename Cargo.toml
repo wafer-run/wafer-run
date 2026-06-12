@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/wafer-block",
     "crates/wafer-block-macro",
-    "crates/wafer-block-config",
     "crates/wafer-block-cors",
     "crates/wafer-block-crypto",
     "crates/wafer-block-fastembed",
@@ -11,7 +10,6 @@ members = [
     "crates/wafer-block-inspector",
     "crates/wafer-block-ip-rate-limit",
     "crates/wafer-block-local-storage",
-    "crates/wafer-block-logger",
     "crates/wafer-block-monitoring",
     "crates/wafer-block-network",
     "crates/wafer-block-postgres",

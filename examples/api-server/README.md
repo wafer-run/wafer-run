@@ -27,7 +27,7 @@ Visit `http://localhost:8080/_inspector/ui` to inspect the running flow.
 ## Key files
 
 - `src/main.rs` — block registration (HTTP server, database, logger, inspector), inline `api-handler` block.
-- `Cargo.toml` — adds `wafer-block-sqlite`, `wafer-block-logger`, `wafer-core` on top of the runtime + HTTP server.
+- `Cargo.toml` — adds `wafer-block-sqlite` and `wafer-core` (which provides the `TracingLogger` service) on top of the runtime + HTTP server.
 
 ## Related docs
 
