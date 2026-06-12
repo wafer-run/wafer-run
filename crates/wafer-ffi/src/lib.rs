@@ -26,20 +26,17 @@ use std::{
 };
 
 use tokio::sync::RwLock;
-use wafer_run::{Message, StaticConfigSource, Wafer, WasmiBlock};
+use wafer_run::{Message, StaticConfigSource, Wafer};
 
 /// Callback invoked when an async FFI op completes.
 ///
 /// - For lifecycle ops (`wafer_resolve`/`wafer_start`/`wafer_stop`): `result`
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
-///   the form `{"action":"respond|drop|error|continue|halt", ...}`.
-///   Note: `halt` payloads always use `body_base64` (Base64-encoded bytes)
-///   instead of a `body` string — Halt may carry non-UTF-8 or empty bodies.
-///   A `respond` payload carries `body` (a UTF-8 string) when the body is
-///   valid UTF-8; when it is not, it carries `body_base64` (Base64-encoded
-///   bytes) instead so binary bodies are never collapsed to `""`. Exactly
-///   one of `body` / `body_base64` is present on a `respond`.
+///   the form `{"action":"respond|drop|error|continue|halt", ...}`. The
+///   wire format (including the `body` vs `body_base64` rules for `respond`
+///   and `halt`) is documented on [`wafer_run::embed::output_to_json`],
+///   which produces it.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.
@@ -95,78 +92,6 @@ fn error_json(msg: &str) -> *mut c_char {
     let json = serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| String::from(r#"{"error":"unprintable"}"#));
     to_c_string(&json)
-}
-
-/// Build a JSON result string from a collected OutputStream.
-async fn output_to_json(output: wafer_run::OutputStream) -> String {
-    use wafer_block::streams::output::TerminalNotResponse;
-    match output.collect_buffered().await {
-        Ok(buf) => {
-            let meta_obj: serde_json::Value = buf
-                .meta
-                .iter()
-                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-            // Emit `body` for valid UTF-8 (the common case, human-readable
-            // wire shape); fall back to `body_base64` for non-UTF-8 bodies so
-            // binary responses are not silently collapsed to "". This mirrors
-            // the `halt` branch, which always base64-encodes.
-            match String::from_utf8(buf.body) {
-                Ok(body_str) => serde_json::json!({
-                    "action": "respond",
-                    "body": body_str,
-                    "meta": meta_obj,
-                })
-                .to_string(),
-                Err(e) => {
-                    use base64ct::{Base64, Encoding};
-                    let body_b64 = Base64::encode_string(e.as_bytes());
-                    serde_json::json!({
-                        "action": "respond",
-                        "body_base64": body_b64,
-                        "meta": meta_obj,
-                    })
-                    .to_string()
-                }
-            }
-        }
-        Err(TerminalNotResponse::Error(err)) => serde_json::json!({
-            "action": "error",
-            "error": {
-                "code": format!("{:?}", err.code),
-                "message": err.message,
-            }
-        })
-        .to_string(),
-        Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
-        Err(TerminalNotResponse::Halt(buf)) => {
-            use base64ct::{Base64, Encoding};
-            let body_b64 = Base64::encode_string(&buf.body);
-            let meta_obj: serde_json::Value = buf
-                .meta
-                .iter()
-                .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-            serde_json::json!({
-                "action": "halt",
-                "body_base64": body_b64,
-                "meta": meta_obj,
-            })
-            .to_string()
-        }
-        Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
-            "action": "continue",
-            "message": serde_json::to_value(&msg).unwrap_or_default(),
-        })
-        .to_string(),
-        Err(TerminalNotResponse::Malformed) => serde_json::json!({
-            "action": "error",
-            "error": { "code": "Internal", "message": "stream ended without terminal event" }
-        })
-        .to_string(),
-    }
 }
 
 /// Safely dereference a `*mut WaferRuntime` to `&WaferRuntime`.
@@ -258,7 +183,47 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
     }
 }
 
-/// Resolve all block references in registered flows (async).
+/// Shared body of `wafer_resolve` / `wafer_start`: spawn `seal()` on the
+/// internal tokio runtime and report completion via the callback. The two
+/// exports are ABI-stable aliases for the same operation; `panic_label`
+/// keeps their panic messages distinguishable.
+unsafe fn spawn_seal(
+    w: *mut WaferRuntime,
+    cb: WaferDoneCb,
+    user_data: *mut c_void,
+    panic_label: &str,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(runtime) = deref_ref(w) else {
+            invoke_done(
+                cb,
+                Some(error_cstring("null runtime pointer")),
+                UserData(user_data),
+            );
+            return;
+        };
+        let inner = runtime.inner.clone();
+        let ud = UserData(user_data);
+        runtime.rt.spawn(async move {
+            let result = inner.write().await.seal().await;
+            let err = match result {
+                Ok(()) => None,
+                Err(e) => Some(error_cstring(&e.to_string())),
+            };
+            invoke_done(cb, err, ud);
+        });
+    }));
+    if result.is_err() {
+        invoke_done(
+            cb,
+            Some(error_cstring(&format!("panic in {panic_label}"))),
+            UserData(user_data),
+        );
+    }
+}
+
+/// Resolve all block references in registered flows (async). This is the
+/// canonical seal entry point; `wafer_start` is an ABI-compatible alias.
 ///
 /// Returns immediately; invokes `cb` when resolution (`seal()`) completes.
 /// On success the callback's `result` is NULL; on failure it is a JSON
@@ -268,92 +233,32 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 /// capability resolution, remote-block download, and startup-snapshot
 /// finalization, but does **not** dispatch `lifecycle(Init)` eagerly.
 /// Per-block `Init` runs lazily on first dispatch per worker isolate —
-/// call `wafer_run_block` (or `wafer_run_flow`) to trigger init on a
-/// specific block. To validate config without dispatching, call
-/// `wafer_validate_all_block_configs` (FFI bindings TBD; see
-/// `Wafer::validate_all_block_configs`).
+/// call `wafer_run` to trigger init on the blocks a flow uses. To validate
+/// config without dispatching, see `Wafer::validate_all_block_configs`
+/// (no FFI binding yet).
 #[no_mangle]
 pub unsafe extern "C" fn wafer_resolve(
     w: *mut WaferRuntime,
     cb: WaferDoneCb,
     user_data: *mut c_void,
 ) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(runtime) = deref_ref(w) else {
-            invoke_done(
-                cb,
-                Some(error_cstring("null runtime pointer")),
-                UserData(user_data),
-            );
-            return;
-        };
-        let inner = runtime.inner.clone();
-        let ud = UserData(user_data);
-        runtime.rt.spawn(async move {
-            let result = inner.write().await.seal().await;
-            let err = match result {
-                Ok(()) => None,
-                Err(e) => Some(error_cstring(&e.to_string())),
-            };
-            invoke_done(cb, err, ud);
-        });
-    }));
-    if result.is_err() {
-        invoke_done(
-            cb,
-            Some(error_cstring("panic in wafer_resolve")),
-            UserData(user_data),
-        );
-    }
+    spawn_seal(w, cb, user_data, "wafer_resolve");
 }
 
 /// Start the runtime without spawning block listeners (async).
 ///
-/// Returns immediately; invokes `cb` when start (`seal()`) completes. On
-/// success the callback's `result` is NULL; on failure it is a JSON
-/// error string.
-///
-/// `seal()` performs composite-config expansion, `uses` gathering,
-/// capability resolution, remote-block download, and startup-snapshot
-/// finalization, but does **not** dispatch `lifecycle(Init)` eagerly.
-/// Per-block `Init` runs lazily on first dispatch per worker isolate —
-/// call `wafer_run_block` (or `wafer_run_flow`) to trigger init on a
-/// specific block. To validate config without dispatching, call
-/// `wafer_validate_all_block_configs` (FFI bindings TBD; see
-/// `Wafer::validate_all_block_configs`).
+/// ABI-compatible alias of [`wafer_resolve`] — both perform `seal()` and
+/// report completion identically. The alias is kept because existing
+/// embedders (e.g. the Go binding, `go/wafer-run-go`) link against both
+/// symbols. Prefer `wafer_resolve` in new code; this alias may be dropped
+/// in the next ABI revision.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(
     w: *mut WaferRuntime,
     cb: WaferDoneCb,
     user_data: *mut c_void,
 ) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(runtime) = deref_ref(w) else {
-            invoke_done(
-                cb,
-                Some(error_cstring("null runtime pointer")),
-                UserData(user_data),
-            );
-            return;
-        };
-        let inner = runtime.inner.clone();
-        let ud = UserData(user_data);
-        runtime.rt.spawn(async move {
-            let result = inner.write().await.seal().await;
-            let err = match result {
-                Ok(()) => None,
-                Err(e) => Some(error_cstring(&e.to_string())),
-            };
-            invoke_done(cb, err, ud);
-        });
-    }));
-    if result.is_err() {
-        invoke_done(
-            cb,
-            Some(error_cstring("panic in wafer_start")),
-            UserData(user_data),
-        );
-    }
+    spawn_seal(w, cb, user_data, "wafer_start");
 }
 
 /// Stop the runtime and shut down all block instances (async).
@@ -415,34 +320,21 @@ pub unsafe extern "C" fn wafer_register(
             return error_json("invalid path");
         };
 
-        // register_block / add_flow_json are sync — block_on isn't needed.
-        // We acquire the write lock with `blocking_write`, which is a CALLER
-        // CONTRACT, not something this layer can enforce: `wafer_register`
-        // must be called from a non-tokio thread (e.g. the C caller's own
-        // thread), NOT from inside a `WaferDoneCb`, which may run on a thread
-        // owned by the internal tokio runtime (see the module-level docs on
+        // register_path is sync — block_on isn't needed. We acquire the
+        // write lock with `blocking_write`, which is a CALLER CONTRACT, not
+        // something this layer can enforce: `wafer_register` must be called
+        // from a non-tokio thread (e.g. the C caller's own thread), NOT from
+        // inside a `WaferDoneCb`, which may run on a thread owned by the
+        // internal tokio runtime (see the module-level docs on
         // `WaferDoneCb`). `blocking_write` PANICS if invoked within a tokio
         // runtime context; if a consumer violates the contract, the
         // surrounding `catch_unwind` converts that panic into a JSON error
         // string ("panic in wafer_register") rather than unwinding across the
         // FFI boundary.
         let mut inner = runtime.inner.blocking_write();
-        if path_str.ends_with(".wasm") {
-            match WasmiBlock::load(path_str) {
-                Ok(block) => match inner.register_block(name_str, Arc::new(block)) {
-                    Ok(()) => std::ptr::null_mut(),
-                    Err(e) => error_json(&e.to_string()),
-                },
-                Err(e) => error_json(&e.to_string()),
-            }
-        } else {
-            match std::fs::read_to_string(path_str) {
-                Ok(json) => match inner.add_flow_json(&json) {
-                    Ok(()) => std::ptr::null_mut(),
-                    Err(e) => error_json(&format!("invalid WaferFlow JSON: {e}")),
-                },
-                Err(e) => error_json(&format!("failed to read file: {e}")),
-            }
+        match wafer_run::embed::register_path(&mut inner, name_str, path_str) {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => error_json(&e),
         }
     }));
     result.unwrap_or_else(|_| error_json("panic in wafer_register"))
@@ -525,7 +417,7 @@ pub unsafe extern "C" fn wafer_run(
         runtime.rt.spawn(async move {
             let input = wafer_run::InputStream::empty();
             let output = inner.read().await.run(&flow_id, msg, input).await;
-            let json = output_to_json(output).await;
+            let json = wafer_run::embed::output_to_json(output).await;
             let cs = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
             invoke_done(cb, Some(cs), ud);
         });
@@ -588,64 +480,5 @@ pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drop(CString::from_raw(s));
         }));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use wafer_block::core_types::MetaEntry;
-    use wafer_run::OutputStream;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn respond_utf8_body_uses_body_field() {
-        let out = OutputStream::respond(b"hello".to_vec());
-        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["action"], "respond");
-        assert_eq!(json["body"], "hello");
-        assert!(json.get("body_base64").is_none());
-    }
-
-    #[tokio::test]
-    async fn respond_non_utf8_body_uses_body_base64_not_empty_string() {
-        // Lone 0xFF is invalid UTF-8 — the old `unwrap_or_default()` collapsed
-        // this to `body: ""` (silent data loss). It must now round-trip as
-        // base64 and not appear under `body`.
-        let bytes = vec![0xFF, 0x00, 0x42];
-        let out = OutputStream::respond(bytes.clone());
-        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["action"], "respond");
-        assert!(
-            json.get("body").is_none(),
-            "binary body must not be under `body`"
-        );
-        use base64ct::{Base64, Encoding};
-        let b64 = json["body_base64"].as_str().expect("body_base64 present");
-        assert_eq!(Base64::decode_vec(b64).unwrap(), bytes);
-    }
-
-    #[tokio::test]
-    async fn respond_empty_body_is_empty_string_not_base64() {
-        // A genuinely-empty UTF-8 body stays `body: ""` — distinguishable from
-        // a non-UTF-8 body, which would use `body_base64`.
-        let out = OutputStream::respond(Vec::new());
-        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["action"], "respond");
-        assert_eq!(json["body"], "");
-        assert!(json.get("body_base64").is_none());
-    }
-
-    #[tokio::test]
-    async fn respond_preserves_meta() {
-        let out = OutputStream::respond_with_meta(
-            b"ok".to_vec(),
-            vec![MetaEntry {
-                key: "x-test".into(),
-                value: "1".into(),
-            }],
-        );
-        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["meta"]["x-test"], "1");
     }
 }
