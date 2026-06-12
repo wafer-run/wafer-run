@@ -55,7 +55,6 @@ pub use wafer_block::{
     executor::{extract_path_vars, match_path, matches_pattern},
     meta::*,
     registry::BlockRegistry,
-    router::Router,
     sha256_hex, streams,
     streams::{
         input::InputStream,

@@ -46,7 +46,6 @@ pub mod hash;
 pub mod interfaces;
 pub mod introspection;
 pub mod registry;
-pub mod router;
 pub mod runtime;
 pub mod spawn;
 #[cfg(not(target_arch = "wasm32"))]
@@ -73,7 +72,6 @@ pub use introspection::FlowIntrospection;
 #[cfg(not(target_arch = "wasm32"))]
 pub use linkme;
 pub use registry::BlockRegistry;
-pub use router::Router;
 pub use runtime::Runtime;
 pub use spawn::spawn_producer;
 #[cfg(not(target_arch = "wasm32"))]
