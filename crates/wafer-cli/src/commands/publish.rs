@@ -47,9 +47,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     }
 
     let url = registry_client::resolve_registry(registry);
-    let cf = credentials::load().unwrap_or_default();
-    let entry = credentials::resolve(&cf, url.as_str())
-        .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;
+    let entry = credentials::require(&url)?;
 
     let file_name = tarball_path.file_name().map_or_else(
         || "package.wafer".to_string(),

@@ -17,9 +17,7 @@ pub async fn run(
     let version = version.ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
 
     let url = registry_client::resolve_registry(registry);
-    let cf = credentials::load().unwrap_or_default();
-    let entry = credentials::resolve(&cf, url.as_str())
-        .ok_or_else(|| anyhow::anyhow!("No token for {url}. Run `wafer login` first."))?;
+    let entry = credentials::require(&url)?;
 
     let action = match op {
         YankOp::Yank => "yank",

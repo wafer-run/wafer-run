@@ -3,6 +3,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::{paths::wafer_home, registry_client::Registry};
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct CredentialsFile {
     #[serde(default)]
@@ -18,8 +20,7 @@ pub struct Entry {
 }
 
 pub fn path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME env var required")?;
-    Ok(PathBuf::from(home).join(".wafer").join("credentials.toml"))
+    Ok(wafer_home()?.join("credentials.toml"))
 }
 
 pub fn load() -> Result<CredentialsFile> {
@@ -66,6 +67,16 @@ pub fn resolve<'a>(cf: &'a CredentialsFile, registry_url: &str) -> Option<&'a En
         }
     }
     cf.registries.values().find(|e| e.registry == registry_url)
+}
+
+/// Load the credentials file and resolve the entry for `registry`, or fail
+/// with the canonical "no token" error. The one preamble shared by every
+/// authenticated command (publish, yank, whoami, …).
+pub fn require(registry: &Registry) -> Result<Entry> {
+    let cf = load()?;
+    resolve(&cf, registry.as_str())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("No token for {registry}. Run `wafer login` first."))
 }
 
 #[cfg(test)]
@@ -150,15 +161,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn path_with_home_unset_errors() {
+    fn require_returns_canonical_error_when_no_entry_matches() {
         let _guard = env_guard();
-        let old_home = std::env::var("HOME").ok();
-        std::env::remove_var("HOME");
-        let result = path();
-        assert!(result.is_err());
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
         }
+        let err = require(&Registry::new("https://wafer.run"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("No token for https://wafer.run") && err.contains("wafer login"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn require_returns_matching_entry() {
+        let _guard = env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let mut cf = CredentialsFile::default();
+        upsert(
+            &mut cf,
+            None,
+            Entry {
+                registry: "https://wafer.run".into(),
+                token: "wafer_pat_abc".into(),
+            },
+        );
+        save(&cf).unwrap();
+        let entry = require(&Registry::new("https://wafer.run/")).unwrap();
+        assert_eq!(entry.token, "wafer_pat_abc");
     }
 }

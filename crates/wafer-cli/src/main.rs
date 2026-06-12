@@ -16,6 +16,7 @@ mod detect;
 mod install;
 mod lockfile;
 mod package;
+mod paths;
 mod registry_client;
 mod registry_error;
 mod scaffold;

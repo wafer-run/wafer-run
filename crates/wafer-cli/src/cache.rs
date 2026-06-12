@@ -41,11 +41,10 @@ pub struct CacheRoot {
 }
 
 impl CacheRoot {
-    /// Resolve the default cache root `$HOME/.wafer/cache/`.
+    /// Resolve the default cache root `~/.wafer/cache/`.
     /// Errors if the OS doesn't expose a home directory.
     pub fn default_location() -> Result<Self> {
-        let home = dirs::home_dir().context("no HOME directory; cannot locate cache")?;
-        Ok(Self::at(home.join(".wafer").join("cache")))
+        Ok(Self::at(crate::paths::wafer_home()?.join("cache")))
     }
 
     /// Construct a `CacheRoot` for an explicit path (tests use `tempdir`).
