@@ -34,7 +34,7 @@ The produced `.wasm` is the input to wafer's WASM block loader. It's also what `
 
 - `src/lib.rs` — the block implementation: a single `EchoBlock` annotated with `#[wafer_block(name = "example/echo", ...)]`.
 - `Cargo.toml` — note `[lib] crate-type = ["cdylib"]` and the `[workspace]` block.
-- `manifest.json` — block manifest used by the registry.
+- `wafer.toml` — the package manifest (`wafer package`/`wafer publish` metadata).
 - `tests/` — host-side tests that load the built `.wasm`.
 
 ## Related docs
