@@ -101,7 +101,13 @@ pub async fn output_to_json(output: OutputStream) -> String {
 ///
 /// Errors are returned as display strings ready for the binding's error
 /// surface (JSON error string / JS exception).
-#[cfg(feature = "wasmi")]
+///
+/// Native-only: this reads from the filesystem (`WasmiBlock::load` and
+/// `std::fs::read_to_string`), so it is gated out on `wasm32` where there is
+/// no disk. Its only callers are the native embedder bindings (`wafer-ffi`,
+/// `wafer-run-node`); browser/wasm32 embedders load blocks from bytes via
+/// `WasmiBlock::load_with_engine` instead (see `runtime::remote`).
+#[cfg(all(feature = "wasmi", not(target_arch = "wasm32")))]
 pub fn register_path(wafer: &mut crate::Wafer, name: &str, path: &str) -> Result<(), String> {
     if path.ends_with(".wasm") {
         let block =
