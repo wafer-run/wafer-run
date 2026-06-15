@@ -760,7 +760,6 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let parameters_json = &skill.parameters;
         quote! {
             info = info
-                .role(wafer_block::types::SkillRole::Skill)
                 .tool(wafer_block::types::SkillTool {
                     description: #description.to_string(),
                     // `parse_skill` already validated `#parameters_json` parses as

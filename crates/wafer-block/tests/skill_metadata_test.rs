@@ -104,16 +104,14 @@ fn external_asset_omits_timeout_ms_when_none() {
 fn block_info_skill_fields_default_to_none() {
     use wafer_block::BlockInfo;
     let info = BlockInfo::new("foo/bar", "0.1.0", "handler@v1", "test");
-    assert!(info.role.is_none());
     assert!(info.tool.is_none());
     assert!(info.external_assets.is_empty());
 }
 
 #[test]
 fn block_info_skill_builder_sets_fields() {
-    use wafer_block::{BlockInfo, ExternalAsset, SkillRole, SkillTool};
+    use wafer_block::{BlockInfo, ExternalAsset, SkillTool};
     let info = BlockInfo::new("gizza-ai/clock", "0.1.0", "handler@v1", "Current time")
-        .role(SkillRole::Skill)
         .tool(SkillTool {
             description: "Get the current time.".to_string(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
@@ -127,7 +125,6 @@ fn block_info_skill_builder_sets_fields() {
             timeout_ms: None,
         }]);
 
-    assert!(matches!(info.role, Some(SkillRole::Skill)));
     assert!(info.tool.is_some());
     assert_eq!(info.external_assets.len(), 1);
     assert_eq!(info.external_assets[0].id, "ffmpeg");

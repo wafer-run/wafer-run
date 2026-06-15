@@ -24,4 +24,4 @@ pub use interface_spec::{ActionSpec, InterfaceSpec};
 pub use message_ext::{hashmap_to_meta, meta_to_hashmap, MetaGet, MetaSet};
 pub use request_action::RequestAction;
 pub use schema::{CollectionSchema, FieldSchema, IndexSchema};
-pub use skill::{ExternalAsset, SkillRole, SkillTool};
+pub use skill::{ExternalAsset, SkillTool};
