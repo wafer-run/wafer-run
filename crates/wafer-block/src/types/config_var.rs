@@ -22,6 +22,12 @@ pub enum InputType {
     /// Plain text input.
     #[default]
     Text,
+    /// Multi-line free text; renders as a `<textarea>` instead of an `<input>`.
+    /// Not sensitive and not URL-validated — semantically the same as [`Text`]
+    /// except for the widget used.
+    ///
+    /// [`Text`]: InputType::Text
+    Textarea,
     /// Boolean on/off toggle.
     Toggle,
     /// Password field (masked, treated as sensitive).
@@ -151,5 +157,18 @@ impl ConfigVar {
     /// Sensitive vars (passwords/secrets) cannot be emptied.
     pub fn can_be_empty(&self) -> bool {
         !self.is_sensitive()
+    }
+}
+
+#[cfg(test)]
+mod input_type_tests {
+    use super::*;
+
+    #[test]
+    fn textarea_serde_round_trip() {
+        let json = serde_json::to_string(&InputType::Textarea).unwrap();
+        assert_eq!(json, "\"textarea\"");
+        let back: InputType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, InputType::Textarea);
     }
 }
