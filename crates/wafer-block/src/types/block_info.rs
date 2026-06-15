@@ -5,7 +5,7 @@ use super::{
     endpoint::BlockEndpoint,
     grants::ResourceGrant,
     schema::CollectionSchema,
-    skill::{ExternalAsset, SkillRole, SkillTool},
+    skill::{ExternalAsset, SkillTool},
 };
 
 /// Block category — determines how the block is displayed in the admin UI.
@@ -149,12 +149,8 @@ pub struct BlockInfo {
     pub capabilities: Option<crate::BlockCapabilities>,
 
     // -- Skill / agent metadata --
-    /// Whether this block acts as an agent-callable tool.
-    /// `None` means the block is not exposed as a skill.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<SkillRole>,
-
-    /// OpenAI-compatible tool descriptor for this block when `role == Some(Skill)`.
+    /// OpenAI-compatible tool descriptor. `Some` marks this block as an
+    /// agent-callable skill; `None` means it is not exposed as a tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<SkillTool>,
 
@@ -197,7 +193,6 @@ impl BlockInfo {
             endpoints: Vec::new(),
             admin_url: String::new(),
             capabilities: None,
-            role: None,
             tool: None,
             external_assets: Vec::new(),
         }
@@ -324,13 +319,8 @@ impl BlockInfo {
         self
     }
 
-    /// Mark this block as an agent-callable skill.
-    pub fn role(mut self, role: SkillRole) -> Self {
-        self.role = Some(role);
-        self
-    }
-
     /// Attach the OpenAI-compatible tool descriptor used by agent blocks.
+    /// Presence of a descriptor is what marks the block as an agent-callable skill.
     pub fn tool(mut self, tool: SkillTool) -> Self {
         self.tool = Some(tool);
         self

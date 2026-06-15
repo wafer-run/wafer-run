@@ -1,12 +1,12 @@
 //! Test that `#[wafer_block(skill(description, parameters))]` produces the
-//! expected `BlockInfo::role` and `BlockInfo::tool` values.
+//! expected `BlockInfo::tool` value.
 //!
 //! Each block is placed in its own module to avoid symbol clashes for the
 //! generated `#[no_mangle]` ABI exports. Tests call the generated
 //! `block_info()` associated function which returns `BlockInfo` directly
 //! without the WASM ABI overhead.
 
-use wafer_block::{types::SkillRole, Message};
+use wafer_block::Message;
 use wafer_block_macro::{wafer_async_trait, wafer_block};
 use wafer_sdk::core_abi::GuestResult;
 
@@ -100,15 +100,10 @@ mod non_skill_block {
 }
 
 #[test]
-fn skill_attribute_sets_role_and_tool() {
+fn skill_attribute_sets_tool() {
     use skill_block::AddNumbers;
     let info = AddNumbers::block_info();
-    assert_eq!(
-        info.role,
-        Some(SkillRole::Skill),
-        "skill(...) attribute must set role to Skill"
-    );
-    let tool = info.tool.expect("tool must be set");
+    let tool = info.tool.expect("skill(...) attribute must set tool");
     assert_eq!(tool.description, "Add two integers and return the sum.");
     assert_eq!(tool.parameters["type"], "object");
     assert_eq!(tool.parameters["properties"]["a"]["type"], "integer");
@@ -116,13 +111,9 @@ fn skill_attribute_sets_role_and_tool() {
 }
 
 #[test]
-fn no_skill_attribute_leaves_role_and_tool_unset() {
+fn no_skill_attribute_leaves_tool_unset() {
     use non_skill_block::PlainBlock;
     let info = PlainBlock::block_info();
-    assert!(
-        info.role.is_none(),
-        "block without skill(...) must have role = None"
-    );
     assert!(
         info.tool.is_none(),
         "block without skill(...) must have tool = None"

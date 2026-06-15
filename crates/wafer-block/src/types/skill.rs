@@ -1,16 +1,28 @@
-//! Skill / agent metadata — [`SkillRole`], [`SkillTool`], and
-//! [`ExternalAsset`] (consumed by gizza-ai/agent and any future agent block).
-
-/// Marker for blocks that should be enumerated as tools by an agent block.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SkillRole {
-    /// Block is callable as a tool by an agent block.
-    Skill,
-}
+//! Skill / agent metadata — [`SkillTool`] and [`ExternalAsset`]
+//! (consumed by gizza-ai/agent and any future agent block).
 
 /// JSON-Schema-shaped tool descriptor for OpenAI-compatible function calling.
 /// Mirrors the shape consumed by WebLLM and remote LLM providers.
+///
+/// A block is an agent-callable skill iff it carries a `SkillTool` (there is no
+/// separate marker — the old single-variant `SkillRole` enum was always set in
+/// lock-step with this field and carried no extra information, so it was
+/// removed). `BlockInfo::tool.is_some()` is the sole predicate.
+///
+/// Deferred design — an `invocable_by` gate. Not built yet because no
+/// autonomous-LLM tool-calling path exists today (every tool is invoked only
+/// via explicit user slash-commands), so it would re-create the always-set /
+/// never-read flag just deleted. Build it the day autonomous invocation lands;
+/// it is a pure additive serde change (no migration). Intended shape:
+///   `enum Invoker { Manual, Autonomous }`  (mode axis: "is a human in the loop?")
+///   `invocable_by: BTreeSet<Invoker>` on `SkillTool`, default `{Manual}`.
+/// `{}` nobody · `{Manual}` user-only (slash) · `{Autonomous}` agent-only · both = full.
+/// Rationale: mode axis not actor (planner/cron/workflow are also autonomous);
+/// default `{Manual}` already neutralizes model-self-invocation of a destructive
+/// tool (`{All}` silently widens on a new invoker, `None`-default is inert);
+/// a typed set not `tags: Vec<String>` (an authz gate must be exhaustive +
+/// compiler-checked, not magic strings); `Cli`/`Api` do NOT belong here —
+/// those are transport, already governed by endpoints + auth levels.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillTool {
     /// Natural-language description shown to the LLM.
