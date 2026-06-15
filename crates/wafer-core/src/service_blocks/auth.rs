@@ -41,13 +41,11 @@ mod tests {
         Arc,
     };
 
-    use wafer_block::{Block, LifecycleEvent, LifecycleType, Message};
+    use wafer_block::{Block, LifecycleEvent, LifecycleType};
     use wafer_block_macro::wafer_async_trait;
 
     use super::*;
-    use crate::interfaces::auth::service::{
-        AuthError, AuthService, Role, TokenScope, UserId, UserProfile,
-    };
+    use crate::interfaces::auth::service::{AuthError, AuthService};
 
     /// Stub service that counts `init()` calls.
     struct InitCounterService {
@@ -60,30 +58,7 @@ mod tests {
             self.inits.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn require_token(
-            &self,
-            _msg: &Message,
-            _scope: TokenScope,
-        ) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn verify_org_admin(
-            &self,
-            _user: UserId,
-            _provider: &str,
-            _org_ref: &str,
-        ) -> Result<bool, AuthError> {
-            Ok(false)
-        }
-        async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
-            Err(AuthError::NotFound)
-        }
+        // All other AuthService methods rely on the trait's fail-closed defaults.
     }
 
     #[tokio::test]
@@ -161,30 +136,7 @@ mod tests {
         fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
             self.grants.clone()
         }
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn require_token(
-            &self,
-            _msg: &Message,
-            _scope: TokenScope,
-        ) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
-            Err(AuthError::Unauthorized)
-        }
-        async fn verify_org_admin(
-            &self,
-            _user: UserId,
-            _provider: &str,
-            _org_ref: &str,
-        ) -> Result<bool, AuthError> {
-            Ok(false)
-        }
-        async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
-            Err(AuthError::NotFound)
-        }
+        // All other AuthService methods rely on the trait's fail-closed defaults.
     }
 
     #[test]

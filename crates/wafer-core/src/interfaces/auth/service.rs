@@ -99,27 +99,48 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Extract credentials from incoming Message (Bearer or Cookie).
     /// Look up in sessions or personal_access_tokens; touch last_used_at.
-    async fn require_user(&self, msg: &Message) -> Result<UserId, AuthError>;
+    ///
+    /// Fail-closed default: a service that does not implement authentication
+    /// rejects every request as unauthorized.
+    async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+        Err(AuthError::Unauthorized)
+    }
 
     /// As require_user but requires a PAT with the given scope.
     /// Session cookies are rejected — scopes only apply to PATs.
-    async fn require_token(&self, msg: &Message, scope: TokenScope) -> Result<UserId, AuthError>;
+    ///
+    /// Fail-closed default: unauthorized.
+    async fn require_token(&self, _msg: &Message, _scope: TokenScope) -> Result<UserId, AuthError> {
+        Err(AuthError::Unauthorized)
+    }
 
     /// require_user + users.role == role. Also accepts a valid unexpired
     /// bootstrap_tokens row as Admin.
-    async fn require_role(&self, msg: &Message, role: Role) -> Result<UserId, AuthError>;
+    ///
+    /// Fail-closed default: unauthorized.
+    async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+        Err(AuthError::Unauthorized)
+    }
 
     /// True iff user owns the org. Reserved orgs return true iff user.role == Admin.
     /// Non-github providers return Ok(false). (Implemented in Plan C.)
+    ///
+    /// Fail-closed default: not an org admin.
     async fn verify_org_admin(
         &self,
-        user: UserId,
-        provider: &str,
-        org_ref: &str,
-    ) -> Result<bool, AuthError>;
+        _user: UserId,
+        _provider: &str,
+        _org_ref: &str,
+    ) -> Result<bool, AuthError> {
+        Ok(false)
+    }
 
     /// Look up the full profile for `user`.
-    async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError>;
+    ///
+    /// Fail-closed default: no profile.
+    async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
+        Err(AuthError::NotFound)
+    }
 }
 
 #[cfg(test)]
