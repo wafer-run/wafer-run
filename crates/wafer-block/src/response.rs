@@ -258,6 +258,72 @@ mod tests {
         }
     }
 
+    /// Drain an `err_internal*` `OutputStream`, assert the sanitized envelope
+    /// (`ErrorCode::Internal` + `"Internal server error (ref: <id>)"`), and
+    /// return the extracted correlation id.
+    async fn ref_id_of(out: OutputStream) -> String {
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::Internal);
+                e.message
+                    .strip_prefix("Internal server error (ref: ")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or_else(|| panic!("unexpected message shape: {}", e.message))
+                    .to_string()
+            }
+            other => panic!("expected error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn err_internal_ref_ids_are_unique_across_calls() {
+        let a = ref_id_of(err_internal("ctx", "cause a")).await;
+        let b = ref_id_of(err_internal("ctx", "cause b")).await;
+        assert_ne!(a, b, "correlation ids must differ across calls: {a} == {b}");
+    }
+
+    #[tokio::test]
+    async fn err_internal_ref_id_is_16_lowercase_hex() {
+        let id = ref_id_of(err_internal("ctx", "cause")).await;
+        assert_eq!(id.len(), 16, "ref id should be 16 hex chars: {id:?}");
+        assert!(
+            id.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "ref id should be lowercase hex: {id:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn err_internal_no_cause_sanitizes_and_carries_ref() {
+        let out = err_internal_no_cause("some secret context");
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::Internal);
+                assert!(
+                    e.message.starts_with("Internal server error (ref: "),
+                    "message: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("some secret context"),
+                    "context leaked to client: {}",
+                    e.message
+                );
+                let id = e
+                    .message
+                    .strip_prefix("Internal server error (ref: ")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .expect("message shape");
+                assert_eq!(
+                    id.len(),
+                    16,
+                    "no-cause ref id should be 16 hex chars: {id:?}"
+                );
+            }
+            other => panic!("expected error terminal, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn builder_status_headers_cookies_and_json() {
         let buf = ResponseBuilder::new()
