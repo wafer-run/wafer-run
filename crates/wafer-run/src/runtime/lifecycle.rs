@@ -289,7 +289,23 @@ impl Wafer {
             }
         }
         self.init_all_blocks().await;
+        self.run_start_lifecycle().await;
 
+        Ok(self.bind_all())
+    }
+
+    /// Dispatch `lifecycle(Start)` on every registered block.
+    ///
+    /// Runs after init — either inside the eager
+    /// [`Wafer::start_with_priority`] funnel, or called directly by a consumer
+    /// that drives its own boot sequence (e.g. solobase's native
+    /// `builder::boot`) after it has sealed, seeded, and run
+    /// [`Wafer::init_all_blocks`]. Each block gets its own startup context so
+    /// WRAP attributes self-resource access to the correct caller. Failures
+    /// are logged-and-tolerated, matching the resilience contract of
+    /// `init_all_blocks`. Call before [`Wafer::bind_all`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_start_lifecycle(&self) {
         for (name, block) in &self.registration.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
             // when the block accesses its own resources during startup.
@@ -314,7 +330,17 @@ impl Wafer {
                 tracing::error!(block = %name, error = %e, "block start lifecycle failed");
             }
         }
+    }
 
+    /// Consume the runtime, wrap it in `Arc`, and `bind()` every block to a
+    /// `RuntimeHandle`.
+    ///
+    /// Must run AFTER [`Wafer::run_start_lifecycle`]: blocks like
+    /// `wafer-run/http-listener` read `Init`-time config and bind their socket
+    /// in `bind()`, so binding before Start would observe incomplete state.
+    /// The returned `Arc<Self>` is the long-lived handle the server holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn bind_all(self) -> Arc<Self> {
         let arc_self = Arc::new(self);
 
         let handle = super::RuntimeHandle {
@@ -325,7 +351,7 @@ impl Wafer {
             block.bind(Box::new(trait_handle.clone()));
         }
 
-        Ok(arc_self)
+        arc_self
     }
 
     /// Shut down all resolved block instances (works through `Arc`).

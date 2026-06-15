@@ -113,3 +113,50 @@ async fn start_runs_init_before_start_and_bind() {
         "bind must run exactly once"
     );
 }
+
+/// The decomposed public boot steps (`seal` → `init_all_blocks` →
+/// `run_start_lifecycle` → `bind_all`) must be equivalent to `start()`.
+/// Consumers that drive their own boot funnel (e.g. solobase's native
+/// `builder::boot`) compose these directly, so each must fire exactly once in
+/// the same order `start()` guarantees (Init before Start before bind).
+#[tokio::test]
+async fn composed_boot_steps_match_start() {
+    let init_calls = Arc::new(AtomicUsize::new(0));
+    let start_calls = Arc::new(AtomicUsize::new(0));
+    let bind_calls = Arc::new(AtomicUsize::new(0));
+
+    let block = Arc::new(LifecycleCountBlock {
+        name: "test/composed-block",
+        init_calls: init_calls.clone(),
+        start_calls: start_calls.clone(),
+        bind_calls: bind_calls.clone(),
+    });
+
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block("test/composed-block", block)
+        .expect("register");
+
+    // Drive the boot funnel by hand, exactly as a custom native boot path does.
+    wafer.seal().await.expect("seal");
+    wafer.init_all_blocks().await;
+    wafer.run_start_lifecycle().await;
+    let _arc = wafer.bind_all();
+
+    assert_eq!(
+        init_calls.load(Ordering::SeqCst),
+        1,
+        "Init must run exactly once"
+    );
+    assert_eq!(
+        start_calls.load(Ordering::SeqCst),
+        1,
+        "Start must run exactly once"
+    );
+    assert_eq!(
+        bind_calls.load(Ordering::SeqCst),
+        1,
+        "bind must run exactly once"
+    );
+}
