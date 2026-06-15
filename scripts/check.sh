@@ -48,6 +48,13 @@ run_wasm() {
 
     echo "==> Guest service-client path (wafer-core wasm-component → wasm32)"
     cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
+
+    # Guards the gizza consumer combo (default-features=false, features=["wasmi"]
+    # on wasm32-unknown-unknown), which no other job covers — run_wasm's
+    # --no-default-features check has wasmi OFF. This is the combo that
+    # regressed silently in #234 (embed::register_path reading from disk).
+    echo "==> Runtime builds on wasm32-unknown-unknown with --features wasmi (gizza combo)"
+    cargo build -p wafer-run --target wasm32-unknown-unknown --no-default-features --features wasmi
 }
 
 run_audit() {

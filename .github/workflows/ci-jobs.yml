@@ -74,7 +74,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: wasm32-wasip1, wasm32-unknown-unknown
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -82,8 +82,10 @@ jobs:
           prefix-key: wasm
 
       # Covers: guest SDK on wasm32-wasip1, wafer-run with
-      # --no-default-features (wasmi off), and the wafer-core
-      # wasm-component guest path. See run_wasm in scripts/check.sh.
+      # --no-default-features (wasmi off), the wafer-core wasm-component
+      # guest path, and the gizza consumer combo (wafer-run on
+      # wasm32-unknown-unknown with --features wasmi). See run_wasm in
+      # scripts/check.sh.
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm
 
