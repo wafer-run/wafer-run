@@ -12,7 +12,7 @@ use wafer_block_macro::wafer_async_trait;
 use wasmi::{Engine, Linker, Module, Store, TypedResumableCall, Val};
 
 use super::{capabilities::BlockCapabilities, host::ContextGuard, stream::StreamRegistry};
-use crate::context::Context;
+use crate::{context::Context, runtime::wasm_state::FuelLimit};
 
 mod abi;
 mod imports;
@@ -23,11 +23,27 @@ use imports::*;
 use meta::*;
 
 // ---------------------------------------------------------------------------
-// Constants
+// Fuel application
 // ---------------------------------------------------------------------------
 
-/// Default fuel budget for a single guest invocation.
-const DEFAULT_FUEL: u64 = 100_000_000;
+/// Apply the configured [`FuelLimit`] to a freshly-prepared store.
+///
+/// `Metered(n)` sets the store's fuel to `n`; `Unmetered` is a no-op — wasmi
+/// rejects `set_fuel` when the engine has `consume_fuel(false)`, so the loader
+/// must skip it. `ctx` labels the error site (initial set vs. post-`_start`
+/// refill).
+fn apply_fuel(
+    store: &mut Store<WasmiHostState>,
+    fuel: FuelLimit,
+    ctx: &str,
+) -> Result<(), RuntimeError> {
+    if let FuelLimit::Metered(n) = fuel {
+        store
+            .set_fuel(n)
+            .map_err(|e| RuntimeError::Wasm(format!("{ctx}: {e}")))?;
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Instantiation helper
@@ -50,6 +66,7 @@ fn instantiate(
     linker: &Linker<WasmiHostState>,
     module: &Module,
     caps: &BlockCapabilities,
+    fuel: FuelLimit,
 ) -> Result<(Store<WasmiHostState>, wasmi::Instance), RuntimeError> {
     let host_state = WasmiHostState {
         context: None,
@@ -65,9 +82,9 @@ fn instantiate(
 
     // Resource limits.
     store.limiter(|state| state);
-    store
-        .set_fuel(DEFAULT_FUEL)
-        .map_err(|e| RuntimeError::Wasm(format!("setting fuel: {e}")))?;
+    // Fuel metering — `Metered(n)` sets the per-call budget; `Unmetered` skips
+    // `set_fuel` entirely (wasmi rejects it when `consume_fuel(false)`).
+    apply_fuel(&mut store, fuel, "setting fuel")?;
 
     let pre = linker
         .instantiate(&mut store, module)
@@ -95,9 +112,7 @@ fn instantiate(
             },
         }
         // Re-fill fuel so the subsequent guest call has a full budget.
-        store
-            .set_fuel(DEFAULT_FUEL)
-            .map_err(|e| RuntimeError::Wasm(format!("refilling fuel after _start: {e}")))?;
+        apply_fuel(&mut store, fuel, "refilling fuel after _start")?;
     }
 
     Ok((store, instance))
@@ -189,6 +204,11 @@ pub struct WasmiBlock {
     /// block's `external_assets` manifest field. Defaults to `NoopAssetLoader`.
     /// Hosts inject a real loader via `set_asset_loader`.
     asset_loader: parking_lot::RwLock<Arc<dyn crate::asset_loader::LoadAssetCallback>>,
+    /// Per-guest-call fuel budget applied at every `instantiate()`. Selected at
+    /// load time (defaults to [`FuelLimit::default`], the bounded 100M cap).
+    /// Must match the `consume_fuel` flag of the block's [`Engine`] — the
+    /// constructors keep the two in sync.
+    fuel: FuelLimit,
 }
 
 // Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44.
@@ -205,27 +225,77 @@ impl WasmiBlock {
         Self::load_from_bytes(&bytes)
     }
 
-    /// Compile a WASM module from raw bytes with unrestricted host capabilities.
+    /// Compile a WASM module from raw bytes with unrestricted host capabilities
+    /// and the default per-call fuel budget ([`FuelLimit::default`], 100M).
     pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
-        Self::load_with_capabilities(wasm_bytes, BlockCapabilities::unrestricted())
+        Self::load_from_bytes_with_fuel(wasm_bytes, FuelLimit::default())
     }
 
-    /// Compile a WASM module with a custom capability set (filters host imports).
+    /// Compile a WASM module from raw bytes with unrestricted host capabilities
+    /// and an explicit per-call [`FuelLimit`].
+    ///
+    /// Trusted single-user embedders (e.g. gizza) pass
+    /// [`FuelLimit::Unmetered`] here — read back from
+    /// [`Wafer::fuel_limit`](crate::Wafer::fuel_limit) — so heavy tools run to
+    /// completion. The freshly-created engine's `consume_fuel` flag is matched
+    /// to the requested mode.
+    pub fn load_from_bytes_with_fuel(
+        wasm_bytes: &[u8],
+        fuel: FuelLimit,
+    ) -> Result<Self, RuntimeError> {
+        Self::load_with_capabilities_and_fuel(wasm_bytes, BlockCapabilities::unrestricted(), fuel)
+    }
+
+    /// Compile a WASM module with a custom capability set (filters host imports)
+    /// and the default per-call fuel budget ([`FuelLimit::default`], 100M).
     pub fn load_with_capabilities(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
     ) -> Result<Self, RuntimeError> {
-        let mut config = wasmi::Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        Self::load_with_engine(&engine, wasm_bytes, caps)
+        Self::load_with_capabilities_and_fuel(wasm_bytes, caps, FuelLimit::default())
     }
 
-    /// Compile a WASM module reusing an existing `wasmi::Engine` (lets callers share fuel config).
+    /// Compile a WASM module with a custom capability set and an explicit
+    /// per-call [`FuelLimit`]. Creates a fresh engine whose `consume_fuel` flag
+    /// matches the requested fuel mode.
+    pub fn load_with_capabilities_and_fuel(
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+        fuel: FuelLimit,
+    ) -> Result<Self, RuntimeError> {
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(fuel.consume_fuel());
+        let engine = Engine::new(&config);
+        Self::load_with_engine_and_fuel(&engine, wasm_bytes, caps, fuel)
+    }
+
+    /// Compile a WASM module reusing an existing `wasmi::Engine` (lets callers
+    /// share fuel config) with the default per-call fuel budget
+    /// ([`FuelLimit::default`], 100M).
+    ///
+    /// The passed-in engine must already have `consume_fuel(true)` (the default
+    /// for engines created by this loader and by `Wafer::wasm_engine`).
     pub fn load_with_engine(
         engine: &Engine,
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
+    ) -> Result<Self, RuntimeError> {
+        Self::load_with_engine_and_fuel(engine, wasm_bytes, caps, FuelLimit::default())
+    }
+
+    /// Compile a WASM module reusing an existing `wasmi::Engine` with an
+    /// explicit per-call [`FuelLimit`].
+    ///
+    /// The caller is responsible for ensuring the engine's `consume_fuel` flag
+    /// matches `fuel` (`true` for [`FuelLimit::Metered`], `false` for
+    /// [`FuelLimit::Unmetered`]). `Wafer::wasm_engine` derives the engine's
+    /// flag from the runtime's configured limit and passes the matching `fuel`
+    /// here, so blocks loaded through the runtime stay consistent.
+    pub fn load_with_engine_and_fuel(
+        engine: &Engine,
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+        fuel: FuelLimit,
     ) -> Result<Self, RuntimeError> {
         let module = Module::new(engine, wasm_bytes)
             .map_err(|e| RuntimeError::Wasm(format!("compiling WASM module: {e}")))?;
@@ -239,6 +309,7 @@ impl WasmiBlock {
             warned_outbound: std::sync::atomic::AtomicBool::new(false),
             warned_inbound: std::sync::atomic::AtomicBool::new(false),
             asset_loader: parking_lot::RwLock::new(Arc::new(crate::asset_loader::NoopAssetLoader)),
+            fuel,
         })
     }
 
@@ -438,8 +509,13 @@ impl WasmiBlock {
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
         let caps_snapshot = self.capabilities.read().clone();
-        let (mut store, instance) =
-            instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
+        let (mut store, instance) = instantiate(
+            &self.engine,
+            &self.linker,
+            &self.module,
+            &caps_snapshot,
+            self.fuel,
+        )?;
 
         // Install the borrowed context (and inbound attachments) for the
         // duration of this call. `ContextScope::drop` clears the store's
@@ -676,8 +752,13 @@ impl Block for WasmiBlock {
         // Sync instantiation: call __wafer_info.
         let result = (|| -> Result<BlockInfo, RuntimeError> {
             let caps_snapshot = self.capabilities.read().clone();
-            let (mut store, instance) =
-                instantiate(&self.engine, &self.linker, &self.module, &caps_snapshot)?;
+            let (mut store, instance) = instantiate(
+                &self.engine,
+                &self.linker,
+                &self.module,
+                &caps_snapshot,
+                self.fuel,
+            )?;
 
             let info_fn = instance
                 .get_typed_func::<(), i64>(&store, "__wafer_info")

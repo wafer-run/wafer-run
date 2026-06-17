@@ -322,6 +322,20 @@ impl Wafer {
         &self.wasm.asset_loader
     }
 
+    /// Return the per-guest-call [`FuelLimit`](crate::FuelLimit) configured on
+    /// this runtime via
+    /// [`WaferBuilder::fuel_per_call`](crate::WaferBuilder::fuel_per_call).
+    /// Defaults to the bounded [`FuelLimit::default`](crate::FuelLimit::default)
+    /// (100M, metered).
+    ///
+    /// Consumers that load WASM blocks directly — rather than through the
+    /// runtime's shared engine — read this back to pass to
+    /// [`WasmiBlock::load_from_bytes_with_fuel`](crate::WasmiBlock::load_from_bytes_with_fuel)
+    /// so directly-registered blocks honour the same budget.
+    pub fn fuel_limit(&self) -> crate::FuelLimit {
+        self.wasm.fuel
+    }
+
     /// Look up the effective (declared ∩ config ∩ host) capabilities for a
     /// registered block. Returns `None` if the block did not declare and no
     /// config/host caps were provided.
