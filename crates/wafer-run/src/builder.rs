@@ -23,6 +23,7 @@ use wafer_block::error::RuntimeError;
 
 use crate::runtime::{
     config_source::{ConfigSource, StaticConfigSource},
+    wasm_state::FuelLimit,
     Wafer,
 };
 
@@ -51,6 +52,7 @@ pub struct WaferBuilder {
     enable_inventory: bool,
     lockfile: LockfileSource,
     config_source: Arc<dyn ConfigSource>,
+    fuel: FuelLimit,
 }
 
 impl Default for WaferBuilder {
@@ -59,6 +61,7 @@ impl Default for WaferBuilder {
             enable_inventory: true,
             lockfile: LockfileSource::Auto,
             config_source: Arc::new(StaticConfigSource::default()),
+            fuel: FuelLimit::default(),
         }
     }
 }
@@ -93,10 +96,29 @@ impl WaferBuilder {
         self
     }
 
+    /// Set the per-guest-call wasmi fuel budget for WASM blocks run by this
+    /// runtime.
+    ///
+    /// Defaults to [`FuelLimit::default`] — the bounded 100M-fuel cap that
+    /// protects hosted, multi-tenant deployments from runaway guests. Trusted
+    /// single-user embedders can pass [`FuelLimit::Unmetered`] to run heavy
+    /// tools without a per-call budget, or a larger
+    /// [`Metered(n)`](FuelLimit::Metered) to raise the cap.
+    ///
+    /// The selected limit is threaded into the runtime's shared wasmi engine
+    /// (so remote/lockfile blocks honour it) and is readable via
+    /// [`Wafer::fuel_limit`] for consumers that load blocks directly through
+    /// [`WasmiBlock::load_from_bytes_with_fuel`](crate::WasmiBlock::load_from_bytes_with_fuel).
+    pub fn fuel_per_call(mut self, limit: FuelLimit) -> Self {
+        self.fuel = limit;
+        self
+    }
+
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         let mut w = Wafer::empty();
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
+        w.wasm.fuel = self.fuel;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

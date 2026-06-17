@@ -40,6 +40,7 @@ pub use runtime::RuntimeHandle;
 pub use runtime::{
     config_source::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource},
     slot::{BlockSlot, InitError, InitializedState},
+    wasm_state::{FuelLimit, DEFAULT_FUEL},
     BrokenBlock, ValidationReport, Wafer,
 };
 #[cfg(not(target_arch = "wasm32"))]

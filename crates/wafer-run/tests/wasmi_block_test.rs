@@ -6,8 +6,8 @@ mod tests {
     use wafer_block::streams::output::TerminalNotResponse;
     use wafer_run::{
         wasm::{capabilities::BlockCapabilities, WasmiBlock},
-        Block, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry,
-        OutputStream, WaferError,
+        Block, ErrorCode, FuelLimit, InputStream, LifecycleEvent, LifecycleType, Message,
+        MetaEntry, OutputStream, WaferError,
     };
 
     const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");
@@ -191,6 +191,118 @@ mod tests {
             }
             other => panic!("infinite loop should produce an error, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6b: configurable fuel budget — a heavy-but-bounded guest traps under
+    // the default 100M cap, but runs to completion under FuelLimit::Unmetered
+    // (and under a high Metered budget).
+    //
+    // The guest's `__wafer_handle` spins a counted loop sized to consume well
+    // over 100M wasmi fuel units, then returns a valid `{"action":"Respond"}`
+    // packed (ptr, len) pointing at a data segment. Under the metered default
+    // the loop exhausts fuel and traps; with metering disabled (or a budget far
+    // above the loop's cost) it finishes and Responds.
+    // -----------------------------------------------------------------------
+
+    /// Build a WAT module whose `__wafer_handle` burns ~`iters` loop iterations
+    /// (≈5 fuel units each) before returning a `Respond` with empty data. The
+    /// `Respond` JSON lives in a data segment at offset 16; the function returns
+    /// the packed `(ptr << 32) | len`.
+    fn heavy_loop_module(iters: u32) -> Vec<u8> {
+        // The guest ABI result the host decodes into OutputStream::respond(&[]).
+        const RESP_JSON: &str = r#"{"action":"Respond","response":{"data":[]}}"#;
+        // Placed well past offset 0: the host's `__wafer_alloc` stub returns 0,
+        // so the inbound serialized message is written at the start of memory.
+        // Keeping the response data high avoids that clobbering it.
+        const PTR: u32 = 4096;
+        let len = RESP_JSON.len() as u32;
+        let packed: i64 = ((PTR as i64) << 32) | (len as i64);
+        // WAT string literals delimit on `"`, so escape the JSON's quotes.
+        let resp_wat = RESP_JSON.replace('"', "\\\"");
+        let wat = format!(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (data (i32.const {PTR}) "{resp_wat}")
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (local $i i32)
+                (local.set $i (i32.const {iters}))
+                (block $done
+                  (loop $spin
+                    (br_if $done (i32.eqz (local.get $i)))
+                    (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+                    (br $spin)))
+                (i64.const {packed})
+              )
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        );
+        wat::parse_str(&wat).expect("heavy-loop WAT should parse")
+    }
+
+    #[tokio::test]
+    async fn test_fuel_budget_metered_vs_unmetered() {
+        // 50M iterations × ~5 fuel/iter ≈ 250M fuel — comfortably over the 100M
+        // default cap, but trivial wall-clock work when unmetered.
+        let wasm_bytes = heavy_loop_module(50_000_000);
+        let ctx = MockContext;
+
+        // 1. Default (metered 100M): the heavy loop exhausts fuel → trap.
+        let metered = WasmiBlock::load_from_bytes(&wasm_bytes)
+            .expect("heavy-loop module should load (default fuel)");
+        let metered_out = metered
+            .handle(
+                &ctx,
+                Message::new("test.fuel.metered"),
+                InputStream::empty(),
+            )
+            .await;
+        match metered_out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                assert!(
+                    err_msg.contains("fuel"),
+                    "default-fuel run should trap on fuel exhaustion, got: {err_msg}"
+                );
+            }
+            other => panic!("default-fuel heavy loop should trap, got: {other:?}"),
+        }
+
+        // 2. Unmetered: the loop runs to completion and Responds (no fuel trap).
+        let unmetered = WasmiBlock::load_from_bytes_with_fuel(&wasm_bytes, FuelLimit::Unmetered)
+            .expect("heavy-loop module should load (unmetered)");
+        let unmetered_out = unmetered
+            .handle(
+                &ctx,
+                Message::new("test.fuel.unmetered"),
+                InputStream::empty(),
+            )
+            .await;
+        let resp = unmetered_out
+            .collect_buffered()
+            .await
+            .expect("unmetered heavy loop should run to completion and Respond");
+        assert!(
+            resp.body.is_empty(),
+            "unmetered Respond should carry the empty data payload, got: {:?}",
+            resp.body
+        );
+
+        // 3. A high Metered budget (1B) is also enough for the loop to finish.
+        let high =
+            WasmiBlock::load_from_bytes_with_fuel(&wasm_bytes, FuelLimit::Metered(1_000_000_000))
+                .expect("heavy-loop module should load (high metered)");
+        let high_out = high
+            .handle(&ctx, Message::new("test.fuel.high"), InputStream::empty())
+            .await;
+        high_out
+            .collect_buffered()
+            .await
+            .expect("high-budget heavy loop should run to completion and Respond");
     }
 
     // -----------------------------------------------------------------------
