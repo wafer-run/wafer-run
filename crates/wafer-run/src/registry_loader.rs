@@ -368,16 +368,19 @@ impl Wafer {
                         reason: format!("read wasm bytes: {e}"),
                     })
                 })?;
-                // Honour the builder's `fuel_per_call` selection for blocks
-                // auto-loaded from the lockfile.
-                let block = WasmiBlock::load_from_bytes_with_fuel(&wasm_bytes, self.wasm.fuel)
-                    .map_err(|source| {
-                        RuntimeError::from(LockLoaderError::WasmLoadFailed {
-                            name: pkg.name.clone(),
-                            version: pkg.version.clone(),
-                            source,
-                        })
-                    })?;
+                // Honour the builder's `fuel_per_call` / `max_wasm_memory_pages`
+                // selection for blocks auto-loaded from the lockfile.
+                let block = WasmiBlock::load_from_bytes_with_limits(
+                    &wasm_bytes,
+                    self.wasm.resource_limits(),
+                )
+                .map_err(|source| {
+                    RuntimeError::from(LockLoaderError::WasmLoadFailed {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        source,
+                    })
+                })?;
                 self.register_block(pkg.name.clone(), Arc::new(block))?;
                 tracing::debug!(
                     name = %pkg.name,

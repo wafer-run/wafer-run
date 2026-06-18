@@ -13,9 +13,6 @@ use crate::{
     wasm::{capabilities::BlockCapabilities, stream::StreamRegistry},
 };
 
-/// Maximum WASM linear-memory pages (256 pages = 16 MiB).
-const MAX_WASM_MEMORY_PAGES: usize = 256;
-
 // ---------------------------------------------------------------------------
 // Packed pointer helpers
 // ---------------------------------------------------------------------------
@@ -50,6 +47,13 @@ pub(super) fn unpack_ptr_len(packed: i64) -> Result<(u32, u32), RuntimeError> {
 pub(super) struct WasmiHostState {
     /// Context reference — set before each guest call via ContextGuard.
     pub(super) context: Option<Arc<dyn Context>>,
+    /// Maximum WASM linear-memory size for this store, in 64 KiB pages. The
+    /// [`wasmi::ResourceLimiter`] impl denies any `memory.grow` that would
+    /// exceed it. Seeded at [`instantiate`](super::instantiate) from the
+    /// block's configured [`ResourceLimits`](crate::ResourceLimits); defaults
+    /// to [`DEFAULT_MAX_WASM_MEMORY_PAGES`](crate::DEFAULT_MAX_WASM_MEMORY_PAGES)
+    /// (256 pages = 16 MiB).
+    pub(super) max_memory_pages: u32,
     /// Capabilities (resource limits) for this block.
     /// Used by host function enforcement (e.g. `allows_call_block`).
     pub(super) capabilities: BlockCapabilities,
@@ -95,7 +99,7 @@ impl wasmi::ResourceLimiter for WasmiHostState {
     ) -> Result<bool, wasmi::errors::MemoryError> {
         // One WASM page = 64 KiB.
         let desired_pages = desired / 65536;
-        Ok(desired_pages <= MAX_WASM_MEMORY_PAGES)
+        Ok(desired_pages <= self.max_memory_pages as usize)
     }
 
     fn table_growing(

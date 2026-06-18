@@ -23,7 +23,7 @@ use wafer_block::error::RuntimeError;
 
 use crate::runtime::{
     config_source::{ConfigSource, StaticConfigSource},
-    wasm_state::FuelLimit,
+    wasm_state::{FuelLimit, DEFAULT_MAX_WASM_MEMORY_PAGES},
     Wafer,
 };
 
@@ -53,6 +53,7 @@ pub struct WaferBuilder {
     lockfile: LockfileSource,
     config_source: Arc<dyn ConfigSource>,
     fuel: FuelLimit,
+    max_wasm_memory_pages: u32,
 }
 
 impl Default for WaferBuilder {
@@ -62,6 +63,7 @@ impl Default for WaferBuilder {
             lockfile: LockfileSource::Auto,
             config_source: Arc::new(StaticConfigSource::default()),
             fuel: FuelLimit::default(),
+            max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
         }
     }
 }
@@ -107,10 +109,29 @@ impl WaferBuilder {
     ///
     /// The selected limit is threaded into the runtime's shared wasmi engine
     /// (so remote/lockfile blocks honour it) and is readable via
-    /// [`Wafer::fuel_limit`] for consumers that load blocks directly through
-    /// [`WasmiBlock::load_from_bytes_with_fuel`](crate::WasmiBlock::load_from_bytes_with_fuel).
+    /// [`Wafer::resource_limits`] for consumers that load blocks directly
+    /// through
+    /// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits).
     pub fn fuel_per_call(mut self, limit: FuelLimit) -> Self {
         self.fuel = limit;
+        self
+    }
+
+    /// Set the per-guest-call WASM linear-memory cap, in 64 KiB pages, for WASM
+    /// blocks run by this runtime.
+    ///
+    /// Defaults to [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB) — the
+    /// bounded cap that protects hosted, multi-tenant deployments. Trusted
+    /// single-user embedders raise it to run memory-heavy tools (e.g. the
+    /// `syntect`+font code-screenshot tool needs ~24 MiB ≈ 384 pages); a
+    /// guest whose `memory.grow` would exceed the cap is denied.
+    ///
+    /// The selected cap is threaded into remote/lockfile blocks loaded through
+    /// this runtime and is readable via [`Wafer::resource_limits`] for
+    /// consumers that load blocks directly through
+    /// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits).
+    pub fn max_wasm_memory_pages(mut self, pages: u32) -> Self {
+        self.max_wasm_memory_pages = pages;
         self
     }
 
@@ -119,6 +140,7 @@ impl WaferBuilder {
         let mut w = Wafer::empty();
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         w.wasm.fuel = self.fuel;
+        w.wasm.max_wasm_memory_pages = self.max_wasm_memory_pages;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

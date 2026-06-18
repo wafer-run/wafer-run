@@ -261,16 +261,19 @@ impl Wafer {
             )));
         }
 
-        // The shared engine's `consume_fuel` flag and the per-call fuel passed
-        // here are both derived from the runtime's configured `FuelLimit`, so a
-        // remote block honours the builder's `fuel_per_call` selection.
-        let fuel = self.wasm.fuel;
+        // The shared engine's `consume_fuel` flag and the per-call limits
+        // passed here are both derived from the runtime's configuration, so a
+        // remote block honours the builder's `fuel_per_call` /
+        // `max_wasm_memory_pages` selection.
+        let limits = self.wasm.resource_limits();
         let engine = self.wasm_engine()?.clone();
-        let block =
-            WasmiBlock::load_with_engine_and_fuel(&engine, &body, BlockCapabilities::none(), fuel)
-                .map_err(|e| {
-                    RuntimeError::Wasm(format!("failed to load remote block {name}: {e}"))
-                })?;
+        let block = WasmiBlock::load_with_engine_and_limits(
+            &engine,
+            &body,
+            BlockCapabilities::none(),
+            limits,
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("failed to load remote block {name}: {e}")))?;
 
         Ok(Arc::new(block))
     }

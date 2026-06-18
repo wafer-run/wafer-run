@@ -12,6 +12,14 @@ use crate::asset_loader::{LoadAssetCallback, NoopAssetLoader};
 /// hard-coded cap, so the default runtime behaviour is unchanged.
 pub const DEFAULT_FUEL: u64 = 100_000_000;
 
+/// Default per-guest-call WASM linear-memory cap, in 64 KiB wasmi pages
+/// (256 pages = 16 MiB).
+///
+/// This is the value used by [`ResourceLimits::default`] and matches the
+/// historical hard-coded cap (`MAX_WASM_MEMORY_PAGES`), so a guest's memory
+/// growth is bounded identically to before unless a consumer raises the cap.
+pub const DEFAULT_MAX_WASM_MEMORY_PAGES: u32 = 256;
+
 /// Per-guest-call wasmi fuel budget for a [`Wafer`](super::Wafer) runtime.
 ///
 /// Fuel metering bounds how much work a single WASM guest invocation may do
@@ -57,6 +65,41 @@ impl FuelLimit {
     }
 }
 
+/// Per-guest-call resource limits applied to a directly-loaded [`WasmiBlock`].
+///
+/// Bundles the two independently-tunable per-call bounds — the wasmi
+/// [`FuelLimit`] and the linear-memory page cap — so consumers that load WASM
+/// blocks directly (e.g. gizza's native CLI and browser runtime) set both in a
+/// single call via
+/// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits)
+/// rather than threading two parallel arguments.
+///
+/// Hosted, multi-tenant deployments want the bounded [`default`](Self::default)
+/// (100M metered fuel, 256-page / 16 MiB memory). Trusted single-user
+/// embedders raise either bound: [`FuelLimit::Unmetered`] for heavy compute,
+/// or a larger `memory_pages` for memory-heavy tools (e.g. the `syntect`+font
+/// code-screenshot tool needs ~24 MiB ≈ 384 pages). The default is
+/// byte-for-byte the historical behaviour, so omitting `ResourceLimits` (or
+/// using [`default`](Self::default)) changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Per-guest-call wasmi fuel budget. See [`FuelLimit`].
+    pub fuel: FuelLimit,
+    /// Maximum WASM linear-memory size, in 64 KiB wasmi pages. A guest whose
+    /// `memory.grow` would exceed this is denied (the grow returns -1).
+    /// Defaults to [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB).
+    pub memory_pages: u32,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            fuel: FuelLimit::default(),
+            memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
+        }
+    }
+}
+
 /// WASM-related runtime state, grouped out of the `Wafer` god-struct.
 pub(crate) struct WasmState {
     /// Host-injected async loader for external wasm/js assets referenced by
@@ -68,9 +111,15 @@ pub(crate) struct WasmState {
     /// runtime (the lazily-created shared engine + remote/lockfile blocks).
     /// Set via `WaferBuilder::fuel_per_call`; defaults to the bounded
     /// [`FuelLimit::default`] (100M, metered). Consumers that load blocks
-    /// directly (e.g. gizza's `WasmiBlock::load_from_bytes_with_fuel`) read it
-    /// back via `Wafer::fuel_limit()`.
+    /// directly (e.g. gizza's `WasmiBlock::load_from_bytes_with_limits`) read it
+    /// back via `Wafer::resource_limits()`.
     pub(crate) fuel: FuelLimit,
+    /// Per-guest-call WASM linear-memory cap, in 64 KiB pages, applied to WASM
+    /// blocks loaded through this runtime (remote/lockfile blocks). Set via
+    /// `WaferBuilder::max_wasm_memory_pages`; defaults to
+    /// [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB). Consumers that
+    /// load blocks directly read it back via `Wafer::resource_limits()`.
+    pub(crate) max_wasm_memory_pages: u32,
     /// Shared fuel-metered WASM engine for all WASM blocks. Created lazily by
     /// `Wafer::wasm_engine()` (during `seal`).
     #[cfg(feature = "wasmi")]
@@ -78,13 +127,24 @@ pub(crate) struct WasmState {
 }
 
 impl WasmState {
-    /// Default state: noop asset loader, default fuel budget, no engine yet.
+    /// Default state: noop asset loader, default fuel budget + memory cap, no
+    /// engine yet.
     pub(crate) fn new() -> Self {
         Self {
             asset_loader: Arc::new(NoopAssetLoader),
             fuel: FuelLimit::default(),
+            max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
             #[cfg(feature = "wasmi")]
             engine: None,
+        }
+    }
+
+    /// The runtime's configured per-call resource limits, bundled for direct
+    /// loaders. Mirrors the individual `fuel` / `max_wasm_memory_pages` fields.
+    pub(crate) fn resource_limits(&self) -> ResourceLimits {
+        ResourceLimits {
+            fuel: self.fuel,
+            memory_pages: self.max_wasm_memory_pages,
         }
     }
 }
