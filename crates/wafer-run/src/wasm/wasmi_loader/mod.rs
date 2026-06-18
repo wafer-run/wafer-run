@@ -959,4 +959,53 @@ mod capabilities_update_tests {
             "after runtime_capabilities_mut, raw_sql should be false"
         );
     }
+
+    /// A guest that imports `wasi_snapshot_preview1::sched_yield` (pulled in by
+    /// pure-Rust crates whose spin/back-off paths reference
+    /// `std::thread::yield_now`, e.g. `scraper`/`ahash`) must link and
+    /// instantiate. Before the `sched_yield` stub existed, `build_linker`
+    /// provided no definition and instantiation failed with
+    /// "cannot find definition for import wasi_snapshot_preview1::sched_yield".
+    #[test]
+    fn guest_importing_sched_yield_instantiates() {
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (import "wasi_snapshot_preview1" "sched_yield" (func $sched_yield (result i32)))
+              (memory (export "memory") 1)
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64)
+                (drop (call $sched_yield))
+                i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("WAT should parse");
+
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm_bytes, BlockCapabilities::unrestricted())
+                .expect("module importing sched_yield should compile");
+
+        // instantiate() runs through build_linker — a missing sched_yield
+        // definition would error here.
+        let (mut store, instance) = instantiate(
+            &block.engine,
+            &block.linker,
+            &block.module,
+            &BlockCapabilities::unrestricted(),
+            block.limits,
+        )
+        .expect("module importing sched_yield should instantiate");
+
+        // Call a guest function that invokes sched_yield to prove the stub
+        // returns success (errno 0) and the call completes.
+        let info_fn = instance
+            .get_typed_func::<(), i64>(&store, "__wafer_info")
+            .expect("__wafer_info export");
+        info_fn
+            .call(&mut store, ())
+            .expect("calling a guest fn that uses sched_yield should succeed");
+    }
 }

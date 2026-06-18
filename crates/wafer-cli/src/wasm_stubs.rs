@@ -14,7 +14,7 @@
 //!   fail `wafer test` the same way it would fail in production.
 //! - Only the WASI preview1 imports the runtime registers are stubbed
 //!   (`fd_write`, `proc_exit`, `environ_*`, `args_*`, `clock_time_get`,
-//!   `random_get`). Anything else (e.g. `poll_oneoff`, `sched_yield`) is
+//!   `random_get`, `sched_yield`). Anything else (e.g. `poll_oneoff`) is
 //!   rejected here because the runtime would reject it too.
 //!
 //! The stubs are inert: nothing in the CLI drives a real stream, so the
@@ -256,6 +256,18 @@ pub fn register_wasi_stubs<T>(linker: &mut Linker<T>) -> anyhow::Result<()> {
             },
         )
         .context("Failed to define clock_time_get stub")?;
+
+    // sched_yield() -> errno — no-op. The validator runs the guest on a single
+    // host thread (as the runtime does), so there is nothing to yield to.
+    // Pure-Rust guests (e.g. blocks pulling in `scraper`/`ahash`) import this
+    // via `std::thread::yield_now` spin/back-off paths.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "sched_yield",
+            |_: Caller<T>| -> i32 { 0 },
+        )
+        .context("Failed to define sched_yield stub")?;
 
     // random_get(buf_ptr, buf_len) -> errno — zero-filled (deterministic;
     // sufficient for init paths, and fixture runs should be reproducible).
