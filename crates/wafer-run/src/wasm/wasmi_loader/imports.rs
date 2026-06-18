@@ -601,6 +601,23 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking clock_time_get stub: {e}")))?;
 
+    // sched_yield() -> errno
+    // Pure-Rust guests (e.g. blocks pulling in `scraper`/`ahash`, whose spin-init
+    // and contention back-off paths reference `std::thread::yield_now`) import
+    // this. The wasmi guest is single-threaded and runs to completion on one
+    // host thread, so there is no other thread to yield to — the yield is a
+    // semantic no-op. Return success, mirroring `environ_get`.
+    linker
+        .func_wrap(
+            "wasi_snapshot_preview1",
+            "sched_yield",
+            |_caller: Caller<WasmiHostState>| -> i32 {
+                // Single-threaded guest: nothing to yield to. Always succeeds.
+                WASI_ERRNO_SUCCESS
+            },
+        )
+        .map_err(|e| RuntimeError::Wasm(format!("linking sched_yield stub: {e}")))?;
+
     // random_get(buf_ptr, buf_len) -> errno
     // TinyGo WASM runtime imports this for crypto/rand and map seed initialisation.
     // We fill the buffer with real random bytes via getrandom.

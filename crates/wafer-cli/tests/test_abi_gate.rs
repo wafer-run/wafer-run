@@ -110,8 +110,9 @@ fn validate_rejects_removed_legacy_call_block_import() {
 
 #[test]
 fn test_rejects_wasi_imports_outside_runtime_set() {
-    // The runtime registers no poll_oneoff/sched_yield; the CLI must not
-    // accept modules the runtime would reject.
+    // The runtime registers no poll_oneoff; the CLI must not accept modules
+    // the runtime would reject. (sched_yield IS provided — see the runtime's
+    // wasmi_loader imports and wasm_stubs — so it must NOT appear here.)
     let tmp = tempfile::tempdir().unwrap();
     seed_project(
         tmp.path(),
