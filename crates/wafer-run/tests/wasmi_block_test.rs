@@ -7,7 +7,7 @@ mod tests {
     use wafer_run::{
         wasm::{capabilities::BlockCapabilities, WasmiBlock},
         Block, ErrorCode, FuelLimit, InputStream, LifecycleEvent, LifecycleType, Message,
-        MetaEntry, OutputStream, WaferError,
+        MetaEntry, OutputStream, ResourceLimits, WaferError,
     };
 
     const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");
@@ -420,5 +420,103 @@ mod tests {
             }
             other => panic!("exceeding memory limit should produce an error, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8b: configurable memory cap — an allocation-heavy guest OOMs under
+    // the default 256-page (16 MiB) cap but runs to completion under a higher
+    // cap (1024 pages / 64 MiB).
+    //
+    // The guest's `__wafer_handle` grows linear memory by 299 pages (total 300,
+    // above the 256 default but below 1024), writes a sentinel into the freshly
+    // grown high page to force a trap if growth was denied, then returns a valid
+    // `{"action":"Respond"}` packed (ptr, len). Under the default cap the grow
+    // is denied → the store traps; under the raised cap it succeeds and Responds.
+    // -----------------------------------------------------------------------
+
+    /// Build a WAT module whose `__wafer_handle` grows memory by `grow_pages`
+    /// (starting from 1 page), writes a byte into the last grown page, then
+    /// returns a `Respond` with empty data. If the host denies the grow,
+    /// `memory.grow` returns -1 and the subsequent store traps out-of-bounds.
+    fn memory_grow_module(grow_pages: u32) -> Vec<u8> {
+        const RESP_JSON: &str = r#"{"action":"Respond","response":{"data":[]}}"#;
+        // The response data lives in the first (always-present) page so growth
+        // success/failure never affects where the host reads the result from.
+        const PTR: u32 = 256;
+        let len = RESP_JSON.len() as u32;
+        let packed: i64 = ((PTR as i64) << 32) | (len as i64);
+        // Byte offset inside the last newly-grown page: (1 + grow_pages - 1)
+        // pages in, i.e. `grow_pages * 65536`. If the grow was denied this
+        // offset is out of bounds and the i32.store traps.
+        let probe_offset: u32 = grow_pages * 65536;
+        let resp_wat = RESP_JSON.replace('"', "\\\"");
+        let wat = format!(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (data (i32.const {PTR}) "{resp_wat}")
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) i64.const 0)
+              (func (export "__wafer_handle") (param i32 i32) (result i64)
+                ;; Grow by `grow_pages`. Returns -1 on denial, prev pages on ok.
+                ;; Drop the result; the probe store below traps if growth failed.
+                (drop (memory.grow (i32.const {grow_pages})))
+                ;; Write a sentinel into the last grown page — traps OOB if denied.
+                (i32.store (i32.const {probe_offset}) (i32.const 42))
+                (i64.const {packed})
+              )
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        );
+        wat::parse_str(&wat).expect("memory-grow WAT should parse")
+    }
+
+    #[tokio::test]
+    async fn test_memory_cap_default_vs_raised() {
+        // Grow by 299 pages → 300 total, above the 256 default but below 1024.
+        let wasm_bytes = memory_grow_module(299);
+        let ctx = MockContext;
+
+        // 1. Default (256-page cap): the grow to 300 pages is denied → trap.
+        let bounded = WasmiBlock::load_from_bytes(&wasm_bytes)
+            .expect("memory-grow module should load (default cap)");
+        let bounded_out = bounded
+            .handle(&ctx, Message::new("test.mem.default"), InputStream::empty())
+            .await;
+        match bounded_out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(err)) => {
+                let err_msg = format!("{err:?}");
+                assert!(
+                    err_msg.contains("WASM handle error")
+                        || err_msg.contains("out of bounds")
+                        || err_msg.contains("memory"),
+                    "default-cap run should trap on the denied grow, got: {err_msg}"
+                );
+            }
+            other => panic!("default-cap memory grow should trap, got: {other:?}"),
+        }
+
+        // 2. Raised cap (1024 pages / 64 MiB): the grow succeeds and Responds.
+        let raised = WasmiBlock::load_from_bytes_with_limits(
+            &wasm_bytes,
+            ResourceLimits {
+                memory_pages: 1024,
+                ..ResourceLimits::default()
+            },
+        )
+        .expect("memory-grow module should load (raised cap)");
+        let raised_out = raised
+            .handle(&ctx, Message::new("test.mem.raised"), InputStream::empty())
+            .await;
+        let resp = raised_out
+            .collect_buffered()
+            .await
+            .expect("raised-cap memory grow should run to completion and Respond");
+        assert!(
+            resp.body.is_empty(),
+            "raised-cap Respond should carry the empty data payload, got: {:?}",
+            resp.body
+        );
     }
 }
