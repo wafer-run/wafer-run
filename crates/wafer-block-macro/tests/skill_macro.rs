@@ -119,3 +119,114 @@ fn no_skill_attribute_leaves_tool_unset() {
         "block without skill(...) must have tool = None"
     );
 }
+
+// A skill block whose `parameters` is an EXPRESSION (a `const &str`), not a
+// string literal — the single-source-descriptor pattern gizza uses. Also
+// exercises a `fn -> String` to prove the `AsRef<str>` coercion covers both.
+mod skill_block_expr {
+    use super::*;
+
+    pub const SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": { "x": { "type": "integer" } },
+        "required": ["x"]
+    }"#;
+
+    pub fn schema_owned() -> String {
+        SCHEMA.to_string()
+    }
+
+    pub struct ConstExprSkill;
+
+    #[wafer_block(
+        name = "test/const-expr-skill",
+        version = "0.1.0",
+        interface = "handler@v1",
+        summary = "Schema via const expression",
+        skill(
+            description = "Schema supplied as a const &str expression.",
+            parameters = SCHEMA
+        )
+    )]
+    impl ConstExprSkill {
+        fn handle(_msg: Message, _body: Vec<u8>) -> GuestResult {
+            GuestResult::respond(b"{}".to_vec())
+        }
+    }
+    impl ConstExprSkill {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+    #[wafer_async_trait]
+    impl wafer_block::block::Block for ConstExprSkill {
+        fn info(&self) -> wafer_block::types::BlockInfo {
+            Self::block_info()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::core_types::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::drop_request()
+        }
+    }
+
+    pub struct FnExprSkill;
+
+    #[wafer_block(
+        name = "test/fn-expr-skill",
+        version = "0.1.0",
+        interface = "handler@v1",
+        summary = "Schema via fn-call expression",
+        skill(
+            description = "Schema supplied as a fn() -> String expression.",
+            parameters = schema_owned()
+        )
+    )]
+    impl FnExprSkill {
+        fn handle(_msg: Message, _body: Vec<u8>) -> GuestResult {
+            GuestResult::respond(b"{}".to_vec())
+        }
+    }
+    impl FnExprSkill {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+    #[wafer_async_trait]
+    impl wafer_block::block::Block for FnExprSkill {
+        fn info(&self) -> wafer_block::types::BlockInfo {
+            Self::block_info()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: wafer_block::core_types::Message,
+            _input: wafer_block::streams::input::InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::drop_request()
+        }
+    }
+}
+
+#[test]
+fn skill_parameters_accepts_const_expression() {
+    let info = skill_block_expr::ConstExprSkill::block_info();
+    let tool = info.tool.expect("skill(...) with const expr must set tool");
+    assert_eq!(
+        tool.description,
+        "Schema supplied as a const &str expression."
+    );
+    assert_eq!(tool.parameters["type"], "object");
+    assert_eq!(tool.parameters["properties"]["x"]["type"], "integer");
+    assert_eq!(tool.parameters["required"], serde_json::json!(["x"]));
+}
+
+#[test]
+fn skill_parameters_accepts_fn_call_expression() {
+    let info = skill_block_expr::FnExprSkill::block_info();
+    let tool = info.tool.expect("skill(...) with fn expr must set tool");
+    assert_eq!(tool.parameters["properties"]["x"]["type"], "integer");
+}
