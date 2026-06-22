@@ -40,9 +40,17 @@ fn collection_to_table(name: &str, coll: &CollectionDef) -> Result<Table, Schema
 }
 
 fn field_to_column(collection: &str, name: &str, f: &FieldDef) -> Result<Column, SchemaError> {
+    // Resolve the declared type once, then branch on the `DataType` enum
+    // everywhere below. `field_type_to_data_type` is case-insensitive (it
+    // lower-cases the raw string), so deriving auto-increment / auto-datetime /
+    // default behaviour from the enum keeps those checks consistent with type
+    // resolution — e.g. a `"INT"` primary key auto-increments and a
+    // `"DateTime"` auto field defaults to NOW(), which the old raw-string
+    // comparisons silently missed.
+    let data_type = field_type_to_data_type(collection, name, &f.field_type)?;
     let mut col = Column {
         name: name.to_string(),
-        data_type: field_type_to_data_type(collection, name, &f.field_type)?,
+        data_type,
         primary_key: f.primary,
         unique: f.unique,
         nullable: f.optional,
@@ -52,22 +60,19 @@ fn field_to_column(collection: &str, name: &str, f: &FieldDef) -> Result<Column,
     };
 
     // Auto-increment for integer primary keys
-    if f.auto
-        && f.primary
-        && (f.field_type == "int" || f.field_type == "integer" || f.field_type == "int64")
-    {
+    if f.auto && f.primary && matches!(data_type, DataType::Int | DataType::Int64) {
         col.auto_increment = true;
     }
 
     // Auto datetime fields default to CURRENT_TIMESTAMP
-    if f.auto && f.field_type == "datetime" {
+    if f.auto && data_type == DataType::DateTime {
         col.default = Some(default_now());
     }
 
     // Explicit default values
     if let Some(ref default_val) = f.default {
         if col.default.is_none() {
-            col.default = Some(to_default_value(default_val, &f.field_type));
+            col.default = Some(to_default_value(collection, name, default_val, data_type)?);
         }
     }
 
@@ -123,8 +128,13 @@ fn field_type_to_data_type(
     })
 }
 
-fn to_default_value(v: &serde_json::Value, field_type: &str) -> DefaultValue {
-    match v {
+fn to_default_value(
+    collection: &str,
+    field: &str,
+    v: &serde_json::Value,
+    data_type: DataType,
+) -> Result<DefaultValue, SchemaError> {
+    Ok(match v {
         serde_json::Value::Null => default_null(),
         serde_json::Value::Bool(b) => {
             if *b {
@@ -134,12 +144,22 @@ fn to_default_value(v: &serde_json::Value, field_type: &str) -> DefaultValue {
             }
         }
         serde_json::Value::Number(n) => {
-            if field_type == "int" || field_type == "integer" || field_type == "int64" {
-                default_int(n.as_i64().unwrap_or(0))
+            // A numeric default that doesn't fit the declared type is an
+            // authoring mistake — surface it rather than zeroing it. serde's
+            // `as_i64` returns `None` for a value out of `i64` range or a
+            // fractional value, and `as_f64` can return `None` for an
+            // arbitrary-precision number; either is a `BadDefault`.
+            let bad_default = || SchemaError::BadDefault {
+                collection: collection.to_string(),
+                field: field.to_string(),
+                value: n.to_string(),
+            };
+            if matches!(data_type, DataType::Int | DataType::Int64) {
+                default_int(n.as_i64().ok_or_else(bad_default)?)
             } else {
                 DefaultValue {
                     raw: String::new(),
-                    value: Some(DefaultVal::Float(n.as_f64().unwrap_or(0.0))),
+                    value: Some(DefaultVal::Float(n.as_f64().ok_or_else(bad_default)?)),
                     is_raw: false,
                     is_null: false,
                 }
@@ -153,7 +173,7 @@ fn to_default_value(v: &serde_json::Value, field_type: &str) -> DefaultValue {
             }
         }
         _ => default_string(v.to_string()),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -246,6 +266,90 @@ mod tests {
         let r = col.references.as_ref().expect("expected a foreign key");
         assert_eq!(r.table, "orgs");
         assert_eq!(r.column, "id");
+    }
+
+    #[test]
+    fn uppercase_int_primary_key_auto_increments() {
+        // Type resolution is case-insensitive, so an uppercase "INT" primary
+        // key with auto=true must auto-increment just like lowercase "int".
+        let mut f = field("INT");
+        f.primary = true;
+        f.auto = true;
+        let colls = collection_with(&[("id", f)]);
+        let tables = collections_to_tables(&colls).unwrap();
+        let col = tables[0].columns.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(col.data_type, DataType::Int);
+        assert!(
+            col.auto_increment,
+            "uppercase INT primary key should auto-increment"
+        );
+    }
+
+    #[test]
+    fn mixedcase_datetime_auto_field_defaults_to_now() {
+        // A mixed-case "DateTime" auto field must get a CURRENT_TIMESTAMP
+        // default, same as lowercase "datetime".
+        let mut f = field("DateTime");
+        f.auto = true;
+        let colls = collection_with(&[("created_at", f)]);
+        let tables = collections_to_tables(&colls).unwrap();
+        let col = tables[0]
+            .columns
+            .iter()
+            .find(|c| c.name == "created_at")
+            .unwrap();
+        assert_eq!(col.data_type, DataType::DateTime);
+        assert!(
+            col.default.is_some(),
+            "mixed-case DateTime auto field should default to NOW()"
+        );
+    }
+
+    #[test]
+    fn fractional_default_for_int_column_is_rejected() {
+        // A fractional default on an integer column doesn't fit the declared
+        // type; it must be surfaced as BadDefault, not silently zeroed.
+        let mut f = field("int");
+        f.default = Some(serde_json::json!(3.5));
+        let colls = collection_with(&[("count", f)]);
+        let err = collections_to_tables(&colls).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaError::BadDefault {
+                collection: "users".to_string(),
+                field: "count".to_string(),
+                value: "3.5".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn out_of_i64_range_default_for_int_column_is_rejected() {
+        // A default larger than i64::MAX must be rejected rather than coerced
+        // to 0 (serde stores it as f64, so as_i64() returns None).
+        let mut f = field("int");
+        f.default = Some(serde_json::from_str("99999999999999999999").unwrap());
+        let colls = collection_with(&[("big", f)]);
+        let err = collections_to_tables(&colls).unwrap_err();
+        assert!(
+            matches!(err, SchemaError::BadDefault { ref field, .. } if field == "big"),
+            "expected BadDefault for out-of-range int default, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn in_range_int_default_is_accepted() {
+        // Sanity: a valid integer default still works after the BadDefault gate.
+        let mut f = field("int");
+        f.default = Some(serde_json::json!(42));
+        let colls = collection_with(&[("count", f)]);
+        let tables = collections_to_tables(&colls).unwrap();
+        let col = tables[0]
+            .columns
+            .iter()
+            .find(|c| c.name == "count")
+            .unwrap();
+        assert!(col.default.is_some());
     }
 
     #[test]

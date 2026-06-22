@@ -87,6 +87,49 @@ fn internal_error_response() -> axum::http::Response<Body> {
         .expect("static response body is always well-formed")
 }
 
+/// Build a plain-text error response with a fixed status. Used for transport
+/// failures detected before dispatch (oversized / unreadable request bodies),
+/// where there is no `OutputStream` to map.
+fn status_text_response(status: StatusCode, message: &'static str) -> axum::http::Response<Body> {
+    axum::http::Response::builder()
+        .status(status)
+        .body(Body::from(message))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
+/// True if `err` (or anything in its source chain) is a
+/// [`http_body_util::LengthLimitError`].
+///
+/// `axum::body::to_bytes` wraps the body in `http_body_util::Limited`, so
+/// exceeding the byte cap surfaces as an `axum::Error` whose source is a
+/// `LengthLimitError`. Walking the chain lets us tell "body too large" apart
+/// from a genuine transport read error (client disconnect, malformed
+/// transfer-encoding).
+fn is_length_limit_error(err: &axum::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = source {
+        if e.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        source = e.source();
+    }
+    false
+}
+
+/// Map a request-body read failure to an HTTP response instead of silently
+/// dispatching an empty body: exceeding `max_body_bytes` → `413 Payload Too
+/// Large`; any other read failure → `400 Bad Request`. Either way the
+/// discarded error is logged so the truncation is observable.
+fn body_read_error_response(err: &axum::Error) -> axum::http::Response<Body> {
+    if is_length_limit_error(err) {
+        tracing::warn!(error = %err, "request body exceeds max_body_bytes; returning 413");
+        status_text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+    } else {
+        tracing::warn!(error = %err, "failed to read request body; returning 400");
+        status_text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // wafer-run/http-listener block
 // ---------------------------------------------------------------------------
@@ -239,10 +282,16 @@ impl Block for HttpListenerBlock {
                     let target = target.clone();
                     async move {
                         let (parts, body) = req.into_parts();
-                        let body_bytes = axum::body::to_bytes(body, max_body_bytes)
-                            .await
-                            .unwrap_or_default()
-                            .to_vec();
+                        // Buffer the request body up to `max_body_bytes`. A read
+                        // failure must NOT be collapsed into an empty body (the
+                        // old `.unwrap_or_default()`): that silently masked
+                        // "too large" and "connection dropped" as a legitimate
+                        // empty request and let the handler return a misleading
+                        // 2xx. Surface them as 413 / 400 instead.
+                        let body_bytes = match axum::body::to_bytes(body, max_body_bytes).await {
+                            Ok(b) => b.to_vec(),
+                            Err(e) => return body_read_error_response(&e),
+                        };
 
                         let uri = &parts.uri;
                         let path = uri.path();
@@ -324,3 +373,44 @@ wafer_block::register_static_block!("wafer-run/http-listener", HttpListenerBlock
 // Query-decoding semantics (`+` → space, `%XX`, invalid-sequence tolerance)
 // are pinned by table-driven tests next to the single implementation in
 // `wafer_block::http_codec` (the former `url_decode_tests` moved there).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_body_is_classified_and_mapped_to_413() {
+        // A body larger than the limit makes `to_bytes` fail with a
+        // LengthLimitError, which must map to 413 rather than an empty body.
+        let body = Body::from(vec![0u8; 100]);
+        let err = axum::body::to_bytes(body, 10)
+            .await
+            .expect_err("100 bytes over a 10-byte limit must error");
+        assert!(
+            is_length_limit_error(&err),
+            "over-limit read should be a length-limit error"
+        );
+        let resp = body_read_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn under_limit_body_reads_successfully() {
+        // Sanity: a body within the limit still reads as-is (no false 413).
+        let body = Body::from(b"hello".to_vec());
+        let bytes = axum::body::to_bytes(body, 1024)
+            .await
+            .expect("under-limit read should succeed");
+        assert_eq!(&bytes[..], b"hello");
+    }
+
+    #[test]
+    fn non_length_read_error_maps_to_400() {
+        // A transport-style error (not a length limit) must surface as 400,
+        // not be misreported as 413 or swallowed.
+        let err = axum::Error::new(std::io::Error::other("connection reset"));
+        assert!(!is_length_limit_error(&err));
+        let resp = body_read_error_response(&err);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

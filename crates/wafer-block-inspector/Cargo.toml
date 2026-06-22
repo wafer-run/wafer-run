@@ -10,7 +10,6 @@ wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 percent-encoding = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

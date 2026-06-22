@@ -179,8 +179,13 @@ impl Block for MonitoringBlock {
                     "top_paths": stats.path_counts,
                 })
             };
-            let body = serde_json::to_vec(&payload).unwrap_or_default();
-            return OutputStream::respond(body);
+            // Serialize via the shared `response::ok_json` helper: it sets
+            // `Content-Type: application/json` and, crucially, turns a
+            // serialization failure into a logged `Internal` error rather than
+            // the old `.unwrap_or_default()` which silently collapsed any
+            // failure into an empty HTTP 200. The sibling inspector block uses
+            // the same helper, so the two no longer drift on error handling.
+            return wafer_block::response::ok_json(&payload);
         }
 
         // Track the request
