@@ -76,7 +76,10 @@ async fn build_and_spawn(cfg: &SupervisorConfig, line_tx: mpsc::Sender<String>) 
         build.arg("--release");
     }
     build.arg("--bin").arg(&cfg.bin);
-    build.args(&cfg.cargo_args);
+    // NOTE: `cargo_args` are the *program*'s arguments (forwarded to `cargo run`
+    // after `--`, see DevArgs::cargo_args), NOT build flags. Splicing them into
+    // `cargo build`'s own flag list made `wafer dev -- --serve-flag` fail the
+    // build before the program ever ran. The build step takes no program args.
     let status = build
         .status()
         .await

@@ -271,8 +271,8 @@ fn find_keyword(s: &str, keyword: &str) -> Option<usize> {
         }
         if i + kw_len <= bytes.len()
             && &bytes[i..i + kw_len] == kw_bytes
-            && (i == 0 || bytes[i - 1] == b' ')
-            && (i + kw_len >= bytes.len() || bytes[i + kw_len] == b' ')
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+            && (i + kw_len >= bytes.len() || bytes[i + kw_len].is_ascii_whitespace())
         {
             found = Some(i);
         }
@@ -604,6 +604,16 @@ mod tests {
     #[test]
     fn parse_and_eval_membership_not_in() {
         let expr = parse_expr("\"guest\" not in $.input.roles").unwrap();
+        let result = eval(&expr, &dummy_resolve).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn parse_and_eval_membership_in_with_tab_boundaries() {
+        // The `in` keyword surrounded by tabs (not just ASCII spaces) must
+        // still be recognized — find_keyword's doc promises "surrounded by
+        // whitespace", and operands are trimmed before parsing.
+        let expr = parse_expr("\"admin\"\tin\t$.input.roles").unwrap();
         let result = eval(&expr, &dummy_resolve).unwrap();
         assert_eq!(result, json!(true));
     }

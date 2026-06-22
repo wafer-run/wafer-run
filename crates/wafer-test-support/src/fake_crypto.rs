@@ -220,7 +220,16 @@ impl FakeCrypto {
 
     fn handle_hash(&self, req: &serde_json::Value) -> OutputStream {
         use sha2::Digest;
-        let data = req["data"].as_str().unwrap_or("");
+        // Surface a missing/non-string `data` loudly instead of quietly hashing
+        // the empty string and returning a valid-looking hash of the wrong
+        // value — the "fixture gap masquerades as a real result" trap this fake
+        // is meant to avoid.
+        let Some(data) = req["data"].as_str() else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::InvalidArgument,
+                "fake-crypto: hash requires a string `data`",
+            ));
+        };
         let digest = Sha256::digest(data.as_bytes());
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         OutputStream::respond(serde_json::to_vec(&serde_json::json!({"hash": hex})).unwrap())
@@ -234,6 +243,29 @@ mod tests {
     use wafer_run::Wafer;
 
     use super::*;
+
+    #[tokio::test]
+    async fn hash_rejects_missing_data() {
+        let crypto = FakeCrypto::new();
+        // `data` omitted → InvalidArgument, not a valid-looking hash of "".
+        let out = crypto.handle_hash(&json!({}));
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::InvalidArgument),
+            other => panic!("expected InvalidArgument error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_of_string_data_succeeds() {
+        let crypto = FakeCrypto::new();
+        let out = crypto.handle_hash(&json!({"data": "hello"}));
+        let buf = out.collect_buffered().await.expect("hash should succeed");
+        let resp: serde_json::Value = serde_json::from_slice(&buf.body).unwrap();
+        assert!(
+            resp["hash"].as_str().is_some_and(|h| h.len() == 64),
+            "sha256 hex digest is 64 chars"
+        );
+    }
 
     #[tokio::test]
     async fn sign_and_verify_roundtrip() {

@@ -231,10 +231,23 @@ impl FakeDb {
 
     fn handle_create(&self, req: &serde_json::Value) -> OutputStream {
         let collection = req["collection"].as_str().unwrap_or("").to_string();
-        let mut data = req["data"].clone();
-        if data["id"].is_null() {
-            data["id"] = serde_json::Value::String(format!("gen-{}", uuid_like()));
+        // `data` must be a JSON object — `serde_json`'s `IndexMut<&str>` panics
+        // on anything else, so a fixture typo (string/number/array `data`)
+        // would crash with an opaque message instead of surfacing the mistake
+        // the way every other malformed-input path in this fake does.
+        let Some(mut obj) = req["data"].as_object().cloned() else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::InvalidArgument,
+                "fake-db: create requires an object `data`",
+            ));
+        };
+        if obj.get("id").is_none_or(serde_json::Value::is_null) {
+            obj.insert(
+                "id".to_string(),
+                serde_json::Value::String(format!("gen-{}", uuid_like())),
+            );
         }
+        let data = serde_json::Value::Object(obj);
         self.state
             .lock()
             .collections
@@ -393,6 +406,39 @@ mod tests {
         // Missing operator defaults to `eq`, like `wire::FilterDef`.
         let default_op = json!({"field": "id", "value": "u1"});
         assert!(row_matches_filters(&row, &[default_op]).unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_non_object_data() {
+        let db = FakeDb::new();
+        // A string `data` (a plausible fixture typo) must surface as
+        // InvalidArgument, not crash with a serde_json IndexMut panic.
+        let out = db.handle_create(&json!({
+            "collection": "users",
+            "data": "oops-not-an-object",
+        }));
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::InvalidArgument);
+            }
+            other => panic!("expected InvalidArgument error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_object_data_generates_id() {
+        let db = FakeDb::new();
+        let out = db.handle_create(&json!({
+            "collection": "users",
+            "data": {"name": "Alice"},
+        }));
+        let buf = out.collect_buffered().await.expect("create should succeed");
+        let resp: serde_json::Value = serde_json::from_slice(&buf.body).unwrap();
+        assert_eq!(resp["name"], "Alice");
+        assert!(
+            resp["id"].as_str().is_some_and(|s| s.starts_with("gen-")),
+            "create should generate an id when none is supplied"
+        );
     }
 
     #[tokio::test]
