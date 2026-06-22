@@ -86,8 +86,10 @@ impl CorsBlock {
         }
     }
 
-    fn cached_origins(&self) -> Option<String> {
-        self.allowed_origins.get().cloned()
+    /// Borrow the Init-cached allow-list without cloning. Returns `None` until
+    /// `lifecycle(Init)` has stored a value (the fail-closed state).
+    fn cached_origins(&self) -> Option<&str> {
+        self.allowed_origins.get().map(String::as_str)
     }
 }
 
@@ -137,10 +139,12 @@ impl Block for CorsBlock {
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Resolve allow-list: per-request config > Init-cached > deny.
-        // No wildcard default — failing closed is the point.
-        let origins = ctx
+        // No wildcard default — failing closed is the point. Borrow both
+        // sources as `&str` (neither outlives this call) so the hot path
+        // allocates nothing — `allowed` is only compared / split / reflected
+        // below, never stored.
+        let origins: Option<&str> = ctx
             .config_get("allowed_origins")
-            .map(|s| s.to_string())
             .or_else(|| self.cached_origins());
 
         let methods = ctx
@@ -190,7 +194,7 @@ impl Block for CorsBlock {
                 // For non-`*` configs we still surface the configured value so
                 // intermediaries can verify, but we do not reflect anything.
                 if allowed != "*" {
-                    out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &allowed);
+                    out_msg.set_meta("resp.header.Access-Control-Allow-Origin", allowed);
                 }
             }
         }
@@ -369,7 +373,7 @@ mod tests {
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(
             block.cached_origins(),
-            Some("https://a.example,https://b.example".to_string()),
+            Some("https://a.example,https://b.example"),
         );
     }
 
@@ -383,7 +387,7 @@ mod tests {
         };
         let ctx = TestContext::new();
         block.lifecycle(&ctx, event).await.expect("init ok");
-        assert_eq!(block.cached_origins(), Some("*".to_string()));
+        assert_eq!(block.cached_origins(), Some("*"));
     }
 
     #[tokio::test]
@@ -431,7 +435,7 @@ mod tests {
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(
             block.cached_origins(),
-            Some("https://a.example,https://b.example".to_string()),
+            Some("https://a.example,https://b.example"),
             "string entries should be preserved when non-string entries are dropped",
         );
     }
@@ -455,7 +459,7 @@ mod tests {
         block.lifecycle(&ctx, event).await.expect("init ok");
         assert_eq!(
             block.cached_origins(),
-            Some("https://real.example".to_string()),
+            Some("https://real.example"),
             "the correctly-declared key must still populate the cache \
              when an unknown key is also present",
         );

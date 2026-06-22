@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use wafer_core::interfaces::vector::{
@@ -13,7 +16,9 @@ use wafer_core::interfaces::vector::{
 pub struct FastembedService {
     model_id: String,
     dimensions: u32,
-    inner: Mutex<TextEmbedding>,
+    /// `Arc` so the model can be moved into a `spawn_blocking` closure for the
+    /// CPU-heavy embedding forward pass without cloning the model itself.
+    inner: Arc<Mutex<TextEmbedding>>,
 }
 
 impl FastembedService {
@@ -40,7 +45,7 @@ impl FastembedService {
         Ok(Self {
             model_id: model_id.to_string(),
             dimensions: dims,
-            inner: Mutex::new(embedding),
+            inner: Arc::new(Mutex::new(embedding)),
         })
     }
 
@@ -64,13 +69,22 @@ impl EmbeddingService for FastembedService {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| VectorError::Internal(format!("fastembed mutex poisoned: {e}")))?;
-        guard
-            .embed(texts, None)
-            .map_err(|e| VectorError::Internal(format!("fastembed: {e}")))
+        // The ONNX forward pass is synchronous and CPU-heavy (hundreds of ms).
+        // Running it directly on the async worker would stall every other task
+        // on that thread, so offload it to the blocking pool. The model is
+        // shared via `Arc` and guarded by the same `Mutex` the tokenizer path
+        // uses, so concurrent embed calls still serialise on the model.
+        let model = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = model
+                .lock()
+                .map_err(|e| VectorError::Internal(format!("fastembed mutex poisoned: {e}")))?;
+            guard
+                .embed(texts, None)
+                .map_err(|e| VectorError::Internal(format!("fastembed: {e}")))
+        })
+        .await
+        .map_err(|e| VectorError::Internal(format!("fastembed embed task failed: {e}")))?
     }
 
     fn count_tokens(&self, text: &str) -> usize {
