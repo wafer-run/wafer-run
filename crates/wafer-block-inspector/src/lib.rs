@@ -171,13 +171,16 @@ impl Block for InspectorBlock {
         let path = msg.path().to_string();
 
         // Flow data is exposed via the runtime's FlowIntrospection capability.
-        // The inspector is a runtime-only block (no point inspecting an empty
-        // mock), so an absent capability is a misconfiguration — panic via
-        // `expect`. Bound once for the whole handler to keep the message in
-        // one place.
-        let intro = ctx
-            .flow_introspection()
-            .expect("inspector requires the runtime to expose FlowIntrospection");
+        // The inspector is a runtime-only block, so an absent capability is a
+        // misconfiguration — but a request handler must not panic (and thus
+        // abort the worker) over a config mismatch. Return a typed
+        // FailedPrecondition error instead. Bound once for the whole handler.
+        let Some(intro) = ctx.flow_introspection() else {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::FailedPrecondition,
+                "inspector requires the runtime to expose FlowIntrospection",
+            ));
+        };
 
         // Suffix-based routing — works regardless of mount prefix
         if path.ends_with("/app") {
