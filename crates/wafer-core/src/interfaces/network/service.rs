@@ -44,3 +44,21 @@ pub trait NetworkService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Issue `req` and return the upstream response, or a transport error.
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_error_display_matches_variant() {
+        assert_eq!(
+            NetworkError::RequestError("connection refused".into()).to_string(),
+            "request error: connection refused"
+        );
+        // `Other` passes the message through verbatim (no prefix).
+        assert_eq!(
+            NetworkError::Other("backend boom".into()).to_string(),
+            "backend boom"
+        );
+    }
+}

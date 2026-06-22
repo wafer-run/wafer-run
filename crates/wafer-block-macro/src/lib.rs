@@ -848,6 +848,12 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
+            // SAFETY: the wasmi host ABI passes (msg_ptr, msg_len) pointing at a
+            // valid, initialized, properly-aligned (u8 has alignment 1) region
+            // of this guest's linear memory. The guest is single-threaded and
+            // does not mutate that region for the duration of this call, so the
+            // borrow is exclusive; the slice is read-only and dropped before we
+            // return control to the host.
             let msg_bytes = unsafe {
                 ::std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize)
             };
@@ -871,6 +877,12 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_lifecycle(evt_ptr: i32, evt_len: i32) -> i64 {
+            // SAFETY: the wasmi host ABI passes (evt_ptr, evt_len) pointing at a
+            // valid, initialized, properly-aligned (u8 has alignment 1) region
+            // of this guest's linear memory. The guest is single-threaded and
+            // does not mutate that region for the duration of this call, so the
+            // borrow is exclusive; the slice is read-only and dropped before we
+            // return control to the host.
             let evt_bytes = unsafe {
                 ::std::slice::from_raw_parts(evt_ptr as *const u8, evt_len as usize)
             };
