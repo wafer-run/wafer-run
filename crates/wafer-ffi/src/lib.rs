@@ -436,6 +436,16 @@ pub unsafe extern "C" fn wafer_run(
 // ---------------------------------------------------------------------------
 
 /// Get info about all registered flows as a JSON array.
+///
+/// CALLER CONTRACT: like [`wafer_register`], this takes the runtime lock with
+/// `blocking_read`, which PANICS if called inside a tokio runtime context. Call
+/// it from a non-tokio thread (e.g. the C caller's own thread), NOT from inside
+/// a `WaferDoneCb` — that callback may run on a thread owned by the internal
+/// tokio runtime (see the module-level docs on `WaferDoneCb`).
+///
+/// On success returns a JSON array. If the call panics (e.g. the contract above
+/// is violated), it returns a `{"error": ...}` JSON object rather than a
+/// success-looking `[]`, so callers can tell a crash apart from "no flows".
 #[no_mangle]
 pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -445,10 +455,18 @@ pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
         let info = runtime.inner.blocking_read().flows_info();
         to_c_string(&serde_json::to_string(&info).unwrap_or_else(|_| "[]".to_string()))
     }));
-    result.unwrap_or_else(|_| to_c_string("[]"))
+    result.unwrap_or_else(|_| error_json("panic in wafer_flows_info"))
 }
 
-/// Check whether a block type is registered. Returns 1 if registered, 0 if not.
+/// Check whether a block type is registered. Returns 1 if registered, 0 if not,
+/// and -1 if the call panicked — so callers can distinguish a crash from a
+/// genuine "not registered" 0.
+///
+/// CALLER CONTRACT: like [`wafer_register`], this takes the runtime lock with
+/// `blocking_read`, which PANICS if called inside a tokio runtime context. Call
+/// it from a non-tokio thread, NOT from inside a `WaferDoneCb` — that callback
+/// may run on a thread owned by the internal tokio runtime (see the module-level
+/// docs on `WaferDoneCb`). A contract violation surfaces as the -1 sentinel.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const c_char) -> c_int {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -464,7 +482,7 @@ pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const
             0
         }
     }));
-    result.unwrap_or(0)
+    result.unwrap_or(-1)
 }
 
 // ---------------------------------------------------------------------------

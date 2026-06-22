@@ -100,3 +100,97 @@ pub async fn handle_message(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use futures::StreamExt;
+    use wafer_block::wire::network::Request as WireRequest;
+
+    use super::*;
+    use crate::interfaces::network::service::Response;
+
+    /// A `NetworkService` that returns a fixed-body 200 response.
+    struct StubNet {
+        body: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkService for StubNet {
+        async fn do_request(&self, _req: &Request) -> Result<Response, NetworkError> {
+            Ok(Response {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: self.body.clone(),
+            })
+        }
+    }
+
+    fn do_request_body(url: &str) -> Vec<u8> {
+        codec::encode(&WireRequest {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            headers: HashMap::new(),
+            body: None,
+        })
+        .expect("encode wire request")
+    }
+
+    #[test]
+    fn network_error_maps_to_unavailable_and_internal() {
+        assert_eq!(
+            network_error_to_wafer(NetworkError::RequestError("timeout".into())).code,
+            ErrorCode::Unavailable,
+        );
+        assert_eq!(
+            network_error_to_wafer(NetworkError::Other("boom".into())).code,
+            ErrorCode::Internal,
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_body_yields_single_header_frame() {
+        let svc = StubNet { body: Vec::new() };
+        let msg = Message::new(ServiceOp::NETWORK_DO_REQUEST);
+        let out = handle_message(&svc, &msg, &do_request_body("http://example.com")).await;
+        let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+        assert_eq!(
+            chunks.len(),
+            1,
+            "an empty response body must emit the header frame only (zero body chunks)"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_empty_body_yields_header_and_body_frames() {
+        let svc = StubNet {
+            body: b"hello".to_vec(),
+        };
+        let msg = Message::new(ServiceOp::NETWORK_DO_REQUEST);
+        let out = handle_message(&svc, &msg, &do_request_body("http://example.com")).await;
+        let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+        assert_eq!(
+            chunks.len(),
+            2,
+            "a non-empty body must emit header + body frames"
+        );
+        assert_eq!(
+            chunks[1], b"hello",
+            "the second frame carries the body bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_operation_is_unimplemented() {
+        let svc = StubNet { body: Vec::new() };
+        let msg = Message::new("network.bogus");
+        let out = handle_message(&svc, &msg, &[]).await;
+        match out.collect_buffered().await {
+            Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::Unimplemented);
+            }
+            other => panic!("expected Unimplemented error terminal, got {other:?}"),
+        }
+    }
+}
