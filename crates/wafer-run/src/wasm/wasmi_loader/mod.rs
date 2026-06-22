@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use tracing::{debug, warn};
+use tracing::{debug, error};
 use wafer_block::{
     core_types::*,
     error::RuntimeError,
@@ -824,7 +824,21 @@ impl Block for WasmiBlock {
                 info
             }
             Err(e) => {
-                warn!("WasmiBlock::info() failed: {e}");
+                // A block that cannot report its own `BlockInfo` is a hard
+                // failure, not a routine warning. The `Block::info()` contract
+                // is infallible, so we must return *something* — but the
+                // placeholder name "unknown" is exactly what the registry and
+                // router key off, so a failed block silently registers under
+                // "unknown", collides with any other failed block, and never
+                // routes. Log at `error!` so the failure is visible in volume
+                // rather than masquerading as a normal block. The failure is
+                // deliberately NOT cached: a transient instantiation fault
+                // (e.g. fuel exhaustion) can recover on a later call.
+                error!(
+                    "WasmiBlock::info() failed: {e}; registering with placeholder \
+                     name \"unknown\" — this block will not route correctly and \
+                     should be treated as a load failure"
+                );
                 BlockInfo::new("unknown", "0.0.0", "unknown", "failed to load info")
             }
         }

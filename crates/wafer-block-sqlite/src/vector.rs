@@ -266,15 +266,22 @@ impl VectorService for SqliteVecService {
                 Vec::new()
             };
 
-        // rrf::fuse already truncates to top_k, so no extra slicing needed
-        let ids_top: Vec<String> = match mode {
-            SearchMode::Vector => vec_ranking.iter().map(|(id, _)| id.clone()).collect(),
-            SearchMode::Keyword => kw_ranking.iter().map(|(id, _)| id.clone()).collect(),
+        // For Hybrid, fuse once and KEEP the (id, score) pairs so the returned
+        // score is the genuine RRF value, not a positional placeholder that
+        // silently diverges from the Vector/Keyword arms' real scores.
+        // `fuse_scored` already truncates to top_k, so no extra slicing needed.
+        let hybrid_fused: Vec<(String, f32)> = match mode {
             SearchMode::Hybrid => {
                 let vec_ids: Vec<String> = vec_ranking.iter().map(|(id, _)| id.clone()).collect();
                 let kw_ids: Vec<String> = kw_ranking.iter().map(|(id, _)| id.clone()).collect();
-                rrf::fuse(&[vec_ids, kw_ids], top_k, rrf::DEFAULT_RRF_K)
+                rrf::fuse_scored(&[vec_ids, kw_ids], top_k, rrf::DEFAULT_RRF_K)
             }
+            _ => Vec::new(),
+        };
+        let ids_top: Vec<String> = match mode {
+            SearchMode::Vector => vec_ranking.iter().map(|(id, _)| id.clone()).collect(),
+            SearchMode::Keyword => kw_ranking.iter().map(|(id, _)| id.clone()).collect(),
+            SearchMode::Hybrid => hybrid_fused.iter().map(|(id, _)| id.clone()).collect(),
         };
 
         if ids_top.is_empty() {
@@ -304,11 +311,7 @@ impl VectorService for SqliteVecService {
         let scores: std::collections::HashMap<String, f32> = match mode {
             SearchMode::Vector => vec_ranking.into_iter().collect(),
             SearchMode::Keyword => kw_ranking.into_iter().collect(),
-            SearchMode::Hybrid => ids_top
-                .iter()
-                .enumerate()
-                .map(|(i, id)| (id.clone(), 1.0 / (i as f32 + 1.0)))
-                .collect(),
+            SearchMode::Hybrid => hybrid_fused.into_iter().collect(),
         };
 
         let out: Vec<VectorMatch> = ids_top

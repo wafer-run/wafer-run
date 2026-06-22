@@ -154,9 +154,16 @@ fn build_go(dir: &Path, out: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("Failed to create {}", dest_dir.display()))?;
 
+    // Filesystem paths are arbitrary byte sequences on Unix, so `to_str()` can
+    // be `None`. Surface a clean error instead of panicking when `wafer build`
+    // is run from a directory whose path isn't valid UTF-8.
+    let out_str = out
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8: {}", out.display()))?;
+
     println!("Running: tinygo build -target wasi -o target/block.wasm .");
     let status = Command::new("tinygo")
-        .args(["build", "-target", "wasi", "-o", out.to_str().unwrap(), "."])
+        .args(["build", "-target", "wasi", "-o", out_str, "."])
         .current_dir(dir)
         .status()
         .context("Failed to run `tinygo build` — is TinyGo installed?")?;
