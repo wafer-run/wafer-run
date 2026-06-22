@@ -118,7 +118,7 @@ impl WebBlock {
                             value: content_type,
                         },
                         MetaEntry {
-                            key: "resp.header.Cache-Control".to_string(),
+                            key: format!("{META_RESP_HEADER_PREFIX}Cache-Control"),
                             value: cc,
                         },
                     ],
@@ -282,7 +282,7 @@ async fn serve_index_spa(ctx: &dyn Context, config: &WebConfig) -> OutputStream 
                     value: "text/html; charset=utf-8".to_string(),
                 },
                 MetaEntry {
-                    key: "resp.header.Cache-Control".to_string(),
+                    key: format!("{META_RESP_HEADER_PREFIX}Cache-Control"),
                     value: "no-cache".to_string(),
                 },
             ],
