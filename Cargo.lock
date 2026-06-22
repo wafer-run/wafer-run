@@ -6050,7 +6050,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "percent-encoding",
- "serde",
  "serde_json",
  "tracing",
  "wafer-block",

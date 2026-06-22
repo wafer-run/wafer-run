@@ -61,37 +61,6 @@ impl InspectorBlock {
     }
 }
 
-/// Build a JSON OutputStream response (bytes already serialized).
-fn json_respond(json: Vec<u8>) -> OutputStream {
-    OutputStream::respond_with_meta(
-        json,
-        vec![MetaEntry {
-            key: META_RESP_CONTENT_TYPE.to_string(),
-            value: "application/json".to_string(),
-        }],
-    )
-}
-
-/// Serialize `v` to a JSON response, or surface a typed `Internal` error.
-///
-/// Serializing the inspector's introspection structs should never fail in
-/// practice, but `serde_json::to_vec` is fallible. The previous
-/// `.unwrap_or_default()` collapsed any failure into an HTTP 200 with an
-/// empty body — a silently-swallowed error. Route every JSON route through
-/// this helper so a serialization fault becomes a real `500` instead.
-fn json_or_error(v: &impl serde::Serialize) -> OutputStream {
-    match serde_json::to_vec(v) {
-        Ok(bytes) => json_respond(bytes),
-        Err(e) => {
-            tracing::error!(error = %e, "inspector: failed to serialize response JSON");
-            OutputStream::error(WaferError::new(
-                ErrorCode::Internal,
-                format!("inspector: failed to serialize response: {e}"),
-            ))
-        }
-    }
-}
-
 /// Build an HTML OutputStream response.
 fn html_respond(html: Vec<u8>) -> OutputStream {
     OutputStream::respond_with_meta(
@@ -185,7 +154,7 @@ impl Block for InspectorBlock {
             let configs = ctx.block_configs();
             let blocks = ctx.registered_blocks();
             let interfaces = ctx.interface_specs();
-            return json_or_error(&serde_json::json!({
+            return ok_json(&serde_json::json!({
                 "flows": flows,
                 "configs": configs,
                 "blocks": blocks,
@@ -195,17 +164,17 @@ impl Block for InspectorBlock {
 
         if path.ends_with("/blocks") {
             let blocks = ctx.registered_blocks();
-            return json_or_error(&blocks);
+            return ok_json(&blocks);
         }
 
         if path.ends_with("/flows") {
             let flows = intro.flow_infos_json();
-            return json_or_error(&flows);
+            return ok_json(&flows);
         }
 
         if path.ends_with("/interfaces") {
             let interfaces = ctx.interface_specs();
-            return json_or_error(&interfaces);
+            return ok_json(&interfaces);
         }
 
         if path.ends_with("/ui") {
@@ -220,7 +189,7 @@ impl Block for InspectorBlock {
                 .into_owned();
             let blocks = ctx.registered_blocks();
             if let Some(info) = blocks.into_iter().find(|b| b.name == decoded) {
-                return json_or_error(&info);
+                return ok_json(&info);
             }
             return OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
@@ -239,7 +208,7 @@ impl Block for InspectorBlock {
                 .into_iter()
                 .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(decoded.as_str()))
             {
-                return json_or_error(&def);
+                return ok_json(&def);
             }
             return OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,
@@ -260,7 +229,7 @@ impl Block for InspectorBlock {
                 .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
                 .collect::<Vec<_>>(),
         });
-        json_or_error(&summary)
+        ok_json(&summary)
     }
 
     async fn lifecycle(

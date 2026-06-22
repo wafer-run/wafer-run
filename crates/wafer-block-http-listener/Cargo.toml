@@ -8,6 +8,7 @@ description = "WAFER block: HTTP transport — listens for HTTP requests and con
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 axum = { workspace = true }
+http-body-util = "0.1"
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
@@ -16,7 +17,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-http-body-util = "0.1"
 
 [lints]
 workspace = true

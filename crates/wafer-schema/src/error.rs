@@ -42,4 +42,22 @@ pub enum SchemaError {
         /// The malformed reference string from the manifest.
         reference: String,
     },
+
+    /// A field declared a numeric `default` that does not fit the column's
+    /// declared type — e.g. an integer column with a default larger than
+    /// `i64::MAX` or a fractional value, or a number serde cannot represent as
+    /// `f64`. Previously such defaults were silently coerced to `0` / `0.0`,
+    /// installing a default the author never asked for.
+    #[error(
+        "collection '{collection}' field '{field}' has out-of-range numeric \
+         default '{value}' for its declared type"
+    )]
+    BadDefault {
+        /// The collection (table) that contains the offending field.
+        collection: String,
+        /// The field (column) with the out-of-range default.
+        field: String,
+        /// The offending default value, rendered as JSON.
+        value: String,
+    },
 }
