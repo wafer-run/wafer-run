@@ -9,6 +9,7 @@ description = "ONNX-based EmbeddingService via fastembed-rs"
 wafer-core = { path = "../wafer-core", default-features = false }
 fastembed = "5"
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
