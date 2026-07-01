@@ -1,4 +1,8 @@
-use std::{path::Path, process::Command};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 use anyhow::{bail, Context};
 
@@ -48,10 +52,8 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     let block_wasm_path = dir.join("target").join("block.wasm");
 
-    // The `{block}` half of the `{org}/{block}` name is the best
-    // deterministic anchor for picking among multiple `.wasm` outputs.
     match lang {
-        Lang::Rust => build_rust(dir, &block_wasm_path, &package.name)?,
+        Lang::Rust => build_rust(dir, &block_wasm_path)?,
         Lang::Go => build_go(dir, &block_wasm_path)?,
     }
 
@@ -100,7 +102,7 @@ pub fn build(dir: &Path) -> anyhow::Result<()> {
 // Language-specific build steps
 // ---------------------------------------------------------------------------
 
-fn build_rust(dir: &Path, out: &Path, block_name: &str) -> anyhow::Result<()> {
+fn build_rust(dir: &Path, out: &Path) -> anyhow::Result<()> {
     // Verify the target is installed.
     let check = Command::new("rustup")
         .args(["target", "list", "--installed"])
@@ -115,25 +117,42 @@ fn build_rust(dir: &Path, out: &Path, block_name: &str) -> anyhow::Result<()> {
         );
     }
 
-    // cargo build --target wasm32-wasip1 --release
+    // Build and read the exact `.wasm` path back from cargo's JSON artifact
+    // stream instead of guessing the target-directory layout. This is correct
+    // no matter where the target directory lives — including a shared
+    // `CARGO_TARGET_DIR` / `[build] target-dir` where many blocks compile into
+    // one release directory — and regardless of how the crate name maps to the
+    // artifact filename. `--message-format=json-render-diagnostics` keeps
+    // human-readable diagnostics on stderr while emitting machine-readable
+    // artifact messages on stdout.
     println!("Running: cargo build --target wasm32-wasip1 --release");
-    let status = Command::new("cargo")
-        .args(["build", "--target", "wasm32-wasip1", "--release"])
+    let mut child = Command::new("cargo")
+        .args([
+            "build",
+            "--target",
+            "wasm32-wasip1",
+            "--release",
+            "--message-format=json-render-diagnostics",
+        ])
         .current_dir(dir)
-        .status()
+        .stdout(Stdio::piped())
+        .spawn()
         .context("Failed to run `cargo build`")?;
 
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("child stdout was piped")
+        .read_to_string(&mut stdout)
+        .context("Failed to read `cargo build` output")?;
+
+    let status = child.wait().context("Failed to wait for `cargo build`")?;
     if !status.success() {
         bail!("`cargo build --target wasm32-wasip1 --release` failed");
     }
 
-    // Find the .wasm output.  The package name may differ from the crate name;
-    // look for any .wasm in the release directory.
-    let release_dir = dir.join("target").join("wasm32-wasip1").join("release");
-
-    let wasm_file = find_wasm_in_dir(&release_dir, block_name)
-        .with_context(|| format!("No .wasm file found in {}", release_dir.display()))?;
-
+    let wasm_file = wasm_path_from_cargo_json(&stdout)?;
     println!("Found: {}", wasm_file.display());
 
     // Ensure the destination directory exists.
@@ -176,70 +195,60 @@ fn build_go(dir: &Path, out: &Path) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: find a single .wasm file in a directory (skip .d files).
+// Helper: locate the block's .wasm from cargo's JSON artifact stream.
 // ---------------------------------------------------------------------------
 
-/// Normalize a file stem / block name for comparison: lowercase and treat
-/// `-` and `_` as equivalent. Cargo replaces `-` with `_` in output artifact
-/// names, so a `my-block` manifest matches a `my_block.wasm` output.
-fn normalize_stem(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c == '-' {
-                '_'
-            } else {
-                c.to_ascii_lowercase()
-            }
-        })
-        .collect()
-}
-
-/// Find the block's `.wasm` output in `dir`.
+/// Extract the block's `.wasm` output path from cargo's
+/// `--message-format=json` stream.
 ///
-/// `read_dir` order is filesystem-arbitrary, so when more than one `.wasm`
-/// exists we cannot rely on position. Instead we prefer the file whose stem
-/// matches `block_name` (with `-`/`_` normalized, since cargo rewrites `-` to
-/// `_` in artifact names). Only if no stem matches do we fall back to the
-/// first entry, warning that the choice is ambiguous.
-fn find_wasm_in_dir(dir: &Path, block_name: &str) -> anyhow::Result<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
+/// Cargo emits one JSON object per line. `compiler-artifact` messages carry the
+/// compiled target's `crate_types` and the `filenames` it produced. A block
+/// crate is the only `cdylib` in its build (its dependencies compile as `lib`s),
+/// so the `cdylib` artifact's `.wasm` filename is the block itself. Reading the
+/// path straight from cargo means we never assume the target-directory layout
+/// or the crate-name → filename mapping, so a `CARGO_TARGET_DIR` shared across
+/// many blocks resolves to the right artifact. If more than one `cdylib` ever
+/// appears, the last wins — the root crate links after its dependencies.
+fn wasm_path_from_cargo_json(stdout: &str) -> anyhow::Result<PathBuf> {
+    let mut wasm: Option<PathBuf> = None;
 
-    let mut found: Vec<std::path::PathBuf> = Vec::new();
-
-    for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to read entry in {}", dir.display()))?;
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "wasm") {
-            found.push(path);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
-    }
-
-    match found.len() {
-        0 => bail!("No .wasm files found in {}", dir.display()),
-        1 => Ok(found.into_iter().next().unwrap()),
-        _ => {
-            let want = normalize_stem(block_name);
-            let matched = found.iter().find(|p| {
-                p.file_stem()
-                    .is_some_and(|s| normalize_stem(&s.to_string_lossy()) == want)
-            });
-            match matched {
-                Some(path) => Ok(path.clone()),
-                None => {
-                    // No stem matches the block name — the choice is genuinely
-                    // ambiguous, so fall back to the first entry and warn.
-                    eprintln!(
-                        "Warning: multiple .wasm files found in {} and none match block {:?}; using {}",
-                        dir.display(),
-                        block_name,
-                        found[0].display()
-                    );
-                    Ok(found.into_iter().next().unwrap())
+        // stdout carries only JSON with this message format; ignore stray lines.
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if msg.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        let is_cdylib = msg
+            .get("target")
+            .and_then(|t| t.get("crate_types"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some("cdylib")));
+        if !is_cdylib {
+            continue;
+        }
+        if let Some(files) = msg.get("filenames").and_then(serde_json::Value::as_array) {
+            for f in files {
+                if let Some(path) = f.as_str() {
+                    if path.ends_with(".wasm") {
+                        wasm = Some(PathBuf::from(path));
+                    }
                 }
             }
         }
     }
+
+    wasm.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cargo build produced no cdylib `.wasm` artifact — ensure the block crate sets \
+             `crate-type = [\"cdylib\"]`"
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,46 +279,62 @@ fn check_wafer_lock_sync(dir: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn touch(dir: &Path, name: &str) {
-        std::fs::write(dir.join(name), b"\0asm").unwrap();
-    }
-
     #[test]
-    fn find_wasm_single_file_returned() {
-        let tmp = tempfile::tempdir().unwrap();
-        touch(tmp.path(), "anything.wasm");
-        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
-        assert_eq!(got.file_name().unwrap(), "anything.wasm");
-    }
-
-    #[test]
-    fn find_wasm_prefers_stem_matching_block_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Two outputs; the deps/* one sorts arbitrarily but must not win.
-        touch(tmp.path(), "aaaa_unrelated.wasm");
-        touch(tmp.path(), "my_block.wasm");
-        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
+    fn wasm_path_picks_the_cdylib_over_dep_libs() {
+        // A realistic stream: dep `lib` artifacts plus the block `cdylib`. The
+        // block's `.wasm` must win even though its filename (crate name) does
+        // not resemble the wafer.toml block name, and even though the release
+        // dir is shared (all paths under one `/shared/...` target dir).
+        let stdout = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"serde","crate_types":["lib"]},"filenames":["/shared/wasm32-wasip1/release/libserde.rlib"]}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"gizza-ai-image-resize-block","crate_types":["cdylib","rlib"]},"filenames":["/shared/wasm32-wasip1/release/gizza_ai_image_resize_block.wasm","/shared/wasm32-wasip1/release/libgizza_ai_image_resize_block.rlib"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        let got = wasm_path_from_cargo_json(stdout).unwrap();
         assert_eq!(
-            got.file_name().unwrap(),
-            "my_block.wasm",
-            "should prefer the .wasm whose stem matches the block name (- normalized to _)"
+            got,
+            PathBuf::from("/shared/wasm32-wasip1/release/gizza_ai_image_resize_block.wasm")
         );
     }
 
     #[test]
-    fn find_wasm_falls_back_to_first_when_no_stem_matches() {
-        let tmp = tempfile::tempdir().unwrap();
-        touch(tmp.path(), "alpha.wasm");
-        touch(tmp.path(), "beta.wasm");
-        // No file stem matches "my-block"; fall back is allowed (still a .wasm).
-        let got = find_wasm_in_dir(tmp.path(), "my-block").unwrap();
-        let name = got.file_name().unwrap().to_string_lossy();
-        assert!(name == "alpha.wasm" || name == "beta.wasm", "got {name}");
+    fn wasm_path_errors_when_no_cdylib_wasm_present() {
+        let stdout = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"serde","crate_types":["lib"]},"filenames":["/t/libserde.rlib"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert!(wasm_path_from_cargo_json(stdout).is_err());
     }
 
     #[test]
-    fn normalize_stem_treats_dash_and_underscore_equal() {
-        assert_eq!(normalize_stem("My-Block"), normalize_stem("my_block"));
-        assert_eq!(normalize_stem("a-b-c"), "a_b_c");
+    fn wasm_path_ignores_non_json_and_blank_lines() {
+        let stdout = concat!(
+            "\n",
+            "   \n",
+            "warning: some rustc line that leaked to stdout\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"b","crate_types":["cdylib"]},"filenames":["/t/b.wasm"]}"#,
+            "\n",
+        );
+        let got = wasm_path_from_cargo_json(stdout).unwrap();
+        assert_eq!(got, PathBuf::from("/t/b.wasm"));
+    }
+
+    #[test]
+    fn wasm_path_takes_last_cdylib_when_multiple() {
+        // Defensive: the root crate links after its dependencies, so the last
+        // cdylib `.wasm` is the block.
+        let stdout = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"a","crate_types":["cdylib"]},"filenames":["/t/a.wasm"]}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"b","crate_types":["cdylib"]},"filenames":["/t/b.wasm"]}"#,
+            "\n",
+        );
+        let got = wasm_path_from_cargo_json(stdout).unwrap();
+        assert_eq!(got, PathBuf::from("/t/b.wasm"));
     }
 }
