@@ -19,7 +19,7 @@ mod skill;
 pub use block_info::{BlockCategory, BlockInfo, BlockInfoError, BlockRuntime};
 pub use config_var::{ConfigVar, InputType, SOLOBASE_SHARED_PREFIX};
 pub use endpoint::{AuthLevel, BlockEndpoint, HttpMethod};
-pub use grants::{ResourceGrant, ResourceType};
+pub use grants::{ResourceGrant, ResourceType, UnknownResourceType};
 pub use interface_spec::{ActionSpec, InterfaceSpec};
 pub use message_ext::{hashmap_to_meta, meta_to_hashmap, MetaGet, MetaSet};
 pub use request_action::RequestAction;

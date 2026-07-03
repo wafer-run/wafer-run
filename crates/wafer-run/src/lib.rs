@@ -70,7 +70,7 @@ pub use wafer_block::{
     types::{
         AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime, CollectionSchema,
         ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet, MetaSet,
-        RequestAction, ResourceGrant, ResourceType,
+        RequestAction, ResourceGrant, ResourceType, UnknownResourceType,
     },
     wrap,
     ErrorCode,
