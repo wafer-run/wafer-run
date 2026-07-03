@@ -41,7 +41,38 @@ impl ResourceType {
             _ => None,
         }
     }
+
+    /// Parse a stored grant `resource_type` column. Absent or empty means
+    /// the grant applies to all types (`Ok(None)` — the documented
+    /// wildcard); a non-empty unrecognized value is an error so readers can
+    /// reject the row instead of silently widening a typo to the all-types
+    /// wildcard.
+    pub fn parse_stored(value: Option<&str>) -> Result<Option<Self>, UnknownResourceType> {
+        match value {
+            None | Some("") => Ok(None),
+            Some(s) => Self::parse(s)
+                .map(Some)
+                .ok_or_else(|| UnknownResourceType(s.to_string())),
+        }
+    }
 }
+
+/// Error from [`ResourceType::parse_stored`]: a non-empty stored value that
+/// is not a recognized resource type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownResourceType(pub String);
+
+impl std::fmt::Display for UnknownResourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownResourceType {}
 
 /// A resource access grant declared by a block.
 ///
@@ -86,5 +117,38 @@ impl ResourceGrant {
     pub fn typed(mut self, rt: ResourceType) -> Self {
         self.resource_type = Some(rt);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_stored_absent_and_empty_are_wildcard() {
+        assert_eq!(ResourceType::parse_stored(None), Ok(None));
+        assert_eq!(ResourceType::parse_stored(Some("")), Ok(None));
+    }
+
+    #[test]
+    fn parse_stored_known_values() {
+        assert_eq!(
+            ResourceType::parse_stored(Some("db")),
+            Ok(Some(ResourceType::Db))
+        );
+        assert_eq!(
+            ResourceType::parse_stored(Some("network")),
+            Ok(Some(ResourceType::Network))
+        );
+    }
+
+    #[test]
+    fn parse_stored_rejects_unrecognized() {
+        let err = ResourceType::parse_stored(Some("databsae")).unwrap_err();
+        assert_eq!(err, UnknownResourceType("databsae".to_string()));
+        // Display names the bad value and the accepted set.
+        let msg = err.to_string();
+        assert!(msg.contains("databsae"));
+        assert!(msg.contains("db|config|storage|crypto|network"));
     }
 }

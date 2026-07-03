@@ -312,6 +312,20 @@ impl Wafer {
         lifecycle::sorted_snapshot(self.registration.blocks.values().map(|b| b.info()))
     }
 
+    /// Return the registration key of every registered block, sorted for
+    /// deterministic order across processes.
+    ///
+    /// Unlike [`Wafer::block_infos`] — which reports each block's
+    /// self-declared `info().name` — these are the names registration
+    /// validated and `init_block` / `call_block` resolve, so they are the
+    /// correct iteration set for whole-runtime lifecycle drivers (e.g. a
+    /// deploy-time init funnel).
+    pub fn block_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.registration.blocks.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Return the currently registered asset loader. Defaults to
     /// `NoopAssetLoader` if `set_asset_loader` was never called.
     ///
