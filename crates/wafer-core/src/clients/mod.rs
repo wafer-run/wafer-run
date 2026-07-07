@@ -32,10 +32,20 @@ use wafer_block::streams::input::InputStream;
 use wafer_block::streams::output::OutputStream;
 use wafer_block::{codec, common::ErrorCode, Message, WaferError};
 
-/// Apply the WRAP access-control meta to `msg` when a `resource` is supplied,
-/// so the runtime can enforce access control. `resource_type` scopes the grant
-/// check to a specific service (e.g. `Some("db")`). Shared by the native and
+/// Stamp the WRAP resource metas (`META_WRAP_RESOURCE`/`_ACCESS`/`_TYPE`) onto
+/// `msg` when a `resource` is supplied. `resource_type` scopes the stamped
+/// value to a specific service (e.g. `Some("db")`). Shared by the native and
 /// wasm-component service-call paths so the emitted meta is byte-identical.
+///
+/// ADVISORY ONLY as of SP-A Stage 2: these metas are no longer read by any
+/// enforcement path. `RuntimeContext::dispatch_call` used to gate resource
+/// access on them (the fail-open backstop this task removed); the sole
+/// enforcement point now is host-side `Context::check_resource_access`,
+/// called by each service handler via `decode_and_authorize` with parameters
+/// derived from the decoded request body, not from message metas. Clients
+/// keep stamping these for audit/observability and defense-in-depth (a
+/// future consumer — logging, tracing, an out-of-process auditor — can still
+/// read them), but nothing currently trusts them for authorization.
 fn apply_wrap_meta(
     msg: &mut Message,
     resource: Option<&str>,

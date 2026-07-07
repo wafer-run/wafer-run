@@ -38,7 +38,8 @@
 //! This is a tracked pre-existing residual, not a Task 7 regression — fixing
 //! it needs a list-all sentinel design (analogous to `DDL_RESOURCE` /
 //! `RAW_SQL_RESOURCE`) that is out of scope for the host-side-enforcement
-//! task sequence (tracked for Stage 2).
+//! task sequence — tracked as a dedicated follow-up (NOT Stage 2, which only
+//! removes the dead meta-gated backstop).
 //!
 //! The completeness loop below explicitly skips it (with a citation to this
 //! comment) rather than silently omitting it, and a separate test —
@@ -749,7 +750,7 @@ async fn storage_ops_all_deny_under_deny_ctx_except_documented_residual() {
     );
     for op in ServiceOp::STORAGE_OPS {
         if *op == ServiceOp::STORAGE_LIST_FOLDERS {
-            // RESIDUAL: unenforced, tracked for Stage 2 — see the module doc
+            // RESIDUAL: unenforced, tracked as a dedicated follow-up — see the module doc
             // comment at the top of this file and
             // `storage_list_folders_residual_is_currently_unenforced` below,
             // which pins its current (unenforced) behavior.
