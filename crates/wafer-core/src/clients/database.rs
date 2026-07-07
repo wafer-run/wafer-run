@@ -280,7 +280,7 @@ dual_api! {
         let req = ExecRawRequest { query: statement.to_string(), args: vec![] };
         let data = svc!(
             ctx, BLOCK,
-            ServiceOp::DATABASE_EXEC_RAW,
+            ServiceOp::DATABASE_DDL,
             &req,
             Some(DDL_RESOURCE),
             true,

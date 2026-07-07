@@ -62,11 +62,6 @@ pub(crate) use decode_or_err;
 /// - On authorize failure, returns `Err(OutputStream::error(..))` wrapping
 ///   the `WaferError` from `check_resource_access` (typically
 ///   `PermissionDenied`).
-///
-/// Not yet called from any op arm: this lands ahead of the handler
-/// migration that wires every op arm through it (tracked separately), so it
-/// is currently only exercised by its own unit tests.
-#[allow(dead_code)]
 pub fn decode_and_authorize<T>(
     ctx: &dyn Context,
     body: &[u8],

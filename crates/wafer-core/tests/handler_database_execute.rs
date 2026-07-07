@@ -1,20 +1,109 @@
 //! Handler tests for `database.execute` and `database.query` service ops.
 //!
 //! Tests cover:
-//! - Happy-path WRAP validation (matching collection in meta → success)
-//! - WRAP rejection (mismatched collection meta → PERMISSION_DENIED)
+//! - Happy-path authorization (a `Context` granting the request's collection
+//!   → success)
+//! - Authorization rejection (a `Context` denying the request's collection →
+//!   PERMISSION_DENIED)
 //! - Security-critical: a read-only grant does not satisfy a write operation.
 //!   `DATABASE_EXECUTE` is flagged `is_write=true` at the client layer; the
 //!   WRAP `check_access` call in the runtime enforces that read-only grants
 //!   cannot satisfy write requests.
+//!
+//! Historical note: before the handler was routed through
+//! `decode_and_authorize` (host-side `ctx.check_resource_access`), these ops
+//! authorized by cross-validating the caller-supplied `wrap.resource` meta
+//! against the decoded payload's `collection` (SEC-003). The database
+//! handler no longer reads that meta at all — `msg` is retained only for
+//! `msg.kind` dispatch — so these tests now drive authorization through a
+//! fake `Context` instead of message meta.
 
 use wafer_block::{
     codec,
     common::ServiceOp,
-    meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
-    types::ResourceGrant,
+    context::Context,
+    streams::{input::InputStream, output::OutputStream},
+    types::{ResourceGrant, ResourceType},
     wire, ErrorCode, Message, WaferError,
 };
+
+/// `Context` stub that grants every resource access check.
+struct AllowCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for AllowCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _is_write: bool,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+}
+
+/// `Context` stub that denies every resource access check, mirroring a
+/// caller with no WRAP grant for the requested resource. The error message
+/// names the resource, matching the operator-friendly wording the runtime's
+/// real `check_access` produces.
+struct DenyCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for DenyCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        _resource_type: ResourceType,
+        _is_write: bool,
+    ) -> Result<(), WaferError> {
+        Err(WaferError::new(
+            ErrorCode::PermissionDenied,
+            format!("WRAP: no grant for resource '{resource}'"),
+        ))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Fake DatabaseService — all ops succeed with empty/zero data.
@@ -164,23 +253,12 @@ mod db_fakes {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a Message with WRAP meta set so the handler's collection check passes.
-fn msg_with_matching_meta(kind: &str, resource: &str, access: &str) -> Message {
-    let mut m = Message::new(kind);
-    m.set_meta(META_WRAP_RESOURCE, resource);
-    m.set_meta(META_WRAP_ACCESS, access);
-    m.set_meta(META_WRAP_RESOURCE_TYPE, "db");
-    m
-}
-
-/// Build a Message with a WRAP resource that does NOT match the payload's
-/// collection, so the handler's SEC-003 cross-validation fires.
-fn msg_with_mismatched_meta(kind: &str, decoy_resource: &str, access: &str) -> Message {
-    let mut m = Message::new(kind);
-    m.set_meta(META_WRAP_RESOURCE, decoy_resource);
-    m.set_meta(META_WRAP_ACCESS, access);
-    m.set_meta(META_WRAP_RESOURCE_TYPE, "db");
-    m
+/// Build a bare Message for the given op kind. The database handler no
+/// longer reads any WRAP meta off `msg` — authorization runs entirely
+/// through the `Context` passed to `handle_message` — so `msg` only needs
+/// to carry `kind` for dispatch.
+fn msg(kind: &str) -> Message {
+    Message::new(kind)
 }
 
 async fn terminal_error(out: wafer_block::streams::output::OutputStream) -> Option<WaferError> {
@@ -204,13 +282,11 @@ async fn execute_with_matching_grant_succeeds() {
         collection: "suppers_ai__auth__users".into(),
     };
     let body = codec::encode(&req).unwrap();
-    // Meta resource matches the collection in the payload — handler should pass.
-    let msg = msg_with_matching_meta(
-        ServiceOp::DATABASE_EXECUTE,
-        "suppers_ai__auth__users",
-        "write",
-    );
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    // AllowCtx grants every resource — handler should pass.
+    let msg = msg(ServiceOp::DATABASE_EXECUTE);
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &AllowCtx, &msg, &body)
+            .await;
     assert!(
         terminal_error(out).await.is_none(),
         "expected success but got an error"
@@ -218,7 +294,7 @@ async fn execute_with_matching_grant_succeeds() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — execute with mismatched WRAP resource returns PERMISSION_DENIED
+// Test 2 — execute with a denying Context returns PERMISSION_DENIED
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -230,13 +306,11 @@ async fn execute_without_matching_grant_returns_permission_denied() {
         collection: "suppers_ai__auth__orders".into(),
     };
     let body = codec::encode(&req).unwrap();
-    // Meta claims a different collection — SEC-003 cross-validation must reject.
-    let msg = msg_with_mismatched_meta(
-        ServiceOp::DATABASE_EXECUTE,
-        "suppers_ai__auth__decoy",
-        "write",
-    );
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    // DenyCtx has no grant for the request's collection — must reject.
+    let msg = msg(ServiceOp::DATABASE_EXECUTE);
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out)
         .await
         .expect("expected PERMISSION_DENIED error");
@@ -272,8 +346,10 @@ async fn query_with_matching_grant_returns_rows() {
         collection: "suppers_ai__auth__users".into(),
     };
     let body = codec::encode(&req).unwrap();
-    let msg = msg_with_matching_meta(ServiceOp::DATABASE_QUERY, "suppers_ai__auth__users", "read");
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let msg = msg(ServiceOp::DATABASE_QUERY);
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &AllowCtx, &msg, &body)
+            .await;
     assert!(
         terminal_error(out).await.is_none(),
         "expected success but got an error"
@@ -281,7 +357,7 @@ async fn query_with_matching_grant_returns_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4 — query with mismatched WRAP resource returns PERMISSION_DENIED
+// Test 4 — query with a denying Context returns PERMISSION_DENIED
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -293,10 +369,11 @@ async fn query_without_matching_grant_returns_permission_denied() {
         collection: "suppers_ai__auth__orders".into(),
     };
     let body = codec::encode(&req).unwrap();
-    // Meta claims a different collection.
-    let msg =
-        msg_with_mismatched_meta(ServiceOp::DATABASE_QUERY, "suppers_ai__auth__decoy", "read");
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    // DenyCtx has no grant for the request's collection.
+    let msg = msg(ServiceOp::DATABASE_QUERY);
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out)
         .await
         .expect("expected PERMISSION_DENIED error");

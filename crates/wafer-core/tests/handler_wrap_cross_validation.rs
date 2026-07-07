@@ -406,6 +406,43 @@ mod db_fakes {
     }
 }
 
+// The database handler now authorizes via `decode_and_authorize`, which
+// calls `ctx.check_resource_access` — it no longer reads any WRAP meta off
+// `msg` at all (that SEC-003 meta-cross-validation is what Task 5 replaced
+// for the database service). `msg_with_meta` below is kept only to build a
+// `Message` carrying the right `kind` for dispatch; its meta values are
+// inert for these four tests. The "mismatched" framing now comes from
+// `DenyCtx`, a `Context` stub that denies every resource — standing in for
+// a caller with no WRAP grant for the collection the payload actually
+// targets.
+struct DenyCtx;
+
+#[wafer_block::wafer_async_trait]
+impl wafer_block::Context for DenyCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: wafer_block::streams::input::InputStream,
+    ) -> wafer_block::streams::output::OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn wafer_block::Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    // `check_resource_access` uses the trait's fail-closed default (deny).
+}
+
 #[tokio::test]
 async fn database_get_rejects_mismatched_collection() {
     let svc = db_fakes::OkDb;
@@ -415,7 +452,9 @@ async fn database_get_rejects_mismatched_collection() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::DATABASE_GET, "decoy_table", "read", "db");
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -429,7 +468,9 @@ async fn database_create_rejects_mismatched_collection() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::DATABASE_CREATE, "decoy", "write", "db");
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -444,7 +485,9 @@ async fn database_update_where_rejects_mismatched_collection() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::DATABASE_UPDATE_WHERE, "decoy", "write", "db");
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -465,7 +508,9 @@ async fn database_increment_field_where_rejects_mismatched_collection() {
         "write",
         "db",
     );
-    let out = wafer_core::interfaces::database::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
