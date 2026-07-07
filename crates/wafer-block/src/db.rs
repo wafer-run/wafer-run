@@ -36,6 +36,21 @@ pub struct Filter {
     pub value: serde_json::Value,
 }
 
+/// A predicate tree for WHERE-clause construction: a leaf [`Filter`] or an
+/// `AND`/`OR` group of sub-trees. This is the builder-input analogue of the
+/// wire `FilterNode`; the database handler converts wire → this before
+/// calling [`wafer_sql_utils`] builders, so the SQL layer never sees wire
+/// types.
+#[derive(Debug, Clone)]
+pub enum FilterTree {
+    /// A single comparison predicate.
+    Leaf(Filter),
+    /// AND of child predicates.
+    All(Vec<FilterTree>),
+    /// OR of child predicates.
+    Any(Vec<FilterTree>),
+}
+
 /// Supported filter comparison operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterOp {
