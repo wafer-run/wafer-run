@@ -183,33 +183,6 @@ impl RuntimeContext {
             }
         }
 
-        // WRAP: check resource access if wrap.resource meta is set.
-        let wrap_resource = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE);
-        if !wrap_resource.is_empty() {
-            let is_write = msg.get_meta(wafer_block::meta::META_WRAP_ACCESS) == "write";
-            let wrap_rt_str = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE_TYPE);
-            let wrap_rt = if wrap_rt_str.is_empty() {
-                None
-            } else {
-                wafer_block::types::ResourceType::parse(wrap_rt_str)
-            };
-            let wrap_caller = if self.node_id.is_empty() {
-                self.caller_id.as_deref()
-            } else {
-                Some(self.node_id.as_str())
-            };
-            if let Err(e) = wafer_block::wrap::check_access(
-                wrap_caller,
-                wrap_resource,
-                is_write,
-                wrap_rt.as_ref(),
-                &self.wrap_grants,
-                &self.wrap_admin_block,
-            ) {
-                return err_output(e.code, e.message);
-            }
-        }
-
         // Capability check: if the calling block is a WASM block with restricted
         // capabilities, verify it has permission for this service call.
         if let Some(caller_block) = self.all_blocks.get(&self.node_id) {
@@ -223,41 +196,6 @@ impl RuntimeContext {
                         ErrorCode::PermissionDenied,
                         format!("block capability denies call to '{block_name}'"),
                     );
-                }
-
-                // Check resource-specific capabilities based on resource_type
-                // meta. Parse the type string into `ResourceType` once and match
-                // on the enum variants — same approach as the WRAP check above,
-                // instead of re-matching hardcoded type strings here.
-                let wrap_rt_str = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE_TYPE);
-                if let Some(wrap_rt) = wafer_block::types::ResourceType::parse(wrap_rt_str) {
-                    use wafer_block::types::ResourceType;
-                    let wrap_resource = msg.get_meta(wafer_block::meta::META_WRAP_RESOURCE);
-                    let allowed = match wrap_rt {
-                        ResourceType::Db => {
-                            if wrap_resource == wafer_block::wrap::RAW_SQL_RESOURCE {
-                                caps.raw_sql
-                            } else if wrap_resource == wafer_block::wrap::DDL_RESOURCE {
-                                caps.ddl
-                            } else {
-                                caps.allows_collection(wrap_resource)
-                            }
-                        }
-                        ResourceType::Storage => caps.allows_storage_folder(wrap_resource),
-                        ResourceType::Config => {
-                            caps.config && caps.allows_config_key(wrap_resource)
-                        }
-                        ResourceType::Crypto => caps.crypto,
-                        ResourceType::Network => caps.allows_network_url(wrap_resource),
-                    };
-                    if !allowed {
-                        return err_output(
-                            ErrorCode::PermissionDenied,
-                            format!(
-                                "block capability denies access to {wrap_rt} '{wrap_resource}'"
-                            ),
-                        );
-                    }
                 }
             }
         }
@@ -451,12 +389,18 @@ impl Context for RuntimeContext {
     /// 1. Call-depth limit (default 16).
     /// 2. Cancellation / deadline.
     /// 3. Caller `requires` allowlist.
-    /// 4. WRAP resource access (`META_WRAP_RESOURCE`).
-    /// 5. Caller capability check (WASM capability model).
-    /// 6. **Interface action**: `msg.action()` must be in the target block's
+    /// 4. Caller `call_block` capability check (WASM capability model).
+    /// 5. **Interface action**: `msg.action()` must be in the target block's
     ///    declared interface action map, unless the interface is
     ///    action-agnostic (empty map) or unknown to the runtime. Unknown
     ///    interfaces produce a one-time `WARN` log per block.
+    ///
+    /// WRAP resource access (grant + resource-capability checks) is NOT
+    /// enforced here. It moved host-side into [`Context::check_resource_access`],
+    /// called by each service handler (database/storage/config/network/crypto)
+    /// via `decode_and_authorize` — see that method's doc comment. This is the
+    /// sole resource-access enforcement point; `dispatch_call` only routes the
+    /// call and checks call-eligibility (`requires`, `allows_call_block`).
     ///
     /// See `crates/wafer-run/src/runtime/validation.rs`.
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
@@ -521,9 +465,13 @@ impl Context for RuntimeContext {
     }
 
     /// Authorize `self.caller_id()` to access `resource` of `resource_type`
-    /// for read/write. Folds the same two checks `dispatch_call` runs from
-    /// message metas (grant check at `:187-211`, capability check at
-    /// `:228-261`) but keyed on explicit parameters instead of metas.
+    /// for read/write. This is the SOLE WRAP resource-access enforcement
+    /// point (grant check + resource-capability check) — `dispatch_call` no
+    /// longer performs either check itself (removed in SP-A Stage 2; it used
+    /// to run the same two checks from message metas as a fail-open backstop
+    /// that duplicated this method). Every service handler
+    /// (database/storage/config/network/crypto) must call this — directly or
+    /// via `decode_and_authorize` — before touching the resource.
     ///
     /// # Identity: `caller_id`, not `node_id`
     ///
@@ -544,8 +492,8 @@ impl Context for RuntimeContext {
         use wafer_block::types::ResourceType;
         let caller = self.caller_id.as_deref();
 
-        // 1) WRAP grant check — identical call to dispatch_call:201-210,
-        // keyed on the caller rather than self.node_id.
+        // 1) WRAP grant check — keyed on the caller (self.caller_id) rather
+        // than self.node_id.
         wafer_block::wrap::check_access(
             caller,
             resource,
@@ -558,8 +506,8 @@ impl Context for RuntimeContext {
             tracing::warn!(caller = ?caller, %resource, %resource_type, "WRAP deny (grant)");
         })?;
 
-        // 2) Resource capability check — mirrors dispatch_call:236-252, on
-        // the CALLER's declared capabilities (the block that invoked us).
+        // 2) Resource capability check — on the CALLER's declared
+        // capabilities (the block that invoked us).
         if let Some(cb) = caller.and_then(|c| self.all_blocks.get(c)) {
             if let Some(caps) = cb.block_capabilities() {
                 let allowed = match resource_type {

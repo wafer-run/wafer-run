@@ -5,8 +5,8 @@
 //! handling.
 
 use wafer_block::{
-    codec, common::ErrorCode, context::Context, meta::META_WRAP_RESOURCE,
-    streams::output::OutputStream, types::ResourceType, Message, WaferError,
+    codec, common::ErrorCode, context::Context, streams::output::OutputStream, types::ResourceType,
+    WaferError,
 };
 
 /// Serialize a value via codec (MessagePack) and return as `OutputStream::respond`,
@@ -86,256 +86,165 @@ where
     Ok(req)
 }
 
-/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
-/// expected resource value from the decoded payload.
-///
-/// - Empty meta = legacy path (runtime already skipped WRAP); accept.
-/// - Matching meta = accept.
-/// - Mismatched meta = PERMISSION_DENIED, with `noun` naming the kind of
-///   resource (e.g. `"key"`, `"collection"`, `"URL"`, `"resource"`) for
-///   operator-friendly error messages.
-// removed in Stage 2; superseded by decode_and_authorize. Every handler that
-// used to call this (database, storage, config, network) now authorizes via
-// `ctx.check_resource_access` instead, so this has no callers left outside
-// its own unit tests below. Kept (not deleted) until Stage 2 per the WRAP
-// host-side-enforcement task sequencing.
-#[allow(dead_code)]
-pub fn check_wrap_resource(msg: &Message, expected: &str, noun: &str) -> Result<(), WaferError> {
-    let supplied = msg.get_meta(META_WRAP_RESOURCE);
-    if supplied.is_empty() || supplied == expected {
-        Ok(())
-    } else {
-        Err(WaferError::new(
-            ErrorCode::PermissionDenied,
-            format!(
-                "WRAP: wrap.resource meta '{supplied}' does not match payload {noun} '{expected}'"
-            ),
-        ))
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use wafer_block::Message;
+mod decode_and_authorize_tests {
+    use std::sync::Arc;
 
-    use super::*;
+    use wafer_block::{
+        streams::{input::InputStream, output::TerminalNotResponse},
+        types::ResourceType,
+        wafer_async_trait, Message,
+    };
 
-    fn msg_with_resource(resource: &str) -> Message {
-        let mut m = Message::new("test.op");
-        if !resource.is_empty() {
-            m.set_meta(META_WRAP_RESOURCE, resource);
+    use super::{codec, decode_and_authorize, Context, ErrorCode, OutputStream, WaferError};
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct TestReq {
+        name: String,
+        value: i32,
+    }
+
+    /// `Context` stub that always grants access.
+    struct AllowCtx;
+
+    #[wafer_async_trait]
+    impl Context for AllowCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            unimplemented!("not exercised by decode_and_authorize")
         }
-        m
+
+        fn is_cancelled(&self) -> bool {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn check_resource_access(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _is_write: bool,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
     }
 
-    #[test]
-    fn empty_meta_accepts_any_expected() {
-        // Empty META_WRAP_RESOURCE = legacy path, always accept.
-        let msg = msg_with_resource("");
-        assert!(check_wrap_resource(&msg, "some-value", "key").is_ok());
+    /// `Context` stub that always denies access, mirroring a real WRAP
+    /// grant rejection.
+    struct DenyCtx;
+
+    #[wafer_async_trait]
+    impl Context for DenyCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn is_cancelled(&self) -> bool {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            unimplemented!("not exercised by decode_and_authorize")
+        }
+
+        fn check_resource_access(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _is_write: bool,
+        ) -> Result<(), WaferError> {
+            Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                "denied by test ctx",
+            ))
+        }
     }
 
-    #[test]
-    fn matching_meta_accepts() {
-        let msg = msg_with_resource("my-key");
-        assert!(check_wrap_resource(&msg, "my-key", "key").is_ok());
+    async fn expect_error_code(out: OutputStream, expected: ErrorCode) -> WaferError {
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, expected, "unexpected error code: {}", e.message);
+                e
+            }
+            other => panic!("expected {expected:?} error terminal, got {other:?}"),
+        }
     }
 
-    #[test]
-    fn mismatched_meta_returns_permission_denied_with_noun() {
-        let msg = msg_with_resource("decoy-key");
-        let err = check_wrap_resource(&msg, "real-key", "key").expect_err("mismatch must error");
-        assert_eq!(err.code, ErrorCode::PermissionDenied);
-        assert!(
-            err.message.contains("key"),
-            "error message should contain the noun 'key', got: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("decoy-key"),
-            "error message should contain the supplied value, got: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("real-key"),
-            "error message should contain the expected value, got: {}",
-            err.message
-        );
-    }
+    #[tokio::test]
+    async fn allow_ctx_returns_decoded_request() {
+        let body = codec::encode(&TestReq {
+            name: "widgets".into(),
+            value: 7,
+        })
+        .expect("encode must succeed");
 
-    #[test]
-    fn noun_appears_in_error_message() {
-        let msg = msg_with_resource("wrong-collection");
-        let err =
-            check_wrap_resource(&msg, "right-collection", "collection").expect_err("must error");
-        assert!(
-            err.message.contains("collection"),
-            "noun 'collection' should appear in message: {}",
-            err.message
-        );
-    }
-
-    mod decode_and_authorize_tests {
-        use std::sync::Arc;
-
-        use wafer_block::{
-            streams::{input::InputStream, output::TerminalNotResponse},
-            types::ResourceType,
-            wafer_async_trait,
+        let Ok(req) = decode_and_authorize::<TestReq>(&AllowCtx, &body, "test.op", |r| {
+            (r.name.clone(), ResourceType::Db, false)
+        }) else {
+            panic!("allow ctx must pass the request through")
         };
 
-        use super::super::{
-            codec, decode_and_authorize, Context, ErrorCode, Message, OutputStream, WaferError,
-        };
-
-        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-        struct TestReq {
-            name: String,
-            value: i32,
-        }
-
-        /// `Context` stub that always grants access.
-        struct AllowCtx;
-
-        #[wafer_async_trait]
-        impl Context for AllowCtx {
-            async fn call_block(
-                &self,
-                _block_name: &str,
-                _msg: Message,
-                _input: InputStream,
-            ) -> OutputStream {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn is_cancelled(&self) -> bool {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn config_get(&self, _key: &str) -> Option<&str> {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn clone_arc(&self) -> Arc<dyn Context> {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn check_resource_access(
-                &self,
-                _resource: &str,
-                _resource_type: ResourceType,
-                _is_write: bool,
-            ) -> Result<(), WaferError> {
-                Ok(())
-            }
-        }
-
-        /// `Context` stub that always denies access, mirroring a real WRAP
-        /// grant rejection.
-        struct DenyCtx;
-
-        #[wafer_async_trait]
-        impl Context for DenyCtx {
-            async fn call_block(
-                &self,
-                _block_name: &str,
-                _msg: Message,
-                _input: InputStream,
-            ) -> OutputStream {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn is_cancelled(&self) -> bool {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn config_get(&self, _key: &str) -> Option<&str> {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn clone_arc(&self) -> Arc<dyn Context> {
-                unimplemented!("not exercised by decode_and_authorize")
-            }
-
-            fn check_resource_access(
-                &self,
-                _resource: &str,
-                _resource_type: ResourceType,
-                _is_write: bool,
-            ) -> Result<(), WaferError> {
-                Err(WaferError::new(
-                    ErrorCode::PermissionDenied,
-                    "denied by test ctx",
-                ))
-            }
-        }
-
-        async fn expect_error_code(out: OutputStream, expected: ErrorCode) -> WaferError {
-            match out.collect_buffered().await {
-                Err(TerminalNotResponse::Error(e)) => {
-                    assert_eq!(e.code, expected, "unexpected error code: {}", e.message);
-                    e
-                }
-                other => panic!("expected {expected:?} error terminal, got {other:?}"),
-            }
-        }
-
-        #[tokio::test]
-        async fn allow_ctx_returns_decoded_request() {
-            let body = codec::encode(&TestReq {
+        assert_eq!(
+            req,
+            TestReq {
                 name: "widgets".into(),
                 value: 7,
-            })
-            .expect("encode must succeed");
+            }
+        );
+    }
 
-            let Ok(req) = decode_and_authorize::<TestReq>(&AllowCtx, &body, "test.op", |r| {
-                (r.name.clone(), ResourceType::Db, false)
-            }) else {
-                panic!("allow ctx must pass the request through")
-            };
+    #[tokio::test]
+    async fn deny_ctx_returns_permission_denied() {
+        let body = codec::encode(&TestReq {
+            name: "widgets".into(),
+            value: 7,
+        })
+        .expect("encode must succeed");
 
-            assert_eq!(
-                req,
-                TestReq {
-                    name: "widgets".into(),
-                    value: 7,
-                }
-            );
-        }
+        let out = decode_and_authorize::<TestReq>(&DenyCtx, &body, "test.op", |r| {
+            (r.name.clone(), ResourceType::Db, false)
+        })
+        .expect_err("deny ctx must reject the request");
 
-        #[tokio::test]
-        async fn deny_ctx_returns_permission_denied() {
-            let body = codec::encode(&TestReq {
-                name: "widgets".into(),
-                value: 7,
-            })
-            .expect("encode must succeed");
+        expect_error_code(out, ErrorCode::PermissionDenied).await;
+    }
 
-            let out = decode_and_authorize::<TestReq>(&DenyCtx, &body, "test.op", |r| {
-                (r.name.clone(), ResourceType::Db, false)
-            })
-            .expect_err("deny ctx must reject the request");
+    #[tokio::test]
+    async fn malformed_body_errors_before_the_resource_closure_runs() {
+        let body = b"not valid msgpack".to_vec();
 
-            expect_error_code(out, ErrorCode::PermissionDenied).await;
-        }
+        // If decode ever ran after (or without) gating on success, this
+        // closure would run and the deliberate panic would fail the test.
+        let out = decode_and_authorize::<TestReq>(&DenyCtx, &body, "test.op", |_req| {
+            panic!("resource closure must not run when decode fails")
+        })
+        .expect_err("malformed body must error");
 
-        #[tokio::test]
-        async fn malformed_body_errors_before_the_resource_closure_runs() {
-            let body = b"not valid msgpack".to_vec();
-
-            // If decode ever ran after (or without) gating on success, this
-            // closure would run and the deliberate panic would fail the test.
-            let out = decode_and_authorize::<TestReq>(&DenyCtx, &body, "test.op", |_req| {
-                panic!("resource closure must not run when decode fails")
-            })
-            .expect_err("malformed body must error");
-
-            let err = expect_error_code(out, ErrorCode::InvalidArgument).await;
-            assert!(
-                err.message.contains("invalid test.op request"),
-                "decode error message should name the op, got: {}",
-                err.message
-            );
-        }
+        let err = expect_error_code(out, ErrorCode::InvalidArgument).await;
+        assert!(
+            err.message.contains("invalid test.op request"),
+            "decode error message should name the op, got: {}",
+            err.message
+        );
     }
 }
