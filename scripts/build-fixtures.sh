@@ -73,3 +73,12 @@ build_if_missing \
     crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm \
     crates/wafer-run/tests/service_client_guest/Cargo.toml \
     crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm
+
+# hostile_db_guest.wasm — consumed by wrap_hostile_guest_e2e.rs at runtime
+# via Path. An ordinary, unprivileged public-SDK guest (SP-A Stage 1 task 8
+# hostile-guest end-to-end regression test — no WRAP meta at all). Built in
+# place.
+build_if_missing \
+    crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm \
+    crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
+    crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm

@@ -1,29 +1,42 @@
 //! Shared message handler logic for the config block.
 //!
-//! Access control is enforced by WRAP in `call_block()` — the config client
-//! sets `wrap.resource` to the config key, and the runtime checks ownership
-//! and grants before dispatching here. This handler is pure business logic.
+//! `ctx` is the trusted host-side authorization surface: `CONFIG_SET`
+//! authorizes via [`decode_and_authorize`], which bundles the codec decode
+//! with a call to `ctx.check_resource_access` so the arm cannot obtain its
+//! typed request without also being checked. `CONFIG_GET` accepts a key via
+//! either a codec-encoded body or a `key` meta fallback (see below), so it
+//! cannot use the single-decode helper directly; it calls
+//! `ctx.check_resource_access` itself immediately after resolving the key
+//! and before it is ever handed to the service.
 
 use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    types::ResourceType,
     wire::config as wire,
     *,
 };
 
 use super::service::ConfigService;
-use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 /// Handle a config message by delegating to the given service.
-///
-/// Access control is handled by WRAP in `call_block()` before this is called.
-pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -> OutputStream {
+pub fn handle_message(
+    service: &dyn ConfigService,
+    ctx: &dyn Context,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::CONFIG_GET => {
             // Accept either a codec-encoded `GetRequest` body or a `key` meta
             // field on the message (a fallback for callers that route through
-            // headers — preserves the original handler's behavior).
+            // headers — preserves the original handler's behavior). Because
+            // the key can come from either source, this arm can't use
+            // `decode_and_authorize`'s single-decode bundling; it authorizes
+            // manually right after resolving `key`, before calling the
+            // service.
             let key = match codec::decode::<wire::GetRequest>(body) {
                 Ok(req) => req.key,
                 Err(_) => {
@@ -38,7 +51,7 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
                 }
             };
 
-            if let Err(e) = check_wrap_resource(msg, &key, "config key") {
+            if let Err(e) = ctx.check_resource_access(&key, ResourceType::Config, false) {
                 return OutputStream::error(e);
             }
             service.get(&key).map_or_else(
@@ -52,10 +65,12 @@ pub fn handle_message(service: &dyn ConfigService, msg: &Message, body: &[u8]) -
             )
         }
         ServiceOp::CONFIG_SET => {
-            let req = decode_or_err!(body, wire::SetRequest, "config.set");
-            if let Err(e) = check_wrap_resource(msg, &req.key, "config key") {
-                return OutputStream::error(e);
-            }
+            let req = match decode_and_authorize::<wire::SetRequest>(ctx, body, "config.set", |r| {
+                (r.key.clone(), ResourceType::Config, true)
+            }) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             service.set(&req.key, &req.value);
             OutputStream::respond(vec![])
         }

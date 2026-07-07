@@ -405,6 +405,23 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
+        ServiceOp::DATABASE_DDL => ActionSpec {
+            description: "Execute a raw DDL statement (cap-gated; host-authoritative op distinct from database.exec_raw).".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "args": { "type": "array" }
+                },
+                "required": ["query"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rows_affected": { "type": "integer" }
+                }
+            })),
+        },
         other => panic!(
             "BUG: no ActionSpec for database op '{other}' — update database_action_spec alongside ServiceOp::DATABASE_OPS"
         ),

@@ -4,29 +4,14 @@ use std::time::Duration;
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
-    meta::META_WRAP_RESOURCE,
     streams::output::OutputStream,
+    types::ResourceType,
     wire::crypto as wire,
     *,
 };
 
 use super::service::{CryptoError, CryptoService};
-use crate::interfaces::handler_util::{decode_or_err, to_output};
-
-/// SEC-003: enforce that the caller-supplied `wrap.resource` meta matches the
-/// crypto operation about to run. If the meta is absent the runtime skipped
-/// WRAP — accept; client wrappers always set this post-SEC-015.
-fn check_op(msg: &Message, expected: &str) -> Result<(), WaferError> {
-    let supplied = msg.get_meta(META_WRAP_RESOURCE);
-    if supplied.is_empty() || supplied == expected {
-        Ok(())
-    } else {
-        Err(WaferError::new(
-            ErrorCode::PermissionDenied,
-            format!("WRAP: wrap.resource meta '{supplied}' does not match crypto op '{expected}'"),
-        ))
-    }
-}
+use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
 
@@ -44,31 +29,50 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
 
 /// Handle a crypto message by delegating to the given service.
 ///
+/// `ctx` is the trusted host-side authorization surface: every op arm
+/// authorizes via [`decode_and_authorize`], which bundles the codec decode
+/// with a call to `ctx.check_resource_access` so an arm cannot obtain its
+/// typed request without also being checked. The resource named is the
+/// literal op name (`"hash"`, `"sign"`, ...) — crypto grants are keyed on
+/// the operation, not on request content — and `is_write` is always `false`:
+/// crypto ops aren't resource writes in the WRAP sense.
+///
 /// JWT sign/verify use per-block HKDF-derived keys when `caller_id` is set
-/// (the runtime provides this from the calling block's identity).
-/// When `caller_id` is None, the master key is used.
+/// (the runtime provides this from the calling block's identity). This is a
+/// separate concern from WRAP enforcement above — `caller_id` selects the
+/// derived key, it does not gate access. When `caller_id` is None, the
+/// master key is used.
 pub fn handle_message(
     service: &dyn CryptoService,
+    ctx: &dyn Context,
     caller_id: Option<&str>,
     msg: &Message,
     body: &[u8],
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::CRYPTO_HASH => {
-            if let Err(e) = check_op(msg, "hash") {
-                return OutputStream::error(e);
-            }
-            let req = decode_or_err!(body, wire::HashRequest, "crypto.hash");
+            let req =
+                match decode_and_authorize::<wire::HashRequest>(ctx, body, "crypto.hash", |_r| {
+                    ("hash".to_string(), ResourceType::Crypto, false)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service.hash(&req.password) {
                 Ok(hash) => to_output(&wire::HashResponse { hash }),
                 Err(e) => OutputStream::error(crypto_error_to_wafer(e)),
             }
         }
         ServiceOp::CRYPTO_COMPARE_HASH => {
-            if let Err(e) = check_op(msg, "compare_hash") {
-                return OutputStream::error(e);
-            }
-            let req = decode_or_err!(body, wire::CompareHashRequest, "crypto.compare_hash");
+            let req = match decode_and_authorize::<wire::CompareHashRequest>(
+                ctx,
+                body,
+                "crypto.compare_hash",
+                |_r| ("compare_hash".to_string(), ResourceType::Crypto, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.compare_hash(&req.password, &req.hash) {
                 Ok(()) => to_output(&wire::CompareHashResponse { matches: true }),
                 Err(CryptoError::PasswordMismatch) => {
@@ -78,10 +82,13 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_SIGN => {
-            if let Err(e) = check_op(msg, "sign") {
-                return OutputStream::error(e);
-            }
-            let req = decode_or_err!(body, wire::SignRequest, "crypto.sign");
+            let req =
+                match decode_and_authorize::<wire::SignRequest>(ctx, body, "crypto.sign", |_r| {
+                    ("sign".to_string(), ResourceType::Crypto, false)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             let expiry = Duration::from_secs(req.expiry_secs);
             let result = match caller_id {
                 Some(id) => service.sign_for(id, req.claims, expiry),
@@ -93,10 +100,15 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_VERIFY => {
-            if let Err(e) = check_op(msg, "verify") {
-                return OutputStream::error(e);
-            }
-            let req = decode_or_err!(body, wire::VerifyRequest, "crypto.verify");
+            let req = match decode_and_authorize::<wire::VerifyRequest>(
+                ctx,
+                body,
+                "crypto.verify",
+                |_r| ("verify".to_string(), ResourceType::Crypto, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             let result = match caller_id {
                 Some(id) => service.verify_for(id, &req.token),
                 None => service.verify(&req.token),
@@ -107,10 +119,15 @@ pub fn handle_message(
             }
         }
         ServiceOp::CRYPTO_RANDOM_BYTES => {
-            if let Err(e) = check_op(msg, "random_bytes") {
-                return OutputStream::error(e);
-            }
-            let req = decode_or_err!(body, wire::RandomBytesRequest, "crypto.random_bytes");
+            let req = match decode_and_authorize::<wire::RandomBytesRequest>(
+                ctx,
+                body,
+                "crypto.random_bytes",
+                |_r| ("random_bytes".to_string(), ResourceType::Crypto, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             const MAX_RANDOM_BYTES: usize = 1_048_576;
             if req.n > MAX_RANDOM_BYTES {
                 return OutputStream::error(WaferError::new(

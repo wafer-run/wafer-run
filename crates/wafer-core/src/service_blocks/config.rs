@@ -13,7 +13,7 @@ crate::service_block! {
     description: "Configuration key-value access",
     category: Service,
     fields: { service: Arc<dyn ConfigService> },
-    handle: |this, _ctx, msg, body| handler::handle_message(this.service.as_ref(), &msg, &body),
+    handle: |this, ctx, msg, body| handler::handle_message(this.service.as_ref(), ctx, &msg, &body),
 }
 
 /// Environment-variable backed [`ConfigService`] implementation.

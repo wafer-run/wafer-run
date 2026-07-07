@@ -92,6 +92,14 @@ impl Context for ContextWrapper {
     fn caller_id(&self) -> Option<&str> {
         unsafe { &*self.0 }.caller_id()
     }
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: wafer_block::types::ResourceType,
+        is_write: bool,
+    ) -> Result<(), wafer_block::WaferError> {
+        unsafe { &*self.0 }.check_resource_access(resource, resource_type, is_write)
+    }
     fn clone_arc(&self) -> Arc<dyn Context> {
         // `ContextWrapper` extends a non-'static `&dyn Context` via
         // `transmute` and only stays valid for the lifetime of the

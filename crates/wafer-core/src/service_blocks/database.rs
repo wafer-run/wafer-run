@@ -15,8 +15,8 @@ crate::service_block! {
     category: Service,
     fields: { service: Arc<dyn DatabaseService> },
     extra_fields: { tables: Vec<Table> },
-    handle: |this, _ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
     lifecycle: |this, _ctx, event| {
         handler::handle_lifecycle(this.service.as_ref(), &this.tables, &event).await

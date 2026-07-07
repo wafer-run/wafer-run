@@ -48,8 +48,8 @@ wafer_core::service_block! {
         "",
     )
     .name("Database URL")]),
-    handle: |service, _this, _ctx, msg, body| {
-        handler::handle_message(service.as_ref(), &msg, &body).await
+    handle: |service, _this, ctx, msg, body| {
+        handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
     lifecycle: |this, _ctx, event| {
         if event.event_type == LifecycleType::Init && this.service.get().is_none() {

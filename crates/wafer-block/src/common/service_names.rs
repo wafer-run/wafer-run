@@ -51,6 +51,10 @@ impl ServiceOp {
     pub const DATABASE_QUERY: &str = "database.query";
     /// Execute a raw mutation statement (cap-gated).
     pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
+    /// Execute a raw DDL statement (cap-gated). Distinct from
+    /// `DATABASE_EXEC_RAW` so the DDL sentinel is host-authoritative — set by
+    /// the op arm the host dispatches on, not a forgeable request meta.
+    pub const DATABASE_DDL: &str = "database.ddl";
     /// Typed execute: WRAP-authorized against the Statement's `collection`.
     pub const DATABASE_EXECUTE: &str = "database.execute";
     /// Delete every row matching a filter.
@@ -178,6 +182,7 @@ impl ServiceOp {
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXECUTE,
         Self::DATABASE_EXEC_RAW,
+        Self::DATABASE_DDL,
     ];
 
     /// Every `storage.*` op — drives the `storage@v1` action catalog in

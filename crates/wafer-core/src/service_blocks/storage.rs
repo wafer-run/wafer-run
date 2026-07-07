@@ -11,7 +11,7 @@ crate::service_block! {
     description: "Object storage service (files, folders, buckets)",
     category: Service,
     fields: { service: Arc<dyn StorageService> },
-    handle: |this, _ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
 }
