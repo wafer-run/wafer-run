@@ -139,4 +139,70 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     async fn validate_all_block_configs(&self) -> crate::validation::ValidationReport {
         crate::validation::ValidationReport::default()
     }
+
+    /// Authorize the CALLER (host-trusted identity) to access `resource` of
+    /// `resource_type` for read/write. Runs the full WRAP grant + capability check.
+    ///
+    /// FAIL-CLOSED: the default DENIES. A Context that legitimately does not enforce
+    /// WRAP (test mocks, forwarders) must EXPLICITLY override this so the enforcing
+    /// runtime can never silently fall back to permissive.
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: crate::types::ResourceType,
+        is_write: bool,
+    ) -> Result<(), crate::WaferError> {
+        let _ = (resource, resource_type, is_write);
+        Err(crate::WaferError::new(
+            crate::ErrorCode::PermissionDenied,
+            "WRAP: context does not implement resource-access enforcement",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{types::ResourceType, ErrorCode};
+
+    /// Minimal `Context` impl that only implements the methods without a
+    /// default (`call_block`, `is_cancelled`, `config_get`, `clone_arc`) and
+    /// deliberately does NOT override `check_resource_access`, so the trait's
+    /// fail-closed default is what gets exercised.
+    struct DefaultCtx;
+
+    #[wafer_async_trait]
+    impl Context for DefaultCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            unimplemented!()
+        }
+
+        fn is_cancelled(&self) -> bool {
+            unimplemented!()
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            unimplemented!()
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn check_resource_access_defaults_to_deny() {
+        let ctx = DefaultCtx;
+        let err = ctx
+            .check_resource_access("any", ResourceType::Db, false)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+    }
 }
