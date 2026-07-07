@@ -12,6 +12,6 @@ crate::service_block! {
     category: Service,
     fields: { service: Arc<dyn CryptoService> },
     handle: |this, ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), ctx.caller_id(), &msg, &body)
+        handler::handle_message(this.service.as_ref(), ctx, ctx.caller_id(), &msg, &body)
     },
 }

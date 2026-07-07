@@ -1,17 +1,105 @@
-//! SEC-003 regression tests — service handlers cross-validate the
-//! caller-supplied `wrap.resource` meta against the actual resource named in
-//! the decoded payload. Mismatch → PERMISSION_DENIED, even if the runtime's
-//! own WRAP check passed (which it might, because the meta names a resource
-//! the caller has a grant for, but the payload targets a different resource).
+//! WRAP authorization regression tests for the service handlers.
+//!
+//! Originally these were SEC-003 regression tests: service handlers
+//! cross-validated the caller-supplied `wrap.resource` meta against the
+//! actual resource named in the decoded payload, so a caller couldn't sneak
+//! a request past the runtime's own WRAP check by mislabeling the payload
+//! while keeping a `wrap.resource` meta value it does have a grant for.
+//!
+//! Storage, crypto, config, network, and database now all authorize via
+//! `ctx.check_resource_access` (host-side, trusted) instead of reading any
+//! caller-suppliable meta off the `Message` — the meta-cross-validation these
+//! tests exercised no longer applies, because the meta is never consulted at
+//! all. `msg_with_meta` is kept only to build a `Message` carrying the right
+//! `kind` for dispatch; the meta values it sets are inert. What each test
+//! actually exercises now is the `Context` passed in: a `DenyCtx` stands in
+//! for a caller with no WRAP grant for the resource the payload targets
+//! (must produce `PermissionDenied`), and an `AllowCtx` stands in for a
+//! caller holding a valid grant (must let the request through).
 
 use std::collections::HashMap;
 
 use wafer_block::{
     codec,
     common::ServiceOp,
+    context::Context,
     meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
+    streams::{input::InputStream, output::OutputStream},
+    types::ResourceType,
     wire, ErrorCode, Message, WaferError,
 };
+
+// ---------------------------------------------------------------------------
+// Shared `Context` fakes
+// ---------------------------------------------------------------------------
+
+/// `Context` stub that denies every resource-access check — models a caller
+/// with no WRAP grant for anything, regardless of what (if any) meta the
+/// message carries.
+struct DenyCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for DenyCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    // `check_resource_access` uses the trait's fail-closed default (deny).
+}
+
+/// `Context` stub that grants every resource-access check — models a caller
+/// holding a valid WRAP grant for the resource it's requesting.
+struct AllowCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for AllowCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _is_write: bool,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Storage
@@ -103,14 +191,15 @@ async fn storage_put_rejects_mismatched_resource() {
         content_type: "image/png".into(),
     };
     let body = codec::encode(&req).unwrap();
-    // Meta claims a different key — handler must reject.
+    // Meta is inert now — `DenyCtx` is what makes this request unauthorized.
     let msg = msg_with_meta(
         ServiceOp::STORAGE_PUT,
         "uploads/decoy.png",
         "write",
         "storage",
     );
-    let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -131,7 +220,9 @@ async fn storage_put_accepts_matched_resource() {
         "write",
         "storage",
     );
-    let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &AllowCtx, &msg, &body)
+            .await;
     assert!(terminal_error(out).await.is_none());
 }
 
@@ -149,7 +240,8 @@ async fn storage_delete_rejects_mismatched_resource() {
         "write",
         "storage",
     );
-    let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -165,7 +257,8 @@ async fn storage_list_rejects_mismatched_folder() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::STORAGE_LIST, "decoy", "read", "storage");
-    let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -184,7 +277,8 @@ async fn storage_create_folder_rejects_mismatched_name() {
         "write",
         "storage",
     );
-    let out = wafer_core::interfaces::storage::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -231,9 +325,10 @@ async fn crypto_sign_rejects_mismatched_op() {
         expiry_secs: 60,
     };
     let body = codec::encode(&req).unwrap();
-    // Caller meta claims `random_bytes` but actually signs — must reject.
+    // Meta is inert now — `DenyCtx` is what makes this request unauthorized.
     let msg = msg_with_meta(ServiceOp::CRYPTO_SIGN, "random_bytes", "read", "crypto");
-    let out = wafer_core::interfaces::crypto::handler::handle_message(&svc, None, &msg, &body);
+    let out =
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -247,7 +342,8 @@ async fn crypto_sign_accepts_matched_op() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::CRYPTO_SIGN, "sign", "read", "crypto");
-    let out = wafer_core::interfaces::crypto::handler::handle_message(&svc, None, &msg, &body);
+    let out =
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &AllowCtx, None, &msg, &body);
     assert!(terminal_error(out).await.is_none());
 }
 
@@ -257,7 +353,8 @@ async fn crypto_random_bytes_rejects_mismatched_op() {
     let req = wire::crypto::RandomBytesRequest { n: 8 };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::CRYPTO_RANDOM_BYTES, "sign", "read", "crypto");
-    let out = wafer_core::interfaces::crypto::handler::handle_message(&svc, None, &msg, &body);
+    let out =
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -406,42 +503,11 @@ mod db_fakes {
     }
 }
 
-// The database handler now authorizes via `decode_and_authorize`, which
-// calls `ctx.check_resource_access` — it no longer reads any WRAP meta off
-// `msg` at all (that SEC-003 meta-cross-validation is what Task 5 replaced
-// for the database service). `msg_with_meta` below is kept only to build a
-// `Message` carrying the right `kind` for dispatch; its meta values are
-// inert for these four tests. The "mismatched" framing now comes from
-// `DenyCtx`, a `Context` stub that denies every resource — standing in for
-// a caller with no WRAP grant for the collection the payload actually
-// targets.
-struct DenyCtx;
-
-#[wafer_block::wafer_async_trait]
-impl wafer_block::Context for DenyCtx {
-    async fn call_block(
-        &self,
-        _block_name: &str,
-        _msg: Message,
-        _input: wafer_block::streams::input::InputStream,
-    ) -> wafer_block::streams::output::OutputStream {
-        unimplemented!("not exercised by decode_and_authorize")
-    }
-
-    fn is_cancelled(&self) -> bool {
-        unimplemented!("not exercised by decode_and_authorize")
-    }
-
-    fn config_get(&self, _key: &str) -> Option<&str> {
-        unimplemented!("not exercised by decode_and_authorize")
-    }
-
-    fn clone_arc(&self) -> std::sync::Arc<dyn wafer_block::Context> {
-        unimplemented!("not exercised by decode_and_authorize")
-    }
-
-    // `check_resource_access` uses the trait's fail-closed default (deny).
-}
+// The database handler authorizes via `decode_and_authorize`, which calls
+// `ctx.check_resource_access` — see the module-level doc comment above for
+// why `msg_with_meta`'s meta values are inert here. `DenyCtx` (shared, above)
+// stands in for a caller with no WRAP grant for the collection the payload
+// actually targets.
 
 #[tokio::test]
 async fn database_get_rejects_mismatched_collection() {
@@ -539,8 +605,9 @@ async fn config_get_rejects_mismatched_key() {
         key: "REAL_KEY".into(),
     };
     let body = codec::encode(&req).unwrap();
+    // Meta is inert now — `DenyCtx` is what makes this request unauthorized.
     let msg = msg_with_meta(ServiceOp::CONFIG_GET, "DECOY_KEY", "read", "config");
-    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &msg, &body);
+    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &DenyCtx, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -554,7 +621,7 @@ async fn config_set_rejects_mismatched_key() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::CONFIG_SET, "DECOY_KEY", "write", "config");
-    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &msg, &body);
+    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &DenyCtx, &msg, &body);
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -593,13 +660,15 @@ async fn network_do_rejects_mismatched_url() {
         body: None,
     };
     let body = codec::encode(&req).unwrap();
+    // Meta is inert now — `DenyCtx` is what makes this request unauthorized.
     let msg = msg_with_meta(
         ServiceOp::NETWORK_DO_REQUEST,
         "https://decoy.example.com/data",
         "read",
         "network",
     );
-    let out = wafer_core::interfaces::network::handler::handle_message(&svc, &msg, &body).await;
+    let out =
+        wafer_core::interfaces::network::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }

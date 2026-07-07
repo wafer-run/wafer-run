@@ -22,7 +22,7 @@ crate::service_block! {
         "52428800",
     )
     .name("Max Response Body Bytes")]),
-    handle: |this, _ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
 }

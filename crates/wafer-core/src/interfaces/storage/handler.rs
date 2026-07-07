@@ -7,12 +7,13 @@ use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    types::ResourceType,
     wire::storage as wire,
     *,
 };
 
 use super::service::{StorageError, StorageService};
-use crate::interfaces::handler_util::{check_wrap_resource, decode_or_err, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
 
@@ -57,6 +58,12 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 
 /// Handle a storage message using the given service.
 ///
+/// `ctx` is the trusted host-side authorization surface: every op arm that
+/// touches a WRAP-governed resource authorizes via
+/// [`decode_and_authorize`], which bundles the codec decode with a call to
+/// `ctx.check_resource_access` so an arm cannot obtain its typed request
+/// without also being checked.
+///
 /// Wire protocol:
 /// - `STORAGE_GET` emits **two frames**: a [`wire::ObjectInfo`] header chunk
 ///   followed by the body bytes. The body chunk is omitted when empty
@@ -65,17 +72,23 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 ///   CREATE_FOLDER, DELETE_FOLDER) or an encoded response (LIST, LIST_FOLDERS).
 pub async fn handle_message(
     service: &dyn StorageService,
+    ctx: &dyn Context,
     msg: &Message,
     body: &[u8],
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::STORAGE_PUT => {
-            let req = decode_or_err!(body, wire::PutRequest, "storage.put");
-            if let Err(e) =
-                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
-            {
-                return OutputStream::error(e);
-            }
+            let req =
+                match decode_and_authorize::<wire::PutRequest>(ctx, body, "storage.put", |r| {
+                    (
+                        format!("{}/{}", r.folder, r.key),
+                        ResourceType::Storage,
+                        true,
+                    )
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service
                 .put(&req.folder, &req.key, &req.data, &req.content_type)
                 .await
@@ -85,12 +98,17 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_GET => {
-            let req = decode_or_err!(body, wire::GetRequest, "storage.get");
-            if let Err(e) =
-                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
-            {
-                return OutputStream::error(e);
-            }
+            let req =
+                match decode_and_authorize::<wire::GetRequest>(ctx, body, "storage.get", |r| {
+                    (
+                        format!("{}/{}", r.folder, r.key),
+                        ResourceType::Storage,
+                        false,
+                    )
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service.get(&req.folder, &req.key).await {
                 Ok((data, info)) => {
                     let header = service_object_info_to_wire(info);
@@ -123,22 +141,34 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_DELETE => {
-            let req = decode_or_err!(body, wire::DeleteRequest, "storage.delete");
-            if let Err(e) =
-                check_wrap_resource(msg, &format!("{}/{}", req.folder, req.key), "resource")
-            {
-                return OutputStream::error(e);
-            }
+            let req = match decode_and_authorize::<wire::DeleteRequest>(
+                ctx,
+                body,
+                "storage.delete",
+                |r| {
+                    (
+                        format!("{}/{}", r.folder, r.key),
+                        ResourceType::Storage,
+                        true,
+                    )
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.delete(&req.folder, &req.key).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_LIST => {
-            let req = decode_or_err!(body, wire::ListRequest, "storage.list");
-            if let Err(e) = check_wrap_resource(msg, &req.folder, "resource") {
-                return OutputStream::error(e);
-            }
+            let req =
+                match decode_and_authorize::<wire::ListRequest>(ctx, body, "storage.list", |r| {
+                    (r.folder.clone(), ResourceType::Storage, false)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             let opts = super::service::ListOptions {
                 prefix: req.prefix,
                 limit: req.limit,
@@ -150,20 +180,30 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_CREATE_FOLDER => {
-            let req = decode_or_err!(body, wire::CreateFolderRequest, "storage.create_folder");
-            if let Err(e) = check_wrap_resource(msg, &req.name, "resource") {
-                return OutputStream::error(e);
-            }
+            let req = match decode_and_authorize::<wire::CreateFolderRequest>(
+                ctx,
+                body,
+                "storage.create_folder",
+                |r| (r.name.clone(), ResourceType::Storage, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.create_folder(&req.name, req.public).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_DELETE_FOLDER => {
-            let req = decode_or_err!(body, wire::DeleteFolderRequest, "storage.delete_folder");
-            if let Err(e) = check_wrap_resource(msg, &req.name, "resource") {
-                return OutputStream::error(e);
-            }
+            let req = match decode_and_authorize::<wire::DeleteFolderRequest>(
+                ctx,
+                body,
+                "storage.delete_folder",
+                |r| (r.name.clone(), ResourceType::Storage, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.delete_folder(&req.name).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),

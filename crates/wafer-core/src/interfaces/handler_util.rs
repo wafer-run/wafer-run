@@ -94,6 +94,12 @@ where
 /// - Mismatched meta = PERMISSION_DENIED, with `noun` naming the kind of
 ///   resource (e.g. `"key"`, `"collection"`, `"URL"`, `"resource"`) for
 ///   operator-friendly error messages.
+// removed in Stage 2; superseded by decode_and_authorize. Every handler that
+// used to call this (database, storage, config, network) now authorizes via
+// `ctx.check_resource_access` instead, so this has no callers left outside
+// its own unit tests below. Kept (not deleted) until Stage 2 per the WRAP
+// host-side-enforcement task sequencing.
+#[allow(dead_code)]
 pub fn check_wrap_resource(msg: &Message, expected: &str, noun: &str) -> Result<(), WaferError> {
     let supplied = msg.get_meta(META_WRAP_RESOURCE);
     if supplied.is_empty() || supplied == expected {
