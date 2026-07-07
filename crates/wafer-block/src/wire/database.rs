@@ -32,6 +32,33 @@ fn default_operator() -> String {
     "eq".to_string()
 }
 
+/// One node of a WHERE-clause predicate tree.
+///
+/// Serialized **untagged**: a leaf is the existing [`FilterDef`] object shape
+/// (`field`/`operator`/`value`); a group is `{"all": [...]}` or
+/// `{"any": [...]}`. The shapes are disjoint (a leaf always has `field`, a
+/// group never does), so untagged matching is deterministic. A legacy flat
+/// `[FilterDef]` array therefore decodes unchanged as `Vec<FilterNode::Leaf>`.
+///
+/// Depth and node-count bounds are enforced at conversion time in the
+/// database handler, not here — deserialization stays a pure data step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FilterNode {
+    /// A single comparison predicate.
+    Leaf(FilterDef),
+    /// AND of child predicates.
+    All {
+        /// Child predicates, all of which must hold.
+        all: Vec<FilterNode>,
+    },
+    /// OR of child predicates.
+    Any {
+        /// Child predicates, at least one of which must hold.
+        any: Vec<FilterNode>,
+    },
+}
+
 /// One element of an ORDER BY clause.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortFieldDef {
@@ -638,5 +665,85 @@ mod tests {
             hex, "81a4726f777390",
             "QueryResponse schema changed — review consumer impact before updating this literal"
         );
+    }
+}
+
+#[cfg(test)]
+mod filter_node_tests {
+    use super::*;
+
+    // A legacy payload — a flat JSON array of leaf objects — must decode as
+    // a Vec of Leaf nodes with no shape change.
+    #[test]
+    fn legacy_flat_array_decodes_as_leaves() {
+        let json = r#"[{"field":"status","operator":"eq","value":"active"}]"#;
+        let nodes: Vec<FilterNode> = serde_json::from_str(json).unwrap();
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            FilterNode::Leaf(f) => {
+                assert_eq!(f.field, "status");
+                assert_eq!(f.operator, "eq");
+            }
+            other => panic!("expected leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_group_decodes() {
+        let json = r#"{"any":[{"field":"a","value":1},{"field":"b","value":2}]}"#;
+        let node: FilterNode = serde_json::from_str(json).unwrap();
+        match node {
+            FilterNode::Any { any } => assert_eq!(any.len(), 2),
+            other => panic!("expected any-group, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_group_decodes() {
+        let json = r#"{"all":[{"field":"a","value":1}]}"#;
+        let node: FilterNode = serde_json::from_str(json).unwrap();
+        assert!(matches!(node, FilterNode::All { .. }));
+    }
+
+    #[test]
+    fn nested_group_decodes() {
+        let json = r#"{"all":[{"field":"a","value":1},{"any":[{"field":"b","value":2}]}]}"#;
+        let node: FilterNode = serde_json::from_str(json).unwrap();
+        let FilterNode::All { all } = node else {
+            panic!("expected all")
+        };
+        assert_eq!(all.len(), 2);
+        assert!(matches!(all[1], FilterNode::Any { .. }));
+    }
+
+    #[test]
+    fn leaf_and_group_shapes_are_disjoint() {
+        // A leaf never has `all`/`any`; a group never has `field`. Untagged
+        // matching picks Leaf first, so an object with `field` is a Leaf.
+        let leaf: FilterNode = serde_json::from_str(r#"{"field":"x","value":1}"#).unwrap();
+        assert!(matches!(leaf, FilterNode::Leaf(_)));
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let node = FilterNode::All {
+            all: vec![
+                FilterNode::Leaf(FilterDef {
+                    field: "a".into(),
+                    operator: "eq".into(),
+                    value: serde_json::json!(1),
+                }),
+                FilterNode::Any {
+                    any: vec![FilterNode::Leaf(FilterDef {
+                        field: "b".into(),
+                        operator: "gt".into(),
+                        value: serde_json::json!(2),
+                    })],
+                },
+            ],
+        };
+        let s = serde_json::to_string(&node).unwrap();
+        let back: FilterNode = serde_json::from_str(&s).unwrap();
+        assert_eq!(format!("{node:?}"), format!("{back:?}"));
     }
 }
