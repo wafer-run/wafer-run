@@ -144,8 +144,9 @@ impl BlockCapabilities {
         self.storage_folders.contains("*") || self.storage_folders.contains(folder)
     }
 
-    /// Whether outbound HTTP to `url` is permitted (network enabled, and URL
-    /// matches one of `network_allow` prefixes, or `network_allow` is empty).
+    /// Whether outbound HTTP to `url` is permitted: network enabled, and
+    /// (empty `network_allow`, or `url` matches an allow entry by exact
+    /// scheme + host + port with a path prefix).
     pub fn allows_network_url(&self, url: &str) -> bool {
         if !self.network {
             return false;
@@ -153,13 +154,23 @@ impl BlockCapabilities {
         if self.network_allow.is_empty() {
             return true;
         }
+        // A raw `starts_with` prefix test does not bound the hostname, so
+        // `https://a.com` would match `https://a.com.evil.net/...`. Parse both
+        // and require an exact scheme + host + effective port, then a path
+        // prefix — closing the hostname-boundary bypass (SEC-007 class) while
+        // preserving the documented URL-prefix semantics for the path.
+        // (The parameter shadows the `url` crate, so use `::url::Url`.)
+        let Ok(target) = ::url::Url::parse(url) else {
+            return false;
+        };
         self.network_allow.iter().any(|allowed| {
-            if url.starts_with(allowed) {
-                return true;
-            }
-            allowed.strip_suffix('/').is_some_and(|stripped| {
-                url.starts_with(stripped) && url.as_bytes().get(stripped.len()) == Some(&b'/')
-            })
+            let Ok(pat) = ::url::Url::parse(allowed) else {
+                return false;
+            };
+            pat.scheme() == target.scheme()
+                && pat.host_str() == target.host_str()
+                && pat.port_or_known_default() == target.port_or_known_default()
+                && target.path().starts_with(pat.path())
         })
     }
 
@@ -429,6 +440,84 @@ mod tests {
             collections: items.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    fn caps_allowing(hosts: &[&str]) -> BlockCapabilities {
+        BlockCapabilities {
+            network: true,
+            network_allow: hosts.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn network_allow_rejects_hostname_suffix_bypass() {
+        // The F8 bug: `https://a.com` must NOT match `https://a.com.evil.net`.
+        let c = caps_allowing(&["https://a.com"]);
+        assert!(!c.allows_network_url("https://a.com.evil.net/steal"));
+        let c2 = caps_allowing(&["https://a.com/"]);
+        assert!(!c2.allows_network_url("https://a.com.evil.net/steal"));
+    }
+
+    #[test]
+    fn network_allow_permits_exact_host_and_subpaths() {
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(c.allows_network_url("https://a.com/"));
+        assert!(c.allows_network_url("https://a.com/foo/bar"));
+        // Path prefix still scopes: an allow of /v1/ must not permit /v2.
+        let stripe = caps_allowing(&["https://api.stripe.com/v1/"]);
+        assert!(stripe.allows_network_url("https://api.stripe.com/v1/charges"));
+        assert!(!stripe.allows_network_url("https://api.stripe.com/v2/refunds"));
+    }
+
+    #[test]
+    fn network_allow_requires_exact_scheme_and_port() {
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(!c.allows_network_url("http://a.com/"), "scheme must match");
+        assert!(
+            !c.allows_network_url("https://a.com:8443/"),
+            "port must match"
+        );
+    }
+
+    #[test]
+    fn network_allow_empty_means_unrestricted_and_off_means_denied() {
+        let open = BlockCapabilities {
+            network: true, // empty allow list → unrestricted
+            ..Default::default()
+        };
+        assert!(open.allows_network_url("https://anything.example/"));
+        // network flag off → always denied even if url matches.
+        let mut off = caps_allowing(&["https://a.com/"]);
+        off.network = false;
+        assert!(!off.allows_network_url("https://a.com/"));
+    }
+
+    #[test]
+    fn network_allow_rejects_malformed_url() {
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(!c.allows_network_url("not a url"));
+    }
+
+    #[test]
+    fn network_allow_userinfo_does_not_confuse_host() {
+        // `a.com` here is userinfo, not the host — host is evil.com → deny.
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(!c.allows_network_url("https://a.com@evil.com/steal"));
+    }
+
+    #[test]
+    fn network_allow_path_traversal_is_normalized_before_prefix_check() {
+        // `/v1/../v2/secret` normalizes to `/v2/secret`, which is not under /v1/.
+        let c = caps_allowing(&["https://api.stripe.com/v1/"]);
+        assert!(!c.allows_network_url("https://api.stripe.com/v1/../v2/secret"));
+    }
+
+    #[test]
+    fn network_allow_ignores_query_and_fragment() {
+        // Query string / fragment must not defeat a legitimate path-prefix match.
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(c.allows_network_url("https://a.com/path?q=1#frag"));
     }
 
     #[test]
