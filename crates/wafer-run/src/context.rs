@@ -520,6 +520,81 @@ impl Context for RuntimeContext {
         self.caller_id.as_deref()
     }
 
+    /// Authorize `self.caller_id()` to access `resource` of `resource_type`
+    /// for read/write. Folds the same two checks `dispatch_call` runs from
+    /// message metas (grant check at `:187-211`, capability check at
+    /// `:228-261`) but keyed on explicit parameters instead of metas.
+    ///
+    /// # Identity: `caller_id`, not `node_id`
+    ///
+    /// `dispatch_call` runs on the CALLER's own context (`self` there IS the
+    /// calling block, so `self.node_id` is the caller). This method is meant
+    /// to be called by a service handler from inside its OWN `handle()` —
+    /// e.g. the database block authorizing whoever invoked it — so here
+    /// `self` is the CALLEE's context and the caller is `self.caller_id`
+    /// (set on the sub-context built for `call_block`). Keying this method
+    /// on `self.node_id` would authorize the block against itself instead
+    /// of against whoever is asking it to act.
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: wafer_block::types::ResourceType,
+        is_write: bool,
+    ) -> Result<(), wafer_block::WaferError> {
+        use wafer_block::types::ResourceType;
+        let caller = self.caller_id.as_deref();
+
+        // 1) WRAP grant check — identical call to dispatch_call:201-210,
+        // keyed on the caller rather than self.node_id.
+        wafer_block::wrap::check_access(
+            caller,
+            resource,
+            is_write,
+            Some(&resource_type),
+            &self.wrap_grants,
+            &self.wrap_admin_block,
+        )
+        .inspect_err(|_| {
+            tracing::warn!(caller = ?caller, %resource, %resource_type, "WRAP deny (grant)");
+        })?;
+
+        // 2) Resource capability check — mirrors dispatch_call:236-252, on
+        // the CALLER's declared capabilities (the block that invoked us).
+        if let Some(cb) = caller.and_then(|c| self.all_blocks.get(c)) {
+            if let Some(caps) = cb.block_capabilities() {
+                let allowed = match resource_type {
+                    ResourceType::Db => {
+                        if resource == wafer_block::wrap::RAW_SQL_RESOURCE {
+                            caps.raw_sql
+                        } else if resource == wafer_block::wrap::DDL_RESOURCE {
+                            caps.ddl
+                        } else {
+                            caps.allows_collection(resource)
+                        }
+                    }
+                    ResourceType::Storage => caps.allows_storage_folder(resource),
+                    ResourceType::Config => caps.config && caps.allows_config_key(resource),
+                    ResourceType::Crypto => caps.crypto,
+                    ResourceType::Network => caps.allows_network_url(resource),
+                };
+                if !allowed {
+                    tracing::warn!(
+                        caller = ?caller,
+                        %resource,
+                        %resource_type,
+                        "WRAP deny (capability)"
+                    );
+                    return Err(wafer_block::WaferError::new(
+                        wafer_block::ErrorCode::PermissionDenied,
+                        format!("block capability denies access to {resource_type} '{resource}'"),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn clone_arc(&self) -> Arc<dyn Context> {
         Arc::new(self.clone())
     }
@@ -580,5 +655,202 @@ impl wafer_block::introspection::FlowIntrospection for RuntimeContext {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wafer_block::{
+        capabilities::BlockCapabilities,
+        core_types::{LifecycleEvent, Message, WaferError},
+        streams::{input::InputStream, output::OutputStream},
+        types::{BlockInfo, ResourceType},
+        Block,
+    };
+    use wafer_block_macro::wafer_async_trait;
+
+    use super::*;
+
+    /// Native-shaped test block: declares no capability override, so
+    /// `block_capabilities()` returns the trait default `None` — the same
+    /// "unrestricted, trusted" shape a real native block has.
+    struct UnrestrictedTestBlock {
+        name: &'static str,
+    }
+
+    #[wafer_async_trait]
+    impl Block for UnrestrictedTestBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                self.name,
+                "0.0.1",
+                "test/iface@v1",
+                "unrestricted test block",
+            )
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(b"ok".to_vec())
+        }
+
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// WASM-shaped test block with fully restricted capabilities — no
+    /// raw_sql, no DDL, no declared collections. Mirrors an untrusted WASM
+    /// block that hasn't been granted anything.
+    struct RestrictedTestBlock {
+        name: &'static str,
+    }
+
+    #[wafer_async_trait]
+    impl Block for RestrictedTestBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(self.name, "0.0.1", "test/iface@v1", "restricted test block")
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(b"ok".to_vec())
+        }
+
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+
+        fn block_capabilities(&self) -> Option<BlockCapabilities> {
+            Some(BlockCapabilities::none())
+        }
+    }
+
+    /// Empty `Wafer`, same construction as `runtime.rs`'s own
+    /// `test_wafer()` helper (duplicated here because that helper lives in
+    /// a private `mod tests` and isn't reachable from this file).
+    fn test_wafer() -> crate::Wafer {
+        crate::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible")
+    }
+
+    /// Build a `RuntimeContext` via the crate's own `Wafer::make_context`
+    /// (the same path production dispatch uses), then let the caller
+    /// override `caller_id` — `make_context` always sets it to `None`
+    /// (top-level call), but these tests need a `call_block`-style
+    /// sub-context view where a caller invoked the current block.
+    fn test_ctx(w: &crate::Wafer) -> RuntimeContext {
+        w.make_context(
+            "test-flow",
+            "test-node",
+            std::collections::HashMap::new(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+            crate::runtime::init_stack::InitStack::new(),
+        )
+    }
+
+    #[test]
+    fn cra_denies_ungranted_raw_sql_and_foreign_collection() {
+        // Caller = a restricted block with no raw_sql cap and no grant for
+        // the resource.
+        let mut w = test_wafer();
+        w.register_block(
+            "restricted/block",
+            Arc::new(RestrictedTestBlock {
+                name: "restricted/block",
+            }),
+        )
+        .expect("register restricted block");
+        w.rebuild_all_blocks();
+        let mut ctx = test_ctx(&w);
+        ctx.caller_id = Some("restricted/block".to_string());
+
+        assert_eq!(
+            ctx.check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            ctx.check_resource_access("other__block__t", ResourceType::Db, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn cra_denies_own_collection_when_capability_forbids() {
+        // Own-namespace access passes the WRAP grant check (Rule 3: caller
+        // owns the resource) but must still be denied by the capability
+        // check, since `RestrictedTestBlock` declares no collections.
+        let mut w = test_wafer();
+        w.register_block(
+            "restricted/block",
+            Arc::new(RestrictedTestBlock {
+                name: "restricted/block",
+            }),
+        )
+        .expect("register restricted block");
+        w.rebuild_all_blocks();
+        let mut ctx = test_ctx(&w);
+        ctx.caller_id = Some("restricted/block".to_string());
+
+        assert_eq!(
+            ctx.check_resource_access("restricted__block__widgets", ResourceType::Db, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn cra_allows_admin_and_unrestricted_native() {
+        // Admin caller (== wrap_admin_block) is allowed for raw SQL even
+        // with no explicit grant.
+        let mut w = test_wafer();
+        w.set_admin_block("suppers-ai/admin");
+        let mut ctx = test_ctx(&w);
+        ctx.caller_id = Some("suppers-ai/admin".to_string());
+        assert!(ctx
+            .check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
+            .is_ok());
+
+        // Unrestricted/native caller (registered, no capability override)
+        // is allowed for its own collection.
+        let mut w2 = test_wafer();
+        w2.register_block(
+            "suppers-ai/auth",
+            Arc::new(UnrestrictedTestBlock {
+                name: "suppers-ai/auth",
+            }),
+        )
+        .expect("register native block");
+        w2.rebuild_all_blocks();
+        let mut ctx2 = test_ctx(&w2);
+        ctx2.caller_id = Some("suppers-ai/auth".to_string());
+        assert!(ctx2
+            .check_resource_access("suppers_ai__auth__widgets", ResourceType::Db, false)
+            .is_ok());
     }
 }
