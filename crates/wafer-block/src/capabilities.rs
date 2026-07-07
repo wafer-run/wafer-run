@@ -144,8 +144,9 @@ impl BlockCapabilities {
         self.storage_folders.contains("*") || self.storage_folders.contains(folder)
     }
 
-    /// Whether outbound HTTP to `url` is permitted (network enabled, and URL
-    /// matches one of `network_allow` prefixes, or `network_allow` is empty).
+    /// Whether outbound HTTP to `url` is permitted: network enabled, and
+    /// (empty `network_allow`, or `url` matches an allow entry by exact
+    /// scheme + host + port with a path prefix).
     pub fn allows_network_url(&self, url: &str) -> bool {
         if !self.network {
             return false;
@@ -496,6 +497,27 @@ mod tests {
     fn network_allow_rejects_malformed_url() {
         let c = caps_allowing(&["https://a.com/"]);
         assert!(!c.allows_network_url("not a url"));
+    }
+
+    #[test]
+    fn network_allow_userinfo_does_not_confuse_host() {
+        // `a.com` here is userinfo, not the host — host is evil.com → deny.
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(!c.allows_network_url("https://a.com@evil.com/steal"));
+    }
+
+    #[test]
+    fn network_allow_path_traversal_is_normalized_before_prefix_check() {
+        // `/v1/../v2/secret` normalizes to `/v2/secret`, which is not under /v1/.
+        let c = caps_allowing(&["https://api.stripe.com/v1/"]);
+        assert!(!c.allows_network_url("https://api.stripe.com/v1/../v2/secret"));
+    }
+
+    #[test]
+    fn network_allow_ignores_query_and_fragment() {
+        // Query string / fragment must not defeat a legitimate path-prefix match.
+        let c = caps_allowing(&["https://a.com/"]);
+        assert!(c.allows_network_url("https://a.com/path?q=1#frag"));
     }
 
     #[test]
