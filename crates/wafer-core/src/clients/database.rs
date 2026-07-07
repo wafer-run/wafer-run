@@ -13,7 +13,7 @@ use wafer_block::{
     wire::database::{
         CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
         DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
-        ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, GetRequest,
+        ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
         IncrementFieldWhereRequest, ListRequest, QueryRawRequest, QueryRequest, QueryResponse,
         SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
         TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
@@ -50,13 +50,18 @@ fn filter_op_str(op: &FilterOp) -> &'static str {
     }
 }
 
-fn to_wire_filters(filters: &[Filter]) -> Vec<WireFilterDef> {
+/// Encode flat client-side [`Filter`]s as all-leaf wire [`FilterNode`]s. The
+/// client never builds AND/OR groups; the tree shape exists so the wire is
+/// uniform and group-capable callers (a later task) reuse the same field.
+fn to_wire_filters(filters: &[Filter]) -> Vec<FilterNode> {
     filters
         .iter()
-        .map(|f| WireFilterDef {
-            field: f.field.clone(),
-            operator: filter_op_str(&f.operator).to_string(),
-            value: f.value.clone(),
+        .map(|f| {
+            FilterNode::Leaf(WireFilterDef {
+                field: f.field.clone(),
+                operator: filter_op_str(&f.operator).to_string(),
+                value: f.value.clone(),
+            })
         })
         .collect()
 }
@@ -396,6 +401,7 @@ dual_api! {
                 limit: page_size,
                 offset: (page - 1).saturating_mul(page_size),
                 skip_count: false,
+                filter_tree: None,
             }
         ))
     }

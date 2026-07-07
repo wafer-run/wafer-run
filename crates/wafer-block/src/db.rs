@@ -23,6 +23,10 @@ pub struct ListOptions {
     /// helpers `list_all` and `list_sorted` set this; bare `list` does
     /// not.
     pub skip_count: bool,
+    /// Optional predicate **tree** (AND/OR groups). When `Some`, backends use
+    /// it in preference to `filters` (which stays for the flat-AND fast path
+    /// and back-compat). `None` = use `filters`.
+    pub filter_tree: Option<Vec<FilterTree>>,
 }
 
 /// A single filter condition applied to a database query.

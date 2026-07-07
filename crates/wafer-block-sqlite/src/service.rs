@@ -591,6 +591,7 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
@@ -623,6 +624,7 @@ mod tests {
             limit: 10,
             offset: 20,
             skip_count: false,
+            filter_tree: None,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
         assert!(stmt.sql.contains("ORDER BY"));

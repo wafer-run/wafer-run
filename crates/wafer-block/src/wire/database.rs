@@ -87,7 +87,7 @@ pub struct ListRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
     /// ORDER BY clause.
     #[serde(default)]
     pub sort: Vec<SortFieldDef>,
@@ -142,7 +142,7 @@ pub struct CountRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 /// Request for `database.sum`.
@@ -154,7 +154,7 @@ pub struct SumRequest {
     pub field: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 /// Request for `database.query_raw`.
@@ -208,7 +208,7 @@ pub struct DeleteWhereRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 /// Request for `database.delete_where_count`.
@@ -218,7 +218,7 @@ pub struct DeleteWhereCountRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 /// Request for `database.take_where`.
@@ -228,7 +228,7 @@ pub struct TakeWhereRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 /// Request for `database.update_where`.
@@ -238,7 +238,7 @@ pub struct UpdateWhereRequest {
     pub collection: String,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
     /// Column → value map to set on matching rows.
     pub data: HashMap<String, serde_json::Value>,
 }
@@ -257,7 +257,7 @@ pub struct IncrementFieldWhereRequest {
     pub delta: i64,
     /// WHERE-clause predicates (AND-combined).
     #[serde(default)]
-    pub filters: Vec<FilterDef>,
+    pub filters: Vec<FilterNode>,
 }
 
 // --- Responses ---
@@ -360,11 +360,11 @@ mod tests {
     fn list_request_round_trips() {
         let original = ListRequest {
             collection: "users".into(),
-            filters: vec![FilterDef {
+            filters: vec![FilterNode::Leaf(FilterDef {
                 field: "active".into(),
                 operator: "eq".into(),
                 value: serde_json::json!(true),
-            }],
+            })],
             sort: vec![SortFieldDef {
                 field: "created_at".into(),
                 desc: true,

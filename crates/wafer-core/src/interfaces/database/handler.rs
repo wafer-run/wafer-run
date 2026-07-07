@@ -5,7 +5,7 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
-    db::{Filter, FilterOp, ListOptions, SortField},
+    db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
     streams::output::OutputStream,
     types::ResourceType,
     wire::database as wire,
@@ -19,16 +19,89 @@ use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
 
-fn convert_filters(defs: Vec<wire::FilterDef>) -> Result<Vec<Filter>, WaferError> {
-    defs.into_iter()
-        .map(|f| {
-            Ok(Filter {
-                field: f.field,
-                operator: FilterOp::parse_wire(&f.operator)?,
-                value: f.value,
-            })
-        })
+/// Maximum nesting depth of a `FilterNode` tree accepted from the wire.
+pub(crate) const MAX_FILTER_DEPTH: usize = 16;
+/// Maximum total node count of a `FilterNode` tree accepted from the wire.
+pub(crate) const MAX_FILTER_NODES: usize = 256;
+
+fn invalid(msg: impl Into<String>) -> WaferError {
+    WaferError::new(ErrorCode::InvalidArgument, msg)
+}
+
+/// Convert a wire `FilterNode` forest into builder-input `FilterTree`,
+/// rejecting trees that exceed the depth or node-count bounds, reject unknown
+/// filter operators, and reject nested empty `all`/`any` groups (which would
+/// otherwise collapse to a degenerate always-true/always-false condition).
+/// Total and panic-free on any input.
+///
+/// A top-level empty forest (`[]`) is valid and means "no filter"; only
+/// *nested* empty groups are rejected.
+pub(crate) fn convert_filter_tree(
+    nodes: Vec<wire::FilterNode>,
+) -> Result<Vec<FilterTree>, WaferError> {
+    let mut count = 0usize;
+    nodes
+        .into_iter()
+        .map(|n| convert_node(n, 1, &mut count))
         .collect()
+}
+
+fn convert_node(
+    node: wire::FilterNode,
+    depth: usize,
+    count: &mut usize,
+) -> Result<FilterTree, WaferError> {
+    if depth > MAX_FILTER_DEPTH {
+        return Err(invalid("filter tree too deep"));
+    }
+    *count += 1;
+    if *count > MAX_FILTER_NODES {
+        return Err(invalid("filter tree has too many nodes"));
+    }
+    match node {
+        wire::FilterNode::Leaf(f) => Ok(FilterTree::Leaf(Filter {
+            field: f.field,
+            operator: FilterOp::parse_wire(&f.operator).map_err(|e| invalid(e.to_string()))?,
+            value: f.value,
+        })),
+        wire::FilterNode::All { all } => {
+            if all.is_empty() {
+                return Err(invalid("filter group must have at least one child"));
+            }
+            Ok(FilterTree::All(
+                all.into_iter()
+                    .map(|c| convert_node(c, depth + 1, count))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        wire::FilterNode::Any { any } => {
+            if any.is_empty() {
+                return Err(invalid("filter group must have at least one child"));
+            }
+            Ok(FilterTree::Any(
+                any.into_iter()
+                    .map(|c| convert_node(c, depth + 1, count))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+    }
+}
+
+/// Flatten a tree to a leaf-only `Vec<Filter>`, rejecting any group node.
+/// Used by ops whose builders take a flat `&[Filter]` and which no current
+/// caller invokes with a group; a group here is a client/runtime mismatch, so
+/// fail closed rather than silently drop it.
+pub(crate) fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
+    let mut out = Vec::with_capacity(tree.len());
+    for node in tree {
+        match node {
+            FilterTree::Leaf(f) => out.push(f.clone()),
+            FilterTree::All(_) | FilterTree::Any(_) => {
+                return Err(invalid("operation does not support filter groups"));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {
@@ -138,16 +211,23 @@ pub async fn handle_message(
                     Ok(r) => r,
                     Err(out) => return out,
                 };
-            let filters = match convert_filters(req.filters) {
-                Ok(f) => f,
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
             };
+            // `filters` carries the flattened leaves for the current
+            // `DbExec::list` fast path (which reads `opts.filters`); groups
+            // ride along in `filter_tree` so a later `DbExec::list` change can
+            // prefer the tree without touching this arm. An all-leaf tree
+            // flattens exactly; a group flattens to empty here but is preserved
+            // in `filter_tree`.
             let opts = ListOptions {
-                filters,
+                filters: flatten_leaves(&tree).unwrap_or_default(),
                 sort: convert_sort(req.sort),
                 limit: req.limit,
                 offset: req.offset,
                 skip_count: req.skip_count,
+                filter_tree: Some(tree),
             };
             match service.list(&req.collection, &opts).await {
                 Ok(list) => to_output(service_record_list_to_wire(list)),
@@ -207,7 +287,11 @@ pub async fn handle_message(
                     Ok(r) => r,
                     Err(out) => return out,
                 };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -243,7 +327,11 @@ pub async fn handle_message(
                     Ok(r) => r,
                     Err(out) => return out,
                 };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -338,7 +426,11 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -357,7 +449,11 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -376,7 +472,11 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -397,7 +497,11 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -419,7 +523,11 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let filters = match convert_filters(req.filters) {
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
@@ -505,22 +613,87 @@ mod tests {
     }
 
     // `FilterOp::parse_wire` unit tests live next to the parser in
-    // `wafer-block/src/db.rs`; this covers the handler's use of it.
+    // `wafer-block/src/db.rs`; the handler's use of it (including bad-operator
+    // rejection) is covered by `filter_tree_conversion_tests` below.
+}
+
+#[cfg(test)]
+mod filter_tree_conversion_tests {
+    use wafer_block::wire::database::{FilterDef, FilterNode};
+
+    use super::{convert_filter_tree, flatten_leaves, MAX_FILTER_DEPTH, MAX_FILTER_NODES};
+
+    fn leaf(field: &str) -> FilterNode {
+        FilterNode::Leaf(FilterDef {
+            field: field.into(),
+            operator: "eq".into(),
+            value: serde_json::json!(1),
+        })
+    }
+
     #[test]
-    fn convert_filters_rejects_bad_op() {
-        let defs = vec![
-            wire::FilterDef {
-                field: "id".into(),
-                operator: "eq".into(),
-                value: serde_json::json!(1),
-            },
-            wire::FilterDef {
-                field: "name".into(),
-                operator: "nope".into(),
-                value: serde_json::json!("x"),
-            },
-        ];
-        let err = convert_filters(defs).expect_err("bad op should fail conversion");
-        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    fn flat_leaves_convert() {
+        let tree = convert_filter_tree(vec![leaf("a"), leaf("b")]).unwrap();
+        assert_eq!(tree.len(), 2);
+        let flat = flatten_leaves(&tree).unwrap();
+        assert_eq!(flat.len(), 2);
+    }
+
+    #[test]
+    fn top_level_empty_is_ok() {
+        // The top-level empty filter list means "no filter" and must stay
+        // valid — only nested empty groups are rejected.
+        let tree = convert_filter_tree(vec![]).unwrap();
+        assert!(tree.is_empty());
+        assert!(flatten_leaves(&tree).unwrap().is_empty());
+    }
+
+    #[test]
+    fn group_is_rejected_by_flatten() {
+        let tree = convert_filter_tree(vec![FilterNode::Any {
+            any: vec![leaf("a")],
+        }])
+        .unwrap();
+        let err = flatten_leaves(&tree).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn empty_group_is_rejected() {
+        // A nested empty `all`/`any` group would otherwise convert to a
+        // degenerate empty `Cond`; reject it so conversion stays fail-closed.
+        let err = convert_filter_tree(vec![FilterNode::All { all: vec![] }]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+        let err = convert_filter_tree(vec![FilterNode::Any { any: vec![] }]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn depth_over_limit_is_rejected() {
+        // Nest All groups MAX_FILTER_DEPTH+1 deep.
+        let mut node = leaf("a");
+        for _ in 0..(MAX_FILTER_DEPTH + 1) {
+            node = FilterNode::All { all: vec![node] };
+        }
+        let err = convert_filter_tree(vec![node]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn node_count_over_limit_is_rejected() {
+        let many: Vec<FilterNode> = (0..(MAX_FILTER_NODES + 1)).map(|_| leaf("a")).collect();
+        let err = convert_filter_tree(vec![FilterNode::All { all: many }]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn bad_operator_is_rejected() {
+        let bad = FilterNode::Leaf(FilterDef {
+            field: "a".into(),
+            operator: "no_such_op".into(),
+            value: serde_json::json!(1),
+        });
+        let err = convert_filter_tree(vec![bad]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
     }
 }

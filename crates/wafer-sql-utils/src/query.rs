@@ -385,6 +385,7 @@ mod tests {
             limit: 10,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
         };
         let stmt = build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
@@ -406,6 +407,7 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
         };
         let stmt = build_select("users", &opts, Backend::Postgres);
         let sql = stmt.sql;
