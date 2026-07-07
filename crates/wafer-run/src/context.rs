@@ -853,4 +853,76 @@ mod tests {
             .check_resource_access("suppers_ai__auth__widgets", ResourceType::Db, false)
             .is_ok());
     }
+
+    /// Task 8 regression: DDL/migration at `Init`. A domain block (e.g.
+    /// `suppers-ai/auth`) running its own `CREATE TABLE` migration during
+    /// `lifecycle(Init)` calls the database block, which authorizes the
+    /// migrating block against `DDL_RESOURCE`. Per `wrap.rs` Rule 1a, DDL
+    /// does not require an explicit `ResourceGrant` — only an *attributable*
+    /// caller (any `Some(_)` caller_id; anonymous/`None` is denied). This
+    /// must stay allowed for an ordinary, non-admin, unrestricted native
+    /// caller or every block's own-table migration breaks.
+    #[test]
+    fn cra_allows_attributable_caller_for_ddl() {
+        let mut w = test_wafer();
+        w.register_block(
+            "suppers-ai/auth",
+            Arc::new(UnrestrictedTestBlock {
+                name: "suppers-ai/auth",
+            }),
+        )
+        .expect("register native block");
+        w.rebuild_all_blocks();
+        let mut ctx = test_ctx(&w);
+        ctx.caller_id = Some("suppers-ai/auth".to_string());
+
+        assert!(
+            ctx.check_resource_access(wafer_block::wrap::DDL_RESOURCE, ResourceType::Db, true)
+                .is_ok(),
+            "an attributable, non-admin caller must be allowed to run DDL \
+             (own-table migrations at Init depend on this)"
+        );
+    }
+
+    /// Task 8 regression (T2 review finding): top-level `caller_id: None`
+    /// (`Wafer::make_context`, `runtime.rs`) fail-closes EVERY resource in
+    /// `wrap::check_access` — Rules 3/4/5 all require `Some(caller)`. If a
+    /// legitimate top-level HTTP entry point ever invoked a resource-access
+    /// handler (database/storage/config/network/crypto) directly, it would
+    /// be denied. It does not: `dispatch_call` stamps the CALLEE's
+    /// `caller_id` from the CALLER's `node_id` (`context.rs` sub_ctx
+    /// construction below), not from the caller's own `caller_id` — so a
+    /// None-caller_id top-level frame (a flow step / router / HTTP
+    /// listener) that itself calls `ctx.call_block(..)` still hands the
+    /// callee an attributable `Some(caller_frame_node_id)`. A `None` caller
+    /// only ever reaches `check_resource_access` if a resource-owning
+    /// handler is dispatched as the *direct* top-level target — which the
+    /// real topology (`wafer-run/http-listener` → flow → `wafer-run/router`
+    /// → domain block → `wafer-run/{sqlite,s3,...}`) never does; see the
+    /// full end-to-end proof in
+    /// `tests/wrap_top_level_caller_regression.rs`. This unit test pins the
+    /// underlying fact both direct claims above rely on: `None` truly denies
+    /// (so we know it *would* regress if a legitimate path could reach it —
+    /// it can't).
+    #[test]
+    fn cra_denies_anonymous_top_level_caller() {
+        let w = test_wafer();
+        let ctx = test_ctx(&w); // make_context always sets caller_id: None
+        assert_eq!(ctx.caller_id, None);
+        assert_eq!(
+            ctx.check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            ctx.check_resource_access("suppers_ai__auth__widgets", ResourceType::Db, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied,
+            "an anonymous top-level caller must not self-admit into any \
+             namespaced resource, even one that superficially looks like \
+             its own"
+        );
+    }
 }

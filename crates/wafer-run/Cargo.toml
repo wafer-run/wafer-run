@@ -76,6 +76,13 @@ wafer-block-cors = { path = "../wafer-block-cors" }
 wafer-block-postgres = { path = "../wafer-block-postgres" }
 wafer-block-s3 = { path = "../wafer-block-s3" }
 wafer-block-router = { path = "../wafer-block-router" }
+# Task 8 hostile-guest e2e (SP-A Stage 1): needs the REAL wafer-core
+# database handler (decode_and_authorize / check_resource_access) wired to
+# a REAL backend, not a hand-rolled fake — same shape as the
+# wafer-block-postgres/s3 dev-deps above (no cycle: wafer-core does not
+# depend on wafer-run).
+wafer-core = { workspace = true }
+wafer-block-sqlite = { path = "../wafer-block-sqlite" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"
