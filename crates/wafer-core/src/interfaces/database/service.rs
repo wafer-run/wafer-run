@@ -406,6 +406,23 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
+    /// Bulk-update all records matching filters and return the number of updated rows.
+    ///
+    /// Default impl: count then update. Small TOCTOU window — concurrent writes
+    /// to matching rows may be updated without being counted, or vice versa.
+    /// Native sqlite/postgres impls override with a single UPDATE statement that
+    /// returns the affected-row count atomically.
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        let n = self.count(collection, filters).await?;
+        self.update_where(collection, filters, data).await?;
+        Ok(n)
+    }
+
     /// Atomically increment `col` by `delta` on every row in `collection`
     /// matching `filters`. Returns the number of rows modified. Use a negative
     /// `delta` to decrement.

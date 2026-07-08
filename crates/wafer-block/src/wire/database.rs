@@ -249,6 +249,18 @@ pub struct UpdateWhereRequest {
     pub data: HashMap<String, serde_json::Value>,
 }
 
+/// Request for `database.update_where_count`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateWhereCountRequest {
+    /// Collection (table) name.
+    pub collection: String,
+    /// WHERE-clause predicates (AND-combined).
+    #[serde(default)]
+    pub filters: Vec<FilterNode>,
+    /// Column → value map to set on matching rows.
+    pub data: HashMap<String, serde_json::Value>,
+}
+
 /// Request for `database.increment_field_where`. Atomically increments a
 /// numeric column on every row matching the filter — a single
 /// `UPDATE … SET col = col + delta WHERE …` round-trip with no
@@ -450,6 +462,13 @@ pub struct SumResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereCountResponse {
     /// Number of rows deleted.
+    pub count: i64,
+}
+
+/// Response for `database.update_where_count`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateWhereCountResponse {
+    /// Number of rows updated.
     pub count: i64,
 }
 
@@ -891,6 +910,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_lock_update_where_count_request() {
+        let req = UpdateWhereCountRequest {
+            collection: String::new(),
+            filters: vec![],
+            data: std::collections::HashMap::new(),
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "83aa636f6c6c656374696f6ea0a766696c7465727390a46461746180",
+            "UpdateWhereCountRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
     fn schema_lock_take_where_request() {
         let req = TakeWhereRequest {
             collection: String::new(),
@@ -912,6 +946,17 @@ mod tests {
         assert_eq!(
             hex, "81a5636f756e7400",
             "DeleteWhereCountResponse schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_update_where_count_response() {
+        let r = UpdateWhereCountResponse { count: 0 };
+        let encoded = codec::encode(&r).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "81a5636f756e7400",
+            "UpdateWhereCountResponse schema changed — review consumer impact before updating this literal"
         );
     }
 

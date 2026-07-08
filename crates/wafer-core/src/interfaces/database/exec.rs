@@ -590,6 +590,30 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
+    /// Shared `update_where_count`: table-exists guard → lazy filter/data-column
+    /// add → UPDATE, returning the affected-row count (0 for a missing table).
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.dbx_table_exists(&table).await? {
+            return Ok(0);
+        }
+        let mut data = data;
+        stamp_timestamps(&mut data, false);
+        self.ensure_data_columns(&table, &data).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
+        let pairs = sorted_pairs(&data);
+        let stmt =
+            wafer_sql_utils::query::build_update_where(&table, &pairs, filters, Self::BACKEND);
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
+    }
+
     /// Shared `increment_field_where`: single-statement atomic
     /// `SET col = col + delta` on matching rows, returning the affected-row
     /// count (0 for a missing table).
