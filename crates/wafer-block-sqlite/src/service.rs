@@ -8,7 +8,7 @@ use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::{pk, DataType};
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec},
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 
@@ -431,6 +431,10 @@ impl DatabaseService for SQLiteDatabaseService {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
+    }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
     }
 
     // --- Schema management ---
@@ -1022,6 +1026,162 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // upsert (INSERT … ON CONFLICT) — SetColumns + WindowedCounter
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upsert_set_columns_inserts_then_updates_on_conflict() {
+        use wafer_core::interfaces::database::service::{UpsertConflict, UpsertSpec};
+
+        let svc = make_test_svc();
+        let table = Table {
+            name: "widgets".into(),
+            columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        svc.ensure_schema_table(&table).await.unwrap();
+
+        // No existing row on id=w1 → the ON CONFLICT insert lands as an insert.
+        let n1 = DatabaseService::upsert(
+            &svc,
+            "widgets",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("w1")),
+                    ("name".into(), serde_json::json!("a")),
+                ],
+                conflict_columns: vec!["id".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["name".into()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(n1, 1, "insert affects one row");
+        let r1 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
+        assert_eq!(r1.data["name"], serde_json::json!("a"));
+
+        // Same id → conflict on the PK → DO UPDATE SET name = excluded.name.
+        let n2 = DatabaseService::upsert(
+            &svc,
+            "widgets",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("w1")),
+                    ("name".into(), serde_json::json!("b")),
+                ],
+                conflict_columns: vec!["id".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["name".into()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(n2, 1, "conflict update affects one row");
+        let r2 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
+        assert_eq!(
+            r2.data["name"],
+            serde_json::json!("b"),
+            "on-conflict updated name a -> b"
+        );
+
+        let total = DatabaseService::count(&svc, "widgets", &[]).await.unwrap();
+        assert_eq!(
+            total, 1,
+            "still exactly one row — the second call updated, not inserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_windowed_counter_increments_in_window_and_keeps_created_at() {
+        use wafer_core::interfaces::database::service::{UpsertConflict, UpsertSpec};
+
+        let svc = make_test_svc();
+        // Seed an existing counter row with SENTINEL timestamps so we can prove
+        // created_at is immutable across conflict-updates (Task-5 fix): if the
+        // builder wrongly re-stamped created_at in DO UPDATE SET, the sentinel
+        // would be overwritten with CURRENT_TIMESTAMP. `key` is UNIQUE — the
+        // conflict target.
+        {
+            let db = svc.db.lock().unwrap();
+            db.execute_batch(
+                "CREATE TABLE rl (
+                     id TEXT PRIMARY KEY,
+                     key TEXT UNIQUE,
+                     count INTEGER,
+                     window_start INTEGER,
+                     created_at TEXT,
+                     updated_at TEXT
+                 );
+                 INSERT INTO rl (id, key, count, window_start, created_at, updated_at)
+                 VALUES ('seed', 'user:1:login', 1, 1700000000, 'SENTINEL-CREATED', 'SENTINEL-UPDATED');",
+            )
+            .unwrap();
+        }
+
+        let now = 1_700_000_000_i64;
+        let cutoff = now - 60; // 60s window; stored window_start (=now) is NOT expired
+        let make_spec = || UpsertSpec {
+            data: vec![
+                ("id".into(), serde_json::json!("fresh-id")),
+                ("key".into(), serde_json::json!("user:1:login")),
+            ],
+            conflict_columns: vec!["key".into()],
+            on_conflict: UpsertConflict::WindowedCounter {
+                count_field: "count".into(),
+                window_field: "window_start".into(),
+                now,
+                window_cutoff: cutoff,
+                created_fields: vec!["created_at".into()],
+                updated_fields: vec!["updated_at".into()],
+            },
+        };
+
+        // First upsert conflicts on `key` → in-window increment (1 -> 2).
+        let n1 = DatabaseService::upsert(&svc, "rl", make_spec())
+            .await
+            .unwrap();
+        assert_eq!(n1, 1, "conflict update affects the one matching row");
+        let r1 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
+        assert_eq!(
+            r1.data["count"],
+            serde_json::json!(2),
+            "count incremented 1 -> 2"
+        );
+        assert_eq!(
+            r1.data["created_at"],
+            serde_json::json!("SENTINEL-CREATED"),
+            "created_at must be immutable on conflict (Task-5 fix)"
+        );
+        assert_ne!(
+            r1.data["updated_at"],
+            serde_json::json!("SENTINEL-UPDATED"),
+            "updated_at must be re-stamped on conflict"
+        );
+
+        // Second in-window upsert → increments again (2 -> 3); created_at still untouched.
+        let n2 = DatabaseService::upsert(&svc, "rl", make_spec())
+            .await
+            .unwrap();
+        assert_eq!(n2, 1);
+        let r2 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
+        assert_eq!(
+            r2.data["count"],
+            serde_json::json!(3),
+            "count incremented 2 -> 3 on the second in-window upsert"
+        );
+        assert_eq!(
+            r2.data["created_at"],
+            serde_json::json!("SENTINEL-CREATED"),
+            "created_at still unchanged after the second in-window upsert"
+        );
+
+        // The conflicting upserts never inserted a duplicate row.
+        let total = DatabaseService::count(&svc, "rl", &[]).await.unwrap();
+        assert_eq!(total, 1, "no duplicate row was inserted");
     }
 
     // -----------------------------------------------------------------------

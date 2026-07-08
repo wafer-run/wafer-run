@@ -19,7 +19,7 @@ use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
 
-use super::service::{DatabaseError, Record, RecordList};
+use super::service::{DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec};
 
 /// Sanitize keys and sort `data` into deterministic `(column, value)` pairs.
 ///
@@ -72,6 +72,34 @@ fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_creat
     if !data.contains_key("updated_at") {
         data.insert("updated_at".to_string(), serde_json::Value::String(now));
     }
+}
+
+/// Extract the `id` and `key` string values from an upsert `data` list for the
+/// windowed-counter path.
+///
+/// The windowed-counter builder binds these positionally — a fresh per-call
+/// row identifier and the conflict-target value — so both must be present and
+/// string-typed. A missing or non-string entry is a caller error (surfaced as
+/// [`DatabaseError`]), never a silent default.
+fn extract_windowed_id_key(
+    data: &[(String, serde_json::Value)],
+) -> Result<(&str, &str), DatabaseError> {
+    fn field<'a>(data: &'a [(String, serde_json::Value)], name: &str) -> Option<&'a str> {
+        data.iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| v.as_str())
+    }
+    let id = field(data, "id").ok_or_else(|| {
+        DatabaseError::Internal(
+            "windowed-counter upsert requires a string `id` value in data".into(),
+        )
+    })?;
+    let key = field(data, "key").ok_or_else(|| {
+        DatabaseError::Internal(
+            "windowed-counter upsert requires a string `key` value in data".into(),
+        )
+    })?;
+    Ok((id, key))
 }
 
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
@@ -583,6 +611,67 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             filters,
             Self::BACKEND,
         );
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
+    }
+
+    /// Shared `upsert`: render a single `INSERT … ON CONFLICT …` via the
+    /// backend's dialect and run it, returning rows affected.
+    ///
+    /// `SetColumns` renders through
+    /// [`wafer_sql_utils::upsert::build_upsert`] (empty update list ⇒
+    /// `DO NOTHING`). `WindowedCounter` reads the `id`/`key` insert values
+    /// from `spec.data` (via [`extract_windowed_id_key`]) and renders the
+    /// atomic windowed-counter statement, whose `created_fields` are stamped
+    /// on INSERT only while `updated_fields` are re-stamped on conflict.
+    ///
+    /// Identifiers are validated at the trust boundary (the database handler's
+    /// `to_upsert_spec`) before reaching here, and again inside
+    /// `build_windowed_counter_upsert` — a fail-closed guard, since those
+    /// column names are interpolated into `CASE`/`SET` expression text.
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        let table = sanitize_ident(collection);
+        let stmt = match spec.on_conflict {
+            UpsertConflict::SetColumns(update_cols) => {
+                let conflict: Vec<&str> =
+                    spec.conflict_columns.iter().map(String::as_str).collect();
+                let update: Vec<&str> = update_cols.iter().map(String::as_str).collect();
+                wafer_sql_utils::upsert::build_upsert(
+                    &table,
+                    &spec.data,
+                    &conflict,
+                    &update,
+                    Self::BACKEND,
+                )
+            }
+            UpsertConflict::WindowedCounter {
+                count_field,
+                window_field,
+                now,
+                window_cutoff,
+                created_fields,
+                updated_fields,
+            } => {
+                let (id, key) = extract_windowed_id_key(&spec.data)?;
+                let conflict_col = spec.conflict_columns.first().map_or("key", String::as_str);
+                let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
+                let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
+                wafer_sql_utils::upsert::build_windowed_counter_upsert(
+                    &table,
+                    conflict_col,
+                    id,
+                    key,
+                    &count_field,
+                    &window_field,
+                    &created,
+                    &updated,
+                    now,
+                    window_cutoff,
+                    Self::BACKEND,
+                )
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?
+            }
+        };
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }

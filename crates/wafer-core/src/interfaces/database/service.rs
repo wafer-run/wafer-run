@@ -27,6 +27,46 @@ pub enum DatabaseError {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// Plain-data upsert specification handed to [`DatabaseService::upsert`].
+///
+/// The database handler converts the wire
+/// [`UpsertRequest`](wafer_block::wire::database::UpsertRequest) into this,
+/// validating every identifier that reaches raw SQL text — so the service
+/// never sees an untrusted column name.
+#[derive(Debug, Clone)]
+pub struct UpsertSpec {
+    /// Insert column → value pairs (order preserved for deterministic SQL).
+    pub data: Vec<(String, serde_json::Value)>,
+    /// Conflict-target columns (must carry a `UNIQUE`/`PRIMARY KEY` constraint).
+    pub conflict_columns: Vec<String>,
+    /// Conflict-resolution strategy.
+    pub on_conflict: UpsertConflict,
+}
+
+/// Builder-input twin of the wire
+/// [`OnConflict`](wafer_block::wire::database::OnConflict) — the plain-data
+/// form consumed by [`UpsertSpec`]. See the wire type for full semantics.
+#[derive(Debug, Clone)]
+pub enum UpsertConflict {
+    /// `DO UPDATE SET <cols> = excluded.<cols>` (empty ⇒ `DO NOTHING`).
+    SetColumns(Vec<String>),
+    /// Atomic sliding-window counter.
+    WindowedCounter {
+        /// Counter column.
+        count_field: String,
+        /// Window-start column.
+        window_field: String,
+        /// Current epoch-seconds.
+        now: i64,
+        /// Expiry cutoff (`now - window_secs`).
+        window_cutoff: i64,
+        /// Creation-timestamp columns (stamped on INSERT only).
+        created_fields: Vec<String>,
+        /// Modification-timestamp columns (stamped on INSERT and on conflict).
+        updated_fields: Vec<String>,
+    },
+}
+
 /// Service provides generic CRUD operations on collections.
 #[wafer_async_trait]
 pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
@@ -199,6 +239,22 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Internal(
             "increment_field_where is not implemented by this database backend".into(),
+        ))
+    }
+
+    /// Insert `spec.data` into `collection`, resolving a conflict on
+    /// `spec.conflict_columns` via `spec.on_conflict`. Returns rows affected.
+    ///
+    /// Implementations must perform this as a single `INSERT … ON CONFLICT …`
+    /// round-trip — the whole point of this op is the absence of a
+    /// read-modify-write race. The default here returns an `Internal` error so
+    /// SQL backends are forced to override it (via
+    /// [`DbExec::upsert`](super::exec::DbExec::upsert)); a backend that cannot
+    /// express `ON CONFLICT` inherits the failure rather than silently doing
+    /// the wrong thing.
+    async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Internal(
+            "upsert is not implemented by this database backend".into(),
         ))
     }
 

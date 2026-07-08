@@ -67,6 +67,10 @@ impl ServiceOp {
     pub const DATABASE_UPDATE_WHERE: &str = "database.update_where";
     /// Atomically increment a numeric column on rows matching a filter.
     pub const DATABASE_INCREMENT_FIELD_WHERE: &str = "database.increment_field_where";
+    /// Insert a row, resolving conflicts via an `ON CONFLICT` strategy
+    /// (`INSERT … ON CONFLICT …`); WRAP-authorized against the target
+    /// collection.
+    pub const DATABASE_UPSERT: &str = "database.upsert";
     /// Write an object to storage.
     pub const STORAGE_PUT: &str = "storage.put";
     /// Read an object from storage.
@@ -178,6 +182,7 @@ impl ServiceOp {
         Self::DATABASE_COUNT,
         Self::DATABASE_SUM,
         Self::DATABASE_INCREMENT_FIELD_WHERE,
+        Self::DATABASE_UPSERT,
         Self::DATABASE_QUERY,
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXECUTE,

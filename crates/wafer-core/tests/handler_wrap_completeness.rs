@@ -597,6 +597,12 @@ fn database_op_body(op: &str) -> Vec<u8> {
             query: "CREATE TABLE suppers_ai__auth__widgets (id TEXT)".into(),
             args: vec![],
         }),
+        ServiceOp::DATABASE_UPSERT => codec::encode(&wire::UpsertRequest {
+            collection: "suppers_ai__auth__users".into(),
+            data: vec![("id".into(), serde_json::json!("1"))],
+            conflict_columns: vec!["id".into()],
+            on_conflict: wire::OnConflict::SetColumns(vec!["id".into()]),
+        }),
         other => panic!(
             "completeness test has no minimal-body case for database op `{other}` — \
              add a `match` arm to `database_op_body` so this op stays covered \

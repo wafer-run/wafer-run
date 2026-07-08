@@ -14,9 +14,9 @@ use wafer_block::{
         CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
         DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
         ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
-        IncrementFieldWhereRequest, ListRequest, QueryRawRequest, QueryRequest, QueryResponse,
-        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
-        TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
+        IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest, QueryRequest,
+        QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
+        TakeWhereResponse, UpdateRequest, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -356,8 +356,16 @@ dual_api! {
             .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))
     }
 
-    /// Update the record in `collection` whose `field == value`, or insert `data` if none exists.
-    pub fn upsert(
+    /// Update the record in `collection` whose `field == value`, or insert
+    /// `data` if none exists.
+    ///
+    /// This is the **non-atomic** get-or-create: it issues a `get_by_field`
+    /// followed by a separate `update`/`create`, so two concurrent callers can
+    /// race (both miss the read, both insert). Its upside is flexibility —
+    /// `field` needs no `UNIQUE`/`PRIMARY KEY` constraint. When `field` *is* a
+    /// real conflict target, prefer the atomic [`upsert`], which issues a
+    /// single `INSERT … ON CONFLICT …` round-trip with no race.
+    pub fn upsert_by_field(
         ctx,
         collection: &str,
         field: &str,
@@ -369,6 +377,41 @@ dual_api! {
             Err(e) if e.code == ErrorCode::NotFound => svc_fn!(ctx, create(collection, data)),
             Err(e) => Err(e),
         }
+    }
+
+    /// Insert `data` into `collection`, resolving a conflict on
+    /// `conflict_columns` via `on_conflict`, in a single atomic
+    /// `INSERT … ON CONFLICT …` round-trip. Returns rows affected.
+    /// WRAP-authorized (write) against `collection`.
+    ///
+    /// `conflict_columns` must name a real `UNIQUE`/`PRIMARY KEY` conflict
+    /// target. For a get-or-create on an unconstrained field, use the
+    /// non-atomic [`upsert_by_field`] instead. Build `data`/`on_conflict` from
+    /// `wafer_block::wire::database::OnConflict` (`SetColumns` or
+    /// `WindowedCounter`).
+    pub fn upsert(
+        ctx,
+        collection: &str,
+        data: Vec<(String, serde_json::Value)>,
+        conflict_columns: Vec<String>,
+        on_conflict: OnConflict,
+    ) -> Result<i64, WaferError> {
+        let req = UpsertRequest {
+            collection: collection.to_string(),
+            data,
+            conflict_columns,
+            on_conflict,
+        };
+        let bytes = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_UPSERT,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: UpsertResponse = decode(&bytes)?;
+        Ok(resp.rows_affected)
     }
 
     /// List all records matching the given filters.

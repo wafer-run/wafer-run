@@ -104,6 +104,73 @@ pub(crate) fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferEr
     Ok(out)
 }
 
+/// Convert a wire [`wire::UpsertRequest`] into a `(collection, UpsertSpec)`
+/// pair for [`DatabaseService::upsert`], validating **every** identifier that
+/// could reach raw SQL text.
+///
+/// `data` values are parameter-bound and `SetColumns`/`conflict_columns` reach
+/// sea-query as quoted `DynCol`s, but we validate *all* column identifiers
+/// uniformly (via [`wafer_sql_utils::ident::validate_ident`], mapping failure
+/// to `InvalidArgument`) so a hostile name can never be interpolated — the
+/// `WindowedCounter` builder in particular splices `count_field`/`window_field`
+/// and the timestamp columns into `CASE`/`SET` expression text, where binding
+/// is impossible. Returns the collection alongside the spec so the caller can
+/// authorize/dispatch without a move-after-use of `req.collection`.
+fn to_upsert_spec(req: wire::UpsertRequest) -> Result<(String, service::UpsertSpec), WaferError> {
+    fn check_ident(name: &str) -> Result<(), WaferError> {
+        wafer_sql_utils::ident::validate_ident(name)
+            .map(|_| ())
+            .map_err(|e| invalid(e.to_string()))
+    }
+
+    for (col, _) in &req.data {
+        check_ident(col)?;
+    }
+    for col in &req.conflict_columns {
+        check_ident(col)?;
+    }
+
+    let on_conflict = match req.on_conflict {
+        wire::OnConflict::SetColumns(cols) => {
+            for col in &cols {
+                check_ident(col)?;
+            }
+            service::UpsertConflict::SetColumns(cols)
+        }
+        wire::OnConflict::WindowedCounter {
+            count_field,
+            window_field,
+            now,
+            window_cutoff,
+            created_fields,
+            updated_fields,
+        } => {
+            check_ident(&count_field)?;
+            check_ident(&window_field)?;
+            for col in created_fields.iter().chain(&updated_fields) {
+                check_ident(col)?;
+            }
+            service::UpsertConflict::WindowedCounter {
+                count_field,
+                window_field,
+                now,
+                window_cutoff,
+                created_fields,
+                updated_fields,
+            }
+        }
+    };
+
+    Ok((
+        req.collection,
+        service::UpsertSpec {
+            data: req.data,
+            conflict_columns: req.conflict_columns,
+            on_conflict,
+        },
+    ))
+}
+
 fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {
     defs.into_iter()
         .map(|s| SortField {
@@ -544,6 +611,25 @@ pub async fn handle_message(
                 Ok(rows) => to_output(&wire::ExecRawResponse {
                     rows_affected: rows,
                 }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_UPSERT => {
+            let req = match decode_and_authorize::<wire::UpsertRequest>(
+                ctx,
+                body,
+                "database.upsert",
+                |r| (r.collection.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            let (collection, spec) = match to_upsert_spec(req) {
+                Ok(pair) => pair,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service.upsert(&collection, spec).await {
+                Ok(rows_affected) => to_output(&wire::UpsertResponse { rows_affected }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

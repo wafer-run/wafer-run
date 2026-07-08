@@ -8,7 +8,7 @@ use wafer_block::db::{FilterOp, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec},
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 #[cfg(test)]
@@ -319,6 +319,10 @@ impl DatabaseService for PostgresDatabaseService {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
+    }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
     }
 }
 

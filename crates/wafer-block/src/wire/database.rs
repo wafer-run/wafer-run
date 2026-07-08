@@ -266,6 +266,58 @@ pub struct IncrementFieldWhereRequest {
     pub filters: Vec<FilterNode>,
 }
 
+/// Request for `database.upsert`. Insert `data`, resolving a conflict on
+/// `conflict_columns` via `on_conflict`, as a single atomic
+/// `INSERT … ON CONFLICT …`. The handler renders the SQL server-side against
+/// the WRAP-authorized `collection`, so the table run always *is* the
+/// collection that was checked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertRequest {
+    /// Collection (table) name. WRAP-authorized (write).
+    pub collection: String,
+    /// Insert column → value pairs. Order is preserved so the generated
+    /// INSERT is deterministic across process starts.
+    pub data: Vec<(String, serde_json::Value)>,
+    /// Conflict-target columns (must carry a `UNIQUE`/`PRIMARY KEY` constraint).
+    pub conflict_columns: Vec<String>,
+    /// What to do when the insert conflicts on `conflict_columns`.
+    pub on_conflict: OnConflict,
+}
+
+/// Conflict-resolution strategy for [`UpsertRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OnConflict {
+    /// `ON CONFLICT (conflict_columns) DO UPDATE SET <cols> = excluded.<cols>`.
+    /// An empty column list degrades to `DO NOTHING` (insert-or-ignore).
+    SetColumns(Vec<String>),
+    /// Atomic sliding-window counter (the fixed-window rate-limit pattern).
+    ///
+    /// On insert the server seeds `count_field = 1` and `window_field = now`;
+    /// on conflict, `count_field` resets to 1 when the stored `window_field`
+    /// is strictly older than `window_cutoff` (also rolling `window_field`
+    /// forward to `now`), otherwise increments by 1. The `id` and `key`
+    /// insert values are read from `data` (a fresh row identifier and the
+    /// conflict-target value).
+    WindowedCounter {
+        /// Counter column (e.g. `count`).
+        count_field: String,
+        /// Window-start column (e.g. `window_start`).
+        window_field: String,
+        /// Current epoch-seconds, recorded as `window_field` on insert/reset.
+        now: i64,
+        /// `now - window_secs`; rows whose stored `window_field` is strictly
+        /// less than this are treated as expired and reset.
+        window_cutoff: i64,
+        /// Creation-timestamp columns, stamped `CURRENT_TIMESTAMP` on INSERT
+        /// **only** — never re-written on conflict, so creation time is
+        /// immutable across counter updates.
+        created_fields: Vec<String>,
+        /// Modification-timestamp columns, stamped `CURRENT_TIMESTAMP` on both
+        /// the initial INSERT and every conflicting update.
+        updated_fields: Vec<String>,
+    },
+}
+
 // --- Responses ---
 
 /// Single record returned by `get`, `create`, `update`. Matches
@@ -339,6 +391,13 @@ pub struct ExecuteResponse {
 pub struct QueryResponse {
     /// Result rows.
     pub rows: Vec<Record>,
+}
+
+/// Response for `database.upsert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertResponse {
+    /// Rows affected by the insert/update.
+    pub rows_affected: i64,
 }
 
 #[cfg(test)]
@@ -456,6 +515,68 @@ mod tests {
         assert_eq!(decoded.total_count, 1);
         assert_eq!(decoded.page, 1);
         assert_eq!(decoded.page_size, 20);
+    }
+
+    #[test]
+    fn upsert_request_set_columns_round_trips() {
+        let original = UpsertRequest {
+            collection: "widgets".into(),
+            data: vec![
+                ("id".into(), serde_json::json!("w1")),
+                ("name".into(), serde_json::json!("gizmo")),
+            ],
+            conflict_columns: vec!["id".into()],
+            on_conflict: OnConflict::SetColumns(vec!["name".into()]),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: UpsertRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.collection, "widgets");
+        assert_eq!(decoded.data.len(), 2);
+        assert_eq!(decoded.conflict_columns, vec!["id".to_string()]);
+        match decoded.on_conflict {
+            OnConflict::SetColumns(cols) => assert_eq!(cols, vec!["name".to_string()]),
+            other => panic!("expected SetColumns, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upsert_request_windowed_counter_round_trips() {
+        let original = UpsertRequest {
+            collection: "rate_limits".into(),
+            data: vec![
+                ("id".into(), serde_json::json!("rl-1")),
+                ("key".into(), serde_json::json!("user:1:login")),
+            ],
+            conflict_columns: vec!["key".into()],
+            on_conflict: OnConflict::WindowedCounter {
+                count_field: "count".into(),
+                window_field: "window_start".into(),
+                now: 1_700_000_000,
+                window_cutoff: 1_699_999_940,
+                created_fields: vec!["created_at".into()],
+                updated_fields: vec!["updated_at".into()],
+            },
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: UpsertRequest = codec::decode(&encoded).expect("decode");
+        match decoded.on_conflict {
+            OnConflict::WindowedCounter {
+                count_field,
+                window_field,
+                now,
+                window_cutoff,
+                created_fields,
+                updated_fields,
+            } => {
+                assert_eq!(count_field, "count");
+                assert_eq!(window_field, "window_start");
+                assert_eq!(now, 1_700_000_000);
+                assert_eq!(window_cutoff, 1_699_999_940);
+                assert_eq!(created_fields, vec!["created_at".to_string()]);
+                assert_eq!(updated_fields, vec!["updated_at".to_string()]);
+            }
+            other => panic!("expected WindowedCounter, got {other:?}"),
+        }
     }
 
     #[test]

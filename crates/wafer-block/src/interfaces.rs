@@ -335,6 +335,31 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
+        ServiceOp::DATABASE_UPSERT => ActionSpec {
+            description: "Insert a row, resolving conflicts via an ON CONFLICT strategy (set-columns or windowed-counter); WRAP-authorized against the target collection.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "data": {
+                        "type": "array",
+                        "description": "Ordered [column, value] insert pairs.",
+                        "items": { "type": "array" }
+                    },
+                    "conflict_columns": { "type": "array", "items": { "type": "string" } },
+                    "on_conflict": {
+                        "description": "SetColumns(update columns) or WindowedCounter{...}."
+                    }
+                },
+                "required": ["collection", "data", "conflict_columns", "on_conflict"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rows_affected": { "type": "integer" }
+                }
+            })),
+        },
         ServiceOp::DATABASE_QUERY => ActionSpec {
             description: "Execute a typed SQL query, WRAP-authorized against its target collection, and return rows.".into(),
             message_schema: Some(json!({
