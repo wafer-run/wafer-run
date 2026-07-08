@@ -125,6 +125,12 @@ pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
 /// is impossible. Returns the collection alongside the spec so the caller can
 /// authorize/dispatch without a move-after-use of `req.collection`.
 ///
+/// `WindowedCounter` also requires a non-empty `conflict_columns` (the
+/// executor's conflict target) and string-valued `id`/`key` entries in `data`
+/// (the executor's insert values) — both fail closed to `InvalidArgument`
+/// here rather than surfacing as an opaque `Internal` error, or in the
+/// conflict-column case silently defaulting, deep inside `DbExec::upsert`.
+///
 /// Public as part of the wire→builder-input conversion surface (see
 /// [`convert_filter_tree`]): it takes only the wire request and is compared
 /// against a direct `upsert::build_upsert` / `build_windowed_counter_upsert`
@@ -164,6 +170,24 @@ pub fn to_upsert_spec(
             check_ident(&window_field)?;
             for col in created_fields.iter().chain(&updated_fields) {
                 check_ident(col)?;
+            }
+            // `DbExec::upsert` derives the conflict target from
+            // `conflict_columns[0]` and reads `id`/`key` insert values out of
+            // `data` (see `extract_windowed_id_key`) — both fail-closed here
+            // rather than surfacing as an opaque `Internal` error (or, for the
+            // conflict column, silently defaulting) deep inside the SQL
+            // builder.
+            if req.conflict_columns.is_empty() {
+                return Err(invalid(
+                    "windowed-counter upsert requires a conflict column",
+                ));
+            }
+            let has_string_field =
+                |name: &str| req.data.iter().any(|(k, v)| k == name && v.is_string());
+            if !has_string_field("id") || !has_string_field("key") {
+                return Err(invalid(
+                    "windowed-counter upsert requires string 'id' and 'key' data fields",
+                ));
             }
             service::UpsertConflict::WindowedCounter {
                 count_field,

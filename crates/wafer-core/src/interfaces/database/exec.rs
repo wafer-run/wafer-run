@@ -631,6 +631,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// `to_upsert_spec`) before reaching here, and again inside
     /// `build_windowed_counter_upsert` — a fail-closed guard, since those
     /// column names are interpolated into `CASE`/`SET` expression text.
+    ///
+    /// For `WindowedCounter`, the handler's `to_upsert_spec` also already
+    /// guarantees `spec.conflict_columns` is non-empty and that `spec.data`
+    /// carries string `id`/`key` entries (both `InvalidArgument` at the
+    /// handler boundary on a caller mistake); the `.first()`/
+    /// `extract_windowed_id_key` handling below is a defensive fallback, not
+    /// the primary validation.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
         let table = sanitize_ident(collection);
         let stmt = match spec.on_conflict {
@@ -655,7 +662,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 updated_fields,
             } => {
                 let (id, key) = extract_windowed_id_key(&spec.data)?;
-                let conflict_col = spec.conflict_columns.first().map_or("key", String::as_str);
+                let conflict_col = spec
+                    .conflict_columns
+                    .first()
+                    .map(String::as_str)
+                    .ok_or_else(|| {
+                        DatabaseError::Internal(
+                            "windowed-counter upsert requires a non-empty conflict_columns \
+                         (should have been rejected as InvalidArgument at the handler \
+                         boundary)"
+                                .into(),
+                        )
+                    })?;
                 let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
                 let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
                 wafer_sql_utils::upsert::build_windowed_counter_upsert(

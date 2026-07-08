@@ -558,6 +558,147 @@ async fn upsert_bad_identifier_in_windowed_counter_is_invalid_argument() {
     );
 }
 
+/// A `WindowedCounter` upsert missing the required string `id` data field is
+/// rejected as `InvalidArgument` by `to_upsert_spec` — before the service
+/// runs — rather than surfacing later as an opaque `Internal` error out of
+/// `extract_windowed_id_key`.
+#[tokio::test]
+async fn upsert_windowed_counter_missing_id_is_invalid_argument() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let req = wire::database::UpsertRequest {
+        collection: "suppers_ai__auth__users".into(),
+        data: vec![("key".into(), serde_json::json!("user:1:login"))],
+        conflict_columns: vec!["key".into()],
+        on_conflict: wire::database::OnConflict::WindowedCounter {
+            count_field: "count".into(),
+            window_field: "window_start".into(),
+            now: 1000,
+            window_cutoff: 940,
+            created_fields: vec!["created_at".into()],
+            updated_fields: vec!["updated_at".into()],
+        },
+    };
+    let body = codec::encode(&req).unwrap();
+
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_UPSERT),
+        &body,
+    )
+    .await;
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(
+            e.code,
+            ErrorCode::InvalidArgument,
+            "missing id must be InvalidArgument, got {:?}: {}",
+            e.code,
+            e.message
+        ),
+        other => panic!("expected an InvalidArgument error terminal, got {other:?}"),
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a missing-id upsert must be rejected before reaching the service; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+/// A `WindowedCounter` upsert missing the required string `key` data field is
+/// rejected as `InvalidArgument` by `to_upsert_spec`.
+#[tokio::test]
+async fn upsert_windowed_counter_missing_key_is_invalid_argument() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let req = wire::database::UpsertRequest {
+        collection: "suppers_ai__auth__users".into(),
+        data: vec![("id".into(), serde_json::json!("rl-1"))],
+        conflict_columns: vec!["key".into()],
+        on_conflict: wire::database::OnConflict::WindowedCounter {
+            count_field: "count".into(),
+            window_field: "window_start".into(),
+            now: 1000,
+            window_cutoff: 940,
+            created_fields: vec!["created_at".into()],
+            updated_fields: vec!["updated_at".into()],
+        },
+    };
+    let body = codec::encode(&req).unwrap();
+
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_UPSERT),
+        &body,
+    )
+    .await;
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(
+            e.code,
+            ErrorCode::InvalidArgument,
+            "missing key must be InvalidArgument, got {:?}: {}",
+            e.code,
+            e.message
+        ),
+        other => panic!("expected an InvalidArgument error terminal, got {other:?}"),
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a missing-key upsert must be rejected before reaching the service; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+/// A `WindowedCounter` upsert with empty `conflict_columns` is rejected as
+/// `InvalidArgument` by `to_upsert_spec`, rather than the executor silently
+/// defaulting the conflict target to the literal `"key"`.
+#[tokio::test]
+async fn upsert_windowed_counter_empty_conflict_columns_is_invalid_argument() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let req = wire::database::UpsertRequest {
+        collection: "suppers_ai__auth__users".into(),
+        data: vec![
+            ("id".into(), serde_json::json!("rl-1")),
+            ("key".into(), serde_json::json!("user:1:login")),
+        ],
+        conflict_columns: vec![],
+        on_conflict: wire::database::OnConflict::WindowedCounter {
+            count_field: "count".into(),
+            window_field: "window_start".into(),
+            now: 1000,
+            window_cutoff: 940,
+            created_fields: vec!["created_at".into()],
+            updated_fields: vec!["updated_at".into()],
+        },
+    };
+    let body = codec::encode(&req).unwrap();
+
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_UPSERT),
+        &body,
+    )
+    .await;
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(
+            e.code,
+            ErrorCode::InvalidArgument,
+            "empty conflict_columns must be InvalidArgument, got {:?}: {}",
+            e.code,
+            e.message
+        ),
+        other => panic!("expected an InvalidArgument error terminal, got {other:?}"),
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "an empty-conflict-columns upsert must be rejected before reaching the service; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ALLOW case — granted ctx lets the request through to the service, for
 // every op the DENY cases above cover.
