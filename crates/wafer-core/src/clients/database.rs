@@ -11,12 +11,13 @@ pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
-        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
-        DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
-        ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
-        IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest, QueryRequest,
-        QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
-        TakeWhereResponse, UpdateRequest, UpdateWhereRequest, UpsertRequest, UpsertResponse,
+        AggregateRequest, CountRequest, CountResponse, CreateRequest, DeleteRequest,
+        DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest,
+        ExecRawResponse, ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode,
+        GetRequest, IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest,
+        QueryRequest, QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest, UpsertRequest,
+        UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -412,6 +413,29 @@ dual_api! {
         )?;
         let resp: UpsertResponse = decode(&bytes)?;
         Ok(resp.rows_affected)
+    }
+
+    /// Run a grouped aggregate query described by `req` and return one
+    /// [`Record`] per group (each carrying the aggregate aliases and any
+    /// grouped columns / date buckets). WRAP-authorized (read) against
+    /// `req.collection`.
+    ///
+    /// The runtime renders the SQL server-side from the structured request, so
+    /// — unlike [`query_raw`] — no raw SQL crosses the boundary and the
+    /// statement always targets the authorized collection. Build the aggregate
+    /// and group-by terms from
+    /// `wafer_block::wire::database::{AggregateColumnDef, GroupByDef}`.
+    pub fn aggregate(ctx, req: AggregateRequest) -> Result<Vec<Record>, WaferError> {
+        let collection = req.collection.clone();
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_AGGREGATE,
+            &req,
+            Some(collection.as_str()),
+            false,
+            Some("db")
+        )?;
+        decode(&data)
     }
 
     /// List all records matching the given filters.

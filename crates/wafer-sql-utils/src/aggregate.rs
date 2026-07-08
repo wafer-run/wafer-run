@@ -80,6 +80,25 @@ pub fn build_sum(
     agg_select(table, expr.into(), "total", filters, None, backend)
 }
 
+/// Per-dialect date-bucket expression — `date("field")` on SQLite,
+/// `to_char(CAST("field" AS DATE), 'YYYY-MM-DD')` on Postgres — as a
+/// sea-query custom expression. The single source shared by
+/// [`build_daily_count`] and the grouped-query date-bucket path
+/// ([`GroupedQueryConfig::date_buckets`]).
+///
+/// `field` is interpolated into raw expression text (ANSI double-quoted, valid
+/// for both dialects), so it MUST be a validated plain identifier — callers
+/// validate upstream (`build_daily_count` via [`validate_ident`]; the
+/// aggregate handler via `validate_ident` in its `to_aggregate_spec`). Passing
+/// an unvalidated field would let it break out of the surrounding expression.
+fn date_bucket_expr(field: &str, backend: Backend) -> SimpleExpr {
+    let sql = match backend {
+        Backend::Sqlite => format!("date(\"{field}\")"),
+        Backend::Postgres => format!("to_char(CAST(\"{field}\" AS DATE), 'YYYY-MM-DD')"),
+    };
+    Expr::cust(&sql)
+}
+
 /// Build a per-day count over a date window.
 ///
 /// Produces (SQLite):
@@ -113,13 +132,7 @@ pub fn build_daily_count(
     // parameter-bound. Reject anything that isn't a plain identifier rather
     // than risk it escaping the surrounding expression.
     let date_field = validate_ident(date_field)?;
-    let date_expr_sql: String = match backend {
-        Backend::Sqlite => format!("date(\"{date_field}\")"),
-        Backend::Postgres => {
-            format!("to_char(CAST(\"{date_field}\" AS DATE), 'YYYY-MM-DD')")
-        }
-    };
-    let date_expr: SimpleExpr = Expr::cust(&date_expr_sql);
+    let date_expr = date_bucket_expr(date_field, backend);
 
     let mut query = Query::select();
     query
@@ -232,6 +245,23 @@ impl AggregateColumn {
     }
 }
 
+/// A `GROUP BY date(field)` bucket for a [`GroupedQueryConfig`].
+///
+/// Groups rows by the day portion of a timestamp column and selects the
+/// bucketed value under `alias`. Shares its per-dialect date expression with
+/// [`build_daily_count`] (see [`date_bucket_expr`]).
+///
+/// `field` and `alias` reach raw expression text (not parameter-bound), so
+/// callers MUST supply validated identifiers — the aggregate handler validates
+/// every `DateBucket.field` with `validate_ident` before constructing this.
+#[derive(Debug, Clone)]
+pub struct DateBucketGroup {
+    /// Timestamp column to bucket by day.
+    pub field: String,
+    /// Output alias for the bucketed date value.
+    pub alias: String,
+}
+
 /// Configuration for a grouped aggregate query.
 #[derive(Debug, Clone)]
 pub struct GroupedQueryConfig {
@@ -246,6 +276,10 @@ pub struct GroupedQueryConfig {
     pub filters: Vec<Filter>,
     /// Columns to `GROUP BY` (interpolated as quoted identifiers).
     pub group_by: Vec<String>,
+    /// Date-bucket `GROUP BY date(field)` terms, layered after the plain
+    /// [`group_by`](Self::group_by) columns. Each also selects its bucketed
+    /// value under its `alias`. Empty for non-time-series aggregates.
+    pub date_buckets: Vec<DateBucketGroup>,
     /// `ORDER BY` clauses; alias names (e.g. `cnt`) are valid because the
     /// aggregates are emitted with `AS` aliases.
     pub order_by: Vec<SortField>,
@@ -317,9 +351,17 @@ pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::
         query.cond_where(cond);
     }
 
-    // GROUP BY
+    // GROUP BY — plain columns
     for col in &cfg.group_by {
         query.group_by_col(DynCol(col.clone()));
+    }
+
+    // GROUP BY — date buckets: select the bucketed value under its alias and
+    // group by the same `date(field)` expression (fields validated upstream).
+    for bucket in &cfg.date_buckets {
+        let expr = date_bucket_expr(&bucket.field, backend);
+        query.expr_as(expr.clone(), Alias::new(&bucket.alias));
+        query.add_group_by(vec![expr]);
     }
 
     // ORDER BY
@@ -428,6 +470,7 @@ mod tests {
             ],
             filters: vec![],
             group_by: vec!["method".into(), "path".into()],
+            date_buckets: vec![],
             order_by: vec![SortField {
                 field: "cnt".into(),
                 desc: true,
@@ -457,6 +500,7 @@ mod tests {
             }],
             filters: vec![],
             group_by: vec!["category".into()],
+            date_buckets: vec![],
             order_by: vec![],
             limit: None,
         };
@@ -497,6 +541,7 @@ mod tests {
             ],
             filters: vec![],
             group_by: vec!["method".into(), "path".into()],
+            date_buckets: vec![],
             order_by: vec![SortField {
                 field: "cnt".into(),
                 desc: true,
@@ -514,5 +559,73 @@ mod tests {
         assert!(sql.contains("\"errors\""), "missing errors alias in: {sql}");
         assert!(sql.contains("GROUP BY"));
         assert_eq!(stmt.collection, "request_logs");
+    }
+
+    #[test]
+    fn grouped_query_supports_date_bucket_group() {
+        // A `date_buckets` entry must both SELECT the bucketed value under its
+        // alias and add the `date(field)` expression to GROUP BY — sharing the
+        // exact per-dialect expression `build_daily_count` uses.
+        let sqlite = build_grouped_query(
+            GroupedQueryConfig {
+                table: "events".into(),
+                select_columns: vec![],
+                aggregates: vec![AggregateColumn {
+                    func: AggFunc::Count,
+                    field: None,
+                    alias: "cnt".into(),
+                    cast_as: None,
+                    inner_expr: None,
+                }],
+                filters: vec![],
+                group_by: vec![],
+                date_buckets: vec![DateBucketGroup {
+                    field: "created_at".into(),
+                    alias: "created_at".into(),
+                }],
+                order_by: vec![],
+                limit: None,
+            },
+            Backend::Sqlite,
+        );
+        assert!(
+            sqlite.sql.contains("date("),
+            "sqlite date bucket: {}",
+            sqlite.sql
+        );
+        assert!(sqlite.sql.contains("GROUP BY"), "{}", sqlite.sql);
+        assert!(
+            sqlite.sql.contains("\"created_at\""),
+            "bucket alias missing: {}",
+            sqlite.sql
+        );
+        assert_eq!(sqlite.collection, "events");
+
+        // Postgres renders the `to_char(CAST(... AS DATE), ...)` form.
+        let pg = build_grouped_query(
+            GroupedQueryConfig {
+                table: "events".into(),
+                select_columns: vec![],
+                aggregates: vec![AggregateColumn {
+                    func: AggFunc::Count,
+                    field: None,
+                    alias: "cnt".into(),
+                    cast_as: None,
+                    inner_expr: None,
+                }],
+                filters: vec![],
+                group_by: vec![],
+                date_buckets: vec![DateBucketGroup {
+                    field: "created_at".into(),
+                    alias: "created_at".into(),
+                }],
+                order_by: vec![],
+                limit: None,
+            },
+            Backend::Postgres,
+        );
+        assert!(pg.sql.contains("to_char"), "pg date bucket: {}", pg.sql);
+        assert!(pg.sql.contains("CAST"), "{}", pg.sql);
+        assert!(pg.sql.contains("GROUP BY"), "{}", pg.sql);
     }
 }

@@ -603,6 +603,17 @@ fn database_op_body(op: &str) -> Vec<u8> {
             conflict_columns: vec!["id".into()],
             on_conflict: wire::OnConflict::SetColumns(vec!["id".into()]),
         }),
+        ServiceOp::DATABASE_AGGREGATE => codec::encode(&wire::AggregateRequest {
+            collection: "suppers_ai__auth__users".into(),
+            select_columns: vec![],
+            aggregates: vec![wire::AggregateColumnDef::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![],
+            sort: vec![],
+            limit: 0,
+        }),
         other => panic!(
             "completeness test has no minimal-body case for database op `{other}` — \
              add a `match` arm to `database_op_body` so this op stays covered \

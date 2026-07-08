@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
-use wafer_block::db::{Filter, ListOptions};
+use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_schema::{
@@ -65,6 +65,176 @@ pub enum UpsertConflict {
         /// Modification-timestamp columns (stamped on INSERT and on conflict).
         updated_fields: Vec<String>,
     },
+}
+
+/// Plain-data grouped-aggregate specification handed to
+/// [`DatabaseService::aggregate`].
+///
+/// The database handler converts the wire
+/// [`AggregateRequest`](wafer_block::wire::database::AggregateRequest) into
+/// this, validating **every** identifier that reaches raw SQL text (aliases,
+/// aggregated `field`s, date-bucket fields, plain group-by columns, and
+/// `select_columns`) and bounding every `CaseWhenSum` predicate tree — so the
+/// service never sees an untrusted column name. Rendering into the `!Send`
+/// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
+/// happens server-side in [`DbExec::aggregate`](super::exec::DbExec::aggregate)
+/// via [`AggregateSpec::into_grouped_config`].
+#[derive(Debug, Clone)]
+pub struct AggregateSpec {
+    /// Plain (non-aggregated) columns to also select.
+    pub select_columns: Vec<String>,
+    /// Aggregate output columns (order preserved).
+    pub aggregates: Vec<AggregateColumnSpec>,
+    /// `WHERE` predicates, AND-combined leaves (groups rejected upstream).
+    pub filters: Vec<Filter>,
+    /// `GROUP BY` terms — plain columns and/or date buckets.
+    pub group_by: Vec<GroupBySpec>,
+    /// `ORDER BY` clause (aggregate aliases are valid sort keys).
+    pub sort: Vec<SortField>,
+    /// Optional `LIMIT N`; a value `<= 0` means no limit.
+    pub limit: i64,
+}
+
+/// One aggregate output column in an [`AggregateSpec`] — the validated,
+/// plain-data twin of the wire
+/// [`AggregateColumnDef`](wafer_block::wire::database::AggregateColumnDef).
+///
+/// The `CaseWhenSum` predicate is carried as an already-bounds-checked
+/// [`FilterTree`] forest (not a sea-query `SimpleExpr`) so the `!Send` `CASE`
+/// expression can be built server-side in
+/// [`AggregateSpec::into_grouped_config`].
+#[derive(Debug, Clone)]
+pub enum AggregateColumnSpec {
+    /// `COUNT(*) AS alias`.
+    Count {
+        /// Output alias.
+        alias: String,
+    },
+    /// `SUM(field) AS alias`.
+    Sum {
+        /// Numeric column to sum.
+        field: String,
+        /// Output alias.
+        alias: String,
+    },
+    /// `AVG(field) AS alias`.
+    Avg {
+        /// Numeric column to average.
+        field: String,
+        /// Output alias.
+        alias: String,
+    },
+    /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
+    /// conditional count. `when` is the validated predicate forest,
+    /// AND-combined at the top level.
+    CaseWhenSum {
+        /// Predicate whose matching rows are counted.
+        when: Vec<FilterTree>,
+        /// Output alias.
+        alias: String,
+    },
+}
+
+/// One `GROUP BY` term in an [`AggregateSpec`]: a plain column or a date
+/// bucket. Plain-data twin of the wire
+/// [`GroupByDef`](wafer_block::wire::database::GroupByDef).
+#[derive(Debug, Clone)]
+pub enum GroupBySpec {
+    /// Group by a plain column.
+    Column(String),
+    /// Group by the date bucket `date(field)`; the bucketed value is emitted
+    /// in each result row under the `field` name.
+    DateBucket {
+        /// Timestamp column to bucket by day.
+        field: String,
+    },
+}
+
+impl AggregateSpec {
+    /// Render this validated spec into a
+    /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
+    /// for `table`.
+    ///
+    /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` `CASE`
+    /// predicate via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
+    /// returned config holds `Rc<dyn Iden>` and is therefore also `!Send`, so
+    /// call this server-side inside
+    /// [`DbExec::aggregate`](super::exec::DbExec::aggregate) and drop the
+    /// result before the next `.await`.
+    #[must_use]
+    pub fn into_grouped_config(
+        self,
+        table: String,
+    ) -> wafer_sql_utils::aggregate::GroupedQueryConfig {
+        use wafer_sql_utils::aggregate::{
+            AggFunc, AggregateColumn, DateBucketGroup, GroupedQueryConfig,
+        };
+
+        let aggregates = self
+            .aggregates
+            .into_iter()
+            .map(|a| match a {
+                AggregateColumnSpec::Count { alias } => AggregateColumn {
+                    func: AggFunc::Count,
+                    field: None,
+                    alias,
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumnSpec::Sum { field, alias } => AggregateColumn {
+                    func: AggFunc::Sum,
+                    field: Some(field),
+                    alias,
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumnSpec::Avg { field, alias } => AggregateColumn {
+                    func: AggFunc::Avg,
+                    field: Some(field),
+                    alias,
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                // The `when` predicate is `!Send` once turned into a
+                // `SimpleExpr`, so it is built here (server-side), never in the
+                // handler.
+                AggregateColumnSpec::CaseWhenSum { when, alias } => AggregateColumn::case_when_sum(
+                    alias,
+                    wafer_sql_utils::query::tree_to_simple_expr(&when),
+                ),
+            })
+            .collect();
+
+        // Plain group-by columns render as quoted identifiers; date buckets
+        // render `date(field)` (and also select the bucketed value) via the
+        // builder's shared per-dialect date expression.
+        let mut group_by = Vec::new();
+        let mut date_buckets = Vec::new();
+        for g in self.group_by {
+            match g {
+                GroupBySpec::Column(c) => group_by.push(c),
+                GroupBySpec::DateBucket { field } => date_buckets.push(DateBucketGroup {
+                    alias: field.clone(),
+                    field,
+                }),
+            }
+        }
+
+        GroupedQueryConfig {
+            table,
+            select_columns: self.select_columns,
+            aggregates,
+            filters: self.filters,
+            group_by,
+            date_buckets,
+            order_by: self.sort,
+            limit: if self.limit > 0 {
+                Some(self.limit)
+            } else {
+                None
+            },
+        }
+    }
 }
 
 /// Service provides generic CRUD operations on collections.
@@ -255,6 +425,26 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Internal(
             "upsert is not implemented by this database backend".into(),
+        ))
+    }
+
+    /// Run the grouped aggregate query described by `spec` against
+    /// `collection`, returning one [`Record`] per group. Each record carries
+    /// the aggregate aliases and any plain group-by columns / date buckets.
+    ///
+    /// SQL backends render `spec` server-side via
+    /// [`DbExec::aggregate`](super::exec::DbExec::aggregate) — the SQL is built
+    /// from the validated structured request, never from caller-supplied text.
+    /// The default here returns an `Internal` error so a backend that cannot
+    /// render a grouped query inherits the failure rather than silently
+    /// returning no rows.
+    async fn aggregate(
+        &self,
+        _collection: &str,
+        _spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        Err(DatabaseError::Internal(
+            "aggregate is not implemented by this database backend".into(),
         ))
     }
 

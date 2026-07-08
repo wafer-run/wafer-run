@@ -318,6 +318,87 @@ pub enum OnConflict {
     },
 }
 
+/// Request for `database.aggregate` (grouped aggregate read). The handler
+/// renders the SQL server-side from this structured request against the
+/// WRAP-authorized `collection`, so — unlike `query_raw` — no raw SQL crosses
+/// the boundary and the statement always targets the checked collection.
+/// The response is a `Vec<Record>`, one per group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateRequest {
+    /// Collection (table) name. WRAP-authorized (read).
+    pub collection: String,
+    /// Plain (non-aggregated) columns to also select — typically the same
+    /// columns named in `group_by`. Empty for pure aggregates.
+    #[serde(default)]
+    pub select_columns: Vec<String>,
+    /// Aggregate output columns. At least one is required — the handler
+    /// rejects an empty list as `InvalidArgument`.
+    pub aggregates: Vec<AggregateColumnDef>,
+    /// WHERE-clause predicates. AND-combined leaves only; a group node is
+    /// rejected as `InvalidArgument` (consistent with `count`/`sum`).
+    #[serde(default)]
+    pub filters: Vec<FilterNode>,
+    /// GROUP BY terms — plain columns and/or date buckets.
+    #[serde(default)]
+    pub group_by: Vec<GroupByDef>,
+    /// ORDER BY clause. Aggregate aliases are valid sort keys.
+    #[serde(default)]
+    pub sort: Vec<SortFieldDef>,
+    /// Optional `LIMIT N`; a value `<= 0` means no limit.
+    #[serde(default)]
+    pub limit: i64,
+}
+
+/// One aggregate output column for [`AggregateRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AggregateColumnDef {
+    /// `COUNT(*) AS alias`.
+    Count {
+        /// Output alias for the count.
+        alias: String,
+    },
+    /// `SUM(field) AS alias`.
+    Sum {
+        /// Numeric column to sum.
+        field: String,
+        /// Output alias for the sum.
+        alias: String,
+    },
+    /// `AVG(field) AS alias`.
+    Avg {
+        /// Numeric column to average.
+        field: String,
+        /// Output alias for the average.
+        alias: String,
+    },
+    /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
+    /// conditional count (no `FILTER` clause required). `when` is a predicate
+    /// forest, AND-combined at the top level; the handler bounds and validates
+    /// it, and the server builds the `CASE` predicate (the sea-query
+    /// expression is `!Send`, so it can't be built caller-side). An empty
+    /// `when` is rejected as `InvalidArgument`.
+    CaseWhenSum {
+        /// Predicate whose matching rows are counted.
+        when: Vec<FilterNode>,
+        /// Output alias for the conditional count.
+        alias: String,
+    },
+}
+
+/// One GROUP BY term for [`AggregateRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GroupByDef {
+    /// Group by a plain column.
+    Column(String),
+    /// Group by the date bucket `date(field)` — the day portion of a
+    /// timestamp column. The bucketed value is emitted in each result row
+    /// under the `field` name.
+    DateBucket {
+        /// Timestamp column to bucket by day.
+        field: String,
+    },
+}
+
 // --- Responses ---
 
 /// Single record returned by `get`, `create`, `update`. Matches
@@ -577,6 +658,96 @@ mod tests {
             }
             other => panic!("expected WindowedCounter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn aggregate_request_round_trips() {
+        let original = AggregateRequest {
+            collection: "request_logs".into(),
+            select_columns: vec!["method".into()],
+            aggregates: vec![
+                AggregateColumnDef::Count {
+                    alias: "cnt".into(),
+                },
+                AggregateColumnDef::Sum {
+                    field: "bytes".into(),
+                    alias: "total_bytes".into(),
+                },
+                AggregateColumnDef::Avg {
+                    field: "duration_ms".into(),
+                    alias: "avg_ms".into(),
+                },
+                AggregateColumnDef::CaseWhenSum {
+                    when: vec![FilterNode::Leaf(FilterDef {
+                        field: "status".into(),
+                        operator: "gte".into(),
+                        value: serde_json::json!(400),
+                    })],
+                    alias: "errors".into(),
+                },
+            ],
+            filters: vec![FilterNode::Leaf(FilterDef {
+                field: "active".into(),
+                operator: "eq".into(),
+                value: serde_json::json!(true),
+            })],
+            group_by: vec![
+                GroupByDef::Column("method".into()),
+                GroupByDef::DateBucket {
+                    field: "created_at".into(),
+                },
+            ],
+            sort: vec![SortFieldDef {
+                field: "cnt".into(),
+                desc: true,
+            }],
+            limit: 50,
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.collection, "request_logs");
+        assert_eq!(decoded.select_columns, vec!["method".to_string()]);
+        assert_eq!(decoded.aggregates.len(), 4);
+        assert_eq!(decoded.filters.len(), 1);
+        assert_eq!(decoded.group_by.len(), 2);
+        assert_eq!(decoded.limit, 50);
+        assert!(decoded.sort[0].desc);
+        match &decoded.aggregates[3] {
+            AggregateColumnDef::CaseWhenSum { when, alias } => {
+                assert_eq!(alias, "errors");
+                assert_eq!(when.len(), 1);
+            }
+            other => panic!("expected CaseWhenSum, got {other:?}"),
+        }
+        match &decoded.group_by[1] {
+            GroupByDef::DateBucket { field } => assert_eq!(field, "created_at"),
+            other => panic!("expected DateBucket, got {other:?}"),
+        }
+    }
+
+    /// `filters`, `group_by`, `sort`, `select_columns`, and `limit` all carry
+    /// `#[serde(default)]`, so a minimal request that only names a collection
+    /// and one aggregate must decode with those fields defaulted/empty.
+    #[test]
+    fn aggregate_request_minimal_defaults_round_trip() {
+        let original = AggregateRequest {
+            collection: "t".into(),
+            select_columns: vec![],
+            aggregates: vec![AggregateColumnDef::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![],
+            sort: vec![],
+            limit: 0,
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.collection, "t");
+        assert_eq!(decoded.aggregates.len(), 1);
+        assert!(decoded.filters.is_empty());
+        assert!(decoded.group_by.is_empty());
+        assert_eq!(decoded.limit, 0);
     }
 
     #[test]

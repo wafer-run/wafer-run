@@ -316,6 +316,34 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
+        ServiceOp::DATABASE_AGGREGATE => ActionSpec {
+            description: "Run a grouped aggregate query (COUNT/SUM/AVG/conditional-count with GROUP BY columns and/or date buckets), WRAP-authorized against its target collection and rendered server-side; returns one row per group.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "select_columns": { "type": "array", "items": { "type": "string" }, "description": "Plain (non-aggregated) columns to also select." },
+                    "aggregates": {
+                        "type": "array",
+                        "description": "Aggregate output columns: Count{alias}, Sum{field,alias}, Avg{field,alias}, or CaseWhenSum{when,alias}. At least one required.",
+                        "items": { "type": "object" }
+                    },
+                    "filters": { "type": "array", "items": filter_schema() },
+                    "group_by": {
+                        "type": "array",
+                        "description": "GROUP BY terms: Column(name) or DateBucket{field}.",
+                        "items": { "type": "object" }
+                    },
+                    "sort": { "type": "array", "items": { "type": "object" } },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["collection", "aggregates"]
+            })),
+            response_schema: Some(json!({
+                "type": "array",
+                "items": { "type": "object" }
+            })),
+        },
         ServiceOp::DATABASE_INCREMENT_FIELD_WHERE => ActionSpec {
             description: "Atomically increment a numeric column on all records matching a set of filters.".into(),
             message_schema: Some(json!({

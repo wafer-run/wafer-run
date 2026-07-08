@@ -79,6 +79,24 @@ pub fn build_condition_tree(nodes: &[FilterTree]) -> Option<Cond> {
     Some(cond)
 }
 
+/// Convert a predicate **tree** into a single boolean [`SimpleExpr`] — the
+/// same AND/OR structure as [`build_condition_tree`], but as an expression
+/// usable outside a `WHERE` clause: most notably the predicate of a
+/// `SUM(CASE WHEN <expr> THEN 1 ELSE 0 END)` conditional count built via
+/// [`crate::aggregate::AggregateColumn::case_when_sum`].
+///
+/// The conversion goes through [`build_condition_tree`] and sea-query's
+/// `From<Condition> for SimpleExpr`, which folds the tree with `.and()` /
+/// `.or()` exactly as the `WHERE`-clause path does — so a `WHERE` and a
+/// `CASE WHEN` built from the same tree render identical predicates. An empty
+/// forest folds to an always-true constant (an empty `AND`); callers that
+/// require a non-empty predicate (the aggregate handler) reject empty input
+/// upstream. Bounds are enforced before conversion, so this cannot fail.
+#[must_use]
+pub fn tree_to_simple_expr(nodes: &[FilterTree]) -> SimpleExpr {
+    SimpleExpr::from(build_condition_tree(nodes).unwrap_or_else(Cond::all))
+}
+
 fn node_to_cond(node: &FilterTree) -> Cond {
     match node {
         FilterTree::Leaf(f) => Cond::all().add(leaf_expr(f)),
@@ -771,6 +789,55 @@ mod tests {
             .cond_where(cond);
         let (sql, _) = crate::render_select(q, Backend::Sqlite);
         assert!(sql.contains(" OR "), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_leaf_renders_predicate() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![FilterTree::Leaf(Filter {
+            field: "status".into(),
+            operator: FilterOp::GreaterEqual,
+            value: serde_json::json!(400),
+        })];
+        let expr = tree_to_simple_expr(&tree);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains("\"status\""), "{sql}");
+        assert!(sql.contains(">="), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_any_group_renders_or() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![FilterTree::Any(vec![
+            FilterTree::Leaf(Filter {
+                field: "a".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(1),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "b".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(2),
+            }),
+        ])];
+        let expr = tree_to_simple_expr(&tree);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains(" OR "), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_empty_folds_to_constant_and_does_not_panic() {
+        // Empty forest → always-true constant (empty AND). Callers reject
+        // empty upstream; this only guarantees totality.
+        let expr = tree_to_simple_expr(&[]);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.starts_with("SELECT"), "{sql}");
     }
 
     #[test]

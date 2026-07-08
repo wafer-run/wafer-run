@@ -19,7 +19,9 @@ use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
 
-use super::service::{DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec};
+use super::service::{
+    AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec,
+};
 
 /// Sanitize keys and sort `data` into deterministic `(column, value)` pairs.
 ///
@@ -673,6 +675,32 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             }
         };
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
+    }
+
+    /// Shared `aggregate`: render the validated [`AggregateSpec`] into a
+    /// grouped query for this backend's dialect and run it via the same
+    /// row-returning primitive `query_raw` uses, returning one [`Record`] per
+    /// group.
+    ///
+    /// The spec is rendered into a `!Send`
+    /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
+    /// inside a nested block whose closing brace drops it (and every
+    /// `Rc<dyn Iden>` it holds) *before* the `.await` below — the same pattern
+    /// [`DbExec::list`] uses so the future stays `Send` for the native build.
+    /// Identifiers are validated at the trust boundary (the handler's
+    /// `to_aggregate_spec`) before reaching here.
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let table = sanitize_ident(collection);
+        let stmt = {
+            let cfg = spec.into_grouped_config(table);
+            wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)
+        };
+        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 

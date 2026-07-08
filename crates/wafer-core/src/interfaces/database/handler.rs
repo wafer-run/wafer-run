@@ -171,6 +171,99 @@ fn to_upsert_spec(req: wire::UpsertRequest) -> Result<(String, service::UpsertSp
     ))
 }
 
+/// Convert a wire [`wire::AggregateRequest`] into a `(collection,
+/// AggregateSpec)` pair for [`DatabaseService::aggregate`], validating **every**
+/// identifier that could reach raw SQL text.
+///
+/// Aliases, aggregated `Sum`/`Avg` `field`s, `DateBucket.field`s, plain
+/// `GroupByDef::Column`s, and `select_columns` are all interpolated as
+/// identifiers (aliases/date-bucket fields reach *raw* `date(...)` /
+/// `AS <alias>` expression text where binding is impossible), so each is
+/// validated via [`wafer_sql_utils::ident::validate_ident`] — a failure maps to
+/// `InvalidArgument`, fail-closed. `CaseWhenSum.when` is run through
+/// [`convert_filter_tree`] for depth/node bounds + operator validation (and
+/// rejected if empty); its `!Send` `CASE` predicate is built server-side in
+/// [`AggregateSpec::into_grouped_config`], so the spec carries the validated
+/// [`FilterTree`] forest, not a sea-query expression. `filters` are flattened
+/// to AND-of-leaves (a group → `InvalidArgument`, consistent with
+/// `count`/`sum`).
+fn to_aggregate_spec(
+    req: wire::AggregateRequest,
+) -> Result<(String, service::AggregateSpec), WaferError> {
+    fn check_ident(name: &str) -> Result<(), WaferError> {
+        wafer_sql_utils::ident::validate_ident(name)
+            .map(|_| ())
+            .map_err(|e| invalid(e.to_string()))
+    }
+
+    for col in &req.select_columns {
+        check_ident(col)?;
+    }
+
+    let mut aggregates = Vec::with_capacity(req.aggregates.len());
+    for agg in req.aggregates {
+        let spec = match agg {
+            wire::AggregateColumnDef::Count { alias } => {
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::Count { alias }
+            }
+            wire::AggregateColumnDef::Sum { field, alias } => {
+                check_ident(&field)?;
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::Sum { field, alias }
+            }
+            wire::AggregateColumnDef::Avg { field, alias } => {
+                check_ident(&field)?;
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::Avg { field, alias }
+            }
+            wire::AggregateColumnDef::CaseWhenSum { when, alias } => {
+                check_ident(&alias)?;
+                // Bounds + operator validation on the predicate tree; the
+                // `SimpleExpr` itself is built server-side (it is `!Send`).
+                let tree = convert_filter_tree(when)?;
+                if tree.is_empty() {
+                    return Err(invalid(
+                        "case-when-sum aggregate requires at least one predicate in `when`",
+                    ));
+                }
+                service::AggregateColumnSpec::CaseWhenSum { when: tree, alias }
+            }
+        };
+        aggregates.push(spec);
+    }
+
+    let mut group_by = Vec::with_capacity(req.group_by.len());
+    for g in req.group_by {
+        let spec = match g {
+            wire::GroupByDef::Column(c) => {
+                check_ident(&c)?;
+                service::GroupBySpec::Column(c)
+            }
+            wire::GroupByDef::DateBucket { field } => {
+                check_ident(&field)?;
+                service::GroupBySpec::DateBucket { field }
+            }
+        };
+        group_by.push(spec);
+    }
+
+    // Aggregation filters are AND-of-leaves today; a group here is a
+    // client/runtime mismatch → InvalidArgument (same rule as count/sum).
+    let tree = convert_filter_tree(req.filters)?;
+    let filters = flatten_leaves(&tree)?;
+
+    let spec = service::AggregateSpec {
+        select_columns: req.select_columns,
+        aggregates,
+        filters,
+        group_by,
+        sort: convert_sort(req.sort),
+        limit: req.limit,
+    };
+    Ok((req.collection, spec))
+}
+
 fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {
     defs.into_iter()
         .map(|s| SortField {
@@ -630,6 +723,34 @@ pub async fn handle_message(
             };
             match service.upsert(&collection, spec).await {
                 Ok(rows_affected) => to_output(&wire::UpsertResponse { rows_affected }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_AGGREGATE => {
+            let req = match decode_and_authorize::<wire::AggregateRequest>(
+                ctx,
+                body,
+                "database.aggregate",
+                |r| (r.collection.clone(), ResourceType::Db, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            if req.aggregates.is_empty() {
+                return OutputStream::error(invalid(
+                    "aggregate requires at least one aggregate column",
+                ));
+            }
+            let (collection, spec) = match to_aggregate_spec(req) {
+                Ok(pair) => pair,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service.aggregate(&collection, spec).await {
+                Ok(records) => {
+                    let wire_records: Vec<wire::Record> =
+                        records.into_iter().map(service_record_to_wire).collect();
+                    to_output(&wire_records)
+                }
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

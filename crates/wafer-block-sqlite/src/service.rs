@@ -8,7 +8,10 @@ use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::{pk, DataType};
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec},
+    service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 
@@ -435,6 +438,14 @@ impl DatabaseService for SQLiteDatabaseService {
 
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
         DbExec::upsert(self, collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        DbExec::aggregate(self, collection, spec).await
     }
 
     // --- Schema management ---
@@ -1182,6 +1193,165 @@ mod tests {
         // The conflicting upserts never inserted a duplicate row.
         let total = DatabaseService::count(&svc, "rl", &[]).await.unwrap();
         assert_eq!(total, 1, "no duplicate row was inserted");
+    }
+
+    // -----------------------------------------------------------------------
+    // aggregate (grouped queries) — count-by-column, case-when, date-bucket
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn aggregate_grouped_count_by_column_carries_alias_and_counts() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "items",
+            vec![
+                serde_json::json!({"status": "active"}),
+                serde_json::json!({"status": "active"}),
+                serde_json::json!({"status": "inactive"}),
+            ],
+        )
+        .await;
+
+        let spec = AggregateSpec {
+            select_columns: vec!["status".into()],
+            aggregates: vec![AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![GroupBySpec::Column("status".into())],
+            sort: vec![SortField {
+                field: "status".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "items", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2, "two distinct status groups");
+        // Sorted ascending: active, inactive.
+        assert_eq!(rows[0].data["status"], serde_json::json!("active"));
+        assert_eq!(
+            rows[0].data["cnt"],
+            serde_json::json!(2),
+            "alias carries count"
+        );
+        assert_eq!(rows[1].data["status"], serde_json::json!("inactive"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn aggregate_case_when_sum_counts_matching_rows_per_group() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "reqs",
+            vec![
+                serde_json::json!({"method": "GET", "status": "ok"}),
+                serde_json::json!({"method": "GET", "status": "error"}),
+                serde_json::json!({"method": "GET", "status": "error"}),
+                serde_json::json!({"method": "POST", "status": "ok"}),
+            ],
+        )
+        .await;
+
+        // Per method: total count + conditional count of status = 'error'.
+        let spec = AggregateSpec {
+            select_columns: vec!["method".into()],
+            aggregates: vec![
+                AggregateColumnSpec::Count {
+                    alias: "cnt".into(),
+                },
+                AggregateColumnSpec::CaseWhenSum {
+                    when: vec![FilterTree::Leaf(Filter {
+                        field: "status".into(),
+                        operator: FilterOp::Equal,
+                        value: serde_json::json!("error"),
+                    })],
+                    alias: "errors".into(),
+                },
+            ],
+            filters: vec![],
+            group_by: vec![GroupBySpec::Column("method".into())],
+            sort: vec![SortField {
+                field: "method".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "reqs", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        // GET first (ascending): 3 total, 2 errors.
+        assert_eq!(rows[0].data["method"], serde_json::json!("GET"));
+        assert_eq!(rows[0].data["cnt"], serde_json::json!(3));
+        assert_eq!(
+            rows[0].data["errors"],
+            serde_json::json!(2),
+            "conditional count of status='error' in GET group"
+        );
+        // POST: 1 total, 0 errors.
+        assert_eq!(rows[1].data["method"], serde_json::json!("POST"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
+        assert_eq!(rows[1].data["errors"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn aggregate_date_bucket_groups_by_day() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        // Explicit plain-date `created_at` values so SQLite's date() buckets
+        // them deterministically (two on the 15th, one on the 16th).
+        seed_rows(
+            &svc,
+            "events",
+            vec![
+                serde_json::json!({"kind": "a", "created_at": "2026-01-15"}),
+                serde_json::json!({"kind": "b", "created_at": "2026-01-15"}),
+                serde_json::json!({"kind": "c", "created_at": "2026-01-16"}),
+            ],
+        )
+        .await;
+
+        let spec = AggregateSpec {
+            select_columns: vec![],
+            aggregates: vec![AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![GroupBySpec::DateBucket {
+                field: "created_at".into(),
+            }],
+            sort: vec![SortField {
+                field: "created_at".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "events", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2, "two day buckets");
+        assert_eq!(rows[0].data["created_at"], serde_json::json!("2026-01-15"));
+        assert_eq!(rows[0].data["cnt"], serde_json::json!(2));
+        assert_eq!(rows[1].data["created_at"], serde_json::json!("2026-01-16"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
     }
 
     // -----------------------------------------------------------------------
