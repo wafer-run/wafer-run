@@ -105,11 +105,10 @@ pub fn build_upsert(
 /// identifier (`[A-Za-z0-9_]`). These names are interpolated into the
 /// `CASE`/`SET` expression text rather than parameter-bound, so this is a
 /// fail-closed guard, not a passthrough.
-// Every parameter here names a distinct, independently-varying part of the
-// generated statement (table/column identifiers, the row's id/key values,
-// and the two time bounds) — bundling them into a struct would just move the
-// same ten fields into a builder callers still have to fill in one at a time.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "windowed-counter upsert is a low-level SQL builder with independent column/value parameters (table + 4 column identifiers + id/key values + 2 time bounds + backend); bundling them into a config struct would just move the same fields into a builder callers still have to fill in one at a time, without improving clarity"
+)]
 pub fn build_windowed_counter_upsert(
     table: &str,
     conflict_column: &str,
