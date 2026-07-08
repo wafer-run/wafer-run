@@ -314,6 +314,15 @@ impl DatabaseService for PostgresDatabaseService {
         DbExec::update_where(self, collection, filters, data).await
     }
 
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        DbExec::update_where_count(self, collection, filters, data).await
+    }
+
     async fn increment_field_where(
         &self,
         collection: &str,

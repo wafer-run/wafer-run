@@ -124,6 +124,13 @@ pub enum AggregateColumnSpec {
         /// Output alias.
         alias: String,
     },
+    /// `MAX(field) AS alias`.
+    Max {
+        /// Column to take the maximum of.
+        field: String,
+        /// Output alias.
+        alias: String,
+    },
     /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
     /// conditional count. `when` is the validated predicate forest,
     /// AND-combined at the top level.
@@ -190,6 +197,13 @@ impl AggregateSpec {
                 },
                 AggregateColumnSpec::Avg { field, alias } => AggregateColumn {
                     func: AggFunc::Avg,
+                    field: Some(field),
+                    alias,
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumnSpec::Max { field, alias } => AggregateColumn {
+                    func: AggFunc::Max,
                     field: Some(field),
                     alias,
                     cast_as: None,
@@ -390,6 +404,23 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
             self.update(collection, &last_id, data).await?;
         }
         Ok(())
+    }
+
+    /// Bulk-update all records matching filters and return the number of updated rows.
+    ///
+    /// Default impl: count then update. Small TOCTOU window — concurrent writes
+    /// to matching rows may be updated without being counted, or vice versa.
+    /// Native sqlite/postgres impls override with a single UPDATE statement that
+    /// returns the affected-row count atomically.
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        let n = self.count(collection, filters).await?;
+        self.update_where(collection, filters, data).await?;
+        Ok(n)
     }
 
     /// Atomically increment `col` by `delta` on every row in `collection`

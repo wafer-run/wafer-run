@@ -229,6 +229,23 @@ fn database_action_spec(op: &str) -> ActionSpec {
             message_schema: None,
             response_schema: None,
         },
+        ServiceOp::DATABASE_UPDATE_WHERE_COUNT => ActionSpec {
+            description: "Update fields on all records in a collection that match a set of filters and return the number of records updated.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "filters": { "type": "array", "items": filter_schema() }
+                },
+                "required": ["collection"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                }
+            })),
+        },
         ServiceOp::DATABASE_DELETE => ActionSpec {
             description: "Delete a record by ID.".into(),
             message_schema: Some(json!({

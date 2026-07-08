@@ -442,6 +442,13 @@ fn aggregate_parity(backend: Backend) {
                 inner_expr: None,
             },
             AggregateColumn::case_when_sum("errors", query::tree_to_simple_expr(&when_direct)),
+            AggregateColumn {
+                func: AggFunc::Max,
+                field: Some("value".to_string()),
+                alias: "max_val".to_string(),
+                cast_as: None,
+                inner_expr: None,
+            },
         ],
         filters: vec![Filter {
             field: "active".to_string(),
@@ -476,6 +483,10 @@ fn aggregate_parity(backend: Backend) {
                     value: json!(400),
                 })],
                 alias: "errors".to_string(),
+            },
+            wire::AggregateColumnDef::Max {
+                field: "value".to_string(),
+                alias: "max_val".to_string(),
             },
         ],
         filters: vec![wire::FilterNode::Leaf(wire::FilterDef {
@@ -514,4 +525,31 @@ fn aggregate_render_parity_sqlite() {
 #[test]
 fn aggregate_render_parity_postgres() {
     aggregate_parity(Backend::Postgres);
+}
+
+/// `AggregateColumnDef::Max` uses serde's default externally-tagged
+/// representation for struct variants: `{"Max": {"field": ..., "alias": ...}}`.
+/// Pin the JSON shape (a client-facing wire contract) and prove it round-trips.
+#[test]
+fn aggregate_column_def_max_serde_round_trip() {
+    let def = wire::AggregateColumnDef::Max {
+        field: "value".to_string(),
+        alias: "max_val".to_string(),
+    };
+
+    let value = serde_json::to_value(&def).expect("serialize AggregateColumnDef::Max");
+    assert_eq!(
+        value,
+        json!({"Max": {"field": "value", "alias": "max_val"}})
+    );
+
+    let back: wire::AggregateColumnDef =
+        serde_json::from_value(value).expect("deserialize AggregateColumnDef::Max");
+    match back {
+        wire::AggregateColumnDef::Max { field, alias } => {
+            assert_eq!(field, "value");
+            assert_eq!(alias, "max_val");
+        }
+        other => panic!("expected Max, got {other:?}"),
+    }
 }

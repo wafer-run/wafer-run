@@ -16,8 +16,8 @@ use wafer_block::{
         ExecRawResponse, ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode,
         GetRequest, IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest,
         QueryRequest, QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest, UpsertRequest,
-        UpsertResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereCountRequest,
+        UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -629,6 +629,30 @@ dual_api! {
             Some("db")
         )?;
         Ok(())
+    }
+
+    /// Update all records matching the filters and return the number of updated rows.
+    pub fn update_by_filters_count(
+        ctx,
+        collection: &str,
+        filters: Vec<Filter>,
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, WaferError> {
+        let req = UpdateWhereCountRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(&filters),
+            data,
+        };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_UPDATE_WHERE_COUNT,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: UpdateWhereCountResponse = decode(&data)?;
+        Ok(resp.count)
     }
 
     /// Atomically increment `col` by `delta` on every row in `collection`

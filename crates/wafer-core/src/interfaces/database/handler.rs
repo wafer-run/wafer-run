@@ -262,6 +262,11 @@ pub fn to_aggregate_spec(
                 check_ident(&alias)?;
                 service::AggregateColumnSpec::Avg { field, alias }
             }
+            wire::AggregateColumnDef::Max { field, alias } => {
+                check_ident(&field)?;
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::Max { field, alias }
+            }
             wire::AggregateColumnDef::CaseWhenSum { when, alias } => {
                 check_ident(&alias)?;
                 // Bounds + operator validation on the predicate tree; the
@@ -721,6 +726,32 @@ pub async fn handle_message(
                 .await
             {
                 Ok(()) => OutputStream::respond(vec![]),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_UPDATE_WHERE_COUNT => {
+            let req = match decode_and_authorize::<wire::UpdateWhereCountRequest>(
+                ctx,
+                body,
+                "database.update_where_count",
+                |r| (r.collection.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            let tree = match convert_filter_tree(req.filters) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            let filters = match flatten_leaves(&tree) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service
+                .update_where_count(&req.collection, &filters, req.data)
+                .await
+            {
+                Ok(count) => to_output(&wire::UpdateWhereCountResponse { count }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

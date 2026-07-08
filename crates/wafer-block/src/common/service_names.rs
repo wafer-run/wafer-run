@@ -69,6 +69,8 @@ impl ServiceOp {
     pub const DATABASE_TAKE_WHERE: &str = "database.take_where";
     /// Update every row matching a filter.
     pub const DATABASE_UPDATE_WHERE: &str = "database.update_where";
+    /// Update every row matching a filter and return the affected count.
+    pub const DATABASE_UPDATE_WHERE_COUNT: &str = "database.update_where_count";
     /// Atomically increment a numeric column on rows matching a filter.
     pub const DATABASE_INCREMENT_FIELD_WHERE: &str = "database.increment_field_where";
     /// Insert a row, resolving conflicts via an `ON CONFLICT` strategy
@@ -179,6 +181,7 @@ impl ServiceOp {
         Self::DATABASE_CREATE,
         Self::DATABASE_UPDATE,
         Self::DATABASE_UPDATE_WHERE,
+        Self::DATABASE_UPDATE_WHERE_COUNT,
         Self::DATABASE_DELETE,
         Self::DATABASE_DELETE_WHERE,
         Self::DATABASE_DELETE_WHERE_COUNT,

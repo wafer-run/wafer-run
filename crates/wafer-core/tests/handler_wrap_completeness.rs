@@ -218,6 +218,15 @@ mod db_fakes {
             self.record("update_where");
             Ok(())
         }
+        async fn update_where_count(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+            _data: std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<i64, DatabaseError> {
+            self.record("update_where_count");
+            Ok(0)
+        }
         async fn increment_field_where(
             &self,
             _collection: &str,
@@ -538,6 +547,11 @@ fn database_op_body(op: &str) -> Vec<u8> {
             data: HashMap::new(),
         }),
         ServiceOp::DATABASE_UPDATE_WHERE => codec::encode(&wire::UpdateWhereRequest {
+            collection: "suppers_ai__auth__users".into(),
+            filters: vec![],
+            data: HashMap::new(),
+        }),
+        ServiceOp::DATABASE_UPDATE_WHERE_COUNT => codec::encode(&wire::UpdateWhereCountRequest {
             collection: "suppers_ai__auth__users".into(),
             filters: vec![],
             data: HashMap::new(),

@@ -373,6 +373,23 @@ async fn aggregate_bad_sum_field_is_invalid_argument() {
 }
 
 #[tokio::test]
+async fn aggregate_bad_max_field_is_invalid_argument() {
+    let req = wire::AggregateRequest {
+        collection: "suppers_ai__auth__users".into(),
+        select_columns: vec![],
+        aggregates: vec![wire::AggregateColumnDef::Max {
+            field: "value) FROM x --".into(),
+            alias: "max_val".into(),
+        }],
+        filters: vec![],
+        group_by: vec![],
+        sort: vec![],
+        limit: 0,
+    };
+    expect_invalid(dispatch(&AllowCtx, &req).await, "hostile max field").await;
+}
+
+#[tokio::test]
 async fn aggregate_bad_date_bucket_field_is_invalid_argument() {
     let req = wire::AggregateRequest {
         collection: "suppers_ai__auth__users".into(),
