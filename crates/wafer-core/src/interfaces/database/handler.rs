@@ -215,19 +215,25 @@ pub async fn handle_message(
                 Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
             };
-            // `filters` carries the flattened leaves for the current
-            // `DbExec::list` fast path (which reads `opts.filters`); groups
-            // ride along in `filter_tree` so a later `DbExec::list` change can
-            // prefer the tree without touching this arm. An all-leaf tree
-            // flattens exactly; a group flattens to empty here but is preserved
-            // in `filter_tree`.
+            if matches!(&req.columns, Some(c) if c.is_empty()) {
+                return OutputStream::error(invalid("columns must be non-empty when specified"));
+            }
+            // All LIST filtering — flat or group — flows through
+            // `filter_tree`; `DbExec::list` renders it via
+            // `query::build_condition_tree` as the `extra_condition` AND-ed
+            // onto the (now-always-empty) flat `filters` clause. `filters`
+            // stays empty here rather than the flattened leaves: keeping both
+            // populated would double-apply flat predicates (once via
+            // `opts.filters`, once via the `filter_tree` leaves already
+            // covering them).
             let opts = ListOptions {
-                filters: flatten_leaves(&tree).unwrap_or_default(),
+                filters: Vec::new(),
                 sort: convert_sort(req.sort),
                 limit: req.limit,
                 offset: req.offset,
                 skip_count: req.skip_count,
                 filter_tree: Some(tree),
+                columns: req.columns,
             };
             match service.list(&req.collection, &opts).await {
                 Ok(list) => to_output(service_record_list_to_wire(list)),

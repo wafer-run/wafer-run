@@ -406,6 +406,7 @@ async fn foreign_collection_list_denied_never_reaches_service() {
         limit: 10,
         offset: 0,
         skip_count: false,
+        columns: None,
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_without_wrap_meta(ServiceOp::DATABASE_LIST);
@@ -510,6 +511,7 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
         limit: 10,
         offset: 0,
         skip_count: false,
+        columns: None,
     })
     .unwrap();
     expect_success(

@@ -98,6 +98,7 @@ dual_api! {
             limit: opts.limit,
             offset: opts.offset,
             skip_count: opts.skip_count,
+            columns: opts.columns.clone(),
         };
         let data = svc!(
             ctx, BLOCK,
@@ -402,6 +403,7 @@ dual_api! {
                 offset: (page - 1).saturating_mul(page_size),
                 skip_count: false,
                 filter_tree: None,
+                columns: None,
             }
         ))
     }

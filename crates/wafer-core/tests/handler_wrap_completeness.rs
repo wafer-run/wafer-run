@@ -526,6 +526,7 @@ fn database_op_body(op: &str) -> Vec<u8> {
             limit: 10,
             offset: 0,
             skip_count: false,
+            columns: None,
         }),
         ServiceOp::DATABASE_CREATE => codec::encode(&wire::CreateRequest {
             collection: "suppers_ai__auth__users".into(),

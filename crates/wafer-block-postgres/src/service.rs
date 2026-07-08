@@ -506,6 +506,7 @@ mod tests {
             offset: 0,
             skip_count: false,
             filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
         let sql = stmt.sql;
@@ -534,6 +535,7 @@ mod tests {
             offset: 20,
             skip_count: false,
             filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
         assert!(stmt.sql.contains("ORDER BY"));

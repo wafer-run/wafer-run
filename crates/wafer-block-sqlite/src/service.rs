@@ -500,7 +500,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
 #[cfg(test)]
 mod tests {
-    use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+    use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
     use wafer_sql_utils::value::sea_values_to_json;
 
     use super::*;
@@ -592,6 +592,7 @@ mod tests {
             offset: 0,
             skip_count: false,
             filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
@@ -625,6 +626,7 @@ mod tests {
             offset: 20,
             skip_count: false,
             filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
         assert!(stmt.sql.contains("ORDER BY"));
@@ -1198,6 +1200,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_with_column_projection_returns_only_selected_columns() {
+        // `columns: Some([...])` renders `SELECT id, name` (not `SELECT *`),
+        // so the unprojected `secret` column must be absent from the returned
+        // record even though the row has a value for it.
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "rows",
+            vec![serde_json::json!({"name": "a", "secret": "s1"})],
+        )
+        .await;
+        let opts = ListOptions {
+            columns: Some(vec!["id".into(), "name".into()]),
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts).await.unwrap();
+        let row = &list.records[0].data;
+        assert!(row.contains_key("name"), "projected column present");
+        assert!(!row.contains_key("secret"), "unprojected column absent");
+        // The projection is honored, but a `None` projection still returns
+        // every column — sanity-check the fixture actually stored `secret`.
+        let full = DatabaseService::list(&svc, "rows", &ListOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(full.records[0].data["secret"], serde_json::json!("s1"));
+    }
+
+    #[tokio::test]
+    async fn list_with_any_group_filter_returns_only_or_matching_rows() {
+        // A group filter (`Any` = OR) must actually execute against the DB via
+        // `filter_tree` → `build_condition_tree` → `extra_condition`. Before
+        // Task 4, LIST flattened the tree to empty and returned ALL rows (the
+        // Task 3 fail-open). Here `status = 'active' OR status = 'pending'`
+        // must return exactly the two matching rows and skip 'archived',
+        // and `total_count` (computed with the same extra_condition) must
+        // agree with the filtered set — not the full table.
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "rows",
+            vec![
+                serde_json::json!({"name": "a", "status": "active"}),
+                serde_json::json!({"name": "b", "status": "pending"}),
+                serde_json::json!({"name": "c", "status": "archived"}),
+                serde_json::json!({"name": "d", "status": "archived"}),
+            ],
+        )
+        .await;
+
+        let tree = vec![FilterTree::Any(vec![
+            FilterTree::Leaf(Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("active"),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("pending"),
+            }),
+        ])];
+        let opts = ListOptions {
+            filters: Vec::new(),
+            filter_tree: Some(tree),
+            sort: vec![SortField {
+                field: "name".into(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts).await.unwrap();
+
+        assert_eq!(
+            list.records.len(),
+            2,
+            "only the two OR-matching rows should return, not all four"
+        );
+        let statuses: Vec<&str> = list
+            .records
+            .iter()
+            .map(|r| r.data["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, vec!["active", "pending"]);
+        assert!(
+            !statuses.contains(&"archived"),
+            "archived rows must be excluded by the group filter"
+        );
+        assert_eq!(
+            list.total_count, 2,
+            "total_count must reflect the filtered set (extra_condition applied to COUNT), not the full table"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_group_filter_on_column_absent_from_schema_lazily_adds_it() {
+        // A field that appears ONLY inside a group (`filter_tree`), never in
+        // the flat `filters` list, must still get its lazy TEXT column added
+        // by `ensure_query_columns` (which now walks the tree's leaves). If it
+        // didn't, the SELECT would fail with "no such column".
+        let svc = make_test_svc();
+        seed_rows(&svc, "rows", vec![serde_json::json!({"name": "a"})]).await;
+
+        let tree = vec![FilterTree::Any(vec![FilterTree::Leaf(Filter {
+            field: "tier".into(), // absent from the seeded schema
+            operator: FilterOp::Equal,
+            value: serde_json::json!("gold"),
+        })])];
+        let opts = ListOptions {
+            filter_tree: Some(tree),
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts)
+            .await
+            .expect("group-only filter column must be lazily added, not error");
+        // No row has tier='gold' (the column was just added as NULL), so the
+        // filter matches nothing — but the query must succeed.
+        assert!(list.records.is_empty());
+        assert_eq!(list.total_count, 0);
+    }
+
+    #[tokio::test]
     async fn get_missing_row_returns_not_found() {
         let svc = make_test_svc();
         seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
@@ -1261,7 +1384,7 @@ mod tests {
         // filter column would be "added" against a table that doesn't exist,
         // which surfaces as a real DDL error rather than being swallowed.
         let res = svc
-            .ensure_query_columns("no_such_table", &filters, &[])
+            .ensure_query_columns("no_such_table", &filters, &[], None)
             .await;
         assert!(
             res.is_err(),

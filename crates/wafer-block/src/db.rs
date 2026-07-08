@@ -27,6 +27,11 @@ pub struct ListOptions {
     /// it in preference to `filters` (which stays for the flat-AND fast path
     /// and back-compat). `None` = use `filters`.
     pub filter_tree: Option<Vec<FilterTree>>,
+    /// Optional column projection. `None` selects every column
+    /// (`SELECT *`); `Some(cols)` selects exactly `cols` (`SELECT
+    /// {cols}`). An explicit empty `Vec` is rejected by the handler before
+    /// it reaches here — see `database::handler`'s `DATABASE_LIST` arm.
+    pub columns: Option<Vec<String>>,
 }
 
 /// A single filter condition applied to a database query.

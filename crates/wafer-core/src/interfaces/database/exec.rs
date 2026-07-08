@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use wafer_block::db::{Filter, ListOptions, SortField};
+use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
 
@@ -36,6 +36,28 @@ fn sorted_pairs(data: &HashMap<String, serde_json::Value>) -> Vec<(String, serde
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
+}
+
+/// Recursively collect the `field` name of every [`FilterTree::Leaf`],
+/// depth-first. Used by [`DbExec::ensure_query_columns`] so fields that only
+/// appear inside a group (`All`/`Any`) — not the flat `opts.filters` list —
+/// still get their lazy TEXT column added before the query runs.
+fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
+    fn walk<'a>(node: &'a FilterTree, out: &mut Vec<&'a str>) {
+        match node {
+            FilterTree::Leaf(f) => out.push(f.field.as_str()),
+            FilterTree::All(children) | FilterTree::Any(children) => {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for node in nodes {
+        walk(node, &mut out);
+    }
+    out
 }
 
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
@@ -202,22 +224,29 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Lazily add TEXT columns for `filters`/`sort` fields missing from
-    /// `table` (they default to NULL), so queries and filtered writes never
-    /// fail with "no such column" for a field the schema simply hasn't seen
-    /// yet.
+    /// Lazily add TEXT columns for `filters`/`sort`/`filter_tree` fields
+    /// missing from `table` (they default to NULL), so queries and filtered
+    /// writes never fail with "no such column" for a field the schema simply
+    /// hasn't seen yet.
+    ///
+    /// `filter_tree` fields aren't included in `filters` — a group's leaves
+    /// live only in the tree (see [`DbExec::list`]) — so `filter_tree` is
+    /// walked separately via [`tree_leaf_fields`] to cover them too.
     async fn ensure_query_columns(
         &self,
         table: &str,
         filters: &[Filter],
         sort: &[SortField],
+        filter_tree: Option<&[FilterTree]>,
     ) -> Result<(), DatabaseError> {
         let existing = self.get_columns(table).await?;
         let mut added: Vec<String> = Vec::new();
+        let tree_fields = filter_tree.map(tree_leaf_fields).unwrap_or_default();
         let fields = filters
             .iter()
             .map(|f| f.field.as_str())
-            .chain(sort.iter().map(|s| s.field.as_str()));
+            .chain(sort.iter().map(|s| s.field.as_str()))
+            .chain(tree_fields);
         for field in fields {
             let safe_field = sanitize_ident(field);
             let lower = safe_field.to_lowercase();
@@ -239,6 +268,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `list`: table-exists guard → ensure columns → optional count → select.
+    ///
+    /// `opts.filter_tree`, when `Some`, renders via
+    /// [`wafer_sql_utils::query::build_condition_tree`] and is AND-ed onto
+    /// the flat `opts.filters` clause as the `extra_condition` of both the
+    /// COUNT and the SELECT — the same `Cond` folds into both, so
+    /// `total_count` always matches the rows actually returned. A `None`
+    /// tree (or an empty one) is a no-op, so legacy callers that only ever
+    /// set `opts.filters` are unaffected.
     async fn list(
         &self,
         collection: &str,
@@ -254,23 +291,72 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             });
         }
 
-        self.ensure_query_columns(&table, &opts.filters, &opts.sort)
-            .await?;
+        self.ensure_query_columns(
+            &table,
+            &opts.filters,
+            &opts.sort,
+            opts.filter_tree.as_deref(),
+        )
+        .await?;
 
-        let total_count: Option<i64> = if opts.skip_count {
-            None
-        } else {
-            let count_stmt =
-                wafer_sql_utils::aggregate::build_count(&table, &opts.filters, Self::BACKEND);
-            Some(
-                self.run_scalar_i64(&count_stmt.sql, &sea_values_to_json(count_stmt.values))
-                    .await?,
-            )
+        // Render both statements to `Statement` (plain `String` + `Vec<Value>`,
+        // both `Send`) before any `.await` below, inside a nested block so
+        // the intermediate `Cond` is fully dropped (its storage freed) by
+        // the closing brace — *before* the generator state machine for this
+        // async fn (via `#[wafer_async_trait]` / `async_trait`) crosses an
+        // `.await`. `Cond` — and the sea-query builder types it flows
+        // through — carries `Rc<dyn Iden>` internally (this crate doesn't
+        // enable sea-query's `thread-safe` feature), so it is **not**
+        // `Send`; a value of that type still in scope (even if logically
+        // moved-out) at an `.await` point makes the whole future non-`Send`,
+        // which the shared `DbExec` trait requires for the native
+        // (non-wasm-component) build.
+        let (count_stmt, select_stmt) = {
+            let extra_cond = opts
+                .filter_tree
+                .as_deref()
+                .and_then(wafer_sql_utils::query::build_condition_tree);
+
+            let count_stmt = (!opts.skip_count).then(|| {
+                wafer_sql_utils::aggregate::build_count_with_condition(
+                    &table,
+                    &opts.filters,
+                    extra_cond.clone(),
+                    Self::BACKEND,
+                )
+            });
+
+            let select_stmt = match &opts.columns {
+                Some(cols) => {
+                    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                    wafer_sql_utils::query::build_select_columns(
+                        &table,
+                        &refs,
+                        opts,
+                        extra_cond,
+                        Self::BACKEND,
+                    )
+                }
+                None => wafer_sql_utils::query::build_select_with_condition(
+                    &table,
+                    opts,
+                    extra_cond,
+                    Self::BACKEND,
+                ),
+            };
+            (count_stmt, select_stmt)
         };
 
-        let stmt = wafer_sql_utils::query::build_select(&table, opts, Self::BACKEND);
+        let total_count: Option<i64> = match count_stmt {
+            Some(stmt) => Some(
+                self.run_scalar_i64(&stmt.sql, &sea_values_to_json(stmt.values))
+                    .await?,
+            ),
+            None => None,
+        };
+
         let records = self
-            .run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
+            .run_fetch(&select_stmt.sql, &sea_values_to_json(select_stmt.values))
             .await?;
 
         let page = if opts.limit > 0 {
@@ -297,7 +383,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if !self.dbx_table_exists(&table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[]).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
         let stmt = wafer_sql_utils::aggregate::build_count(&table, filters, Self::BACKEND);
         self.run_scalar_i64(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
@@ -421,7 +508,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if !self.dbx_table_exists(&table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[]).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
         let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
@@ -438,7 +526,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if !self.dbx_table_exists(&table).await? {
             return Ok(Vec::new());
         }
-        self.ensure_query_columns(&table, filters, &[]).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
         let stmt =
             wafer_sql_utils::query::build_delete_where_returning(&table, filters, Self::BACKEND);
         self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -461,7 +550,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(&table, &data).await?;
-        self.ensure_query_columns(&table, filters, &[]).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
         let pairs = sorted_pairs(&data);
         let stmt =
             wafer_sql_utils::query::build_update_where(&table, &pairs, filters, Self::BACKEND);
@@ -484,7 +574,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if !self.dbx_table_exists(&table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[]).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
         let stmt = wafer_sql_utils::query::build_increment_field_where(
             &table,
             col,

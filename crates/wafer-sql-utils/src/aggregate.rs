@@ -1,4 +1,4 @@
-use sea_query::{Alias, Asterisk, Expr, Func, Query, SimpleExpr};
+use sea_query::{Alias, Asterisk, Cond, Expr, Func, Query, SimpleExpr};
 use wafer_block::db::{Filter, SortField};
 
 use crate::{
@@ -8,12 +8,17 @@ use crate::{
 };
 
 /// Shared tail of the single-aggregate builders:
-/// `SELECT {expr} AS {alias} FROM {table} WHERE {filters}`.
+/// `SELECT {expr} AS {alias} FROM {table} WHERE {filters}`, plus an optional
+/// extra `Cond` AND-ed with the flat `filters` clause (see
+/// [`crate::query::build_select_with_condition`] for the SELECT-side
+/// equivalent — used to fold a `FilterTree`-derived `Cond` into a COUNT so
+/// `total_count` matches the filtered row set, not the whole table).
 fn agg_select(
     table: &str,
     expr: SimpleExpr,
     alias: &str,
     filters: &[Filter],
+    extra_condition: Option<Cond>,
     backend: Backend,
 ) -> crate::Statement {
     let mut query = Query::select();
@@ -24,6 +29,9 @@ fn agg_select(
     if let Some(cond) = build_condition(filters) {
         query.cond_where(cond);
     }
+    if let Some(extra) = extra_condition {
+        query.cond_where(extra);
+    }
 
     let (sql, values) = crate::render_select(query, backend);
     crate::Statement::new(sql, values, table)
@@ -31,11 +39,29 @@ fn agg_select(
 
 /// Build SELECT COUNT(*) FROM {table} WHERE {filters}.
 pub fn build_count(table: &str, filters: &[Filter], backend: Backend) -> crate::Statement {
+    build_count_with_condition(table, filters, None, backend)
+}
+
+/// Build SELECT COUNT(*) FROM {table} WHERE {filters} AND {extra_condition}.
+///
+/// Use this when `filters` is the flat AND-of-filters list and there is also
+/// a `FilterTree`-derived `Cond` (e.g. an OR group) that must be folded in —
+/// most commonly to compute `total_count` for a `LIST` whose rows are
+/// selected via [`crate::query::build_select_columns`] /
+/// [`crate::query::build_select_with_condition`] with the same
+/// `extra_condition`, so the count matches the actual filtered result set.
+pub fn build_count_with_condition(
+    table: &str,
+    filters: &[Filter],
+    extra_condition: Option<Cond>,
+    backend: Backend,
+) -> crate::Statement {
     agg_select(
         table,
         Func::count(Expr::col(Asterisk)).into(),
         "cnt",
         filters,
+        extra_condition,
         backend,
     )
 }
@@ -51,7 +77,7 @@ pub fn build_sum(
         Func::sum(Expr::col(DynCol(field.into()))).into(),
         Expr::val(0i64).into(),
     ]);
-    agg_select(table, expr.into(), "total", filters, backend)
+    agg_select(table, expr.into(), "total", filters, None, backend)
 }
 
 /// Build a per-day count over a date window.
@@ -124,6 +150,7 @@ pub fn build_avg(
         Func::avg(Expr::col(DynCol(field.into()))).into(),
         "avg_val",
         filters,
+        None,
         backend,
     )
 }

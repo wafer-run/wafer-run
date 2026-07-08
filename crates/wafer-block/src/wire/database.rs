@@ -104,6 +104,12 @@ pub struct ListRequest {
     /// UIs should leave this `false` and read `total_count` normally.
     #[serde(default)]
     pub skip_count: bool,
+    /// Optional column projection. `None` (the default) selects every
+    /// column; `Some(cols)` selects exactly `cols`. An empty `Some(vec![])`
+    /// is rejected by the handler as `InvalidArgument` — it can't express
+    /// "no columns" as a meaningful SELECT.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
 }
 
 /// Request for `database.create`.
@@ -372,6 +378,7 @@ mod tests {
             limit: 50,
             offset: 100,
             skip_count: false,
+            columns: Some(vec!["id".into(), "active".into()]),
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListRequest = codec::decode(&encoded).expect("decode");
@@ -382,6 +389,26 @@ mod tests {
         assert_eq!(decoded.sort.len(), 1);
         assert!(decoded.sort[0].desc);
         assert!(!decoded.skip_count);
+        assert_eq!(
+            decoded.columns,
+            Some(vec!["id".to_string(), "active".to_string()])
+        );
+    }
+
+    #[test]
+    fn list_request_columns_none_round_trips() {
+        let original = ListRequest {
+            collection: "users".into(),
+            filters: vec![],
+            sort: vec![],
+            limit: 0,
+            offset: 0,
+            skip_count: false,
+            columns: None,
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: ListRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.columns, None);
     }
 
     #[test]
@@ -470,11 +497,12 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            columns: None,
         };
         let encoded = codec::encode(&req).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex, "86aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400aa736b69705f636f756e74c2",
+            hex, "87aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400aa736b69705f636f756e74c2a7636f6c756d6e73c0",
             "ListRequest schema changed — review consumer impact before updating this literal"
         );
     }
