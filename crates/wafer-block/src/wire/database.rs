@@ -371,6 +371,13 @@ pub enum AggregateColumnDef {
         /// Output alias for the average.
         alias: String,
     },
+    /// `MAX(field) AS alias` — greatest value in each group.
+    Max {
+        /// Column to take the maximum of.
+        field: String,
+        /// Output alias for the maximum.
+        alias: String,
+    },
     /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
     /// conditional count (no `FILTER` clause required). `when` is a predicate
     /// forest, AND-combined at the top level; the handler bounds and validates

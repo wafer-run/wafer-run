@@ -124,6 +124,13 @@ pub enum AggregateColumnSpec {
         /// Output alias.
         alias: String,
     },
+    /// `MAX(field) AS alias`.
+    Max {
+        /// Column to take the maximum of.
+        field: String,
+        /// Output alias.
+        alias: String,
+    },
     /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
     /// conditional count. `when` is the validated predicate forest,
     /// AND-combined at the top level.
@@ -190,6 +197,13 @@ impl AggregateSpec {
                 },
                 AggregateColumnSpec::Avg { field, alias } => AggregateColumn {
                     func: AggFunc::Avg,
+                    field: Some(field),
+                    alias,
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumnSpec::Max { field, alias } => AggregateColumn {
+                    func: AggFunc::Max,
                     field: Some(field),
                     alias,
                     cast_as: None,

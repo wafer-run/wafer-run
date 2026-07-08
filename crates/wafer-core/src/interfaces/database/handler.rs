@@ -262,6 +262,11 @@ pub fn to_aggregate_spec(
                 check_ident(&alias)?;
                 service::AggregateColumnSpec::Avg { field, alias }
             }
+            wire::AggregateColumnDef::Max { field, alias } => {
+                check_ident(&field)?;
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::Max { field, alias }
+            }
             wire::AggregateColumnDef::CaseWhenSum { when, alias } => {
                 check_ident(&alias)?;
                 // Bounds + operator validation on the predicate tree; the
