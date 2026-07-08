@@ -1,6 +1,10 @@
 use sea_query::{OnConflict, Query, SimpleExpr};
 
-use crate::{ident::DynCol, value::json_to_sea_value, Backend};
+use crate::{
+    ident::{validate_ident, DynCol},
+    value::json_to_sea_value,
+    Backend, SqlBuildError,
+};
 
 /// Build INSERT ... ON CONFLICT (conflict_cols) DO UPDATE SET {update_columns} = excluded.{col}.
 ///
@@ -46,100 +50,155 @@ pub fn build_upsert(
     crate::Statement::new(sql, values, table)
 }
 
-/// Build the atomic rate-limit upsert for a fixed-window counter.
+/// Build the atomic windowed-counter upsert: insert a fresh counter row, or
+/// increment it if the stored window is still current, or reset it to 1 if
+/// the stored window has expired.
 ///
 /// Emits the dialect-portable equivalent of:
 ///
 /// ```sql
-/// INSERT INTO {table} (id, key, count, window_start, created_at, updated_at)
-/// VALUES (?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-/// ON CONFLICT(key) DO UPDATE SET
-///   count        = CASE WHEN window_start < ? THEN 1 ELSE count + 1 END,
-///   window_start = CASE WHEN window_start < ? THEN ? ELSE window_start END,
-///   updated_at   = CURRENT_TIMESTAMP
+/// INSERT INTO {table} (id, {conflict_column}, {count_field}, {window_field}, {created_fields...}, {updated_fields...})
+/// VALUES (?, ?, 1, ?, CURRENT_TIMESTAMP, ..., CURRENT_TIMESTAMP, ...)
+/// ON CONFLICT({conflict_column}) DO UPDATE SET
+///   {count_field}       = CASE WHEN {window_field} < ? THEN 1 ELSE {count_field} + 1 END,
+///   {window_field}      = CASE WHEN {window_field} < ? THEN ? ELSE {window_field} END,
+///   {updated_fields...} = CURRENT_TIMESTAMP
 /// ```
 ///
 /// Semantics:
-/// - First request in a window: row is inserted with `count=1`,
-///   `window_start=now`.
+/// - First request in a window: row is inserted with `{count_field}=1`,
+///   `{window_field}=now`.
 /// - Subsequent request inside the same window
-///   (`stored window_start >= window_cutoff`): increments `count` by 1.
+///   (`stored {window_field} >= window_cutoff`): increments `{count_field}`
+///   by 1.
 /// - First request in a new window
-///   (`stored window_start < window_cutoff`): resets `count=1` and rolls
-///   `window_start` forward to `now`.
+///   (`stored {window_field} < window_cutoff`): resets `{count_field}=1` and
+///   rolls `{window_field}` forward to `now`.
 ///
-/// The `key` column must carry a UNIQUE constraint (the conflict target).
+/// This is generic windowed-counter infrastructure — the fixed-window
+/// rate-limit block is its first caller, but any block needing an atomic
+/// "increment within a rolling window, else reset" counter (usage quotas,
+/// abuse throttles, etc.) can use it directly.
+///
+/// The `conflict_column` must carry a UNIQUE constraint (the conflict
+/// target).
 ///
 /// Arguments:
+/// - `conflict_column` — name of the UNIQUE column used as the conflict
+///   target (e.g. `"key"`).
 /// - `id` — fresh per-call row identifier; only used when no existing row
-///   for `key` is present.
-/// - `key` — rate-limit bucket key (e.g. `"user:<id>:login"`).
-/// - `now` — current epoch-seconds; recorded as `window_start` on insert
+///   matching `key` is present.
+/// - `key` — the value stored in `conflict_column` for this row (e.g.
+///   `"user:<id>:login"`).
+/// - `count_field` — name of the counter column (e.g. `"count"`).
+/// - `window_field` — name of the window-start column (e.g.
+///   `"window_start"`).
+/// - `created_fields` — creation-timestamp columns (e.g. `["created_at"]`).
+///   Stamped `CURRENT_TIMESTAMP` on **INSERT only**; they are *never* written
+///   in the `ON CONFLICT ... DO UPDATE SET` clause, so a row's creation time
+///   stays immutable across every subsequent counter update.
+/// - `updated_fields` — modification-timestamp columns (e.g.
+///   `["updated_at"]`). Stamped `CURRENT_TIMESTAMP` on **both** the initial
+///   INSERT and every conflicting update.
+/// - `now` — current epoch-seconds; recorded as `{window_field}` on insert
 ///   or on window-reset.
-/// - `window_cutoff` — `now - window_secs`; rows whose `window_start` is
+/// - `window_cutoff` — `now - window_secs`; rows whose `{window_field}` is
 ///   strictly less than this are treated as expired.
-pub fn build_rate_limit_upsert(
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] if `conflict_column`,
+/// `count_field`, `window_field`, or any `created_fields`/`updated_fields`
+/// entry is not a plain identifier (`[A-Za-z0-9_]`). These names are
+/// interpolated into the `CASE`/`SET` expression text rather than
+/// parameter-bound, so this is a fail-closed guard, not a passthrough.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "windowed-counter upsert is a low-level SQL builder with independent column/value parameters (table + 4 column identifiers + created/updated timestamp column lists + id/key values + 2 time bounds + backend); bundling them into a config struct would just move the same fields into a builder callers still have to fill in one at a time, without improving clarity"
+)]
+pub fn build_windowed_counter_upsert(
     table: &str,
+    conflict_column: &str,
     id: &str,
     key: &str,
+    count_field: &str,
+    window_field: &str,
+    created_fields: &[&str],
+    updated_fields: &[&str],
     now: i64,
     window_cutoff: i64,
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     use sea_query::CaseStatement;
+
+    let conflict_column = validate_ident(conflict_column)?;
+    let count_field = validate_ident(count_field)?;
+    let window_field = validate_ident(window_field)?;
+    let created_fields: Vec<&str> = created_fields
+        .iter()
+        .map(|f| validate_ident(f))
+        .collect::<Result<_, _>>()?;
+    let updated_fields: Vec<&str> = updated_fields
+        .iter()
+        .map(|f| validate_ident(f))
+        .collect::<Result<_, _>>()?;
 
     let mut query = Query::insert();
     query.into_table(DynCol(table.into()));
 
-    let columns: Vec<DynCol> = [
-        "id",
-        "key",
-        "count",
-        "window_start",
-        "created_at",
-        "updated_at",
-    ]
-    .iter()
-    .map(|c| DynCol((*c).into()))
-    .collect();
+    // Column order: id, conflict target, counter, window, then the
+    // created-timestamp columns, then the updated-timestamp columns. Both
+    // timestamp groups get an initial CURRENT_TIMESTAMP stamp on INSERT.
+    let mut columns: Vec<DynCol> = vec![
+        DynCol("id".into()),
+        DynCol(conflict_column.into()),
+        DynCol(count_field.into()),
+        DynCol(window_field.into()),
+    ];
+    columns.extend(created_fields.iter().map(|f| DynCol((*f).into())));
+    columns.extend(updated_fields.iter().map(|f| DynCol((*f).into())));
     query.columns(columns);
 
     let now_expr: SimpleExpr = sea_query::Expr::current_timestamp().into();
-    query.values_panic([
+    let mut values: Vec<SimpleExpr> = vec![
         json_to_sea_value(&serde_json::Value::String(id.to_string())).into(),
         json_to_sea_value(&serde_json::Value::String(key.to_string())).into(),
         json_to_sea_value(&serde_json::json!(1i64)).into(),
         json_to_sea_value(&serde_json::json!(now)).into(),
-        now_expr.clone(),
-        now_expr.clone(),
-    ]);
+    ];
+    values.extend(created_fields.iter().map(|_| now_expr.clone()));
+    values.extend(updated_fields.iter().map(|_| now_expr.clone()));
+    query.values_panic(values);
 
-    // count = CASE WHEN window_start < ? THEN 1 ELSE count + 1 END
+    // {count_field} = CASE WHEN {window_field} < ? THEN 1 ELSE {count_field} + 1 END
     let count_case: SimpleExpr = CaseStatement::new()
         .case(
-            sea_query::Expr::col(DynCol("window_start".into())).lt(window_cutoff),
+            sea_query::Expr::col(DynCol(window_field.into())).lt(window_cutoff),
             SimpleExpr::Value(1i64.into()),
         )
-        .finally(sea_query::Expr::col(DynCol("count".into())).add(1))
+        .finally(sea_query::Expr::col(DynCol(count_field.into())).add(1))
         .into();
 
-    // window_start = CASE WHEN window_start < ? THEN ? ELSE window_start END
-    let window_start_case: SimpleExpr = CaseStatement::new()
+    // {window_field} = CASE WHEN {window_field} < ? THEN ? ELSE {window_field} END
+    let window_case: SimpleExpr = CaseStatement::new()
         .case(
-            sea_query::Expr::col(DynCol("window_start".into())).lt(window_cutoff),
+            sea_query::Expr::col(DynCol(window_field.into())).lt(window_cutoff),
             SimpleExpr::Value(now.into()),
         )
-        .finally(sea_query::Expr::col(DynCol("window_start".into())))
+        .finally(sea_query::Expr::col(DynCol(window_field.into())))
         .into();
 
-    let mut on_conflict = OnConflict::column(DynCol("key".into()));
-    on_conflict.value(DynCol("count".into()), count_case);
-    on_conflict.value(DynCol("window_start".into()), window_start_case);
-    on_conflict.value(DynCol("updated_at".into()), now_expr);
+    let mut on_conflict = OnConflict::column(DynCol(conflict_column.into()));
+    on_conflict.value(DynCol(count_field.into()), count_case);
+    on_conflict.value(DynCol(window_field.into()), window_case);
+    // Only the updated-timestamp columns are re-stamped on conflict; the
+    // created-timestamp columns are deliberately absent from the SET clause so
+    // a row's creation time is immutable after the first INSERT.
+    for field in &updated_fields {
+        on_conflict.value(DynCol((*field).into()), now_expr.clone());
+    }
     query.on_conflict(on_conflict);
 
     let (sql, values) = crate::render_insert(query, backend);
-    crate::Statement::new(sql, values, table)
+    Ok(crate::Statement::new(sql, values, table))
 }
 
 #[cfg(test)]
@@ -252,14 +311,20 @@ mod tests {
 
     #[test]
     fn rate_limit_upsert_sqlite_shape() {
-        let stmt = build_rate_limit_upsert(
+        let stmt = build_windowed_counter_upsert(
             "rate_limits",
+            "key",
             "rl-id-1",
             "user:42:login",
+            "count",
+            "window_start",
+            &["created_at"],
+            &["updated_at"],
             1_700_000_000,
             1_699_999_940, // 60s window
             Backend::Sqlite,
-        );
+        )
+        .unwrap();
         let sql = stmt.sql;
         let values = stmt.values;
 
@@ -307,14 +372,20 @@ mod tests {
 
     #[test]
     fn rate_limit_upsert_postgres_uses_dollar_params() {
-        let stmt = build_rate_limit_upsert(
+        let stmt = build_windowed_counter_upsert(
             "rate_limits",
+            "key",
             "rl-id-2",
             "user:42:signup",
+            "count",
+            "window_start",
+            &["created_at"],
+            &["updated_at"],
             1_700_000_000,
             1_699_999_700,
             Backend::Postgres,
-        );
+        )
+        .unwrap();
         let sql = stmt.sql;
         assert!(sql.contains("$1"), "postgres should use $-params: {sql}");
         assert!(sql.contains("CASE WHEN"));
@@ -322,5 +393,100 @@ mod tests {
         // sanity: postgres quote style
         assert!(sql.contains("\"rate_limits\""));
         assert_eq!(stmt.collection, "rate_limits");
+    }
+
+    #[test]
+    fn windowed_counter_upsert_rejects_invalid_identifier() {
+        let err = build_windowed_counter_upsert(
+            "rate_limits",
+            "key",
+            "rl-id-3",
+            "user:42:login",
+            "co unt",
+            "window_start",
+            &["created_at"],
+            &["updated_at"],
+            1_700_000_000,
+            1_699_999_940,
+            Backend::Sqlite,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            SqlBuildError::InvalidIdentifier {
+                value: "co unt".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn windowed_counter_upsert_uses_parameterized_columns() {
+        let stmt = build_windowed_counter_upsert(
+            "suppers_ai__rl__buckets",
+            "key",
+            "row-1",
+            "user:1:login",
+            "count",
+            "window_start",
+            &["created_at"],
+            &["updated_at"],
+            1000,
+            940,
+            Backend::Sqlite,
+        )
+        .unwrap();
+        assert!(stmt.sql.contains("ON CONFLICT"), "{}", stmt.sql);
+        assert!(stmt.sql.contains("\"count\""), "{}", stmt.sql);
+        assert!(stmt.sql.contains("\"window_start\""), "{}", stmt.sql);
+        assert_eq!(stmt.collection, "suppers_ai__rl__buckets");
+    }
+
+    // Regression (semantic-drift guard): `created_fields` are INSERT-only —
+    // they must NOT appear in the `ON CONFLICT ... DO UPDATE SET` clause, or a
+    // row's creation timestamp would be silently overwritten on every counter
+    // update. The presence-only assertions in the shape tests above cannot
+    // catch this because `created_at` legitimately appears on the INSERT side;
+    // here we split the SQL on `ON CONFLICT` and inspect only the update
+    // portion. Both backends, since the SET-clause rendering is per-dialect.
+    #[test]
+    fn windowed_counter_upsert_created_field_absent_from_update_clause() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let stmt = build_windowed_counter_upsert(
+                "rate_limits",
+                "key",
+                "rl-id-4",
+                "user:42:login",
+                "count",
+                "window_start",
+                &["created_at"],
+                &["updated_at"],
+                1_700_000_000,
+                1_699_999_940,
+                backend,
+            )
+            .unwrap();
+            let sql = stmt.sql;
+
+            let (insert_part, update_part) = sql
+                .split_once("ON CONFLICT")
+                .unwrap_or_else(|| panic!("expected ON CONFLICT clause in: {sql}"));
+
+            // created_at is stamped on INSERT ...
+            assert!(
+                insert_part.contains("created_at"),
+                "created_at should be on the INSERT side ({backend:?}): {sql}"
+            );
+            // ... but must never be re-written on conflict.
+            assert!(
+                !update_part.contains("created_at"),
+                "created_at leaked into DO UPDATE SET ({backend:?}) — creation time \
+                 would be overwritten on every counter update: {update_part}"
+            );
+            // updated_at, by contrast, is re-stamped on every update.
+            assert!(
+                update_part.contains("updated_at"),
+                "updated_at should be re-stamped in DO UPDATE SET ({backend:?}): {update_part}"
+            );
+        }
     }
 }

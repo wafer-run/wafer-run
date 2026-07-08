@@ -45,6 +45,10 @@ impl ServiceOp {
     pub const DATABASE_COUNT: &str = "database.count";
     /// Aggregate sum of a numeric column.
     pub const DATABASE_SUM: &str = "database.sum";
+    /// Grouped aggregate query (COUNT/SUM/AVG/conditional-count, GROUP BY
+    /// columns and/or date buckets); WRAP-authorized against the target
+    /// collection and rendered server-side.
+    pub const DATABASE_AGGREGATE: &str = "database.aggregate";
     /// Execute a raw SELECT and return rows (cap-gated).
     pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
     /// Typed query: WRAP-authorized against the Statement's `collection`.
@@ -67,6 +71,10 @@ impl ServiceOp {
     pub const DATABASE_UPDATE_WHERE: &str = "database.update_where";
     /// Atomically increment a numeric column on rows matching a filter.
     pub const DATABASE_INCREMENT_FIELD_WHERE: &str = "database.increment_field_where";
+    /// Insert a row, resolving conflicts via an `ON CONFLICT` strategy
+    /// (`INSERT … ON CONFLICT …`); WRAP-authorized against the target
+    /// collection.
+    pub const DATABASE_UPSERT: &str = "database.upsert";
     /// Write an object to storage.
     pub const STORAGE_PUT: &str = "storage.put";
     /// Read an object from storage.
@@ -177,7 +185,9 @@ impl ServiceOp {
         Self::DATABASE_TAKE_WHERE,
         Self::DATABASE_COUNT,
         Self::DATABASE_SUM,
+        Self::DATABASE_AGGREGATE,
         Self::DATABASE_INCREMENT_FIELD_WHERE,
+        Self::DATABASE_UPSERT,
         Self::DATABASE_QUERY,
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXECUTE,

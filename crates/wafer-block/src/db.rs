@@ -23,6 +23,15 @@ pub struct ListOptions {
     /// helpers `list_all` and `list_sorted` set this; bare `list` does
     /// not.
     pub skip_count: bool,
+    /// Optional predicate **tree** (AND/OR groups). When `Some`, backends use
+    /// it in preference to `filters` (which stays for the flat-AND fast path
+    /// and back-compat). `None` = use `filters`.
+    pub filter_tree: Option<Vec<FilterTree>>,
+    /// Optional column projection. `None` selects every column
+    /// (`SELECT *`); `Some(cols)` selects exactly `cols` (`SELECT
+    /// {cols}`). An explicit empty `Vec` is rejected by the handler before
+    /// it reaches here — see `database::handler`'s `DATABASE_LIST` arm.
+    pub columns: Option<Vec<String>>,
 }
 
 /// A single filter condition applied to a database query.
@@ -34,6 +43,21 @@ pub struct Filter {
     pub operator: FilterOp,
     /// Value to compare against (interpreted per `operator`).
     pub value: serde_json::Value,
+}
+
+/// A predicate tree for WHERE-clause construction: a leaf [`Filter`] or an
+/// `AND`/`OR` group of sub-trees. This is the builder-input analogue of the
+/// wire `FilterNode`; the database handler converts wire → this before
+/// calling [`wafer_sql_utils`] builders, so the SQL layer never sees wire
+/// types.
+#[derive(Debug, Clone)]
+pub enum FilterTree {
+    /// A single comparison predicate.
+    Leaf(Filter),
+    /// AND of child predicates.
+    All(Vec<FilterTree>),
+    /// OR of child predicates.
+    Any(Vec<FilterTree>),
 }
 
 /// Supported filter comparison operators.

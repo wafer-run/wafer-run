@@ -526,6 +526,7 @@ fn database_op_body(op: &str) -> Vec<u8> {
             limit: 10,
             offset: 0,
             skip_count: false,
+            columns: None,
         }),
         ServiceOp::DATABASE_CREATE => codec::encode(&wire::CreateRequest {
             collection: "suppers_ai__auth__users".into(),
@@ -595,6 +596,23 @@ fn database_op_body(op: &str) -> Vec<u8> {
         ServiceOp::DATABASE_DDL => codec::encode(&wire::ExecRawRequest {
             query: "CREATE TABLE suppers_ai__auth__widgets (id TEXT)".into(),
             args: vec![],
+        }),
+        ServiceOp::DATABASE_UPSERT => codec::encode(&wire::UpsertRequest {
+            collection: "suppers_ai__auth__users".into(),
+            data: vec![("id".into(), serde_json::json!("1"))],
+            conflict_columns: vec!["id".into()],
+            on_conflict: wire::OnConflict::SetColumns(vec!["id".into()]),
+        }),
+        ServiceOp::DATABASE_AGGREGATE => codec::encode(&wire::AggregateRequest {
+            collection: "suppers_ai__auth__users".into(),
+            select_columns: vec![],
+            aggregates: vec![wire::AggregateColumnDef::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![],
+            sort: vec![],
+            limit: 0,
         }),
         other => panic!(
             "completeness test has no minimal-body case for database op `{other}` — \

@@ -173,3 +173,158 @@ async fn hostile_guest_query_raw_foreign_collection_is_denied() {
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// SP-B1 structured-op coverage (DATABASE_UPSERT / DATABASE_AGGREGATE)
+// ---------------------------------------------------------------------------
+
+/// Foreign collection B, in a namespace the guest does NOT own. The tests
+/// create + seed it directly via the backing `SQLiteDatabaseService` (a
+/// legitimate test-oracle use of raw SQL, bypassing WRAP the way the runtime's
+/// own migration code does) so denial can be checked against real DB state.
+const VICTIM_TABLE: &str = "victim_org__victim_block__balances";
+
+/// Run the guest's `kind` op and assert it terminates with `expected` error
+/// code (rather than succeeding). Returns nothing — the assertion *is* the
+/// point: a hostile structured op must never yield a response frame.
+async fn run_guest_expecting_error(
+    wafer: &Arc<Wafer>,
+    kind: &str,
+    expected: wafer_block::ErrorCode,
+) {
+    let out = wafer
+        .run_block(
+            "test/hostile-db-guest",
+            Message::new(kind),
+            InputStream::empty(),
+        )
+        .await;
+    match out.collect_buffered().await {
+        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+            assert_eq!(
+                e.code, expected,
+                "expected {expected:?} for {kind}, got {:?}: {}",
+                e.code, e.message
+            );
+        }
+        other => panic!(
+            "REGRESSION: hostile guest op {kind} was not rejected with {expected:?}: {other:?}"
+        ),
+    }
+}
+
+/// Create the victim table with a seeded balance of 100 for row `b1`, directly
+/// against the backing store (bypassing WRAP, as a test oracle may).
+async fn seed_victim(sqlite: &SQLiteDatabaseService) {
+    sqlite
+        .exec_raw(
+            &format!("CREATE TABLE {VICTIM_TABLE} (id TEXT PRIMARY KEY, balance INTEGER NOT NULL)"),
+            &[],
+        )
+        .await
+        .expect("create victim table");
+    sqlite
+        .exec_raw(
+            &format!("INSERT INTO {VICTIM_TABLE} (id, balance) VALUES ('b1', 100)"),
+            &[],
+        )
+        .await
+        .expect("seed victim row");
+}
+
+/// Read row `b1`'s balance from the victim table directly (test oracle).
+async fn victim_balance(sqlite: &SQLiteDatabaseService) -> i64 {
+    let rows = sqlite
+        .query_raw(
+            &format!("SELECT id, balance FROM {VICTIM_TABLE} WHERE id = 'b1'"),
+            &[],
+        )
+        .await
+        .expect("read victim balance");
+    rows.first()
+        .and_then(|r| r.data.get("balance"))
+        .and_then(serde_json::Value::as_i64)
+        .expect("victim balance column present and integer-typed")
+}
+
+/// A guest authorized (by owning collection A) for *some* collection cannot
+/// `DATABASE_UPSERT` into a foreign collection B: the server WRAP-checks the
+/// request's `collection` before rendering any SQL, so the write is denied and
+/// B's real row is provably untouched — not a call-log stand-in.
+#[tokio::test]
+async fn hostile_guest_upsert_foreign_collection_is_denied_and_never_writes() {
+    let (wafer, sqlite) = build_wafer_with_real_db().await;
+    seed_victim(&sqlite).await;
+    assert_eq!(
+        victim_balance(&sqlite).await,
+        100,
+        "test setup invariant: victim balance must start at 100"
+    );
+
+    run_guest_expecting_error(
+        &wafer,
+        "test.upsert_foreign",
+        wafer_block::ErrorCode::PermissionDenied,
+    )
+    .await;
+
+    // Non-execution against real DB state: had the denied upsert rendered +
+    // run (the SP-B vector where a grant for collection A lets a caller write
+    // collection B by relabeling), `balance` would now be 999.
+    assert_eq!(
+        victim_balance(&sqlite).await,
+        100,
+        "REGRESSION: the denied DATABASE_UPSERT actually wrote to the foreign \
+         collection — server-side render/WRAP enforcement is NOT holding"
+    );
+}
+
+/// The same boundary for reads: a `DATABASE_AGGREGATE` naming foreign
+/// collection B is denied before the aggregate query is built or run, so B's
+/// rows are never read (the guest receives a terminal error, not a result set).
+#[tokio::test]
+async fn hostile_guest_aggregate_foreign_collection_is_denied() {
+    let (wafer, sqlite) = build_wafer_with_real_db().await;
+    seed_victim(&sqlite).await;
+
+    run_guest_expecting_error(
+        &wafer,
+        "test.aggregate_foreign",
+        wafer_block::ErrorCode::PermissionDenied,
+    )
+    .await;
+
+    // The seed row is irrelevant to the read denial, but confirm the aggregate
+    // side-effect-free path left it intact too.
+    assert_eq!(victim_balance(&sqlite).await, 100);
+}
+
+/// Malformed IR on an AUTHORIZED collection is rejected as `InvalidArgument`,
+/// *after* authorization but *before* execution: a `FilterNode` tree nested
+/// past the depth bound (17 deep) trips `convert_filter_tree`'s bound. Because
+/// the collection is the guest's own (authorized), this can't be masked by a
+/// `PermissionDenied` short-circuit — it genuinely exercises the IR validator.
+#[tokio::test]
+async fn hostile_guest_deep_filter_tree_is_invalid_argument() {
+    let (wafer, _sqlite) = build_wafer_with_real_db().await;
+    run_guest_expecting_error(
+        &wafer,
+        "test.aggregate_deep_filter",
+        wafer_block::ErrorCode::InvalidArgument,
+    )
+    .await;
+}
+
+/// The other malformed-IR shape: a `CaseWhenSum` aggregate with an empty
+/// `when` predicate. Authorized (own collection), then rejected as
+/// `InvalidArgument` before any grouped query is built or run.
+#[tokio::test]
+async fn hostile_guest_empty_case_when_is_invalid_argument() {
+    let (wafer, _sqlite) = build_wafer_with_real_db().await;
+    run_guest_expecting_error(
+        &wafer,
+        "test.aggregate_empty_casewhen",
+        wafer_block::ErrorCode::InvalidArgument,
+    )
+    .await;
+}

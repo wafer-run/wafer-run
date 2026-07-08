@@ -1,58 +1,120 @@
 use sea_query::{Asterisk, Cond, Expr, Order, Query, SelectStatement, SimpleExpr};
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 
 use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
-/// Convert a slice of Filters into a sea_query Cond.
+/// Render one [`Filter`] leaf to a sea-query predicate expression.
+///
+/// Field names reach sea-query via [`DynCol`], which quotes them, so this is
+/// injection-safe without a separate identifier validation step. Malformed
+/// operand shapes (`In` with a non-array, `Like` with a non-string) render an
+/// always-false `1=0` predicate — narrow, never widen (see the inline notes).
+pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
+    let col = DynCol(filter.field.clone());
+    match filter.operator {
+        FilterOp::IsNull => Expr::col(col).is_null(),
+        FilterOp::IsNotNull => Expr::col(col).is_not_null(),
+        FilterOp::In => {
+            if let serde_json::Value::Array(arr) = &filter.value {
+                let values: Vec<sea_query::Value> = arr.iter().map(json_to_sea_value).collect();
+                Expr::col(col).is_in(values)
+            } else {
+                // Fail-safe: an `In` filter whose value isn't a JSON array
+                // is malformed input. Emit an always-false predicate rather
+                // than dropping the filter — narrowing the result set to
+                // nothing is safe; widening it (by skipping the predicate)
+                // would leak rows the caller meant to exclude.
+                Expr::cust("1=0")
+            }
+        }
+        FilterOp::Equal => Expr::col(col).eq(json_to_sea_value(&filter.value)),
+        FilterOp::NotEqual => Expr::col(col).ne(json_to_sea_value(&filter.value)),
+        FilterOp::GreaterThan => Expr::col(col).gt(json_to_sea_value(&filter.value)),
+        FilterOp::GreaterEqual => Expr::col(col).gte(json_to_sea_value(&filter.value)),
+        FilterOp::LessThan => Expr::col(col).lt(json_to_sea_value(&filter.value)),
+        FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
+        FilterOp::Like => {
+            if let Some(pattern) = filter.value.as_str() {
+                Expr::col(col).like(pattern.to_string())
+            } else {
+                // Fail-safe: a `Like` filter whose value isn't a JSON
+                // string is malformed input. Emit an always-false predicate
+                // rather than coercing to `LIKE ''` (which matches only
+                // empty strings — a surprising, non-failing result). Same
+                // narrow-never-widen rule as the `In` arm above.
+                Expr::cust("1=0")
+            }
+        }
+    }
+}
+
+/// Convert a slice of Filters into a sea_query Cond (AND-combined).
 /// Returns None if filters is empty.
 pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
     if filters.is_empty() {
         return None;
     }
-
     let mut cond = Cond::all();
-
     for filter in filters {
-        let col = DynCol(filter.field.clone());
-        let expr: SimpleExpr = match filter.operator {
-            FilterOp::IsNull => Expr::col(col).is_null(),
-            FilterOp::IsNotNull => Expr::col(col).is_not_null(),
-            FilterOp::In => {
-                if let serde_json::Value::Array(arr) = &filter.value {
-                    let values: Vec<sea_query::Value> = arr.iter().map(json_to_sea_value).collect();
-                    Expr::col(col).is_in(values)
-                } else {
-                    // Fail-safe: an `In` filter whose value isn't a JSON array
-                    // is malformed input. Emit an always-false predicate rather
-                    // than dropping the filter — narrowing the result set to
-                    // nothing is safe; widening it (by skipping the predicate)
-                    // would leak rows the caller meant to exclude.
-                    Expr::cust("1=0")
-                }
-            }
-            FilterOp::Equal => Expr::col(col).eq(json_to_sea_value(&filter.value)),
-            FilterOp::NotEqual => Expr::col(col).ne(json_to_sea_value(&filter.value)),
-            FilterOp::GreaterThan => Expr::col(col).gt(json_to_sea_value(&filter.value)),
-            FilterOp::GreaterEqual => Expr::col(col).gte(json_to_sea_value(&filter.value)),
-            FilterOp::LessThan => Expr::col(col).lt(json_to_sea_value(&filter.value)),
-            FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
-            FilterOp::Like => {
-                if let Some(pattern) = filter.value.as_str() {
-                    Expr::col(col).like(pattern.to_string())
-                } else {
-                    // Fail-safe: a `Like` filter whose value isn't a JSON
-                    // string is malformed input. Emit an always-false predicate
-                    // rather than coercing to `LIKE ''` (which matches only
-                    // empty strings — a surprising, non-failing result). Same
-                    // narrow-never-widen rule as the `In` arm above.
-                    Expr::cust("1=0")
-                }
-            }
-        };
-        cond = cond.add(expr);
+        cond = cond.add(leaf_expr(filter));
     }
-
     Some(cond)
+}
+
+/// Convert a predicate **tree** into a sea_query `Cond`. The top-level slice
+/// is AND-combined; `All` nodes render `Cond::all()`, `Any` nodes
+/// `Cond::any()`, leaves render via [`leaf_expr`]. Empty slice → `None`.
+///
+/// Bounds (depth / node count) are enforced by the caller (the database
+/// handler) before conversion, so this function assumes already-validated
+/// input and cannot itself fail.
+pub fn build_condition_tree(nodes: &[FilterTree]) -> Option<Cond> {
+    if nodes.is_empty() {
+        return None;
+    }
+    let mut cond = Cond::all();
+    for node in nodes {
+        cond = cond.add(node_to_cond(node));
+    }
+    Some(cond)
+}
+
+/// Convert a predicate **tree** into a single boolean [`SimpleExpr`] — the
+/// same AND/OR structure as [`build_condition_tree`], but as an expression
+/// usable outside a `WHERE` clause: most notably the predicate of a
+/// `SUM(CASE WHEN <expr> THEN 1 ELSE 0 END)` conditional count built via
+/// [`crate::aggregate::AggregateColumn::case_when_sum`].
+///
+/// The conversion goes through [`build_condition_tree`] and sea-query's
+/// `From<Condition> for SimpleExpr`, which folds the tree with `.and()` /
+/// `.or()` exactly as the `WHERE`-clause path does — so a `WHERE` and a
+/// `CASE WHEN` built from the same tree render identical predicates. An empty
+/// forest folds to an always-true constant (an empty `AND`); callers that
+/// require a non-empty predicate (the aggregate handler) reject empty input
+/// upstream. Bounds are enforced before conversion, so this cannot fail.
+#[must_use]
+pub fn tree_to_simple_expr(nodes: &[FilterTree]) -> SimpleExpr {
+    SimpleExpr::from(build_condition_tree(nodes).unwrap_or_else(Cond::all))
+}
+
+fn node_to_cond(node: &FilterTree) -> Cond {
+    match node {
+        FilterTree::Leaf(f) => Cond::all().add(leaf_expr(f)),
+        FilterTree::All(children) => {
+            let mut c = Cond::all();
+            for child in children {
+                c = c.add(node_to_cond(child));
+            }
+            c
+        }
+        FilterTree::Any(children) => {
+            let mut c = Cond::any();
+            for child in children {
+                c = c.add(node_to_cond(child));
+            }
+            c
+        }
+    }
 }
 
 /// Apply sort directives to a SelectStatement.
@@ -341,6 +403,8 @@ mod tests {
             limit: 10,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
@@ -362,6 +426,8 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = build_select("users", &opts, Backend::Postgres);
         let sql = stmt.sql;
@@ -669,5 +735,140 @@ mod tests {
         // LIMIT / OFFSET depending on backend — we don't pin that here).
         assert!(values.len() >= 2, "expected ≥2 bindings, got {values:?}");
         assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn build_condition_tree_empty_is_none() {
+        assert!(build_condition_tree(&[]).is_none());
+    }
+
+    #[test]
+    fn build_condition_tree_flat_leaves_are_anded() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![
+            FilterTree::Leaf(Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("active"),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "age".into(),
+                operator: FilterOp::GreaterThan,
+                value: serde_json::json!(18),
+            }),
+        ];
+        let cond = build_condition_tree(&tree).expect("some");
+        let mut q = sea_query::Query::select();
+        q.column(sea_query::Asterisk)
+            .from(crate::ident::DynCol("t".into()))
+            .cond_where(cond);
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains("\"status\""), "{sql}");
+        assert!(sql.contains("AND"), "{sql}");
+    }
+
+    #[test]
+    fn build_condition_tree_any_group_renders_or() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![FilterTree::Any(vec![
+            FilterTree::Leaf(Filter {
+                field: "email".into(),
+                operator: FilterOp::Like,
+                value: serde_json::json!("%a%"),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "id".into(),
+                operator: FilterOp::Like,
+                value: serde_json::json!("%a%"),
+            }),
+        ])];
+        let cond = build_condition_tree(&tree).expect("some");
+        let mut q = sea_query::Query::select();
+        q.column(sea_query::Asterisk)
+            .from(crate::ident::DynCol("t".into()))
+            .cond_where(cond);
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains(" OR "), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_leaf_renders_predicate() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![FilterTree::Leaf(Filter {
+            field: "status".into(),
+            operator: FilterOp::GreaterEqual,
+            value: serde_json::json!(400),
+        })];
+        let expr = tree_to_simple_expr(&tree);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains("\"status\""), "{sql}");
+        assert!(sql.contains(">="), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_any_group_renders_or() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![FilterTree::Any(vec![
+            FilterTree::Leaf(Filter {
+                field: "a".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(1),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "b".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(2),
+            }),
+        ])];
+        let expr = tree_to_simple_expr(&tree);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains(" OR "), "{sql}");
+    }
+
+    #[test]
+    fn tree_to_simple_expr_empty_folds_to_constant_and_does_not_panic() {
+        // Empty forest → always-true constant (empty AND). Callers reject
+        // empty upstream; this only guarantees totality.
+        let expr = tree_to_simple_expr(&[]);
+        let mut q = sea_query::Query::select();
+        q.expr(expr).from(DynCol("t".into()));
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.starts_with("SELECT"), "{sql}");
+    }
+
+    #[test]
+    fn build_condition_tree_nested_all_of_any() {
+        use wafer_block::db::{Filter, FilterOp, FilterTree};
+        let tree = vec![
+            FilterTree::Leaf(Filter {
+                field: "active".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(true),
+            }),
+            FilterTree::Any(vec![
+                FilterTree::Leaf(Filter {
+                    field: "role".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!("admin"),
+                }),
+                FilterTree::Leaf(Filter {
+                    field: "role".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!("owner"),
+                }),
+            ]),
+        ];
+        let cond = build_condition_tree(&tree).expect("some");
+        let mut q = sea_query::Query::select();
+        q.column(sea_query::Asterisk)
+            .from(crate::ident::DynCol("t".into()))
+            .cond_where(cond);
+        let (sql, _) = crate::render_select(q, Backend::Sqlite);
+        assert!(sql.contains(" OR "), "{sql}");
+        assert!(sql.contains("AND"), "{sql}");
     }
 }

@@ -4,19 +4,20 @@ use std::collections::HashMap;
 use wafer_block::context::Context;
 // `Filter`, `FilterOp`, `ListOptions`, `SortField` are defined in wafer_block::db;
 // import them non-pub for use in conversion helpers and method signatures.
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
 pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
-        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
-        DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse,
-        ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, GetRequest,
-        IncrementFieldWhereRequest, ListRequest, QueryRawRequest, QueryRequest, QueryResponse,
-        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
-        TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
+        AggregateRequest, CountRequest, CountResponse, CreateRequest, DeleteRequest,
+        DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest,
+        ExecRawResponse, ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode,
+        GetRequest, IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest,
+        QueryRequest, QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest, UpsertRequest,
+        UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -50,15 +51,56 @@ fn filter_op_str(op: &FilterOp) -> &'static str {
     }
 }
 
-fn to_wire_filters(filters: &[Filter]) -> Vec<WireFilterDef> {
+/// Encode flat client-side [`Filter`]s as all-leaf wire [`FilterNode`]s. The
+/// client never builds AND/OR groups; the tree shape exists so the wire is
+/// uniform and group-capable callers (a later task) reuse the same field.
+fn to_wire_filters(filters: &[Filter]) -> Vec<FilterNode> {
     filters
         .iter()
-        .map(|f| WireFilterDef {
+        .map(|f| {
+            FilterNode::Leaf(WireFilterDef {
+                field: f.field.clone(),
+                operator: filter_op_str(&f.operator).to_string(),
+                value: f.value.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Encode a builder-input [`FilterTree`] node as its wire [`FilterNode`]
+/// shape — the inverse of the handler's `convert_filter_tree`
+/// (`interfaces::database::handler`). A client that assembles an AND/OR
+/// group via `ListOptions::filter_tree` (rather than the flat
+/// `ListOptions::filters` fast path) needs this to put the group on the wire
+/// at all.
+pub(crate) fn filter_tree_to_wire_node(tree: &FilterTree) -> FilterNode {
+    match tree {
+        FilterTree::Leaf(f) => FilterNode::Leaf(WireFilterDef {
             field: f.field.clone(),
             operator: filter_op_str(&f.operator).to_string(),
             value: f.value.clone(),
-        })
-        .collect()
+        }),
+        FilterTree::All(children) => FilterNode::All {
+            all: children.iter().map(filter_tree_to_wire_node).collect(),
+        },
+        FilterTree::Any(children) => FilterNode::Any {
+            any: children.iter().map(filter_tree_to_wire_node).collect(),
+        },
+    }
+}
+
+/// Build the wire `filters` field for `ListRequest` from a [`ListOptions`]:
+/// the flat `opts.filters` (encoded as all-leaf nodes, as every other op
+/// already does via [`to_wire_filters`]) concatenated with the converted
+/// `opts.filter_tree` groups, when present. Top-level order doesn't matter —
+/// the handler AND-combines every top-level `FilterNode` into one predicate
+/// tree, so this is equivalent to "both sources, if set, must all hold".
+fn list_wire_filters(opts: &ListOptions) -> Vec<FilterNode> {
+    let mut nodes = to_wire_filters(&opts.filters);
+    if let Some(tree) = &opts.filter_tree {
+        nodes.extend(tree.iter().map(filter_tree_to_wire_node));
+    }
+    nodes
 }
 
 fn to_wire_sort(sort: &[SortField]) -> Vec<WireSortFieldDef> {
@@ -88,11 +130,12 @@ dual_api! {
     pub fn list(ctx, collection: &str, opts: &ListOptions) -> Result<RecordList, WaferError> {
         let req = ListRequest {
             collection: collection.to_string(),
-            filters: to_wire_filters(&opts.filters),
+            filters: list_wire_filters(opts),
             sort: to_wire_sort(&opts.sort),
             limit: opts.limit,
             offset: opts.offset,
             skip_count: opts.skip_count,
+            columns: opts.columns.clone(),
         };
         let data = svc!(
             ctx, BLOCK,
@@ -314,8 +357,16 @@ dual_api! {
             .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))
     }
 
-    /// Update the record in `collection` whose `field == value`, or insert `data` if none exists.
-    pub fn upsert(
+    /// Update the record in `collection` whose `field == value`, or insert
+    /// `data` if none exists.
+    ///
+    /// This is the **non-atomic** get-or-create: it issues a `get_by_field`
+    /// followed by a separate `update`/`create`, so two concurrent callers can
+    /// race (both miss the read, both insert). Its upside is flexibility —
+    /// `field` needs no `UNIQUE`/`PRIMARY KEY` constraint. When `field` *is* a
+    /// real conflict target, prefer the atomic [`upsert`], which issues a
+    /// single `INSERT … ON CONFLICT …` round-trip with no race.
+    pub fn upsert_by_field(
         ctx,
         collection: &str,
         field: &str,
@@ -327,6 +378,64 @@ dual_api! {
             Err(e) if e.code == ErrorCode::NotFound => svc_fn!(ctx, create(collection, data)),
             Err(e) => Err(e),
         }
+    }
+
+    /// Insert `data` into `collection`, resolving a conflict on
+    /// `conflict_columns` via `on_conflict`, in a single atomic
+    /// `INSERT … ON CONFLICT …` round-trip. Returns rows affected.
+    /// WRAP-authorized (write) against `collection`.
+    ///
+    /// `conflict_columns` must name a real `UNIQUE`/`PRIMARY KEY` conflict
+    /// target. For a get-or-create on an unconstrained field, use the
+    /// non-atomic [`upsert_by_field`] instead. Build `data`/`on_conflict` from
+    /// `wafer_block::wire::database::OnConflict` (`SetColumns` or
+    /// `WindowedCounter`).
+    pub fn upsert(
+        ctx,
+        collection: &str,
+        data: Vec<(String, serde_json::Value)>,
+        conflict_columns: Vec<String>,
+        on_conflict: OnConflict,
+    ) -> Result<i64, WaferError> {
+        let req = UpsertRequest {
+            collection: collection.to_string(),
+            data,
+            conflict_columns,
+            on_conflict,
+        };
+        let bytes = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_UPSERT,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: UpsertResponse = decode(&bytes)?;
+        Ok(resp.rows_affected)
+    }
+
+    /// Run a grouped aggregate query described by `req` and return one
+    /// [`Record`] per group (each carrying the aggregate aliases and any
+    /// grouped columns / date buckets). WRAP-authorized (read) against
+    /// `req.collection`.
+    ///
+    /// The runtime renders the SQL server-side from the structured request, so
+    /// — unlike [`query_raw`] — no raw SQL crosses the boundary and the
+    /// statement always targets the authorized collection. Build the aggregate
+    /// and group-by terms from
+    /// `wafer_block::wire::database::{AggregateColumnDef, GroupByDef}`.
+    pub fn aggregate(ctx, req: AggregateRequest) -> Result<Vec<Record>, WaferError> {
+        let collection = req.collection.clone();
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_AGGREGATE,
+            &req,
+            Some(collection.as_str()),
+            false,
+            Some("db")
+        )?;
+        decode(&data)
     }
 
     /// List all records matching the given filters.
@@ -396,6 +505,8 @@ dual_api! {
                 limit: page_size,
                 offset: (page - 1).saturating_mul(page_size),
                 skip_count: false,
+                filter_tree: None,
+                columns: None,
             }
         ))
     }
@@ -548,5 +659,144 @@ dual_api! {
         )?;
         let resp: ExecRawResponse = decode(&data)?;
         Ok(resp.rows_affected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf_filter(field: &str) -> Filter {
+        Filter {
+            field: field.to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(1),
+        }
+    }
+
+    #[test]
+    fn filter_tree_to_wire_node_leaf() {
+        let tree = FilterTree::Leaf(leaf_filter("a"));
+        match filter_tree_to_wire_node(&tree) {
+            FilterNode::Leaf(f) => {
+                assert_eq!(f.field, "a");
+                assert_eq!(f.operator, "eq");
+            }
+            other => panic!("expected Leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_tree_to_wire_node_any_group() {
+        let tree = FilterTree::Any(vec![
+            FilterTree::Leaf(leaf_filter("a")),
+            FilterTree::Leaf(leaf_filter("b")),
+        ]);
+        match filter_tree_to_wire_node(&tree) {
+            FilterNode::Any { any } => {
+                assert_eq!(any.len(), 2);
+                assert!(matches!(&any[0], FilterNode::Leaf(f) if f.field == "a"));
+                assert!(matches!(&any[1], FilterNode::Leaf(f) if f.field == "b"));
+            }
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_tree_to_wire_node_nested_all_any_round_trips() {
+        // All([Leaf(a), Any([Leaf(b), Leaf(c)])]) — mirrors the shape
+        // SP-B2's OR-group migration produces.
+        let tree = FilterTree::All(vec![
+            FilterTree::Leaf(leaf_filter("a")),
+            FilterTree::Any(vec![
+                FilterTree::Leaf(leaf_filter("b")),
+                FilterTree::Leaf(leaf_filter("c")),
+            ]),
+        ]);
+        match filter_tree_to_wire_node(&tree) {
+            FilterNode::All { all } => {
+                assert_eq!(all.len(), 2);
+                assert!(matches!(&all[0], FilterNode::Leaf(f) if f.field == "a"));
+                match &all[1] {
+                    FilterNode::Any { any } => {
+                        assert_eq!(any.len(), 2);
+                        assert!(matches!(&any[0], FilterNode::Leaf(f) if f.field == "b"));
+                        assert!(matches!(&any[1], FilterNode::Leaf(f) if f.field == "c"));
+                    }
+                    other => panic!("expected Any, got {other:?}"),
+                }
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_wire_filters_flat_only_produces_all_leaf_nodes() {
+        let opts = ListOptions {
+            filters: vec![leaf_filter("a"), leaf_filter("b")],
+            ..Default::default()
+        };
+        let nodes = list_wire_filters(&opts);
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|n| matches!(n, FilterNode::Leaf(_))));
+    }
+
+    #[test]
+    fn list_wire_filters_tree_only_forwards_the_group() {
+        let opts = ListOptions {
+            filter_tree: Some(vec![FilterTree::Any(vec![
+                FilterTree::Leaf(leaf_filter("a")),
+                FilterTree::Leaf(leaf_filter("b")),
+            ])]),
+            ..Default::default()
+        };
+        let nodes = list_wire_filters(&opts);
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            FilterNode::Any { any } => assert_eq!(any.len(), 2),
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_wire_filters_concatenates_flat_and_tree() {
+        let opts = ListOptions {
+            filters: vec![leaf_filter("a")],
+            filter_tree: Some(vec![FilterTree::Any(vec![
+                FilterTree::Leaf(leaf_filter("b")),
+                FilterTree::Leaf(leaf_filter("c")),
+            ])]),
+            ..Default::default()
+        };
+        let nodes = list_wire_filters(&opts);
+        assert_eq!(nodes.len(), 2);
+        assert!(matches!(&nodes[0], FilterNode::Leaf(f) if f.field == "a"));
+        match &nodes[1] {
+            FilterNode::Any { any } => assert_eq!(any.len(), 2),
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_request_columns_still_forwarded() {
+        // Task 4 added `columns` projection to `ListRequest`; guard against a
+        // future edit to `list()`'s request-building silently dropping it.
+        let opts = ListOptions {
+            columns: Some(vec!["id".to_string(), "name".to_string()]),
+            ..Default::default()
+        };
+        let req = ListRequest {
+            collection: "widgets".to_string(),
+            filters: list_wire_filters(&opts),
+            sort: to_wire_sort(&opts.sort),
+            limit: opts.limit,
+            offset: opts.offset,
+            skip_count: opts.skip_count,
+            columns: opts.columns.clone(),
+        };
+        assert_eq!(
+            req.columns,
+            Some(vec!["id".to_string(), "name".to_string()])
+        );
     }
 }

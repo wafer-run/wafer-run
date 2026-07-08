@@ -8,7 +8,10 @@ use wafer_block::db::{FilterOp, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 #[cfg(test)]
@@ -320,6 +323,18 @@ impl DatabaseService for PostgresDatabaseService {
     ) -> Result<i64, DatabaseError> {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
     }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        DbExec::aggregate(self, collection, spec).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +520,8 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
         let sql = stmt.sql;
@@ -532,6 +549,8 @@ mod tests {
             limit: 10,
             offset: 20,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
         assert!(stmt.sql.contains("ORDER BY"));

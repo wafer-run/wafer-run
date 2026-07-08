@@ -16,8 +16,9 @@
 //!   behind `wafer-site`'s `target-native` feature; the `target-cloudflare`
 //!   build does not pull it in.
 //! - Cloudflare Workers production paths (`solobase` on `wafer.run`) use
-//!   solobase-core's own `UserRateLimiter`, which is D1-backed via
-//!   `wafer-sql-utils::upsert::build_rate_limit_upsert`.
+//!   solobase-core's own `UserRateLimiter`, which is D1-backed via the
+//!   generic windowed-counter builder,
+//!   `wafer-sql-utils::upsert::build_windowed_counter_upsert`.
 //!
 //! If a durable, cross-instance rate-limit primitive is ever needed at this
 //! layer, follow the solobase `UserRateLimiter` pattern (D1 upsert under

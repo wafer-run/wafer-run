@@ -8,7 +8,10 @@ use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::{pk, DataType};
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 
@@ -433,6 +436,18 @@ impl DatabaseService for SQLiteDatabaseService {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
     }
 
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        DbExec::aggregate(self, collection, spec).await
+    }
+
     // --- Schema management ---
 
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
@@ -500,7 +515,7 @@ impl DatabaseService for SQLiteDatabaseService {
 
 #[cfg(test)]
 mod tests {
-    use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
+    use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
     use wafer_sql_utils::value::sea_values_to_json;
 
     use super::*;
@@ -591,6 +606,8 @@ mod tests {
             limit: 0,
             offset: 0,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
         let sql = stmt.sql;
@@ -623,6 +640,8 @@ mod tests {
             limit: 10,
             offset: 20,
             skip_count: false,
+            filter_tree: None,
+            columns: None,
         };
         let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
         assert!(stmt.sql.contains("ORDER BY"));
@@ -1021,6 +1040,321 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // upsert (INSERT … ON CONFLICT) — SetColumns + WindowedCounter
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upsert_set_columns_inserts_then_updates_on_conflict() {
+        use wafer_core::interfaces::database::service::{UpsertConflict, UpsertSpec};
+
+        let svc = make_test_svc();
+        let table = Table {
+            name: "widgets".into(),
+            columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        svc.ensure_schema_table(&table).await.unwrap();
+
+        // No existing row on id=w1 → the ON CONFLICT insert lands as an insert.
+        let n1 = DatabaseService::upsert(
+            &svc,
+            "widgets",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("w1")),
+                    ("name".into(), serde_json::json!("a")),
+                ],
+                conflict_columns: vec!["id".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["name".into()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(n1, 1, "insert affects one row");
+        let r1 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
+        assert_eq!(r1.data["name"], serde_json::json!("a"));
+
+        // Same id → conflict on the PK → DO UPDATE SET name = excluded.name.
+        let n2 = DatabaseService::upsert(
+            &svc,
+            "widgets",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("w1")),
+                    ("name".into(), serde_json::json!("b")),
+                ],
+                conflict_columns: vec!["id".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["name".into()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(n2, 1, "conflict update affects one row");
+        let r2 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
+        assert_eq!(
+            r2.data["name"],
+            serde_json::json!("b"),
+            "on-conflict updated name a -> b"
+        );
+
+        let total = DatabaseService::count(&svc, "widgets", &[]).await.unwrap();
+        assert_eq!(
+            total, 1,
+            "still exactly one row — the second call updated, not inserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_windowed_counter_increments_in_window_and_keeps_created_at() {
+        use wafer_core::interfaces::database::service::{UpsertConflict, UpsertSpec};
+
+        let svc = make_test_svc();
+        // Seed an existing counter row with SENTINEL timestamps so we can prove
+        // created_at is immutable across conflict-updates (Task-5 fix): if the
+        // builder wrongly re-stamped created_at in DO UPDATE SET, the sentinel
+        // would be overwritten with CURRENT_TIMESTAMP. `key` is UNIQUE — the
+        // conflict target.
+        {
+            let db = svc.db.lock().unwrap();
+            db.execute_batch(
+                "CREATE TABLE rl (
+                     id TEXT PRIMARY KEY,
+                     key TEXT UNIQUE,
+                     count INTEGER,
+                     window_start INTEGER,
+                     created_at TEXT,
+                     updated_at TEXT
+                 );
+                 INSERT INTO rl (id, key, count, window_start, created_at, updated_at)
+                 VALUES ('seed', 'user:1:login', 1, 1700000000, 'SENTINEL-CREATED', 'SENTINEL-UPDATED');",
+            )
+            .unwrap();
+        }
+
+        let now = 1_700_000_000_i64;
+        let cutoff = now - 60; // 60s window; stored window_start (=now) is NOT expired
+        let make_spec = || UpsertSpec {
+            data: vec![
+                ("id".into(), serde_json::json!("fresh-id")),
+                ("key".into(), serde_json::json!("user:1:login")),
+            ],
+            conflict_columns: vec!["key".into()],
+            on_conflict: UpsertConflict::WindowedCounter {
+                count_field: "count".into(),
+                window_field: "window_start".into(),
+                now,
+                window_cutoff: cutoff,
+                created_fields: vec!["created_at".into()],
+                updated_fields: vec!["updated_at".into()],
+            },
+        };
+
+        // First upsert conflicts on `key` → in-window increment (1 -> 2).
+        let n1 = DatabaseService::upsert(&svc, "rl", make_spec())
+            .await
+            .unwrap();
+        assert_eq!(n1, 1, "conflict update affects the one matching row");
+        let r1 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
+        assert_eq!(
+            r1.data["count"],
+            serde_json::json!(2),
+            "count incremented 1 -> 2"
+        );
+        assert_eq!(
+            r1.data["created_at"],
+            serde_json::json!("SENTINEL-CREATED"),
+            "created_at must be immutable on conflict (Task-5 fix)"
+        );
+        assert_ne!(
+            r1.data["updated_at"],
+            serde_json::json!("SENTINEL-UPDATED"),
+            "updated_at must be re-stamped on conflict"
+        );
+
+        // Second in-window upsert → increments again (2 -> 3); created_at still untouched.
+        let n2 = DatabaseService::upsert(&svc, "rl", make_spec())
+            .await
+            .unwrap();
+        assert_eq!(n2, 1);
+        let r2 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
+        assert_eq!(
+            r2.data["count"],
+            serde_json::json!(3),
+            "count incremented 2 -> 3 on the second in-window upsert"
+        );
+        assert_eq!(
+            r2.data["created_at"],
+            serde_json::json!("SENTINEL-CREATED"),
+            "created_at still unchanged after the second in-window upsert"
+        );
+
+        // The conflicting upserts never inserted a duplicate row.
+        let total = DatabaseService::count(&svc, "rl", &[]).await.unwrap();
+        assert_eq!(total, 1, "no duplicate row was inserted");
+    }
+
+    // -----------------------------------------------------------------------
+    // aggregate (grouped queries) — count-by-column, case-when, date-bucket
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn aggregate_grouped_count_by_column_carries_alias_and_counts() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "items",
+            vec![
+                serde_json::json!({"status": "active"}),
+                serde_json::json!({"status": "active"}),
+                serde_json::json!({"status": "inactive"}),
+            ],
+        )
+        .await;
+
+        let spec = AggregateSpec {
+            select_columns: vec!["status".into()],
+            aggregates: vec![AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![GroupBySpec::Column("status".into())],
+            sort: vec![SortField {
+                field: "status".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "items", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2, "two distinct status groups");
+        // Sorted ascending: active, inactive.
+        assert_eq!(rows[0].data["status"], serde_json::json!("active"));
+        assert_eq!(
+            rows[0].data["cnt"],
+            serde_json::json!(2),
+            "alias carries count"
+        );
+        assert_eq!(rows[1].data["status"], serde_json::json!("inactive"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn aggregate_case_when_sum_counts_matching_rows_per_group() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "reqs",
+            vec![
+                serde_json::json!({"method": "GET", "status": "ok"}),
+                serde_json::json!({"method": "GET", "status": "error"}),
+                serde_json::json!({"method": "GET", "status": "error"}),
+                serde_json::json!({"method": "POST", "status": "ok"}),
+            ],
+        )
+        .await;
+
+        // Per method: total count + conditional count of status = 'error'.
+        let spec = AggregateSpec {
+            select_columns: vec!["method".into()],
+            aggregates: vec![
+                AggregateColumnSpec::Count {
+                    alias: "cnt".into(),
+                },
+                AggregateColumnSpec::CaseWhenSum {
+                    when: vec![FilterTree::Leaf(Filter {
+                        field: "status".into(),
+                        operator: FilterOp::Equal,
+                        value: serde_json::json!("error"),
+                    })],
+                    alias: "errors".into(),
+                },
+            ],
+            filters: vec![],
+            group_by: vec![GroupBySpec::Column("method".into())],
+            sort: vec![SortField {
+                field: "method".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "reqs", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        // GET first (ascending): 3 total, 2 errors.
+        assert_eq!(rows[0].data["method"], serde_json::json!("GET"));
+        assert_eq!(rows[0].data["cnt"], serde_json::json!(3));
+        assert_eq!(
+            rows[0].data["errors"],
+            serde_json::json!(2),
+            "conditional count of status='error' in GET group"
+        );
+        // POST: 1 total, 0 errors.
+        assert_eq!(rows[1].data["method"], serde_json::json!("POST"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
+        assert_eq!(rows[1].data["errors"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn aggregate_date_bucket_groups_by_day() {
+        use wafer_core::interfaces::database::service::{
+            AggregateColumnSpec, AggregateSpec, GroupBySpec,
+        };
+
+        let svc = make_test_svc();
+        // Explicit plain-date `created_at` values so SQLite's date() buckets
+        // them deterministically (two on the 15th, one on the 16th).
+        seed_rows(
+            &svc,
+            "events",
+            vec![
+                serde_json::json!({"kind": "a", "created_at": "2026-01-15"}),
+                serde_json::json!({"kind": "b", "created_at": "2026-01-15"}),
+                serde_json::json!({"kind": "c", "created_at": "2026-01-16"}),
+            ],
+        )
+        .await;
+
+        let spec = AggregateSpec {
+            select_columns: vec![],
+            aggregates: vec![AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![GroupBySpec::DateBucket {
+                field: "created_at".into(),
+            }],
+            sort: vec![SortField {
+                field: "created_at".into(),
+                desc: false,
+            }],
+            limit: 0,
+        };
+        let rows = DatabaseService::aggregate(&svc, "events", spec)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 2, "two day buckets");
+        assert_eq!(rows[0].data["created_at"], serde_json::json!("2026-01-15"));
+        assert_eq!(rows[0].data["cnt"], serde_json::json!(2));
+        assert_eq!(rows[1].data["created_at"], serde_json::json!("2026-01-16"));
+        assert_eq!(rows[1].data["cnt"], serde_json::json!(1));
+    }
+
+    // -----------------------------------------------------------------------
     // Lazy column-add on filtered writes (sqlite/postgres divergence resolved
     // deliberately: both backends now lazily add missing filter/data columns
     // on the *_where family, matching the documented lazy column-add design;
@@ -1196,6 +1530,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_with_column_projection_returns_only_selected_columns() {
+        // `columns: Some([...])` renders `SELECT id, name` (not `SELECT *`),
+        // so the unprojected `secret` column must be absent from the returned
+        // record even though the row has a value for it.
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "rows",
+            vec![serde_json::json!({"name": "a", "secret": "s1"})],
+        )
+        .await;
+        let opts = ListOptions {
+            columns: Some(vec!["id".into(), "name".into()]),
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts).await.unwrap();
+        let row = &list.records[0].data;
+        assert!(row.contains_key("name"), "projected column present");
+        assert!(!row.contains_key("secret"), "unprojected column absent");
+        // The projection is honored, but a `None` projection still returns
+        // every column — sanity-check the fixture actually stored `secret`.
+        let full = DatabaseService::list(&svc, "rows", &ListOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(full.records[0].data["secret"], serde_json::json!("s1"));
+    }
+
+    #[tokio::test]
+    async fn list_with_any_group_filter_returns_only_or_matching_rows() {
+        // A group filter (`Any` = OR) must actually execute against the DB via
+        // `filter_tree` → `build_condition_tree` → `extra_condition`. Before
+        // Task 4, LIST flattened the tree to empty and returned ALL rows (the
+        // Task 3 fail-open). Here `status = 'active' OR status = 'pending'`
+        // must return exactly the two matching rows and skip 'archived',
+        // and `total_count` (computed with the same extra_condition) must
+        // agree with the filtered set — not the full table.
+        let svc = make_test_svc();
+        seed_rows(
+            &svc,
+            "rows",
+            vec![
+                serde_json::json!({"name": "a", "status": "active"}),
+                serde_json::json!({"name": "b", "status": "pending"}),
+                serde_json::json!({"name": "c", "status": "archived"}),
+                serde_json::json!({"name": "d", "status": "archived"}),
+            ],
+        )
+        .await;
+
+        let tree = vec![FilterTree::Any(vec![
+            FilterTree::Leaf(Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("active"),
+            }),
+            FilterTree::Leaf(Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("pending"),
+            }),
+        ])];
+        let opts = ListOptions {
+            filters: Vec::new(),
+            filter_tree: Some(tree),
+            sort: vec![SortField {
+                field: "name".into(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts).await.unwrap();
+
+        assert_eq!(
+            list.records.len(),
+            2,
+            "only the two OR-matching rows should return, not all four"
+        );
+        let statuses: Vec<&str> = list
+            .records
+            .iter()
+            .map(|r| r.data["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, vec!["active", "pending"]);
+        assert!(
+            !statuses.contains(&"archived"),
+            "archived rows must be excluded by the group filter"
+        );
+        assert_eq!(
+            list.total_count, 2,
+            "total_count must reflect the filtered set (extra_condition applied to COUNT), not the full table"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_group_filter_on_column_absent_from_schema_lazily_adds_it() {
+        // A field that appears ONLY inside a group (`filter_tree`), never in
+        // the flat `filters` list, must still get its lazy TEXT column added
+        // by `ensure_query_columns` (which now walks the tree's leaves). If it
+        // didn't, the SELECT would fail with "no such column".
+        let svc = make_test_svc();
+        seed_rows(&svc, "rows", vec![serde_json::json!({"name": "a"})]).await;
+
+        let tree = vec![FilterTree::Any(vec![FilterTree::Leaf(Filter {
+            field: "tier".into(), // absent from the seeded schema
+            operator: FilterOp::Equal,
+            value: serde_json::json!("gold"),
+        })])];
+        let opts = ListOptions {
+            filter_tree: Some(tree),
+            ..Default::default()
+        };
+        let list = DatabaseService::list(&svc, "rows", &opts)
+            .await
+            .expect("group-only filter column must be lazily added, not error");
+        // No row has tier='gold' (the column was just added as NULL), so the
+        // filter matches nothing — but the query must succeed.
+        assert!(list.records.is_empty());
+        assert_eq!(list.total_count, 0);
+    }
+
+    #[tokio::test]
     async fn get_missing_row_returns_not_found() {
         let svc = make_test_svc();
         seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
@@ -1259,7 +1714,7 @@ mod tests {
         // filter column would be "added" against a table that doesn't exist,
         // which surfaces as a real DDL error rather than being swallowed.
         let res = svc
-            .ensure_query_columns("no_such_table", &filters, &[])
+            .ensure_query_columns("no_such_table", &filters, &[], None)
             .await;
         assert!(
             res.is_err(),
