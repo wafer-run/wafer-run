@@ -36,9 +36,13 @@ fn invalid(msg: impl Into<String>) -> WaferError {
 ///
 /// A top-level empty forest (`[]`) is valid and means "no filter"; only
 /// *nested* empty groups are rejected.
-pub(crate) fn convert_filter_tree(
-    nodes: Vec<wire::FilterNode>,
-) -> Result<Vec<FilterTree>, WaferError> {
+///
+/// Public (like [`flatten_leaves`], [`to_upsert_spec`], [`to_aggregate_spec`])
+/// as the render trust boundary's wire→builder-input conversion surface: it
+/// takes only wire types and is exercised directly by the wire-round-trip
+/// render-parity integration tests (`tests/database_render_parity.rs`), which
+/// prove SP-B2's future migration is pure re-plumbing.
+pub fn convert_filter_tree(nodes: Vec<wire::FilterNode>) -> Result<Vec<FilterTree>, WaferError> {
     let mut count = 0usize;
     nodes
         .into_iter()
@@ -91,7 +95,11 @@ fn convert_node(
 /// Used by ops whose builders take a flat `&[Filter]` and which no current
 /// caller invokes with a group; a group here is a client/runtime mismatch, so
 /// fail closed rather than silently drop it.
-pub(crate) fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
+///
+/// Public as part of the wire→builder-input conversion surface (see
+/// [`convert_filter_tree`]); asserted against direct builder calls in
+/// `tests/database_render_parity.rs`.
+pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
     let mut out = Vec::with_capacity(tree.len());
     for node in tree {
         match node {
@@ -116,7 +124,14 @@ pub(crate) fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferEr
 /// and the timestamp columns into `CASE`/`SET` expression text, where binding
 /// is impossible. Returns the collection alongside the spec so the caller can
 /// authorize/dispatch without a move-after-use of `req.collection`.
-fn to_upsert_spec(req: wire::UpsertRequest) -> Result<(String, service::UpsertSpec), WaferError> {
+///
+/// Public as part of the wire→builder-input conversion surface (see
+/// [`convert_filter_tree`]): it takes only the wire request and is compared
+/// against a direct `upsert::build_upsert` / `build_windowed_counter_upsert`
+/// call in `tests/database_render_parity.rs`.
+pub fn to_upsert_spec(
+    req: wire::UpsertRequest,
+) -> Result<(String, service::UpsertSpec), WaferError> {
     fn check_ident(name: &str) -> Result<(), WaferError> {
         wafer_sql_utils::ident::validate_ident(name)
             .map(|_| ())
@@ -187,7 +202,13 @@ fn to_upsert_spec(req: wire::UpsertRequest) -> Result<(String, service::UpsertSp
 /// [`FilterTree`] forest, not a sea-query expression. `filters` are flattened
 /// to AND-of-leaves (a group → `InvalidArgument`, consistent with
 /// `count`/`sum`).
-fn to_aggregate_spec(
+///
+/// Public as part of the wire→builder-input conversion surface (see
+/// [`convert_filter_tree`]): it takes only the wire request and its output,
+/// fed through `AggregateSpec::into_grouped_config`, is compared against a
+/// direct `aggregate::build_grouped_query` call in
+/// `tests/database_render_parity.rs`.
+pub fn to_aggregate_spec(
     req: wire::AggregateRequest,
 ) -> Result<(String, service::AggregateSpec), WaferError> {
     fn check_ident(name: &str) -> Result<(), WaferError> {
