@@ -94,8 +94,9 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
 /// Dispatch to the right resource-owner parser for the given resource type.
 ///
 /// `ResourceType::Storage` parses slash-separated `{org}/{block}/...` paths
-/// via [`storage_resource_owner`]. Everything else (Db, Config, untyped)
-/// parses double-underscore `{org}__{block}__...` names via [`resource_owner`].
+/// via [`storage_resource_owner`]. Everything else (Db, Config, Vector,
+/// untyped) parses double-underscore `{org}__{block}__...` names via
+/// [`resource_owner`].
 ///
 /// Used by `check_access` and by the lifecycle grant validator to apply
 /// ownership rules consistently across resource types.
@@ -111,7 +112,7 @@ pub fn typed_resource_owner(
 
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
-/// For namespace-based resources (Db, Config, or untyped):
+/// For namespace-based resources (Db, Config, Vector, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
 /// 2. `__ddl__` → any attributable caller (NOT admin-only). Convention is that
 ///    blocks only DDL their own (`{org}__{block}__*`) tables; this is enforced
@@ -148,7 +149,7 @@ pub fn check_access(
     grants: &[ResourceGrant],
     admin_block: &str,
 ) -> Result<(), WaferError> {
-    // Namespace-based rules only apply to Db, Config, or untyped resources.
+    // Namespace-based rules apply to Db, Config, Vector, or untyped resources.
     // Network, Storage, and Crypto resources use URLs / file-paths /
     // operation-names, not the {org}__{block}__{name} convention.
     let namespace_based = !matches!(
@@ -536,6 +537,80 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::ResourceType;
+
+    #[test]
+    fn vector_is_namespace_based_and_self_admits() {
+        let admin = "suppers-ai/admin";
+        // Owner self-admits its own index namespace (read and write).
+        assert!(check_access(
+            Some("suppers-ai/vector"),
+            "suppers_ai__vector__docs",
+            false,
+            Some(&ResourceType::Vector),
+            &[],
+            admin
+        )
+        .is_ok());
+        assert!(check_access(
+            Some("suppers-ai/vector"),
+            "suppers_ai__vector__docs",
+            true,
+            Some(&ResourceType::Vector),
+            &[],
+            admin
+        )
+        .is_ok());
+        // A different block with no grant is denied.
+        assert!(check_access(
+            Some("evil/block"),
+            "suppers_ai__vector__docs",
+            false,
+            Some(&ResourceType::Vector),
+            &[],
+            admin
+        )
+        .is_err());
+        // An unnamespaced index name is denied.
+        assert!(check_access(
+            Some("evil/block"),
+            "pwned",
+            false,
+            Some(&ResourceType::Vector),
+            &[],
+            admin
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn vector_grant_satisfies_only_vector_requests() {
+        let admin = "suppers-ai/admin";
+        let grants = vec![
+            ResourceGrant::read("reader/block", "suppers_ai__vector__docs")
+                .typed(ResourceType::Vector),
+        ];
+        // Same-type read is allowed via the grant.
+        assert!(check_access(
+            Some("reader/block"),
+            "suppers_ai__vector__docs",
+            false,
+            Some(&ResourceType::Vector),
+            &grants,
+            admin
+        )
+        .is_ok());
+        // A Db request for the same name is not satisfied by a Vector grant
+        // (and, being cross-namespace, is denied).
+        assert!(check_access(
+            Some("reader/block"),
+            "suppers_ai__vector__docs",
+            false,
+            Some(&ResourceType::Db),
+            &grants,
+            admin
+        )
+        .is_err());
+    }
 
     #[test]
     fn test_resource_owner() {
