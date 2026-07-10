@@ -538,6 +538,51 @@ fn vector_action_spec(op: &str) -> ActionSpec {
                 "properties": { "count": { "type": "integer" } }
             })),
         },
+        ServiceOp::VECTOR_LIST_INDEXES => ActionSpec {
+            description:
+                "List index stems under a namespace prefix. WRAP-authorized against prefix.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "prefix": { "type": "string" } },
+                "required": ["prefix"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "indexes": { "type": "array", "items": { "type": "string" } } }
+            })),
+        },
+        ServiceOp::VECTOR_DESCRIBE_INDEX => ActionSpec {
+            description:
+                "Describe an index: existence, columns, keyword capability. WRAP-authorized against index."
+                    .into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" } },
+                "required": ["index"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "exists": { "type": "boolean" },
+                    "columns": { "type": "array", "items": { "type": "object" } },
+                    "keyword_search": { "type": "boolean" }
+                }
+            })),
+        },
+        ServiceOp::VECTOR_LIST_IDS => ActionSpec {
+            description:
+                "List entry ids matching a metadata equality filter. WRAP-authorized against index."
+                    .into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" }, "filter": { "type": "object" } },
+                "required": ["index", "filter"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+            })),
+        },
         other => panic!(
             "BUG: no ActionSpec for vector op '{other}' — update vector_action_spec alongside ServiceOp::VECTOR_OPS"
         ),

@@ -164,6 +164,34 @@ impl VectorIndexSchema {
         self.ddl_stmt(sql)
     }
 
+    /// `SELECT id FROM {meta_table} WHERE json_extract(metadata, ?) = ? AND …`
+    /// with one `(path, value)` placeholder pair per condition. Both the JSON
+    /// path (a `$.dotted.path` string) and the value are bound parameters —
+    /// nothing caller-supplied is interpolated into the SQL text.
+    ///
+    /// `n_conditions` must be >= 1 (an unconditioned id dump is not a
+    /// supported query shape); panics otherwise — callers validate the
+    /// filter before building, this is a programmer-error guard.
+    pub fn build_select_ids_by_metadata(&self, n_conditions: usize) -> crate::Statement {
+        assert!(
+            n_conditions > 0,
+            "build_select_ids_by_metadata requires at least one metadata condition"
+        );
+        let mut clauses = String::new();
+        for i in 0..n_conditions {
+            if i > 0 {
+                clauses.push_str(" AND ");
+            }
+            let path_param = i * 2 + 1;
+            let value_param = i * 2 + 2;
+            clauses.push_str(&format!(
+                "json_extract(metadata, ?{path_param}) = ?{value_param}"
+            ));
+        }
+        let sql = format!("SELECT id FROM {} WHERE {clauses}", self.meta_table);
+        self.ddl_stmt(sql)
+    }
+
     /// `SELECT rowid FROM {meta_table} WHERE id IN (?,?,...)`
     pub fn build_select_rowid_in(&self, n_ids: usize) -> crate::Statement {
         let in_clause = in_clause_placeholders(n_ids);
@@ -253,6 +281,34 @@ impl VectorIndexSchema {
         );
         self.ddl_stmt(sql)
     }
+}
+
+/// Escape LIKE-pattern metacharacters (`\`, `%`, `_`) with a backslash so
+/// the input matches literally under `LIKE … ESCAPE '\'`.
+pub fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `(sql, bind_pattern)` to list the `_meta` tables of every vector index
+/// under `prefix` in `sqlite_master`.
+///
+/// The prefix is LIKE-escaped so `_`/`%` inside it match literally — unlike
+/// `introspect::build_list_tables_like`, whose pattern treats `_` as a
+/// single-character wildcard. Bind the returned pattern as `?1`; row column
+/// is `name` (the full `{stem}_meta` table name), in lexical order.
+pub fn build_list_meta_tables(prefix: &str) -> (String, String) {
+    (
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ESCAPE '\\' ORDER BY name"
+            .to_string(),
+        format!("{}%\\_meta", escape_like(prefix)),
+    )
 }
 
 /// `?,?,?...` with `n` placeholders. Returns an empty string when
@@ -354,5 +410,39 @@ mod tests {
         assert!(sql.contains("bm25(docs_fts)"));
         assert!(sql.contains("FROM docs_fts WHERE docs_fts MATCH ?1"));
         assert_eq!(stmt.collection, "docs_meta");
+    }
+
+    #[test]
+    fn escape_like_escapes_wildcards_and_backslash() {
+        assert_eq!(escape_like("a_b%c\\d"), "a\\_b\\%c\\\\d");
+        assert_eq!(escape_like("plain"), "plain");
+    }
+
+    #[test]
+    fn list_meta_tables_pattern_treats_prefix_literally() {
+        let (sql, pattern) = build_list_meta_tables("suppers_ai__vector__");
+        assert_eq!(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ESCAPE '\\' ORDER BY name"
+        );
+        assert_eq!(pattern, "suppers\\_ai\\_\\_vector\\_\\_%\\_meta");
+    }
+
+    #[test]
+    fn select_ids_by_metadata_binds_paths_and_values() {
+        let s = VectorIndexSchema::new("idx").expect("plain identifier");
+        let stmt = s.build_select_ids_by_metadata(2);
+        assert_eq!(
+            stmt.sql,
+            "SELECT id FROM idx_meta WHERE json_extract(metadata, ?1) = ?2 AND json_extract(metadata, ?3) = ?4"
+        );
+        assert_eq!(stmt.collection, "idx_meta");
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one metadata condition")]
+    fn select_ids_by_metadata_rejects_zero_conditions() {
+        let s = VectorIndexSchema::new("idx").expect("plain identifier");
+        let _ = s.build_select_ids_by_metadata(0);
     }
 }

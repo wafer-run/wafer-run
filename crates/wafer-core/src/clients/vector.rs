@@ -18,13 +18,15 @@ use wafer_block::context::Context;
 // `interfaces::vector::service::*` types (the wire crate is the canonical
 // home for these vector data types now).
 pub use wafer_block::wire::vector::{
-    DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+    ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode, VectorEntry,
+    VectorIndexConfig, VectorMatch,
 };
 use wafer_block::{
     common::ServiceOp,
     wire::vector::{
         CountRequest, CountResponse, CountTokensRequest, CountTokensResponse, CreateIndexRequest,
-        DeleteIndexRequest, DeleteRequest, EmbedRequest, EmbedResponse, QueryRequest,
+        DeleteIndexRequest, DeleteRequest, DescribeIndexRequest, EmbedRequest, EmbedResponse,
+        ListIdsRequest, ListIdsResponse, ListIndexesRequest, ListIndexesResponse, QueryRequest,
         QueryResponse, UpsertRequest,
     },
     WaferError,
@@ -139,6 +141,57 @@ dual_api! {
         )?;
         let resp: CountResponse = decode(&data)?;
         Ok(resp.count)
+    }
+
+    /// List index stems (storage names, `_meta` suffix stripped) under
+    /// `prefix` — a full `{org}__{block}__` namespace, which is also the
+    /// WRAP authorization resource (partial prefixes deny host-side).
+    pub fn list_indexes(ctx, prefix: &str) -> Result<Vec<String>, WaferError> {
+        let req = ListIndexesRequest { prefix: prefix.to_string() };
+        let data = svc!(
+            ctx, VECTOR_BLOCK,
+            ServiceOp::VECTOR_LIST_INDEXES,
+            &req,
+            Some(prefix),
+            false,
+            Some("vector")
+        )?;
+        let resp: ListIndexesResponse = decode(&data)?;
+        Ok(resp.indexes)
+    }
+
+    /// Describe `index`: existence, meta-table columns, keyword capability.
+    /// A missing index is `exists: false`, not an error — usable as an
+    /// existence/capability probe.
+    pub fn describe_index(ctx, index: &str) -> Result<DescribeIndexResponse, WaferError> {
+        let req = DescribeIndexRequest { index: index.to_string() };
+        let data = svc!(
+            ctx, VECTOR_BLOCK,
+            ServiceOp::VECTOR_DESCRIBE_INDEX,
+            &req,
+            Some(index),
+            false,
+            Some("vector")
+        )?;
+        let resp: DescribeIndexResponse = decode(&data)?;
+        Ok(resp)
+    }
+
+    /// Ids of entries in `index` whose metadata equals every `filter.equals`
+    /// condition. The filter must be non-empty with string/number values
+    /// (`InvalidArgument` otherwise); a missing index is `NotFound`.
+    pub fn list_ids(ctx, index: &str, filter: MetadataFilter) -> Result<Vec<String>, WaferError> {
+        let req = ListIdsRequest { index: index.to_string(), filter };
+        let data = svc!(
+            ctx, VECTOR_BLOCK,
+            ServiceOp::VECTOR_LIST_IDS,
+            &req,
+            Some(index),
+            false,
+            Some("vector")
+        )?;
+        let resp: ListIdsResponse = decode(&data)?;
+        Ok(resp.ids)
     }
 
     /// Call an embedding block to embed the given texts.

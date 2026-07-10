@@ -20,8 +20,9 @@ use wafer_block::{
 use super::service::{EmbeddingService, VectorError, VectorService};
 use crate::interfaces::handler_util::{decode_and_authorize, decode_or_err, to_output};
 
-/// The three read-only vector ops authorize with `is_write = false`; every
-/// other op mutates the index and authorizes with `is_write = true`.
+/// The read-only vector ops (query, count, list_indexes, describe_index,
+/// list_ids) authorize with `is_write = false`; every other op mutates the
+/// index and authorizes with `is_write = true`.
 const READ: bool = false;
 const WRITE: bool = true;
 
@@ -38,7 +39,8 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::UnknownModel(_)
         | VectorError::TextRequired
         | VectorError::KeywordQueryRequired(_)
-        | VectorError::InvalidIndexName(_) => {
+        | VectorError::InvalidIndexName(_)
+        | VectorError::InvalidMetadataFilter(_) => {
             WaferError::new(ErrorCode::InvalidArgument, e.to_string())
         }
         VectorError::Internal(msg) => {
@@ -149,6 +151,54 @@ pub async fn handle_message(
                 };
             match service.count(&req.index).await {
                 Ok(count) => to_output(&wire::CountResponse { count }),
+                Err(e) => OutputStream::error(vector_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::VECTOR_LIST_INDEXES => {
+            // Authorizes on the literal prefix: `resource_owner` requires a
+            // full `{org}__{block}__` namespace, so partial prefixes are
+            // unnamespaced and deny under Rule 7.
+            let req = match decode_and_authorize::<wire::ListIndexesRequest>(
+                ctx,
+                body,
+                "vector.list_indexes",
+                |r| (r.prefix.clone(), ResourceType::Vector, READ),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.list_indexes(&req.prefix).await {
+                Ok(indexes) => to_output(&wire::ListIndexesResponse { indexes }),
+                Err(e) => OutputStream::error(vector_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::VECTOR_DESCRIBE_INDEX => {
+            let req = match decode_and_authorize::<wire::DescribeIndexRequest>(
+                ctx,
+                body,
+                "vector.describe_index",
+                |r| (r.index.clone(), ResourceType::Vector, READ),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.describe_index(&req.index).await {
+                Ok(desc) => to_output(&desc),
+                Err(e) => OutputStream::error(vector_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::VECTOR_LIST_IDS => {
+            let req = match decode_and_authorize::<wire::ListIdsRequest>(
+                ctx,
+                body,
+                "vector.list_ids",
+                |r| (r.index.clone(), ResourceType::Vector, READ),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.list_ids(&req.index, req.filter).await {
+                Ok(ids) => to_output(&wire::ListIdsResponse { ids }),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }

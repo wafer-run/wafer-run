@@ -432,7 +432,8 @@ mod crypto_fakes {
 
 mod vector_fakes {
     use wafer_block::wire::vector::{
-        MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+        DescribeIndexResponse, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig,
+        VectorMatch,
     };
     use wafer_core::interfaces::vector::service::{Result as VResult, VectorService};
 
@@ -484,6 +485,22 @@ mod vector_fakes {
         async fn count(&self, _i: &str) -> VResult<u64> {
             self.record("count");
             Ok(0)
+        }
+        async fn list_indexes(&self, _p: &str) -> VResult<Vec<String>> {
+            self.record("list_indexes");
+            Ok(vec![])
+        }
+        async fn describe_index(&self, _i: &str) -> VResult<DescribeIndexResponse> {
+            self.record("describe_index");
+            Ok(DescribeIndexResponse {
+                exists: false,
+                columns: vec![],
+                keyword_search: false,
+            })
+        }
+        async fn list_ids(&self, _i: &str, _f: MetadataFilter) -> VResult<Vec<String>> {
+            self.record("list_ids");
+            Ok(vec![])
         }
     }
 }
@@ -836,6 +853,14 @@ fn vector_op_body(op: &str) -> Vec<u8> {
         }),
         ServiceOp::VECTOR_DELETE => codec::encode(&wire::DeleteRequest { index, ids: vec![] }),
         ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index }),
+        ServiceOp::VECTOR_LIST_INDEXES => codec::encode(&wire::ListIndexesRequest {
+            prefix: "suppers_ai__vector__".into(),
+        }),
+        ServiceOp::VECTOR_DESCRIBE_INDEX => codec::encode(&wire::DescribeIndexRequest { index }),
+        ServiceOp::VECTOR_LIST_IDS => codec::encode(&wire::ListIdsRequest {
+            index,
+            filter: wire::MetadataFilter::default(),
+        }),
         other => panic!(
             "completeness test has no minimal-body case for vector op `{other}` — \
              add a `match` arm to `vector_op_body`"

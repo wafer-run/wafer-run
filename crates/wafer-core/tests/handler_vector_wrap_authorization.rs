@@ -99,7 +99,8 @@ mod vec_fakes {
     use std::sync::{Arc, Mutex};
 
     use wafer_block::wire::vector::{
-        MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+        DescribeIndexResponse, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig,
+        VectorMatch,
     };
     use wafer_core::interfaces::vector::service::{Result as VResult, VectorService};
 
@@ -149,6 +150,22 @@ mod vec_fakes {
         async fn count(&self, _i: &str) -> VResult<u64> {
             self.note("count");
             Ok(0)
+        }
+        async fn list_indexes(&self, _p: &str) -> VResult<Vec<String>> {
+            self.note("list_indexes");
+            Ok(vec![])
+        }
+        async fn describe_index(&self, _i: &str) -> VResult<DescribeIndexResponse> {
+            self.note("describe_index");
+            Ok(DescribeIndexResponse {
+                exists: false,
+                columns: vec![],
+                keyword_search: false,
+            })
+        }
+        async fn list_ids(&self, _i: &str, _f: MetadataFilter) -> VResult<Vec<String>> {
+            self.note("list_ids");
+            Ok(vec![])
         }
     }
 }
@@ -200,6 +217,17 @@ fn body_for(op: &str) -> Vec<u8> {
             ids: vec![],
         }),
         ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index: IDX.into() }),
+        ServiceOp::VECTOR_LIST_INDEXES => codec::encode(&wire::ListIndexesRequest {
+            // The namespace prefix of IDX — list authorizes on the prefix itself.
+            prefix: "suppers_ai__vector__".into(),
+        }),
+        ServiceOp::VECTOR_DESCRIBE_INDEX => {
+            codec::encode(&wire::DescribeIndexRequest { index: IDX.into() })
+        }
+        ServiceOp::VECTOR_LIST_IDS => codec::encode(&wire::ListIdsRequest {
+            index: IDX.into(),
+            filter: wire::MetadataFilter::default(),
+        }),
         other => panic!("no body for op {other}"),
     };
     encoded.expect("encode")
@@ -212,6 +240,9 @@ const ALL_OPS: &[&str] = &[
     ServiceOp::VECTOR_QUERY,
     ServiceOp::VECTOR_DELETE,
     ServiceOp::VECTOR_COUNT,
+    ServiceOp::VECTOR_LIST_INDEXES,
+    ServiceOp::VECTOR_DESCRIBE_INDEX,
+    ServiceOp::VECTOR_LIST_IDS,
 ];
 const WRITE_OPS: &[&str] = &[
     ServiceOp::VECTOR_CREATE_INDEX,
@@ -219,7 +250,13 @@ const WRITE_OPS: &[&str] = &[
     ServiceOp::VECTOR_UPSERT,
     ServiceOp::VECTOR_DELETE,
 ];
-const READ_OPS: &[&str] = &[ServiceOp::VECTOR_QUERY, ServiceOp::VECTOR_COUNT];
+const READ_OPS: &[&str] = &[
+    ServiceOp::VECTOR_QUERY,
+    ServiceOp::VECTOR_COUNT,
+    ServiceOp::VECTOR_LIST_INDEXES,
+    ServiceOp::VECTOR_DESCRIBE_INDEX,
+    ServiceOp::VECTOR_LIST_IDS,
+];
 
 // --- Tests ---------------------------------------------------------------
 
