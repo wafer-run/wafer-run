@@ -299,10 +299,55 @@ async fn foreign_folder_list_denied_never_reaches_service() {
     );
 }
 
+#[tokio::test]
+async fn list_folders_denied_under_deny_ctx_never_reaches_service() {
+    let calls = new_calls();
+    let svc = storage_fakes::RecordingStorage::new(calls.clone());
+    // list_folders carries no meaningful body — the handler authorizes
+    // against the admin-only STORAGE_LIST_ALL_RESOURCE sentinel.
+    let body = codec::encode(&serde_json::json!({})).unwrap();
+    let msg = msg_without_wrap_meta(ServiceOp::STORAGE_LIST_FOLDERS);
+
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body).await;
+    expect_permission_denied(out).await;
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "list_folders must not run on a denied request; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ALLOW case — granted ctx lets the request through to the service, for
 // every op the DENY cases above cover.
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_folders_allowed_under_admin_ctx() {
+    let calls = new_calls();
+    let svc = storage_fakes::RecordingStorage::new(calls.clone());
+    // AllowCtx grants the sentinel check (models the admin block) → the
+    // service's list_folders runs.
+    let body = codec::encode(&serde_json::json!({})).unwrap();
+    expect_success(
+        wafer_core::interfaces::storage::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            &msg_without_wrap_meta(ServiceOp::STORAGE_LIST_FOLDERS),
+            &body,
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["list_folders"],
+        "list_folders should reach the service under an allowing ctx"
+    );
+}
 
 #[tokio::test]
 async fn granted_ctx_allows_put_get_and_list() {
