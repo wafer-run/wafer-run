@@ -447,6 +447,64 @@ mod crypto_fakes {
     }
 }
 
+mod vector_fakes {
+    use wafer_block::wire::vector::{
+        MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+    };
+    use wafer_core::interfaces::vector::service::{Result as VResult, VectorService};
+
+    use super::Calls;
+
+    pub struct RecordingVector {
+        pub calls: Calls,
+    }
+
+    impl RecordingVector {
+        pub fn new(calls: Calls) -> Self {
+            Self { calls }
+        }
+        fn record(&self, op: &'static str) {
+            self.calls.lock().unwrap().push(op);
+        }
+    }
+
+    #[wafer_block::wafer_async_trait]
+    impl VectorService for RecordingVector {
+        async fn create_index(&self, _c: VectorIndexConfig) -> VResult<()> {
+            self.record("create_index");
+            Ok(())
+        }
+        async fn delete_index(&self, _n: &str) -> VResult<()> {
+            self.record("delete_index");
+            Ok(())
+        }
+        async fn upsert(&self, _i: &str, _e: Vec<VectorEntry>) -> VResult<()> {
+            self.record("upsert");
+            Ok(())
+        }
+        async fn query(
+            &self,
+            _i: &str,
+            _v: Vec<f32>,
+            _k: usize,
+            _f: Option<MetadataFilter>,
+            _m: SearchMode,
+            _q: Option<String>,
+        ) -> VResult<Vec<VectorMatch>> {
+            self.record("query");
+            Ok(vec![])
+        }
+        async fn delete(&self, _i: &str, _ids: Vec<String>) -> VResult<()> {
+            self.record("delete");
+            Ok(())
+        }
+        async fn count(&self, _i: &str) -> VResult<u64> {
+            self.record("count");
+            Ok(0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DenyCtx — models a caller with no WRAP grant for anything. Relies on the
 // `Context` trait's fail-closed default (see `wafer-block/src/context.rs`):
@@ -759,6 +817,75 @@ async fn database_ops_all_deny_under_deny_ctx() {
         assert!(
             calls.lock().unwrap().is_empty(),
             "database op `{op}` must not reach the service on a denied request; calls = {:?}",
+            calls.lock().unwrap()
+        );
+    }
+}
+
+fn vector_op_body(op: &str) -> Vec<u8> {
+    use wafer_block::wire::vector as wire;
+    let index = "suppers_ai__vector__docs".to_string();
+    let encoded = match op {
+        ServiceOp::VECTOR_CREATE_INDEX => codec::encode(&wire::CreateIndexRequest {
+            config: wire::VectorIndexConfig {
+                name: index,
+                model: "m".into(),
+                dimensions: 3,
+                metric: wire::DistanceMetric::Cosine,
+                keyword_search: false,
+            },
+        }),
+        ServiceOp::VECTOR_DELETE_INDEX => {
+            codec::encode(&wire::DeleteIndexRequest { name: index })
+        }
+        ServiceOp::VECTOR_UPSERT => codec::encode(&wire::UpsertRequest {
+            index,
+            entries: vec![],
+        }),
+        ServiceOp::VECTOR_QUERY => codec::encode(&wire::QueryRequest {
+            index,
+            vector: vec![],
+            top_k: 1,
+            filter: None,
+            mode: wire::SearchMode::Vector,
+            keyword_query: None,
+        }),
+        ServiceOp::VECTOR_DELETE => codec::encode(&wire::DeleteRequest {
+            index,
+            ids: vec![],
+        }),
+        ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index }),
+        other => panic!(
+            "completeness test has no minimal-body case for vector op `{other}` — \
+             add a `match` arm to `vector_op_body`"
+        ),
+    };
+    encoded.expect("encode must succeed")
+}
+
+/// Every vector op denies by default under a `Context` that grants nothing —
+/// the structural guarantee that a newly-added vector op can't ship without
+/// an authorization call.
+#[tokio::test]
+async fn vector_ops_all_deny_under_deny_ctx() {
+    assert!(
+        !ServiceOp::VECTOR_OPS.is_empty(),
+        "sanity: VECTOR_OPS must not be empty"
+    );
+    for op in ServiceOp::VECTOR_OPS {
+        let calls = new_calls();
+        let svc = vector_fakes::RecordingVector::new(calls.clone());
+        let body = vector_op_body(op);
+        let msg = msg_without_wrap_meta(op);
+
+        let out =
+            wafer_core::interfaces::vector::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+                .await;
+        expect_permission_denied(out, op).await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "vector op `{op}` must not reach the service on a denied request; calls = {:?}",
             calls.lock().unwrap()
         );
     }
