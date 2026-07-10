@@ -29,6 +29,7 @@ pub fn all() -> Vec<InterfaceSpec> {
         router_v1(),
         http_listener_v1(),
         database_v1(),
+        vector_v1(),
         storage_v1(),
         crypto_v1(),
         http_client_v1(),
@@ -460,6 +461,89 @@ fn database_action_spec(op: &str) -> ActionSpec {
     }
 }
 
+/// Vector — per-index vector search, WRAP-authorized against the index's
+/// `{org}__{block}__{index}` namespace (`ResourceType::Vector`).
+pub fn vector_v1() -> InterfaceSpec {
+    InterfaceSpec {
+        name: "vector@v1".into(),
+        description: "Vector index search and maintenance. Actions are message \
+                      kinds (e.g. vector.query, vector.upsert)."
+            .into(),
+        actions: actions_from_ops(ServiceOp::VECTOR_OPS, vector_action_spec),
+    }
+}
+
+fn vector_action_spec(op: &str) -> ActionSpec {
+    match op {
+        ServiceOp::VECTOR_CREATE_INDEX => ActionSpec {
+            description: "Create a vector index. WRAP-authorized against config.name.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "config": { "type": "object" } },
+                "required": ["config"]
+            })),
+            response_schema: None,
+        },
+        ServiceOp::VECTOR_DELETE_INDEX => ActionSpec {
+            description: "Delete a vector index. WRAP-authorized against name.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            })),
+            response_schema: None,
+        },
+        ServiceOp::VECTOR_UPSERT => ActionSpec {
+            description:
+                "Insert/replace entries in an index. WRAP-authorized against index.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" }, "entries": { "type": "array" } },
+                "required": ["index", "entries"]
+            })),
+            response_schema: None,
+        },
+        ServiceOp::VECTOR_QUERY => ActionSpec {
+            description:
+                "Nearest-neighbor / keyword / hybrid search. WRAP-authorized against index.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" } },
+                "required": ["index"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "matches": { "type": "array", "items": { "type": "object" } } }
+            })),
+        },
+        ServiceOp::VECTOR_DELETE => ActionSpec {
+            description:
+                "Delete entries by id from an index. WRAP-authorized against index.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" }, "ids": { "type": "array" } },
+                "required": ["index", "ids"]
+            })),
+            response_schema: None,
+        },
+        ServiceOp::VECTOR_COUNT => ActionSpec {
+            description: "Count entries in an index. WRAP-authorized against index.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "index": { "type": "string" } },
+                "required": ["index"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "count": { "type": "integer" } }
+            })),
+        },
+        other => panic!(
+            "BUG: no ActionSpec for vector op '{other}' — update vector_action_spec alongside ServiceOp::VECTOR_OPS"
+        ),
+    }
+}
+
 /// Storage — object/file storage with folders.
 pub fn storage_v1() -> InterfaceSpec {
     InterfaceSpec {
@@ -808,6 +892,7 @@ mod tests {
     fn catalogued() -> Vec<(InterfaceSpec, &'static [&'static str])> {
         vec![
             (database_v1(), ServiceOp::DATABASE_OPS),
+            (vector_v1(), ServiceOp::VECTOR_OPS),
             (storage_v1(), ServiceOp::STORAGE_OPS),
             (crypto_v1(), ServiceOp::CRYPTO_OPS),
             (http_client_v1(), ServiceOp::NETWORK_OPS),
@@ -846,6 +931,7 @@ mod tests {
     fn op_family_slices_have_consistent_prefixes() {
         for (prefix, ops) in [
             ("database.", ServiceOp::DATABASE_OPS),
+            ("vector.", ServiceOp::VECTOR_OPS),
             ("storage.", ServiceOp::STORAGE_OPS),
             ("crypto.", ServiceOp::CRYPTO_OPS),
             ("network.", ServiceOp::NETWORK_OPS),
@@ -859,6 +945,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vector_catalog_covers_every_vector_op() {
+        let spec = vector_v1();
+        assert_eq!(spec.name, "vector@v1");
+        for op in ServiceOp::VECTOR_OPS {
+            assert!(
+                spec.actions.contains_key(*op),
+                "vector@v1 catalog missing op '{op}'"
+            );
+        }
+        assert_eq!(spec.actions.len(), ServiceOp::VECTOR_OPS.len());
+    }
+
+    #[test]
+    fn all_registers_vector_v1() {
+        let names: Vec<String> = all().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"vector@v1".to_string()));
     }
 
     /// Regression pin for the 2026-06-10 audit finding: these ops were
