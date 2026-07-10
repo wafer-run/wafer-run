@@ -10,12 +10,12 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
+    context::Context,
     streams::output::OutputStream,
+    types::ResourceType,
     wire::vector as wire,
     *,
 };
-
-use wafer_block::{context::Context, types::ResourceType};
 
 use super::service::{EmbeddingService, VectorError, VectorService};
 use crate::interfaces::handler_util::{decode_and_authorize, decode_or_err, to_output};
@@ -91,30 +91,26 @@ pub async fn handle_message(
             }
         }
         ServiceOp::VECTOR_UPSERT => {
-            let req = match decode_and_authorize::<wire::UpsertRequest>(
-                ctx,
-                body,
-                "vector.upsert",
-                |r| (r.index.clone(), ResourceType::Vector, WRITE),
-            ) {
-                Ok(r) => r,
-                Err(out) => return out,
-            };
+            let req =
+                match decode_and_authorize::<wire::UpsertRequest>(ctx, body, "vector.upsert", |r| {
+                    (r.index.clone(), ResourceType::Vector, WRITE)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service.upsert(&req.index, req.entries).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_QUERY => {
-            let req = match decode_and_authorize::<wire::QueryRequest>(
-                ctx,
-                body,
-                "vector.query",
-                |r| (r.index.clone(), ResourceType::Vector, READ),
-            ) {
-                Ok(r) => r,
-                Err(out) => return out,
-            };
+            let req =
+                match decode_and_authorize::<wire::QueryRequest>(ctx, body, "vector.query", |r| {
+                    (r.index.clone(), ResourceType::Vector, READ)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service
                 .query(
                     &req.index,
@@ -131,30 +127,26 @@ pub async fn handle_message(
             }
         }
         ServiceOp::VECTOR_DELETE => {
-            let req = match decode_and_authorize::<wire::DeleteRequest>(
-                ctx,
-                body,
-                "vector.delete",
-                |r| (r.index.clone(), ResourceType::Vector, WRITE),
-            ) {
-                Ok(r) => r,
-                Err(out) => return out,
-            };
+            let req =
+                match decode_and_authorize::<wire::DeleteRequest>(ctx, body, "vector.delete", |r| {
+                    (r.index.clone(), ResourceType::Vector, WRITE)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service.delete(&req.index, req.ids).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }
         ServiceOp::VECTOR_COUNT => {
-            let req = match decode_and_authorize::<wire::CountRequest>(
-                ctx,
-                body,
-                "vector.count",
-                |r| (r.index.clone(), ResourceType::Vector, READ),
-            ) {
-                Ok(r) => r,
-                Err(out) => return out,
-            };
+            let req =
+                match decode_and_authorize::<wire::CountRequest>(ctx, body, "vector.count", |r| {
+                    (r.index.clone(), ResourceType::Vector, READ)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
             match service.count(&req.index).await {
                 Ok(count) => to_output(&wire::CountResponse { count }),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),

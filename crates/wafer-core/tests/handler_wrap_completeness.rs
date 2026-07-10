@@ -835,9 +835,7 @@ fn vector_op_body(op: &str) -> Vec<u8> {
                 keyword_search: false,
             },
         }),
-        ServiceOp::VECTOR_DELETE_INDEX => {
-            codec::encode(&wire::DeleteIndexRequest { name: index })
-        }
+        ServiceOp::VECTOR_DELETE_INDEX => codec::encode(&wire::DeleteIndexRequest { name: index }),
         ServiceOp::VECTOR_UPSERT => codec::encode(&wire::UpsertRequest {
             index,
             entries: vec![],
@@ -850,10 +848,7 @@ fn vector_op_body(op: &str) -> Vec<u8> {
             mode: wire::SearchMode::Vector,
             keyword_query: None,
         }),
-        ServiceOp::VECTOR_DELETE => codec::encode(&wire::DeleteRequest {
-            index,
-            ids: vec![],
-        }),
+        ServiceOp::VECTOR_DELETE => codec::encode(&wire::DeleteRequest { index, ids: vec![] }),
         ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index }),
         other => panic!(
             "completeness test has no minimal-body case for vector op `{other}` — \
