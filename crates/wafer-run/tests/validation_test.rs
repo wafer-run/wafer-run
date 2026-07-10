@@ -350,10 +350,12 @@ impl Block for OpForwardingCallerBlock {
     }
 }
 
-/// End-to-end regression for the 2026-06-10 audit finding: these five ops are
+/// End-to-end regression for the 2026-06-10 audit finding: these ops are
 /// implemented by the database handler but were missing from the hand-written
 /// database@v1 catalog, so call_block rejected them with INVALID_ARGUMENT
-/// before the block was ever invoked.
+/// before the block was ever invoked. (`database.query`/`database.execute`
+/// were also pinned here until SP-B3 removed those ops entirely — see
+/// `call_block_rejects_removed_raw_execute_query_ops` for their pin.)
 #[tokio::test]
 async fn call_block_delivers_previously_rejected_database_ops() {
     let mut w = Wafer::builder()
@@ -372,8 +374,6 @@ async fn call_block_delivers_previously_rejected_database_ops() {
     w.seal().await.expect("start should succeed");
 
     for op in [
-        "database.query",
-        "database.execute",
         "database.take_where",
         "database.delete_where_count",
         "database.increment_field_where",
@@ -394,6 +394,56 @@ async fn call_block_delivers_previously_rejected_database_ops() {
                 "op '{op}' did not reach the database block"
             ),
             Err(other) => panic!("op '{op}' was rejected before dispatch: {other:?}"),
+        }
+    }
+}
+
+/// SP-B3 end-state pin: the generic SQL-bearing `database.query` /
+/// `database.execute` ops were removed from the wire (block code uses the
+/// typed `db::*` ops; only the admin-gated `*_raw` escape hatches still
+/// carry SQL). Dispatch validation must reject them like any unknown
+/// action — reintroducing either op to the catalog fails this test.
+#[tokio::test]
+async fn call_block_rejects_removed_raw_execute_query_ops() {
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
+    w.register_block("test-org/db-block", Arc::new(DbBlock))
+        .unwrap();
+    w.register_block(
+        "test-org/op-forwarding-caller",
+        Arc::new(OpForwardingCallerBlock),
+    )
+    .unwrap();
+
+    w.seal().await.expect("start should succeed");
+
+    for op in ["database.query", "database.execute"] {
+        let mut trigger = Message::new("trigger");
+        trigger.set_meta("target-op", op);
+        let output = w
+            .run_block(
+                "test-org/op-forwarding-caller",
+                trigger,
+                InputStream::empty(),
+            )
+            .await;
+
+        match output.collect_buffered().await {
+            Ok(buf) => panic!(
+                "removed op '{op}' reached the database block (body: {:?}) — \
+                 it must be rejected before dispatch",
+                buf.body
+            ),
+            Err(other) => {
+                let msg = format!("{other:?}");
+                assert!(
+                    msg.contains("InvalidArgument"),
+                    "removed op '{op}' should be rejected with INVALID_ARGUMENT, got: {msg}"
+                );
+            }
         }
     }
 }
