@@ -91,8 +91,12 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     fn config_get(&self, key: &str) -> Option<&str>;
 
     /// List all registered blocks.
-    fn registered_blocks(&self) -> Vec<BlockInfo> {
-        Vec::new()
+    ///
+    /// Borrows the runtime's sealed snapshot — the data is built once at
+    /// seal time, so implementations return a reference instead of
+    /// deep-cloning per call.
+    fn registered_blocks(&self) -> &[BlockInfo] {
+        &[]
     }
 
     /// Optional runtime capability: returns a handle to query live flow
@@ -104,13 +108,21 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     }
 
     /// Get expanded block configs (for inspector app view).
-    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        std::collections::HashMap::new()
+    ///
+    /// Borrows the runtime's sealed snapshot (see
+    /// [`Context::registered_blocks`]).
+    fn block_configs(&self) -> &std::collections::HashMap<String, serde_json::Value> {
+        static EMPTY: std::sync::LazyLock<std::collections::HashMap<String, serde_json::Value>> =
+            std::sync::LazyLock::new(std::collections::HashMap::new);
+        &EMPTY
     }
 
     /// List registered interface specifications.
-    fn interface_specs(&self) -> Vec<crate::types::InterfaceSpec> {
-        Vec::new()
+    ///
+    /// Borrows the runtime's sealed snapshot (see
+    /// [`Context::registered_blocks`]).
+    fn interface_specs(&self) -> &[crate::types::InterfaceSpec] {
+        &[]
     }
 
     /// The block name of the caller that invoked this block via `call_block()`.

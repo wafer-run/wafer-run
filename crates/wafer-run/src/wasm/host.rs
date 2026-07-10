@@ -83,8 +83,17 @@ impl Context for ContextWrapper {
     fn config_get(&self, key: &str) -> Option<&str> {
         unsafe { &*self.0 }.config_get(key)
     }
-    fn registered_blocks(&self) -> Vec<wafer_block::BlockInfo> {
+    fn registered_blocks(&self) -> &[wafer_block::BlockInfo] {
         unsafe { &*self.0 }.registered_blocks()
+    }
+    // block_configs / interface_specs were previously NOT forwarded, so WASM
+    // guests silently saw the empty trait defaults — forward them like every
+    // other capability.
+    fn block_configs(&self) -> &std::collections::HashMap<String, serde_json::Value> {
+        unsafe { &*self.0 }.block_configs()
+    }
+    fn interface_specs(&self) -> &[wafer_block::InterfaceSpec] {
+        unsafe { &*self.0 }.interface_specs()
     }
     fn flow_introspection(&self) -> Option<&dyn wafer_block::introspection::FlowIntrospection> {
         unsafe { &*self.0 }.flow_introspection()
