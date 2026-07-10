@@ -6,8 +6,8 @@ use rusqlite::{params, Connection};
 use wafer_core::interfaces::vector::{
     rrf,
     service::{
-        ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode,
-        VectorEntry, VectorError, VectorIndexConfig, VectorMatch, VectorService,
+        ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode, VectorEntry,
+        VectorError, VectorIndexConfig, VectorMatch, VectorService,
     },
 };
 use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema};
@@ -925,9 +925,12 @@ mod tests {
             metadata: Some(serde_json::json!({ "document_id": doc, "page": page })),
             text: None,
         };
-        svc.upsert("docs", vec![e("a", "d1", 1), e("b", "d1", 2), e("c", "d2", 1)])
-            .await
-            .unwrap();
+        svc.upsert(
+            "docs",
+            vec![e("a", "d1", 1), e("b", "d1", 2), e("c", "d2", 1)],
+        )
+        .await
+        .unwrap();
 
         let mut filter = MetadataFilter::default();
         filter
