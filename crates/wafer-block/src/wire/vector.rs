@@ -161,6 +161,72 @@ pub struct CountResponse {
     pub count: u64,
 }
 
+/// Request for `vector.list_indexes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListIndexesRequest {
+    /// Namespace prefix to scan (e.g. `suppers_ai__vector__`). Doubles as the
+    /// WRAP authorization resource: it must parse to an owner via
+    /// `resource_owner`, so partial prefixes fail closed.
+    pub prefix: String,
+}
+
+/// Response for `vector.list_indexes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListIndexesResponse {
+    /// Index stems (full storage names, prefix retained, `_meta` suffix
+    /// stripped), in lexical order.
+    pub indexes: Vec<String>,
+}
+
+/// Request for `vector.describe_index`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeIndexRequest {
+    /// Index name (storage stem) to describe.
+    pub index: String,
+}
+
+/// One column of an index's meta table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnInfo {
+    /// Column name.
+    pub name: String,
+    /// Declared SQL type (e.g. `TEXT`, `INTEGER`).
+    pub sql_type: String,
+}
+
+/// Response for `vector.describe_index`.
+///
+/// Absence is data, not an error: a missing index yields
+/// `exists: false` with empty `columns` — callers use this op as an
+/// existence/capability probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeIndexResponse {
+    /// Whether the index's meta table exists.
+    pub exists: bool,
+    /// The meta table's actual columns in declaration order (real state —
+    /// legacy indexes may drift from the canonical DDL).
+    pub columns: Vec<ColumnInfo>,
+    /// Whether the index has an FTS table (keyword search capability).
+    pub keyword_search: bool,
+}
+
+/// Request for `vector.list_ids`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListIdsRequest {
+    /// Index name.
+    pub index: String,
+    /// Metadata equality filter. Must contain at least one entry, and values
+    /// must be JSON strings or numbers — enforced fail-closed by the service.
+    pub filter: MetadataFilter,
+}
+
+/// Response for `vector.list_ids`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListIdsResponse {
+    /// Ids of entries whose metadata matches every filter condition.
+    pub ids: Vec<String>,
+}
+
 // ---- Embedding requests / responses ----
 
 /// Request for `embedding.embed`.
@@ -487,6 +553,72 @@ mod tests {
         let encoded = codec::encode(&original).expect("encode");
         let decoded: CountTokensResponse = codec::decode(&encoded).expect("decode");
         assert_eq!(decoded.tokens, 42);
+    }
+
+    #[test]
+    fn list_indexes_request_round_trips() {
+        let original = ListIndexesRequest {
+            prefix: "suppers_ai__vector__".into(),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: ListIndexesRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn list_indexes_response_round_trips() {
+        let original = ListIndexesResponse {
+            indexes: vec!["suppers_ai__vector__docs".into()],
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: ListIndexesResponse = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn describe_index_response_round_trips() {
+        let original = DescribeIndexResponse {
+            exists: true,
+            columns: vec![
+                ColumnInfo {
+                    name: "id".into(),
+                    sql_type: "TEXT".into(),
+                },
+                ColumnInfo {
+                    name: "metadata".into(),
+                    sql_type: "TEXT".into(),
+                },
+            ],
+            keyword_search: true,
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: DescribeIndexResponse = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn list_ids_request_round_trips() {
+        let mut filter = MetadataFilter::default();
+        filter
+            .equals
+            .insert("document_id".into(), serde_json::json!("doc-1"));
+        let original = ListIdsRequest {
+            index: "suppers_ai__vector__docs".into(),
+            filter,
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: ListIdsRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn list_ids_response_round_trips() {
+        let original = ListIdsResponse {
+            ids: vec!["chunk-1".into(), "chunk-2".into()],
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: ListIdsResponse = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
     }
 
     #[test]
