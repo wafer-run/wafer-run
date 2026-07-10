@@ -14,6 +14,10 @@ pub enum ResourceType {
     Crypto,
     /// Outbound network access (HTTP requests)
     Network,
+    /// Vector indexes (create_index, delete_index, upsert, query, delete,
+    /// count). Namespace-based like `Db`: the index storage name is
+    /// `{org}__{block}__{index}` and its owner self-admits.
+    Vector,
 }
 
 impl std::fmt::Display for ResourceType {
@@ -24,6 +28,7 @@ impl std::fmt::Display for ResourceType {
             Self::Storage => f.write_str("storage"),
             Self::Crypto => f.write_str("crypto"),
             Self::Network => f.write_str("network"),
+            Self::Vector => f.write_str("vector"),
         }
     }
 }
@@ -38,6 +43,7 @@ impl ResourceType {
             "storage" => Some(Self::Storage),
             "crypto" => Some(Self::Crypto),
             "network" => Some(Self::Network),
+            "vector" => Some(Self::Vector),
             _ => None,
         }
     }
@@ -66,7 +72,7 @@ impl std::fmt::Display for UnknownResourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network)",
+            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network|vector)",
             self.0
         )
     }
@@ -150,5 +156,15 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("databsae"));
         assert!(msg.contains("db|config|storage|crypto|network"));
+    }
+
+    #[test]
+    fn vector_variant_round_trips() {
+        assert_eq!(ResourceType::Vector.to_string(), "vector");
+        assert_eq!(ResourceType::parse("vector"), Some(ResourceType::Vector));
+        assert_eq!(
+            ResourceType::parse_stored(Some("vector")).unwrap(),
+            Some(ResourceType::Vector)
+        );
     }
 }
