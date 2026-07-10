@@ -583,8 +583,7 @@ mod tests {
         .is_ok());
         // A non-admin caller is denied even with a wildcard Storage grant —
         // the sentinel does not fall through to grant matching.
-        let grants =
-            vec![ResourceGrant::read("files/block", "*").typed(ResourceType::Storage)];
+        let grants = vec![ResourceGrant::read("files/block", "*").typed(ResourceType::Storage)];
         assert!(check_access(
             Some("files/block"),
             STORAGE_LIST_ALL_RESOURCE,
