@@ -76,6 +76,9 @@ pub struct BlockCapabilities {
     /// Allowed config key patterns.
     #[serde(default)]
     pub config_keys: HashSet<String>,
+    /// Allowed vector indexes (by storage name). "*" = all, empty = none.
+    #[serde(default)]
+    pub vector_indexes: HashSet<String>,
     /// Blocks that may be called via `call_block()`. Empty = unrestricted.
     #[serde(default)]
     pub callable_blocks: HashSet<String>,
@@ -106,6 +109,11 @@ impl BlockCapabilities {
             network_allow: Vec::new(),
             config: true,
             config_keys: HashSet::new(),
+            vector_indexes: {
+                let mut s = HashSet::new();
+                s.insert("*".to_string());
+                s
+            },
             callable_blocks: {
                 let mut s = HashSet::new();
                 s.insert("*".to_string());
@@ -127,6 +135,7 @@ impl BlockCapabilities {
             network_allow: Vec::new(),
             config: false,
             config_keys: HashSet::new(),
+            vector_indexes: HashSet::new(),
             callable_blocks: HashSet::new(), // empty = no calls allowed
             headers: HeaderPolicy::default(),
         }
@@ -174,6 +183,14 @@ impl BlockCapabilities {
         })
     }
 
+    /// Whether this capability set permits operations on vector index `name`
+    /// (matches `"*"` wildcard or an exact entry). Independent of
+    /// `allows_collection`: a db-collection grant must not confer vector
+    /// access, per the no-magic-mapping rule.
+    pub fn allows_vector_index(&self, name: &str) -> bool {
+        self.vector_indexes.contains("*") || self.vector_indexes.contains(name)
+    }
+
     /// Whether the block may read/write config key `key` (empty allowlist
     /// means no restriction).
     pub fn allows_config_key(&self, key: &str) -> bool {
@@ -210,6 +227,7 @@ impl BlockCapabilities {
             network_allow: intersect_vec(&self.network_allow, &other.network_allow),
             config: self.config && other.config,
             config_keys: intersect_wildcard_set(&self.config_keys, &other.config_keys),
+            vector_indexes: intersect_wildcard_set(&self.vector_indexes, &other.vector_indexes),
             callable_blocks: intersect_wildcard_set(&self.callable_blocks, &other.callable_blocks),
             headers: HeaderPolicy {
                 readable: intersect_vec(&self.headers.readable, &other.headers.readable),
@@ -262,6 +280,9 @@ impl BlockCapabilities {
             }),
             config: narrow(&self.config, o.config.as_ref(), |a, b| *a && *b),
             config_keys: narrow(&self.config_keys, o.config_keys.as_ref(), |a, b| {
+                intersect_wildcard_set(a, b)
+            }),
+            vector_indexes: narrow(&self.vector_indexes, o.vector_indexes.as_ref(), |a, b| {
                 intersect_wildcard_set(a, b)
             }),
             callable_blocks: narrow(&self.callable_blocks, o.callable_blocks.as_ref(), |a, b| {
@@ -345,6 +366,9 @@ pub struct ConfigCapabilityOverrides {
     /// Override for [`BlockCapabilities::config_keys`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_keys: Option<HashSet<String>>,
+    /// Override for [`BlockCapabilities::vector_indexes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_indexes: Option<HashSet<String>>,
     /// Override for [`BlockCapabilities::callable_blocks`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callable_blocks: Option<HashSet<String>>,
@@ -795,5 +819,39 @@ mod tests {
         assert!(eff.crypto);
         assert!(eff.collections.contains("users"));
         assert_eq!(eff.network_allow, Vec::<String>::new()); // declared was empty; override narrowed to empty
+    }
+
+    #[test]
+    fn allows_vector_index_wildcard_and_exact() {
+        let unrestricted = BlockCapabilities::unrestricted();
+        assert!(unrestricted.allows_vector_index("suppers_ai__vector__docs"));
+
+        let none = BlockCapabilities::none();
+        assert!(!none.allows_vector_index("suppers_ai__vector__docs"));
+
+        let scoped = BlockCapabilities {
+            vector_indexes: ["suppers_ai__vector__docs"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ..Default::default()
+        };
+        assert!(scoped.allows_vector_index("suppers_ai__vector__docs"));
+        assert!(!scoped.allows_vector_index("suppers_ai__vector__other"));
+    }
+
+    #[test]
+    fn intersect_vector_indexes_set_intersection() {
+        let a = BlockCapabilities {
+            vector_indexes: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            vector_indexes: ["b", "c"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let r = a.intersect(&b);
+        let expected: HashSet<String> = ["b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(r.vector_indexes, expected);
     }
 }

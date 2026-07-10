@@ -165,8 +165,8 @@ impl ServiceOp {
     // families requires adding it to the family slice AND declaring an
     // `ActionSpec` for it in the matching `*_action_spec` fn in
     // `crate::interfaces`; the drift tests there enforce slice ↔ catalog
-    // agreement. Families without a well-known interface catalog (vector,
-    // embedding, llm, image, auth) intentionally have no slice yet.
+    // agreement. Families without a well-known interface catalog (embedding,
+    // llm, image, auth) intentionally have no slice yet.
     // -----------------------------------------------------------------------
 
     /// Every `database.*` op — drives the `database@v1` action catalog in
@@ -190,6 +190,17 @@ impl ServiceOp {
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXEC_RAW,
         Self::DATABASE_DDL,
+    ];
+
+    /// Every `vector.*` op — drives the `vector@v1` action catalog in
+    /// [`crate::interfaces::vector_v1`].
+    pub const VECTOR_OPS: &[&str] = &[
+        Self::VECTOR_CREATE_INDEX,
+        Self::VECTOR_DELETE_INDEX,
+        Self::VECTOR_UPSERT,
+        Self::VECTOR_QUERY,
+        Self::VECTOR_DELETE,
+        Self::VECTOR_COUNT,
     ];
 
     /// Every `storage.*` op — drives the `storage@v1` action catalog in
