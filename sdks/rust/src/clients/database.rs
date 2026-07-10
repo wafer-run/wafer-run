@@ -1,19 +1,23 @@
 //! Typed client for the database service.
 //!
-//! All thirteen ops are buffered single-frame request/response. Mutating
-//! ops that return no value (`delete`, `delete_where`, `update_where`)
-//! yield an empty acknowledgement; the rest decode a typed response.
+//! Every op in [`ServiceOp::DATABASE_OPS`] is wrapped here (enforced by the
+//! `sdk_covers_every_database_op` test) as a buffered single-frame
+//! request/response. Mutating ops that return no value (`delete`,
+//! `delete_where`, `update_where`) yield an empty acknowledgement; the rest
+//! decode a typed response.
 //!
-//! `query_raw` is special: the host handler encodes the result as a
-//! MessagePack-encoded `Vec<Record>` directly (one frame), so the response
-//! type here is `Vec<Record>`.
+//! `query_raw` and `aggregate` are special: the host handler encodes the
+//! result as a MessagePack-encoded `Vec<Record>` directly (one frame), so
+//! the response type here is `Vec<Record>`.
 
 use wafer_block::{
     wire::database::{
-        CountRequest, CountResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
-        DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest, ExecRawResponse, GetRequest,
-        ListRequest, QueryRawRequest, Record, RecordList, SumRequest, SumResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereRequest,
+        AggregateRequest, CountRequest, CountResponse, CreateRequest, DeleteRequest,
+        DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest,
+        ExecRawResponse, GetRequest, IncrementFieldWhereRequest, ListRequest, QueryRawRequest,
+        Record, RecordList, SumRequest, SumResponse, TakeWhereRequest, TakeWhereResponse,
+        UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest,
+        UpsertRequest, UpsertResponse,
     },
     ServiceOp, WaferError,
 };
@@ -86,6 +90,14 @@ pub fn update_where(request: &UpdateWhereRequest) -> Result<(), WaferError> {
     call_ack(BLOCK, ServiceOp::DATABASE_UPDATE_WHERE, request)
 }
 
+/// Buffered: update all records matching the filters with `data` and return
+/// the number of updated rows.
+pub fn update_where_count(
+    request: &UpdateWhereCountRequest,
+) -> Result<UpdateWhereCountResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_UPDATE_WHERE_COUNT, request)
+}
+
 /// Buffered: delete all records matching the filters and return the number of
 /// deleted rows.
 pub fn delete_where_count(
@@ -98,4 +110,83 @@ pub fn delete_where_count(
 /// returning the deleted rows.
 pub fn take_where(request: &TakeWhereRequest) -> Result<TakeWhereResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_TAKE_WHERE, request)
+}
+
+/// Buffered: atomically increment a numeric column on all records matching
+/// the filters, returning the number of affected rows.
+pub fn increment_field_where(
+    request: &IncrementFieldWhereRequest,
+) -> Result<ExecRawResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_INCREMENT_FIELD_WHERE, request)
+}
+
+/// Buffered: insert a row, resolving a conflict on the request's
+/// `conflict_columns` via its `on_conflict` strategy (`SetColumns` or
+/// `WindowedCounter`), in one atomic `INSERT … ON CONFLICT …` round-trip.
+pub fn upsert(request: &UpsertRequest) -> Result<UpsertResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_UPSERT, request)
+}
+
+/// Buffered: run a grouped aggregate query and return one [`Record`] per
+/// group. Like `query_raw`, the handler MessagePack-encodes `Vec<Record>`
+/// directly into a single response frame.
+pub fn aggregate(request: &AggregateRequest) -> Result<Vec<Record>, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_AGGREGATE, request)
+}
+
+/// Buffered: execute a DDL statement (`CREATE TABLE`, `CREATE INDEX`, …),
+/// returning the number of affected rows. Routes through the permissive
+/// `__ddl__` WRAP resource — blocks DDL their own `{org}__{block}__*`
+/// tables at init.
+pub fn ddl(request: &ExecRawRequest) -> Result<ExecRawResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_DDL, request)
+}
+
+/// Every database op this client wraps. Kept set-equal to
+/// [`ServiceOp::DATABASE_OPS`] by the `sdk_covers_every_database_op` test —
+/// adding an op to the family without adding a wrapper (and an entry here)
+/// fails that test.
+const SUPPORTED_DATABASE_OPS: &[&str] = &[
+    ServiceOp::DATABASE_GET,
+    ServiceOp::DATABASE_LIST,
+    ServiceOp::DATABASE_CREATE,
+    ServiceOp::DATABASE_UPDATE,
+    ServiceOp::DATABASE_UPDATE_WHERE,
+    ServiceOp::DATABASE_UPDATE_WHERE_COUNT,
+    ServiceOp::DATABASE_DELETE,
+    ServiceOp::DATABASE_DELETE_WHERE,
+    ServiceOp::DATABASE_DELETE_WHERE_COUNT,
+    ServiceOp::DATABASE_TAKE_WHERE,
+    ServiceOp::DATABASE_COUNT,
+    ServiceOp::DATABASE_SUM,
+    ServiceOp::DATABASE_AGGREGATE,
+    ServiceOp::DATABASE_INCREMENT_FIELD_WHERE,
+    ServiceOp::DATABASE_UPSERT,
+    ServiceOp::DATABASE_QUERY_RAW,
+    ServiceOp::DATABASE_EXEC_RAW,
+    ServiceOp::DATABASE_DDL,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SDK-drift guard: the typed client must wrap every op in the
+    /// `database.*` family. This is the test that was missing when
+    /// `DATABASE_UPDATE_WHERE_COUNT`, `DATABASE_AGGREGATE`,
+    /// `DATABASE_INCREMENT_FIELD_WHERE`, `DATABASE_UPSERT` and
+    /// `DATABASE_DDL` landed host-side without SDK wrappers (SP-B1/SP-B2
+    /// follow-up).
+    #[test]
+    fn sdk_covers_every_database_op() {
+        let mut family: Vec<&str> = ServiceOp::DATABASE_OPS.to_vec();
+        let mut supported: Vec<&str> = SUPPORTED_DATABASE_OPS.to_vec();
+        family.sort_unstable();
+        supported.sort_unstable();
+        assert_eq!(
+            family, supported,
+            "sdks/rust database client is out of sync with ServiceOp::DATABASE_OPS — \
+             add a wrapper fn and a SUPPORTED_DATABASE_OPS entry for each missing op"
+        );
+    }
 }
