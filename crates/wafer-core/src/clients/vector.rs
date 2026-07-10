@@ -4,10 +4,13 @@
 //! accept a caller-provided block name so app blocks can dispatch by model
 //! (e.g. `suppers-ai/fastembed`, `suppers-ai/openai-embed`).
 //!
-//! WRAP access control is not applied at this layer. Callers (app blocks
-//! such as `suppers-ai/vector`) enforce authentication and authorization
-//! at the HTTP boundary. If per-index WRAP typing is needed later, add
-//! `Vector` and `Embedding` variants to `ResourceType` in `wafer-block`.
+//! WRAP authorization is enforced host-side in the `wafer-run/vector`
+//! handler, keyed on the decoded index name (`ResourceType::Vector`): a
+//! caller can only touch indexes in its own `{org}__{block}__*` namespace.
+//! The resource / is_write / type passed to `svc!` below are diagnostic
+//! labels for the call path, NOT the enforcement mechanism — a caller
+//! cannot widen its access by changing them (the runtime does not read
+//! client-supplied WRAP meta). Embedding ops carry no index resource.
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
@@ -43,9 +46,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_CREATE_INDEX,
             &req,
-            None::<&str>,
-            false,
-            None::<&str>
+            Some(req.config.name.as_str()),
+            true,
+            Some("vector")
         )?;
         Ok(())
     }
@@ -57,9 +60,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE_INDEX,
             &req,
-            None::<&str>,
-            false,
-            None::<&str>
+            Some(name),
+            true,
+            Some("vector")
         )?;
         Ok(())
     }
@@ -71,9 +74,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_UPSERT,
             &req,
-            None::<&str>,
-            false,
-            None::<&str>
+            Some(index),
+            true,
+            Some("vector")
         )?;
         Ok(())
     }
@@ -101,9 +104,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_QUERY,
             &req,
-            None::<&str>,
+            Some(index),
             false,
-            None::<&str>
+            Some("vector")
         )?;
         let resp: QueryResponse = decode(&data)?;
         Ok(resp.matches)
@@ -116,9 +119,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_DELETE,
             &req,
-            None::<&str>,
-            false,
-            None::<&str>
+            Some(index),
+            true,
+            Some("vector")
         )?;
         Ok(())
     }
@@ -130,9 +133,9 @@ dual_api! {
             ctx, VECTOR_BLOCK,
             ServiceOp::VECTOR_COUNT,
             &req,
-            None::<&str>,
+            Some(index),
             false,
-            None::<&str>
+            Some("vector")
         )?;
         let resp: CountResponse = decode(&data)?;
         Ok(resp.count)
