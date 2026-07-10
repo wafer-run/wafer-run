@@ -99,9 +99,11 @@ dual_api! {
         Ok(())
     }
 
-    /// List every folder / bucket known to the storage block.
+    /// List every folder / bucket known to the storage block. Admin-only:
+    /// the handler authorizes against `wrap::STORAGE_LIST_ALL_RESOURCE`. The
+    /// resource stamped here is a diagnostic label, not the enforcement path.
     pub fn list_folders(ctx,) -> Result<Vec<FolderInfo>, WaferError> {
-        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_LIST_FOLDERS, &serde_json::json!({}), None, false, Some("storage"))?;
+        let data = svc!(ctx, BLOCK, ServiceOp::STORAGE_LIST_FOLDERS, &serde_json::json!({}), Some(wafer_block::wrap::STORAGE_LIST_ALL_RESOURCE), false, Some("storage"))?;
         decode(&data)
     }
 }
