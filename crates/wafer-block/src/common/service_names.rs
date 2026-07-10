@@ -123,6 +123,12 @@ impl ServiceOp {
     pub const VECTOR_DELETE: &str = "vector.delete";
     /// Count vectors in an index.
     pub const VECTOR_COUNT: &str = "vector.count";
+    /// List index stems under a namespace prefix.
+    pub const VECTOR_LIST_INDEXES: &str = "vector.list_indexes";
+    /// Describe an index: existence, meta-table columns, keyword capability.
+    pub const VECTOR_DESCRIBE_INDEX: &str = "vector.describe_index";
+    /// List entry ids matching a metadata equality filter.
+    pub const VECTOR_LIST_IDS: &str = "vector.list_ids";
     /// Compute text embeddings.
     pub const EMBEDDING_EMBED: &str = "embedding.embed";
     /// Count tokens for a piece of text.
@@ -201,6 +207,9 @@ impl ServiceOp {
         Self::VECTOR_QUERY,
         Self::VECTOR_DELETE,
         Self::VECTOR_COUNT,
+        Self::VECTOR_LIST_INDEXES,
+        Self::VECTOR_DESCRIBE_INDEX,
+        Self::VECTOR_LIST_IDS,
     ];
 
     /// Every `storage.*` op — drives the `storage@v1` action catalog in
