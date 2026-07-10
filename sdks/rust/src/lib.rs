@@ -20,7 +20,11 @@
 //! ```
 
 pub mod attachment;
-#[cfg(target_arch = "wasm32")]
+// Client wrappers call WASM host imports, so the module is guest-only in
+// normal builds; it additionally compiles under native `cargo test` (the
+// stream layer has native stubs) so in-module drift tests — e.g. the
+// database client's DATABASE_OPS coverage guard — run in ordinary CI.
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod clients;
 pub mod core_abi;
 pub mod stream;
