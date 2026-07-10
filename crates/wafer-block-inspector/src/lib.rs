@@ -191,8 +191,8 @@ impl Block for InspectorBlock {
                 .decode_utf8_lossy()
                 .into_owned();
             let blocks = ctx.registered_blocks();
-            if let Some(info) = blocks.into_iter().find(|b| b.name == decoded) {
-                return ok_json(&info);
+            if let Some(info) = blocks.iter().find(|b| b.name == decoded) {
+                return ok_json(info);
             }
             return OutputStream::error(WaferError {
                 code: ErrorCode::NotFound,

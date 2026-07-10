@@ -444,20 +444,20 @@ impl Context for RuntimeContext {
             .map(|s| s.as_str())
     }
 
-    fn registered_blocks(&self) -> Vec<wafer_block::BlockInfo> {
-        self.snapshot.blocks.clone()
+    fn registered_blocks(&self) -> &[wafer_block::BlockInfo] {
+        &self.snapshot.blocks
     }
 
     fn flow_introspection(&self) -> Option<&dyn wafer_block::introspection::FlowIntrospection> {
         Some(self)
     }
 
-    fn block_configs(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        self.snapshot.block_configs.clone()
+    fn block_configs(&self) -> &std::collections::HashMap<String, serde_json::Value> {
+        &self.snapshot.block_configs
     }
 
-    fn interface_specs(&self) -> Vec<wafer_block::InterfaceSpec> {
-        self.snapshot.interface_specs.clone()
+    fn interface_specs(&self) -> &[wafer_block::InterfaceSpec] {
+        &self.snapshot.interface_specs
     }
 
     fn caller_id(&self) -> Option<&str> {
@@ -873,5 +873,19 @@ mod tests {
              namespaced resource, even one that superficially looks like \
              its own"
         );
+    }
+
+    /// M3: the introspection getters borrow the sealed snapshot instead of
+    /// deep-cloning it on every call — two calls yield the same allocation.
+    #[test]
+    fn introspection_getters_borrow_snapshot() {
+        let w = test_wafer();
+        let ctx = test_ctx(&w);
+        assert!(std::ptr::eq(
+            ctx.registered_blocks(),
+            ctx.registered_blocks()
+        ));
+        assert!(std::ptr::eq(ctx.block_configs(), ctx.block_configs()));
+        assert!(std::ptr::eq(ctx.interface_specs(), ctx.interface_specs()));
     }
 }
