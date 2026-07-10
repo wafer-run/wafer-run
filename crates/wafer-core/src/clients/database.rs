@@ -13,11 +13,11 @@ use wafer_block::{
     wire::database::{
         AggregateRequest, CountRequest, CountResponse, CreateRequest, DeleteRequest,
         DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, ExecRawRequest,
-        ExecRawResponse, ExecuteRequest, ExecuteResponse, FilterDef as WireFilterDef, FilterNode,
-        GetRequest, IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest,
-        QueryRequest, QueryResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereCountRequest,
-        UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
+        ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
+        IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest,
+        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TakeWhereRequest,
+        TakeWhereResponse, UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse,
+        UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -223,7 +223,8 @@ dual_api! {
     /// **Admin escape hatch.** Runs raw SQL with row results; the SQL is
     /// opaque to the runtime so authorization is by the blanket
     /// `"__raw_sql__"` WRAP resource (admin-required). Block code MUST use
-    /// [`query`] with a `wafer-sql-utils` builder instead.
+    /// the typed ops ([`list`], [`aggregate`], [`count`], …) instead — only
+    /// the SQL explorer legitimately needs this.
     pub fn query_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, WaferError> {
         let req = QueryRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -240,8 +241,9 @@ dual_api! {
     /// **Admin escape hatch.** Runs raw SQL with `rows_affected` return; the
     /// SQL is opaque to the runtime so authorization is by the blanket
     /// `"__raw_sql__"` WRAP resource (admin-required). Block code MUST use
-    /// [`execute`] with a `wafer-sql-utils` builder instead — only the SQL
-    /// explorer and migration runners legitimately need this.
+    /// the typed ops ([`update_by_filters`], [`delete_by_filters`],
+    /// [`upsert`], …) instead — only the SQL explorer and migration runners
+    /// legitimately need this.
     pub fn exec_raw(ctx, query: &str, args: &[serde_json::Value]) -> Result<i64, WaferError> {
         let req = ExecRawRequest { query: query.to_string(), args: args.to_vec() };
         let data = svc!(
@@ -254,54 +256,6 @@ dual_api! {
         )?;
         let resp: ExecRawResponse = decode(&data)?;
         Ok(resp.rows_affected)
-    }
-
-    /// Execute a write (`INSERT` / `UPDATE` / `DELETE` / upsert / DDL) built
-    /// via a `wafer-sql-utils` builder.
-    ///
-    /// WRAP-authorized against `stmt.collection`. Returns rows affected.
-    ///
-    /// Block code should prefer this over [`exec_raw`], which is admin-only
-    /// and exists as an escape hatch for the SQL explorer and migration runners.
-    pub fn execute(ctx, stmt: &wafer_sql_utils::Statement) -> Result<i64, WaferError> {
-        let req = ExecuteRequest {
-            sql: stmt.sql.clone(),
-            args: wafer_sql_utils::value::sea_values_to_json(stmt.values.clone()),
-            collection: stmt.collection.clone(),
-        };
-        let data = svc!(
-            ctx, BLOCK,
-            ServiceOp::DATABASE_EXECUTE,
-            &req,
-            Some(stmt.collection.as_str()),
-            true,
-            Some("db")
-        )?;
-        let resp: ExecuteResponse = decode(&data)?;
-        Ok(resp.rows_affected)
-    }
-
-    /// Run a read (`SELECT`) built via a `wafer-sql-utils` builder.
-    ///
-    /// WRAP-authorized against `stmt.collection`. Returns result rows.
-    ///
-    /// Block code should prefer this over [`query_raw`], which is admin-only.
-    pub fn query(ctx, stmt: &wafer_sql_utils::Statement) -> Result<Vec<Record>, WaferError> {
-        let req = QueryRequest {
-            sql: stmt.sql.clone(),
-            args: wafer_sql_utils::value::sea_values_to_json(stmt.values.clone()),
-            collection: stmt.collection.clone(),
-        };
-        let data = svc!(
-            ctx, BLOCK,
-            ServiceOp::DATABASE_QUERY,
-            &req,
-            Some(stmt.collection.as_str()),
-            false,
-            Some("db")
-        )?;
-        let resp: QueryResponse = decode(&data)?;
-        Ok(resp.rows)
     }
 
     /// Execute a DDL statement (`CREATE TABLE`, `CREATE INDEX`, `DROP TABLE`, etc).

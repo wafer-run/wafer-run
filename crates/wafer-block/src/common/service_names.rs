@@ -51,16 +51,12 @@ impl ServiceOp {
     pub const DATABASE_AGGREGATE: &str = "database.aggregate";
     /// Execute a raw SELECT and return rows (cap-gated).
     pub const DATABASE_QUERY_RAW: &str = "database.query_raw";
-    /// Typed query: WRAP-authorized against the Statement's `collection`.
-    pub const DATABASE_QUERY: &str = "database.query";
     /// Execute a raw mutation statement (cap-gated).
     pub const DATABASE_EXEC_RAW: &str = "database.exec_raw";
     /// Execute a raw DDL statement (cap-gated). Distinct from
     /// `DATABASE_EXEC_RAW` so the DDL sentinel is host-authoritative — set by
     /// the op arm the host dispatches on, not a forgeable request meta.
     pub const DATABASE_DDL: &str = "database.ddl";
-    /// Typed execute: WRAP-authorized against the Statement's `collection`.
-    pub const DATABASE_EXECUTE: &str = "database.execute";
     /// Delete every row matching a filter.
     pub const DATABASE_DELETE_WHERE: &str = "database.delete_where";
     /// Delete every row matching a filter and return the affected count.
@@ -191,9 +187,7 @@ impl ServiceOp {
         Self::DATABASE_AGGREGATE,
         Self::DATABASE_INCREMENT_FIELD_WHERE,
         Self::DATABASE_UPSERT,
-        Self::DATABASE_QUERY,
         Self::DATABASE_QUERY_RAW,
-        Self::DATABASE_EXECUTE,
         Self::DATABASE_EXEC_RAW,
         Self::DATABASE_DDL,
     ];

@@ -589,19 +589,9 @@ fn database_op_body(op: &str) -> Vec<u8> {
                 filters: vec![],
             })
         }
-        ServiceOp::DATABASE_QUERY => codec::encode(&wire::QueryRequest {
-            sql: "SELECT 1".into(),
-            args: vec![],
-            collection: "suppers_ai__auth__users".into(),
-        }),
         ServiceOp::DATABASE_QUERY_RAW => codec::encode(&wire::QueryRawRequest {
             query: "SELECT 1".into(),
             args: vec![],
-        }),
-        ServiceOp::DATABASE_EXECUTE => codec::encode(&wire::ExecuteRequest {
-            sql: "UPDATE suppers_ai__auth__users SET x = 1".into(),
-            args: vec![],
-            collection: "suppers_ai__auth__users".into(),
         }),
         ServiceOp::DATABASE_EXEC_RAW => codec::encode(&wire::ExecRawRequest {
             query: "DELETE FROM suppers_ai__auth__users".into(),

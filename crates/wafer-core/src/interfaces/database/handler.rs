@@ -594,44 +594,6 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
-        // SP-B: execute/query still ship raw SQL; collection is a label
-        // until structured queries land. WRAP authorizes against
-        // `req.collection`, but the backend runs `req.sql` verbatim, so a
-        // caller with a grant for collection A can still run arbitrary SQL
-        // against collection B by mislabeling `collection`. Closing this is
-        // SP-B's job (structured statements the runtime can actually
-        // validate), not this task's.
-        ServiceOp::DATABASE_EXECUTE => {
-            let req = match decode_and_authorize::<wire::ExecuteRequest>(
-                ctx,
-                body,
-                "database.execute",
-                |r| (r.collection.clone(), ResourceType::Db, true),
-            ) {
-                Ok(r) => r,
-                Err(out) => return out,
-            };
-            match service.exec_raw(&req.sql, &req.args).await {
-                Ok(rows_affected) => to_output(&wire::ExecuteResponse { rows_affected }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
-            }
-        }
-        // SP-B: see the identical note on DATABASE_EXECUTE above.
-        ServiceOp::DATABASE_QUERY => {
-            let req =
-                match decode_and_authorize::<wire::QueryRequest>(ctx, body, "database.query", |r| {
-                    (r.collection.clone(), ResourceType::Db, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
-            match service.query_raw(&req.sql, &req.args).await {
-                Ok(records) => to_output(&wire::QueryResponse {
-                    rows: records.into_iter().map(service_record_to_wire).collect(),
-                }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
-            }
-        }
         ServiceOp::DATABASE_DELETE_WHERE => {
             let req = match decode_and_authorize::<wire::DeleteWhereRequest>(
                 ctx,
