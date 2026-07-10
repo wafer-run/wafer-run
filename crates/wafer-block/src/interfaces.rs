@@ -405,24 +405,6 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
-        ServiceOp::DATABASE_QUERY => ActionSpec {
-            description: "Execute a typed SQL query, WRAP-authorized against its target collection, and return rows.".into(),
-            message_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "sql": { "type": "string" },
-                    "args": { "type": "array" },
-                    "collection": { "type": "string", "description": "Collection (table) the statement targets. WRAP-authorized." }
-                },
-                "required": ["sql", "collection"]
-            })),
-            response_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "rows": { "type": "array", "items": { "type": "object" } }
-                }
-            })),
-        },
         ServiceOp::DATABASE_QUERY_RAW => ActionSpec {
             description: "Execute a raw SQL query and return rows.".into(),
             message_schema: Some(json!({
@@ -436,26 +418,6 @@ fn database_action_spec(op: &str) -> ActionSpec {
             response_schema: Some(json!({
                 "type": "array",
                 "items": { "type": "object" }
-            })),
-        },
-        ServiceOp::DATABASE_EXECUTE => ActionSpec {
-            description:
-                "Execute a typed SQL mutation, WRAP-authorized against its target collection."
-                    .into(),
-            message_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "sql": { "type": "string" },
-                    "args": { "type": "array" },
-                    "collection": { "type": "string", "description": "Collection (table) the statement targets. WRAP-authorized." }
-                },
-                "required": ["sql", "collection"]
-            })),
-            response_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "rows_affected": { "type": "integer" }
-                }
             })),
         },
         ServiceOp::DATABASE_EXEC_RAW => ActionSpec {
@@ -899,15 +861,15 @@ mod tests {
         }
     }
 
-    /// Regression pin for the 2026-06-10 audit finding: these five ops were
+    /// Regression pin for the 2026-06-10 audit finding: these ops were
     /// implemented by the database handler but missing from the hand-written
     /// catalog, so dispatch validation rejected them with INVALID_ARGUMENT.
+    /// (`database.query`/`database.execute` were also pinned here until
+    /// SP-B3 removed those ops entirely.)
     #[test]
     fn database_catalog_includes_previously_missing_ops() {
         let spec = database_v1();
         for op in [
-            "database.query",
-            "database.execute",
             "database.take_where",
             "database.delete_where_count",
             "database.increment_field_where",
