@@ -8,6 +8,18 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{ErrorCode, WaferError};
 
+/// Maximum container-nesting depth accepted when decoding a wire body.
+///
+/// This must be far below rmp-serde's default depth limit (1024): decoding
+/// recursion costs ~2KB+ of stack per level for `serde_json::Value`-bearing
+/// types, so 1024 levels overflows a 2MB thread stack — an uncatchable abort
+/// — before that limit ever fires (I-1 audit finding). 128 matches
+/// serde_json's default recursion limit (anything that legitimately entered
+/// through a JSON HTTP edge fits) and keeps worst-case decode stack use in
+/// the low hundreds of KB, safe on small wasm32 stacks. Real wire payloads
+/// are far shallower (`FilterNode` is bounded at depth 16 post-decode).
+pub const WIRE_MAX_DEPTH: usize = 128;
+
 /// Encode `v` as MessagePack bytes using named-map field encoding for forward
 /// compatibility. Returns a [`WaferError`] with [`ErrorCode::Internal`] on
 /// serialization failure.
@@ -27,10 +39,13 @@ pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
 }
 
 /// Decode MessagePack bytes into `T`. Unknown fields are ignored (forward
-/// compatibility). Returns a [`WaferError`] with [`ErrorCode::Internal`] on
-/// deserialization failure.
+/// compatibility). Nesting deeper than [`WIRE_MAX_DEPTH`] is rejected before
+/// the recursive decode can endanger the stack. Returns a [`WaferError`]
+/// with [`ErrorCode::Internal`] on deserialization failure.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WaferError> {
-    rmp_serde::from_slice(bytes).map_err(|e| {
+    let mut de = rmp_serde::Deserializer::from_read_ref(bytes);
+    de.set_max_depth(WIRE_MAX_DEPTH);
+    T::deserialize(&mut de).map_err(|e| {
         WaferError::new(
             ErrorCode::Internal,
             format!("codec decode error in {}: {e}", std::any::type_name::<T>()),
@@ -111,5 +126,54 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(format!("{err:?}").contains("codec decode error"));
+    }
+
+    /// `depth` nested single-element msgpack arrays terminated by nil —
+    /// the smallest hostile deep body (one 0x91 byte per level).
+    fn nested_array_bytes(depth: usize) -> Vec<u8> {
+        let mut bytes = vec![0x91u8; depth];
+        bytes.push(0xc0);
+        bytes
+    }
+
+    #[test]
+    fn decode_rejects_depth_beyond_wire_cap() {
+        // Just above the cap: must be a clean error, not a decode.
+        let bytes = nested_array_bytes(super::WIRE_MAX_DEPTH + 1);
+        let result: Result<serde_json::Value, _> = decode(&bytes);
+        let err = result.expect_err("body deeper than WIRE_MAX_DEPTH must be rejected");
+        assert!(
+            err.message.contains("depth"),
+            "error should name the depth limit; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn decode_rejects_hostile_deep_body_without_crashing() {
+        // Regression for the I-1 audit finding: a hostile ~1K-deep body
+        // stack-overflowed (uncatchable abort) inside rmp-serde's recursive
+        // decode BEFORE its default depth limit (1024) could fire — the
+        // limit was deeper than the stack. With the explicit wire cap the
+        // recursion stops long before any stack risk, natively and on
+        // small-stack wasm32 targets.
+        for depth in [1023, 50_000] {
+            let bytes = nested_array_bytes(depth);
+            let result: Result<serde_json::Value, _> = decode(&bytes);
+            assert!(
+                result.is_err(),
+                "hostile {depth}-deep body must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_accepts_realistic_nesting() {
+        // Half the cap must decode fine — the cap exists for hostile
+        // bodies, not to constrain real payloads (FilterNode is bounded at
+        // depth 16 post-decode; user JSON values are modest).
+        let bytes = nested_array_bytes(super::WIRE_MAX_DEPTH / 2);
+        let result: Result<serde_json::Value, _> = decode(&bytes);
+        assert!(result.is_ok(), "{:?}", result.unwrap_err());
     }
 }
