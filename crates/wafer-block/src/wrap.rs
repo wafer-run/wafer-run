@@ -21,6 +21,13 @@ pub const RAW_SQL_RESOURCE: &str = "__raw_sql__";
 /// here (and in the runtime's capability check). Same literal on both sides.
 pub const DDL_RESOURCE: &str = "__ddl__";
 
+/// Reserved WRAP resource for `storage.list_folders`, which enumerates every
+/// folder in the backend with no per-folder scope. Gated admin-only (like
+/// [`RAW_SQL_RESOURCE`]): a global, privileged listing is not something an
+/// untrusted block may perform. The `__`-reserved name cannot collide with a
+/// real folder path.
+pub const STORAGE_LIST_ALL_RESOURCE: &str = "__storage_list_all__";
+
 /// Extract the owning block ID from a namespaced resource name.
 ///
 /// Convention: `suppers_ai__auth__users` → `suppers-ai/auth`
@@ -136,6 +143,11 @@ pub fn typed_resource_owner(
 /// 3. Admin → Ok
 /// 4. Grant match (for `@`-prefixed cross-block access) → Ok
 /// 5. Otherwise → Err (default deny)
+///
+/// The Storage list-all sentinel ([`STORAGE_LIST_ALL_RESOURCE`], used by
+/// `storage.list_folders`) is a special case checked before the Storage
+/// self-admit: admin-only, with no grant fallthrough (a global folder
+/// enumeration is privileged, like raw SQL).
 ///
 /// For Network and Crypto (URLs, operation names — not namespaced):
 /// 1. Admin → Ok
@@ -275,6 +287,24 @@ pub fn check_access(
         };
     let is_cross_block_storage = matches!(resource_type, Some(crate::types::ResourceType::Storage))
         && resource.starts_with('@');
+
+    // Storage list-all sentinel: a global folder enumeration is admin-only,
+    // like raw SQL. Checked before the Rule-3 self-admit (which would
+    // otherwise pass any plain resource) with no grant fallthrough.
+    if matches!(resource_type, Some(crate::types::ResourceType::Storage))
+        && resource == STORAGE_LIST_ALL_RESOURCE
+    {
+        return match caller_id {
+            Some(c) if c == admin_block => Ok(()),
+            _ => Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                format!(
+                    "WRAP: storage.list_folders (list-all) is admin-only \
+                     (caller: {caller_id:?}, admin: {admin_block})"
+                ),
+            )),
+        };
+    }
 
     // Rule 3 (Storage only): own-namespace self-admit. Two shapes count
     // as own-namespace under the convention SolobaseStorageBlock-style
@@ -537,6 +567,43 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::ResourceType;
+
+    #[test]
+    fn storage_list_all_sentinel_is_admin_only() {
+        let admin = "suppers-ai/admin";
+        // Admin allowed.
+        assert!(check_access(
+            Some(admin),
+            STORAGE_LIST_ALL_RESOURCE,
+            false,
+            Some(&ResourceType::Storage),
+            &[],
+            admin
+        )
+        .is_ok());
+        // A non-admin caller is denied even with a wildcard Storage grant —
+        // the sentinel does not fall through to grant matching.
+        let grants = vec![ResourceGrant::read("files/block", "*").typed(ResourceType::Storage)];
+        assert!(check_access(
+            Some("files/block"),
+            STORAGE_LIST_ALL_RESOURCE,
+            false,
+            Some(&ResourceType::Storage),
+            &grants,
+            admin
+        )
+        .is_err());
+        // Anonymous caller denied.
+        assert!(check_access(
+            None,
+            STORAGE_LIST_ALL_RESOURCE,
+            false,
+            Some(&ResourceType::Storage),
+            &[],
+            admin
+        )
+        .is_err());
+    }
 
     #[test]
     fn vector_is_namespace_based_and_self_admits() {

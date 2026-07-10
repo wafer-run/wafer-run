@@ -27,27 +27,10 @@
 //! its body (missing arm → panic) or failing the deny assertion (missing
 //! `check_resource_access` call in the handler arm).
 //!
-//! ## The one documented exception
-//!
-//! `ServiceOp::STORAGE_LIST_FOLDERS` has NO resource authorization in the
-//! storage handler today — it lists every folder in the block's storage
-//! backend with no per-folder grant check, because there is no "list-all"
-//! WRAP sentinel yet (see `wafer-core/src/interfaces/storage/handler.rs`,
-//! the `STORAGE_LIST_FOLDERS` arm calls `service.list_folders()` directly,
-//! with no `decode_and_authorize` / `check_resource_access` call at all).
-//! This is a tracked pre-existing residual, not a Task 7 regression — fixing
-//! it needs a list-all sentinel design (analogous to `DDL_RESOURCE` /
-//! `RAW_SQL_RESOURCE`) that is out of scope for the host-side-enforcement
-//! task sequence — tracked as a dedicated follow-up (NOT Stage 2, which only
-//! removes the dead meta-gated backstop).
-//!
-//! The completeness loop below explicitly skips it (with a citation to this
-//! comment) rather than silently omitting it, and a separate test —
-//! `storage_list_folders_residual_is_currently_unenforced` — pins its
-//! *current* (unenforced) behavior: dispatching it under a denying `Context`
-//! still reaches the service. If a future change adds enforcement, that
-//! pinned test will fail, which is the intended signal to also promote
-//! `STORAGE_LIST_FOLDERS` out of the skip-list above.
+//! No documented exceptions remain: every op in every family slice —
+//! including `STORAGE_LIST_FOLDERS`, which is now admin-only via the
+//! `STORAGE_LIST_ALL_RESOURCE` sentinel (`wafer-block/src/wrap.rs`) — is
+//! covered by the deny loop.
 
 use std::{
     collections::HashMap,
@@ -716,11 +699,14 @@ fn storage_op_body(op: &str) -> Vec<u8> {
         ServiceOp::STORAGE_DELETE_FOLDER => codec::encode(&wire::DeleteFolderRequest {
             name: "uploads".into(),
         }),
+        // list_folders carries no meaningful body — the handler authorizes
+        // against the admin-only STORAGE_LIST_ALL_RESOURCE sentinel and never
+        // decodes the body.
+        ServiceOp::STORAGE_LIST_FOLDERS => codec::encode(&serde_json::json!({})),
         other => panic!(
             "completeness test has no minimal-body case for storage op `{other}` — \
-             add a `match` arm to `storage_op_body` (or, if it's a deliberate \
-             residual like STORAGE_LIST_FOLDERS, add it to the documented \
-             skip-list in the completeness loop AND a residual-pinning test)"
+             add a `match` arm to `storage_op_body` so this op stays covered \
+             by the completeness guarantee"
         ),
     };
     encoded.expect("encode must succeed")
@@ -887,20 +873,12 @@ async fn vector_ops_all_deny_under_deny_ctx() {
 }
 
 #[tokio::test]
-async fn storage_ops_all_deny_under_deny_ctx_except_documented_residual() {
+async fn storage_ops_all_deny_under_deny_ctx() {
     assert!(
         !ServiceOp::STORAGE_OPS.is_empty(),
         "sanity: STORAGE_OPS must not be empty"
     );
     for op in ServiceOp::STORAGE_OPS {
-        if *op == ServiceOp::STORAGE_LIST_FOLDERS {
-            // RESIDUAL: unenforced, tracked as a dedicated follow-up — see the module doc
-            // comment at the top of this file and
-            // `storage_list_folders_residual_is_currently_unenforced` below,
-            // which pins its current (unenforced) behavior.
-            continue;
-        }
-
         let calls = new_calls();
         let svc = storage_fakes::RecordingStorage::new(calls.clone());
         let body = storage_op_body(op);
@@ -917,40 +895,6 @@ async fn storage_ops_all_deny_under_deny_ctx_except_documented_residual() {
             calls.lock().unwrap()
         );
     }
-}
-
-/// Pins the CURRENT (unenforced) behavior of `storage.list_folders`: it has
-/// no `check_resource_access` call in the handler at all, so it reaches the
-/// service and succeeds even under a `Context` that denies everything.
-///
-/// This is a known, tracked residual (see the module doc comment) — not a
-/// silent gap. If this test starts failing because `list_folders` now
-/// denies, that's good news: promote it out of the skip-list in
-/// `storage_ops_all_deny_under_deny_ctx_except_documented_residual` and
-/// delete this pin.
-#[tokio::test]
-async fn storage_list_folders_residual_is_currently_unenforced() {
-    let calls = new_calls();
-    let svc = storage_fakes::RecordingStorage::new(calls.clone());
-    let msg = msg_without_wrap_meta(ServiceOp::STORAGE_LIST_FOLDERS);
-
-    let out =
-        wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &[]).await;
-    if let Err(TerminalNotResponse::Error(e)) = out.collect_buffered().await {
-        panic!(
-            "expected storage.list_folders to currently be UNENFORCED (reach the \
-             service even under a denying ctx) — got an error instead: {:?}: {}. \
-             If this op is now enforced, remove this pin and drop it from the \
-             skip-list in the sibling completeness test.",
-            e.code, e.message
-        );
-    }
-
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec!["list_folders"],
-        "list_folders should have reached the service — this is the documented residual"
-    );
 }
 
 #[tokio::test]

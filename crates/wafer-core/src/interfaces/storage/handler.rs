@@ -209,16 +209,27 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
-        ServiceOp::STORAGE_LIST_FOLDERS => match service.list_folders().await {
-            Ok(folders) => {
-                let wire_folders: Vec<wire::FolderInfo> = folders
-                    .into_iter()
-                    .map(service_folder_info_to_wire)
-                    .collect();
-                to_output(&wire_folders)
+        ServiceOp::STORAGE_LIST_FOLDERS => {
+            // Global folder enumeration is admin-only (no per-folder scope
+            // exists to authorize against) — gated by the list-all sentinel.
+            if let Err(e) = ctx.check_resource_access(
+                wafer_block::wrap::STORAGE_LIST_ALL_RESOURCE,
+                ResourceType::Storage,
+                false,
+            ) {
+                return OutputStream::error(e);
             }
-            Err(e) => OutputStream::error(storage_error_to_wafer(e)),
-        },
+            match service.list_folders().await {
+                Ok(folders) => {
+                    let wire_folders: Vec<wire::FolderInfo> = folders
+                        .into_iter()
+                        .map(service_folder_info_to_wire)
+                        .collect();
+                    to_output(&wire_folders)
+                }
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
+            }
+        }
         other => OutputStream::error(WaferError::new(
             ErrorCode::Unimplemented,
             format!("unknown storage operation: {other}"),
