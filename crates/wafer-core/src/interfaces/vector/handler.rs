@@ -38,7 +38,8 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::UnknownModel(_)
         | VectorError::TextRequired
         | VectorError::KeywordQueryRequired(_)
-        | VectorError::InvalidIndexName(_) => {
+        | VectorError::InvalidIndexName(_)
+        | VectorError::InvalidMetadataFilter(_) => {
             WaferError::new(ErrorCode::InvalidArgument, e.to_string())
         }
         VectorError::Internal(msg) => {

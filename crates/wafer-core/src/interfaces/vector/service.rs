@@ -9,7 +9,8 @@
 
 use thiserror::Error;
 pub use wafer_block::wire::vector::{
-    DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
+    ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode, VectorEntry,
+    VectorIndexConfig, VectorMatch,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -51,6 +52,12 @@ pub enum VectorError {
     /// `query` called in keyword / hybrid mode without supplying `keyword_query`.
     #[error("keyword_query required for SearchMode::{0:?}")]
     KeywordQueryRequired(SearchMode),
+    /// `list_ids` called with an unusable metadata filter (no conditions, or
+    /// a non-scalar value). Rejected fail-closed: an unconditioned id dump
+    /// is not a supported query shape, and bind-equality against
+    /// `json_extract` output is ill-defined for non-scalar JSON values.
+    #[error("invalid metadata filter: {0}")]
+    InvalidMetadataFilter(String),
     /// Backend-internal failure.
     #[error("internal vector store error: {0}")]
     Internal(String),
@@ -82,6 +89,41 @@ pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn delete(&self, index: &str, ids: Vec<String>) -> Result<()>;
     /// Return the number of entries currently stored in `index`.
     async fn count(&self, index: &str) -> Result<u64>;
+    /// List the index stems (storage names, `_meta` suffix stripped) whose
+    /// meta tables live under `prefix`, in lexical order. The prefix matches
+    /// literally — `_`/`%` in it are not LIKE wildcards.
+    ///
+    /// Defaulted to `Internal` so existing backends keep compiling; backends
+    /// that can enumerate their catalog should override.
+    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>> {
+        let _ = prefix;
+        Err(VectorError::Internal(
+            "list_indexes not implemented by this backend".into(),
+        ))
+    }
+    /// Describe `index`: existence, meta-table columns (declaration order),
+    /// and keyword-search capability. Absence is data (`exists: false`), not
+    /// an error — callers use this as an existence/capability probe.
+    ///
+    /// Defaulted to `Internal` so existing backends keep compiling.
+    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse> {
+        let _ = index;
+        Err(VectorError::Internal(
+            "describe_index not implemented by this backend".into(),
+        ))
+    }
+    /// Ids of entries in `index` whose metadata satisfies every
+    /// `filter.equals` condition. The filter must be non-empty and its
+    /// values JSON strings or numbers ([`VectorError::InvalidMetadataFilter`]
+    /// otherwise); a missing index is [`VectorError::IndexNotFound`].
+    ///
+    /// Defaulted to `Internal` so existing backends keep compiling.
+    async fn list_ids(&self, index: &str, filter: MetadataFilter) -> Result<Vec<String>> {
+        let _ = (index, filter);
+        Err(VectorError::Internal(
+            "list_ids not implemented by this backend".into(),
+        ))
+    }
 }
 
 /// Embedding model interface — convert text into fixed-dimensional vectors.

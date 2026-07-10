@@ -6,11 +6,11 @@ use rusqlite::{params, Connection};
 use wafer_core::interfaces::vector::{
     rrf,
     service::{
-        DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorError, VectorIndexConfig,
-        VectorMatch, VectorService,
+        ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode,
+        VectorEntry, VectorError, VectorIndexConfig, VectorMatch, VectorService,
     },
 };
-use wafer_sql_utils::vector::VectorIndexSchema;
+use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema};
 
 use crate::ensure_vec_loaded;
 
@@ -52,29 +52,26 @@ impl SqliteVecService {
         VectorIndexSchema::new(name).map_err(|_| VectorError::InvalidIndexName(name.to_string()))
     }
 
-    fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
+    fn table_exists(conn: &Connection, table: &str) -> Result<bool, VectorError> {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                params![&schema.vec_table],
+                params![table],
                 |row| row.get(0),
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(exists)
     }
 
+    fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
+        Self::table_exists(conn, &schema.vec_table)
+    }
+
     fn has_keyword_search(
         conn: &Connection,
         schema: &VectorIndexSchema,
     ) -> Result<bool, VectorError> {
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                params![&schema.fts_table],
-                |row| row.get(0),
-            )
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        Ok(exists)
+        Self::table_exists(conn, &schema.fts_table)
     }
 }
 
@@ -397,6 +394,111 @@ impl VectorService for SqliteVecService {
             .query_row(&schema.build_count_meta().sql, [], |r| r.get(0))
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(n as u64)
+    }
+
+    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>, VectorError> {
+        let conn = self.db.lock();
+        let (sql, pattern) = build_list_meta_tables(prefix);
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let names = stmt
+            .query_map(params![pattern], |row| row.get::<_, String>(0))
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        // The LIKE pattern guarantees the `_meta` suffix; strip it to stems.
+        Ok(names
+            .into_iter()
+            .filter_map(|n| n.strip_suffix("_meta").map(str::to_string))
+            .collect())
+    }
+
+    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse, VectorError> {
+        let conn = self.db.lock();
+        let schema = Self::schema_for(index)?;
+        // Keyed on the meta table (same source the catalog scan uses), not
+        // the vec table — describe reports the meta table's real state.
+        if !Self::table_exists(&conn, &schema.meta_table)? {
+            return Ok(DescribeIndexResponse {
+                exists: false,
+                columns: Vec::new(),
+                keyword_search: false,
+            });
+        }
+        let mut stmt = conn
+            .prepare("SELECT name, type FROM pragma_table_info(?1) ORDER BY cid")
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let columns = stmt
+            .query_map(params![&schema.meta_table], |row| {
+                Ok(ColumnInfo {
+                    name: row.get(0)?,
+                    sql_type: row.get(1)?,
+                })
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .collect::<Result<Vec<ColumnInfo>, _>>()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let keyword_search = Self::has_keyword_search(&conn, &schema)?;
+        Ok(DescribeIndexResponse {
+            exists: true,
+            columns,
+            keyword_search,
+        })
+    }
+
+    async fn list_ids(
+        &self,
+        index: &str,
+        filter: MetadataFilter,
+    ) -> Result<Vec<String>, VectorError> {
+        if filter.equals.is_empty() {
+            return Err(VectorError::InvalidMetadataFilter(
+                "filter.equals must contain at least one condition".into(),
+            ));
+        }
+        let mut binds: Vec<rusqlite::types::Value> = Vec::with_capacity(filter.equals.len() * 2);
+        for (path, value) in &filter.equals {
+            binds.push(rusqlite::types::Value::Text(format!("$.{path}")));
+            match value {
+                serde_json::Value::String(s) => {
+                    binds.push(rusqlite::types::Value::Text(s.clone()));
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        binds.push(rusqlite::types::Value::Integer(i));
+                    } else if let Some(f) = n.as_f64() {
+                        binds.push(rusqlite::types::Value::Real(f));
+                    } else {
+                        return Err(VectorError::InvalidMetadataFilter(format!(
+                            "unrepresentable number for path {path:?}"
+                        )));
+                    }
+                }
+                other => {
+                    return Err(VectorError::InvalidMetadataFilter(format!(
+                        "value for path {path:?} must be a JSON string or number, got {other}"
+                    )));
+                }
+            }
+        }
+        let conn = self.db.lock();
+        let schema = Self::schema_for(index)?;
+        if !Self::table_exists(&conn, &schema.meta_table)? {
+            return Err(VectorError::IndexNotFound(index.to_string()));
+        }
+        let sql = schema.build_select_ids_by_metadata(filter.equals.len()).sql;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let ids = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        Ok(ids)
     }
 }
 
@@ -774,5 +876,100 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(svc.count("docs").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_indexes_matches_prefix_literally() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(cfg("foo_bar", false)).await.unwrap();
+        svc.create_index(cfg("fooxbar", false)).await.unwrap();
+        // `_` in the prefix must match literally, not as a LIKE wildcard.
+        let got = svc.list_indexes("foo_").await.unwrap();
+        assert_eq!(got, vec!["foo_bar".to_string()]);
+        let all = svc.list_indexes("foo").await.unwrap();
+        assert_eq!(all, vec!["foo_bar".to_string(), "fooxbar".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn describe_index_reports_columns_and_fts() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(cfg("docs", true)).await.unwrap();
+        let desc = svc.describe_index("docs").await.unwrap();
+        assert!(desc.exists);
+        assert!(desc.keyword_search);
+        let names: Vec<&str> = desc.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "rowid", "metadata", "text"]);
+        assert_eq!(desc.columns[0].sql_type, "TEXT");
+        assert_eq!(desc.columns[1].sql_type, "INTEGER");
+
+        let vector_only_desc = {
+            svc.create_index(cfg("plain", false)).await.unwrap();
+            svc.describe_index("plain").await.unwrap()
+        };
+        assert!(vector_only_desc.exists);
+        assert!(!vector_only_desc.keyword_search);
+
+        let missing = svc.describe_index("nope").await.unwrap();
+        assert!(!missing.exists);
+        assert!(missing.columns.is_empty());
+        assert!(!missing.keyword_search);
+    }
+
+    #[tokio::test]
+    async fn list_ids_filters_by_metadata_equality() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(cfg("docs", false)).await.unwrap();
+        let e = |id: &str, doc: &str, page: i64| VectorEntry {
+            id: id.into(),
+            vector: vec![0.1; 1024],
+            metadata: Some(serde_json::json!({ "document_id": doc, "page": page })),
+            text: None,
+        };
+        svc.upsert("docs", vec![e("a", "d1", 1), e("b", "d1", 2), e("c", "d2", 1)])
+            .await
+            .unwrap();
+
+        let mut filter = MetadataFilter::default();
+        filter
+            .equals
+            .insert("document_id".into(), serde_json::json!("d1"));
+        let mut ids = svc.list_ids("docs", filter).await.unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+
+        // Numeric equality binds as a number, and multiple conditions AND.
+        let mut filter = MetadataFilter::default();
+        filter
+            .equals
+            .insert("document_id".into(), serde_json::json!("d1"));
+        filter.equals.insert("page".into(), serde_json::json!(2));
+        let ids = svc.list_ids("docs", filter).await.unwrap();
+        assert_eq!(ids, vec!["b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_ids_rejects_empty_and_non_scalar_filters() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(cfg("docs", false)).await.unwrap();
+
+        let err = svc
+            .list_ids("docs", MetadataFilter::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VectorError::InvalidMetadataFilter(_)));
+
+        let mut filter = MetadataFilter::default();
+        filter.equals.insert("flag".into(), serde_json::json!(true));
+        let err = svc.list_ids("docs", filter).await.unwrap_err();
+        assert!(matches!(err, VectorError::InvalidMetadataFilter(_)));
+    }
+
+    #[tokio::test]
+    async fn list_ids_missing_index_is_not_found() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        let mut filter = MetadataFilter::default();
+        filter.equals.insert("k".into(), serde_json::json!("v"));
+        let err = svc.list_ids("nope", filter).await.unwrap_err();
+        assert!(matches!(err, VectorError::IndexNotFound(_)));
     }
 }
