@@ -962,8 +962,7 @@ mod tests {
 
     #[test]
     fn all_registers_vector_v1() {
-        let names: Vec<String> = all().into_iter().map(|s| s.name).collect();
-        assert!(names.contains(&"vector@v1".to_string()));
+        assert!(all().iter().any(|s| s.name == "vector@v1"));
     }
 
     /// Regression pin for the 2026-06-10 audit finding: these ops were

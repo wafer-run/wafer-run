@@ -43,6 +43,7 @@ struct CapabilitiesArgs {
     storage_folders: Vec<String>,
     network_allow: Vec<String>,
     config_keys: Vec<String>,
+    vector_indexes: Vec<String>,
     callable_blocks: Vec<String>,
     headers_readable: Vec<String>,
     headers_writable: Vec<String>,
@@ -96,6 +97,7 @@ fn parse_capabilities(meta: &syn::MetaList) -> syn::Result<CapabilitiesArgs> {
                     "storage_folders" => out.storage_folders = list,
                     "network_allow" => out.network_allow = list,
                     "config_keys" => out.config_keys = list,
+                    "vector_indexes" => out.vector_indexes = list,
                     "callable_blocks" => out.callable_blocks = list,
                     other => {
                         return Err(syn::Error::new(
@@ -551,7 +553,8 @@ pub fn wafer_async_trait(
 /// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `config`
 ///
 /// List fields: `collections = [...]`, `storage_folders = [...]`,
-/// `network_allow = [...]`, `config_keys = [...]`, `callable_blocks = [...]`
+/// `network_allow = [...]`, `config_keys = [...]`, `vector_indexes = [...]`,
+/// `callable_blocks = [...]`
 ///
 /// Header policy: `headers(readable = [...], writable = [...], masked = [...])`
 ///
@@ -724,6 +727,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let storage_folders = &c.storage_folders;
         let network_allow = &c.network_allow;
         let config_keys = &c.config_keys;
+        let vector_indexes = &c.vector_indexes;
         let callable_blocks = &c.callable_blocks;
         let readable = &c.headers_readable;
         let writable = &c.headers_writable;
@@ -748,6 +752,11 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 config_keys: {
                     let mut s = ::std::collections::HashSet::new();
                     #(s.insert(#config_keys.to_string());)*
+                    s
+                },
+                vector_indexes: {
+                    let mut s = ::std::collections::HashSet::new();
+                    #(s.insert(#vector_indexes.to_string());)*
                     s
                 },
                 callable_blocks: {
