@@ -6,16 +6,30 @@
 
 use anyhow::{bail, Result};
 
-/// Parse `org/block` — exactly one `/`, both segments non-empty.
+/// True iff `s` is a single, non-empty segment matching `[a-z0-9_-]+`.
+///
+/// This is stricter than "no path separator": it rejects `.`/`..` outright
+/// (neither contains anything outside `[a-z0-9_-]`), and rejects any
+/// character — including `/`, whitespace, and uppercase — that could make
+/// `org`/`block` ambiguous once they're joined into a cache filesystem path
+/// (`{cache_root}/{org}/{block}/{version}`, see `cache.rs::package_dir`).
+fn is_valid_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Parse `org/block` — exactly one `/`, both segments non-empty and matching
+/// `[a-z0-9_-]+` (so neither can be `.`/`..` or carry a stray `/`).
 /// Surrounding whitespace is trimmed.
 pub fn parse_org_block(name: &str) -> Result<(String, String)> {
     let name = name.trim();
     let parsed = name
         .split_once('/')
-        .filter(|(org, block)| !org.is_empty() && !block.is_empty() && !block.contains('/'));
+        .filter(|(org, block)| is_valid_segment(org) && is_valid_segment(block));
     let Some((org, block)) = parsed else {
         bail!(
-            "invalid block name {name:?}: must be in {{org}}/{{block}} format (exactly one \"/\")"
+            "invalid block name {name:?}: must be in {{org}}/{{block}} format (exactly one \"/\", each segment lowercase alphanumeric/_/-, no \".\" or \"..\")"
         );
     };
     Ok((org.to_string(), block.to_string()))
@@ -59,6 +73,32 @@ mod tests {
     #[test]
     fn parse_org_block_rejects_missing_slash() {
         assert!(parse_org_block("justname").is_err());
+    }
+
+    #[test]
+    fn parse_org_block_rejects_dotdot_org() {
+        // A hostile/compromised registry (or a stray CLI arg) must not be
+        // able to steer a `..` segment into `org`/`block` — they get joined
+        // straight into cache filesystem paths downstream.
+        assert!(parse_org_block("../foo/bar").is_err());
+        assert!(parse_org_block("./x/y").is_err());
+        assert!(parse_org_block("../widget").is_err());
+        assert!(parse_org_block("acme/..").is_err());
+    }
+
+    #[test]
+    fn parse_org_block_rejects_uppercase_and_other_chars() {
+        assert!(parse_org_block("Acme/widget").is_err());
+        assert!(parse_org_block("acme/wid get").is_err());
+        assert!(parse_org_block("acme/widget.tar").is_err());
+    }
+
+    #[test]
+    fn parse_org_block_accepts_underscore_and_hyphen() {
+        assert_eq!(
+            parse_org_block("suppers_ai/my-block").unwrap(),
+            ("suppers_ai".into(), "my-block".into())
+        );
     }
 
     #[test]
