@@ -158,6 +158,16 @@ mod tests {
     }
 
     #[test]
+    fn dollar_dollar_before_defined_var_does_not_expand() {
+        // `$$` must emit a literal `$` and NOT attempt to expand what follows.
+        // Using a DEFINED var proves no lookup happens — an "expand-then-fallback"
+        // regression would substitute the value here and this test would catch it.
+        std::env::set_var("WR4_DOLLAR_SET", "should-not-appear");
+        assert_eq!(expand_env_vars("$$WR4_DOLLAR_SET"), "$WR4_DOLLAR_SET");
+        std::env::remove_var("WR4_DOLLAR_SET");
+    }
+
+    #[test]
     fn undefined_braced_var_is_left_literal_not_blanked() {
         std::env::remove_var("WR4_NOPE_BRACED");
         assert_eq!(
