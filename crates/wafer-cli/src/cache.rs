@@ -22,7 +22,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -33,6 +33,38 @@ use fs2::FileExt;
 const LOCK_TIMEOUT_ENV: &str = "WAFER_INSTALL_LOCK_TIMEOUT_SECS";
 const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 60;
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A cache path segment (org, block, or version) failed validation.
+///
+/// `org`/`block`/`version` all become raw path components under the cache
+/// root (`{root}/{org}/{block}/{version}`). `org`/`block` are attacker-shaped
+/// by whatever the caller passed to the CLI; `version` can be echoed
+/// verbatim by the registry (see `install.rs`). None of the three may carry
+/// `..`, be absolute, or embed a `/` — otherwise a hostile/compromised
+/// registry response like `version = "../../.."` could steer
+/// `fs::remove_dir_all`/`fs::rename` outside the cache root.
+#[derive(Debug, thiserror::Error)]
+pub enum CacheError {
+    #[error(
+        "invalid {field} {value:?}: must be a single path segment (no \"..\", \".\", leading \"/\", or embedded \"/\")"
+    )]
+    InvalidSegment { field: &'static str, value: String },
+}
+
+/// Reject anything that isn't exactly one `Component::Normal` matching
+/// `value` verbatim. This rejects `..`, `.`, absolute paths, empty strings,
+/// and any embedded separator (including a trailing `/`, which `Path`
+/// normalizes away — the post-match string-equality check catches that).
+fn validate_segment(field: &'static str, value: &str) -> Result<(), CacheError> {
+    let mut components = Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(seg)), None) if seg.to_str() == Some(value) => Ok(()),
+        _ => Err(CacheError::InvalidSegment {
+            field,
+            value: value.to_string(),
+        }),
+    }
+}
 
 /// Root of the on-disk cache; wraps an absolute path under the user's home.
 #[derive(Debug, Clone)]
@@ -58,8 +90,21 @@ impl CacheRoot {
     }
 
     /// Final directory for a specific package@version.
-    pub fn package_dir(&self, org: &str, block: &str, version: &str) -> PathBuf {
-        self.root.join(org).join(block).join(version)
+    ///
+    /// `org`, `block`, and `version` are validated as single, normal path
+    /// segments before being joined — see [`CacheError`]. `version` in
+    /// particular may originate from the registry (untrusted network input);
+    /// callers must not skip this by building the path any other way.
+    pub fn package_dir(
+        &self,
+        org: &str,
+        block: &str,
+        version: &str,
+    ) -> Result<PathBuf, CacheError> {
+        validate_segment("org", org)?;
+        validate_segment("block", block)?;
+        validate_segment("version", version)?;
+        Ok(self.root.join(org).join(block).join(version))
     }
 
     /// Path to the advisory lock file.
@@ -75,8 +120,8 @@ impl CacheRoot {
     }
 
     /// Return true iff the final version dir exists. Does not hit the lock.
-    pub fn is_populated(&self, org: &str, block: &str, version: &str) -> bool {
-        self.package_dir(org, block, version).is_dir()
+    pub fn is_populated(&self, org: &str, block: &str, version: &str) -> Result<bool, CacheError> {
+        Ok(self.package_dir(org, block, version)?.is_dir())
     }
 
     /// Acquire the advisory flock, polling every 100 ms until acquired or
@@ -167,8 +212,46 @@ mod tests {
     fn package_dir_composes_segments() {
         let tmp = tempdir().unwrap();
         let c = CacheRoot::at(tmp.path().to_path_buf());
-        let p = c.package_dir("acme", "widget", "0.3.1");
+        let p = c.package_dir("acme", "widget", "0.3.1").unwrap();
         assert!(p.ends_with("acme/widget/0.3.1"));
+    }
+
+    #[test]
+    fn package_dir_rejects_traversal_in_version() {
+        // A compromised/hostile registry echoing version="../../.." must not
+        // be able to build a cache path that escapes the cache root and
+        // gets fed to remove_dir_all.
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        assert!(cache.package_dir("acme", "widget", "../../..").is_err());
+        assert!(cache.package_dir("acme", "widget", "/etc").is_err());
+    }
+
+    #[test]
+    fn package_dir_rejects_traversal_in_org_or_block() {
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        assert!(cache.package_dir("..", "widget", "1.0.0").is_err());
+        assert!(cache.package_dir("acme", "..", "1.0.0").is_err());
+        assert!(cache.package_dir("a/b", "widget", "1.0.0").is_err());
+        assert!(cache.package_dir("acme", "a/b", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn package_dir_rejects_dot_and_embedded_separator() {
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        assert!(cache.package_dir("acme", "widget", ".").is_err());
+        assert!(cache
+            .package_dir("acme", "widget", "1.0.0/../../x")
+            .is_err());
+    }
+
+    #[test]
+    fn is_populated_rejects_invalid_version() {
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        assert!(cache.is_populated("acme", "widget", "../../etc").is_err());
     }
 
     #[test]
@@ -185,9 +268,9 @@ mod tests {
     fn is_populated_sees_the_version_dir() {
         let tmp = tempdir().unwrap();
         let c = CacheRoot::at(tmp.path().to_path_buf());
-        assert!(!c.is_populated("a", "b", "1.0.0"));
-        fs::create_dir_all(c.package_dir("a", "b", "1.0.0")).unwrap();
-        assert!(c.is_populated("a", "b", "1.0.0"));
+        assert!(!c.is_populated("a", "b", "1.0.0").unwrap());
+        fs::create_dir_all(c.package_dir("a", "b", "1.0.0").unwrap()).unwrap();
+        assert!(c.is_populated("a", "b", "1.0.0").unwrap());
     }
 
     #[test]

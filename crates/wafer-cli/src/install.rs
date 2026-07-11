@@ -149,22 +149,26 @@ pub(crate) fn lockfile_entry(
 
 /// Check whether the cache+lockfile pair already satisfies this version.
 /// Returns `Some(sha256)` if satisfied and the download can be skipped.
+///
+/// Errors if `org`/`block`/`version` can't be turned into a cache path (see
+/// `CacheRoot::package_dir`); callers are expected to have already validated
+/// `version` as semver before reaching this point.
 pub(crate) fn cache_hit(
     cache: &CacheRoot,
     lockfile: &Lockfile,
     org: &str,
     block: &str,
     version: &str,
-) -> Option<String> {
-    if !cache.is_populated(org, block, version) {
-        return None;
+) -> Result<Option<String>> {
+    if !cache.is_populated(org, block, version)? {
+        return Ok(None);
     }
     let name = format!("{org}/{block}");
-    lockfile
+    Ok(lockfile
         .packages
         .iter()
         .find(|p| p.name == name && p.version == version)
-        .map(|p| p.sha256.clone())
+        .map(|p| p.sha256.clone()))
 }
 
 /// Extract a gzipped tar into `dest` (which must not exist yet; `fs::rename`
@@ -242,6 +246,15 @@ pub async fn install_cache_only(
     let (resolved_version, expected_sha, yanked_warning): (String, String, Option<String>) =
         match version_req {
             Some(ver) => {
+                // Reject malformed version requests before `ver` can reach
+                // any cache path construction — the fast-path
+                // `is_populated` check below runs before any registry
+                // round-trip, so this has to happen first, not just before
+                // `final_dir` further down.
+                Version::parse(ver).with_context(|| {
+                    format!("invalid version {ver:?} for {org}/{block}: must be valid semver (e.g. 1.2.3)")
+                })?;
+
                 // Fast path: if the lockfile already has this version + the
                 // cache is populated with it, skip the registry call entirely.
                 let name = format!("{org}/{block}");
@@ -250,7 +263,7 @@ pub async fn install_cache_only(
                     .iter()
                     .find(|p| p.name == name && p.version == ver)
                 {
-                    if cache.is_populated(org, block, ver) {
+                    if cache.is_populated(org, block, ver)? {
                         // Network-free: use the lockfile entry.
                         return Ok(InstallOutcome::cached(
                             org,
@@ -263,6 +276,17 @@ pub async fn install_cache_only(
                 // Fallback: ask the registry.
                 let vd: VersionDetail =
                     registry_client::get_version(registry, org, block, ver).await?;
+                // The registry response is untrusted network input — a
+                // hostile/compromised registry could echo back a
+                // `version` field that differs from what we requested
+                // (e.g. "../../.."). Require it to be valid semver before
+                // it's ever used to build a cache path.
+                Version::parse(&vd.version).with_context(|| {
+                    format!(
+                        "registry returned invalid version {:?} for {org}/{block}",
+                        vd.version
+                    )
+                })?;
                 let warn = if vd.yanked != 0 {
                     Some(format!("warning: {org}/{block}@{ver} was yanked"))
                 } else {
@@ -287,7 +311,7 @@ pub async fn install_cache_only(
     // (Already loaded above for the explicit-version optimization.)
 
     // Step 3: pre-lock cache-hit shortcut.
-    if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version) {
+    if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version)? {
         if cached_sha == expected_sha {
             return Ok(InstallOutcome::cached(
                 org,
@@ -306,7 +330,7 @@ pub async fn install_cache_only(
     // we must not stomp their entry when we write below.
     let mut lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
 
-    let final_dir = cache.package_dir(org, block, &resolved_version);
+    let final_dir = cache.package_dir(org, block, &resolved_version)?;
     let bytes = if final_dir.is_dir() {
         // Another process may have populated while we waited for the lock.
         if lf.packages.iter().any(|p| {
@@ -374,9 +398,19 @@ pub async fn install_cache_only_frozen(
     version: &str,
     expected_sha: &str,
 ) -> Result<InstallOutcome> {
+    // `version` comes straight from wafer.lock — a file that could have
+    // been hand-edited or, historically, populated from an unvalidated
+    // registry response. Require it to be valid semver before it's used to
+    // build any cache path (fast path below, and `final_dir` further down).
+    Version::parse(version).with_context(|| {
+        format!(
+            "wafer.lock has invalid version {version:?} for {org}/{block}: must be valid semver"
+        )
+    })?;
+
     // Fast path: if the cache is populated, trust the lockfile sha as the
     // proof of provenance (that's what --frozen means: lockfile is truth).
-    if cache.is_populated(org, block, version) {
+    if cache.is_populated(org, block, version)? {
         return Ok(InstallOutcome::cached(org, block, version, expected_sha));
     }
 
@@ -384,7 +418,7 @@ pub async fn install_cache_only_frozen(
     let _guard = cache.acquire_lock()?;
 
     // Re-check under the lock — another installer may have populated.
-    let final_dir = cache.package_dir(org, block, version);
+    let final_dir = cache.package_dir(org, block, version)?;
     if final_dir.is_dir() {
         return Ok(InstallOutcome::cached(org, block, version, expected_sha));
     }
@@ -655,10 +689,10 @@ mod tests {
         use tempfile::tempdir;
         let tmp = tempdir().unwrap();
         let cache = CacheRoot::at(tmp.path().to_path_buf());
-        fs::create_dir_all(cache.package_dir("a", "b", "1.0.0")).unwrap();
+        fs::create_dir_all(cache.package_dir("a", "b", "1.0.0").unwrap()).unwrap();
         let lf = Lockfile::new();
         // This is the "stale dir" case: dir present, no lockfile entry.
-        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").is_none());
+        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap().is_none());
     }
 
     #[test]
@@ -669,11 +703,11 @@ mod tests {
         let mut lf = Lockfile::new();
 
         // Neither dir nor entry → miss.
-        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").is_none());
+        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap().is_none());
 
         // Dir only → miss.
-        fs::create_dir_all(cache.package_dir("a", "b", "1.0.0")).unwrap();
-        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").is_none());
+        fs::create_dir_all(cache.package_dir("a", "b", "1.0.0").unwrap()).unwrap();
+        assert!(cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap().is_none());
 
         // Both → hit.
         lf.insert_or_replace(LockfilePackage {
@@ -683,8 +717,64 @@ mod tests {
             source: "registry+https://x".into(),
         });
         assert_eq!(
-            cache_hit(&cache, &lf, "a", "b", "1.0.0"),
+            cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap(),
             Some("zzz".into())
         );
+    }
+
+    #[test]
+    fn cache_hit_rejects_traversal_version() {
+        // Same threat model as `package_dir` — a hostile registry response
+        // resolved into `cache_hit`'s `version` argument must error, not
+        // silently treat it as a cache miss and fall through to the network.
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().to_path_buf());
+        let lf = Lockfile::new();
+        assert!(cache_hit(&cache, &lf, "a", "b", "../../etc").is_err());
+    }
+
+    #[tokio::test]
+    async fn install_cache_only_rejects_non_semver_explicit_version() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().join("cache"));
+        let lockfile_path = tmp.path().join("wafer.lock");
+        let registry = Registry::new("https://example.invalid/");
+
+        let err = install_cache_only(
+            &registry,
+            &cache,
+            &lockfile_path,
+            "acme",
+            "widget",
+            Some("../../../etc/passwd"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid version"), "{err}");
+        // No path should have been created outside the cache dir.
+        assert!(!tmp.path().join("etc").exists());
+    }
+
+    #[tokio::test]
+    async fn install_cache_only_frozen_rejects_non_semver_version() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let cache = CacheRoot::at(tmp.path().join("cache"));
+        let registry = Registry::new("https://example.invalid/");
+
+        let err = install_cache_only_frozen(
+            &registry,
+            &cache,
+            "acme",
+            "widget",
+            "../../../etc/passwd",
+            "deadbeef",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid version"), "{err}");
+        assert!(!tmp.path().join("etc").exists());
     }
 }
