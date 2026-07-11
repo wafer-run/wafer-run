@@ -129,22 +129,19 @@ impl StorageService for LocalStorageService {
         data: &[u8],
         _content_type: &str,
     ) -> Result<(), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
         }
-        // Validate after parent dirs are created so canonicalize can resolve
-        let path = self.validate_path(&path)?;
         fs::write(&path, data).map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
 
         let metadata = fs::metadata(&path)
             .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
@@ -178,11 +175,10 @@ impl StorageService for LocalStorageService {
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
         fs::remove_file(&path).map_err(|e| StorageError::Internal(format!("delete {path:?}: {e}")))
     }
 
@@ -372,6 +368,40 @@ mod tests {
         let inside = svc.root.join("new_folder").join("new_key");
         let ok = svc.validate_path(&inside).expect("should accept");
         assert!(ok.starts_with(svc.root.canonicalize().unwrap()));
+    }
+
+    /// Regression: `put` used to call `fs::create_dir_all` on the raw
+    /// joined path BEFORE `validate_path`. `create_dir_all` resolves `..`
+    /// components at the syscall level as it walks up creating ancestors,
+    /// so a traversal key materialized directories *outside* the storage
+    /// root before the write was ever refused. Validation must happen
+    /// first, and `create_dir_all` must only ever run on its normalized,
+    /// in-root result.
+    #[tokio::test]
+    async fn put_rejects_traversal_key_without_creating_dirs_outside_root() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        // Escapes only the root's own directory, landing in the root's
+        // parent (still inside the writable system temp dir) — not the
+        // filesystem root, so the test doesn't depend on `/` permissions.
+        let escape_target = svc.root.parent().unwrap().join("evil");
+
+        let err = svc
+            .put("f", "../../evil/x", b"data", "text/plain")
+            .await
+            .expect_err("traversal key must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert!(
+            !escape_target.exists(),
+            "no directory may be created outside the storage root, found {escape_target:?}"
+        );
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
