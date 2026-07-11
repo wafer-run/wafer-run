@@ -433,17 +433,22 @@ mod tests {
 
     /// Regression: `delete_folder` used to check `path.exists()` BEFORE
     /// `validate_path`, turning filesystem existence into an oracle for
-    /// out-of-root paths (and only rejecting traversal for paths that
-    /// happened to exist). Validation must run first so a traversal name
-    /// is always rejected with the traversal error, not treated as a
-    /// (non-)existence question.
+    /// out-of-root paths: a traversal name was only rejected with the
+    /// traversal error if the resolved target happened to exist; if it
+    /// didn't exist, the buggy code early-returned `NotFound` instead
+    /// (silently confirming *non*-existence of an out-of-root path).
+    /// The target below is guaranteed absent (it resolves to a filesystem-
+    /// root-level path that nothing creates), so this specifically
+    /// exercises that divergence: validation must run first so a traversal
+    /// name is always rejected with the traversal error, never treated as
+    /// a (non-)existence question.
     #[tokio::test]
     async fn delete_folder_rejects_traversal_name_before_existence_check() {
         let tmp = tempdir();
         let svc = LocalStorageService::new(&tmp).expect("create svc");
 
         let err = svc
-            .delete_folder("../../etc")
+            .delete_folder("../../wafer-local-storage-nonexistent-delete-folder-wr10")
             .await
             .expect_err("traversal name must be rejected");
         match err {
@@ -451,16 +456,23 @@ mod tests {
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
-            other => panic!("unexpected error variant: {other:?}, expected traversal error"),
+            other => panic!(
+                "unexpected error variant: {other:?}, expected traversal error (got NotFound would mean the pre-validation existence check fired again)"
+            ),
         }
     }
 
     /// Regression: `list` used to check `dir.exists()` BEFORE
     /// `validate_path`, turning filesystem existence into an oracle for
-    /// out-of-root paths (a traversal folder that didn't exist silently
-    /// returned an empty list instead of being rejected). Validation must
-    /// run first so a traversal name is always rejected with the
-    /// traversal error, not treated as an empty-list case.
+    /// out-of-root paths: a traversal folder that didn't exist silently
+    /// returned an empty list (`Ok`) instead of being rejected, while one
+    /// that DID exist fell through to validation and got the traversal
+    /// error — so existence alone decided whether traversal was even
+    /// checked. The target below is guaranteed absent (it resolves to a
+    /// filesystem-root-level path that nothing creates), so this
+    /// specifically exercises that divergence: validation must run first
+    /// so a traversal name is always rejected with the traversal error,
+    /// never treated as an empty-list case.
     #[tokio::test]
     async fn list_rejects_traversal_folder_before_existence_check() {
         let tmp = tempdir();
@@ -472,7 +484,7 @@ mod tests {
             limit: 0,
         };
         let err = svc
-            .list("../../etc", &opts)
+            .list("../../wafer-local-storage-nonexistent-list-wr10", &opts)
             .await
             .expect_err("traversal folder must be rejected");
         match err {
@@ -480,7 +492,9 @@ mod tests {
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
-            other => panic!("unexpected error variant: {other:?}, expected traversal error"),
+            other => panic!(
+                "unexpected error variant: {other:?}, expected traversal error (got Ok(empty list) would mean the pre-validation existence check fired again)"
+            ),
         }
     }
 
