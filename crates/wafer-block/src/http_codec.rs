@@ -847,12 +847,17 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_maps_to_500() {
-        // A stream that ends without a terminal event. The sink's Drop
-        // safety-net auto-Complete uses try_send, so filling the channel
-        // (capacity 1) before dropping reproduces the protocol violation.
-        let (stream, sink, _cancel) = OutputStream::new_streaming_with_capacity(1);
-        sink.send_chunk(b"partial".to_vec()).await.unwrap();
-        drop(sink);
+        // A stream that ends without a terminal event. `OutputSink` can no
+        // longer produce this (terminal delivery is guaranteed via a reserved
+        // channel slot, even when the body channel is full at drop), so the
+        // protocol violation is synthesized at the raw channel level — it can
+        // still reach consumers from non-sink sources such as a buggy remote
+        // producer decoded off the wire.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(crate::stream::StreamEvent::Chunk(b"partial".to_vec()))
+            .unwrap();
+        drop(tx); // channel closes with no terminal event
+        let stream = OutputStream::from_raw_receiver(rx);
         let parts = collect_http_response(stream).await;
         assert_eq!(parts.status, 500);
         assert_eq!(parts.body, b"internal server error");
