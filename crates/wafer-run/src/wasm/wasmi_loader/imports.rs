@@ -65,19 +65,12 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                 let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
                     return;
                 };
-                let level_bytes = {
-                    let mut buf = vec![0u8; level_len as usize];
-                    if memory.read(&caller, level_ptr as usize, &mut buf).is_err() {
-                        return;
-                    }
-                    buf
+                let Ok(level_bytes) = read_guest_slice(&caller, memory, level_ptr, level_len)
+                else {
+                    return;
                 };
-                let msg_bytes = {
-                    let mut buf = vec![0u8; msg_len as usize];
-                    if memory.read(&caller, msg_ptr as usize, &mut buf).is_err() {
-                        return;
-                    }
-                    buf
+                let Ok(msg_bytes) = read_guest_slice(&caller, memory, msg_ptr, msg_len) else {
+                    return;
                 };
                 let level = String::from_utf8_lossy(&level_bytes);
                 let msg = String::from_utf8_lossy(&msg_bytes);
@@ -130,9 +123,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
 
-                let mut name_buf = vec![0u8; name_len as usize];
-                memory
-                    .read(&caller, name_ptr as usize, &mut name_buf)
+                let name_buf = read_guest_slice(&caller, memory, name_ptr, name_len)
                     .map_err(|e| WasmiError::new(format!("reading block name: {e}")))?;
                 let block_name = String::from_utf8(name_buf)
                     .map_err(|e| WasmiError::new(format!("block name not UTF-8: {e}")))?;
@@ -142,9 +133,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     return Ok(error_code_to_neg_i64(ErrorCode::PermissionDenied));
                 }
 
-                let mut msg_buf = vec![0u8; msg_len as usize];
-                memory
-                    .read(&caller, msg_ptr as usize, &mut msg_buf)
+                let msg_buf = read_guest_slice(&caller, memory, msg_ptr, msg_len)
                     .map_err(|e| WasmiError::new(format!("reading stream message: {e}")))?;
 
                 // Decode the message. The SDK encodes via rmp-serde (codec
@@ -186,12 +175,8 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
 
-                let mut buf = vec![0u8; body_len as usize];
-                if body_len > 0 {
-                    memory
-                        .read(&caller, body_ptr as usize, &mut buf)
-                        .map_err(|e| WasmiError::new(format!("reading stream chunk: {e}")))?;
-                }
+                let buf = read_guest_slice(&caller, memory, body_ptr, body_len)
+                    .map_err(|e| WasmiError::new(format!("reading stream chunk: {e}")))?;
 
                 let mut caller = caller;
                 let Some(state) = caller.data_mut().streams.get_mut(handle as u64) else {
@@ -231,9 +216,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .get_export("memory")
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory".to_string()))?;
-                let mut buf = vec![0u8; payload_len as usize];
-                memory
-                    .read(&caller, payload_ptr as usize, &mut buf)
+                let buf = read_guest_slice(&caller, memory, payload_ptr, payload_len)
                     .map_err(|e| WasmiError::new(format!("reading attach payload: {e}")))?;
 
                 let (id, att): (String, wafer_block::Attachment) =
@@ -352,9 +335,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory".to_string()))?;
 
-                let mut id_buf = vec![0u8; id_len as usize];
-                memory
-                    .read(&caller, id_ptr as usize, &mut id_buf)
+                let id_buf = read_guest_slice(&caller, memory, id_ptr, id_len)
                     .map_err(|e| WasmiError::new(format!("reading attachment id: {e}")))?;
 
                 let id = match std::str::from_utf8(&id_buf) {
@@ -433,9 +414,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
 
-                let mut id_buf = vec![0u8; id_len as usize];
-                memory
-                    .read(&caller, id_ptr as usize, &mut id_buf)
+                let id_buf = read_guest_slice(&caller, memory, id_ptr, id_len)
                     .map_err(|e| WasmiError::new(format!("reading asset id: {e}")))?;
                 let asset_id = String::from_utf8(id_buf)
                     .map_err(|e| WasmiError::new(format!("asset id not UTF-8: {e}")))?;
@@ -629,7 +608,15 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                 let Some(wasmi::Extern::Memory(memory)) = caller.get_export("memory") else {
                     return WASI_ERRNO_FAULT;
                 };
-                let mut buf = vec![0u8; buf_len as usize];
+                // `buf` is filled by the host RNG, not read from guest memory —
+                // but it's still sized off the guest-controlled `buf_len`, so
+                // the same pre-allocation range check applies (see
+                // `checked_guest_range`'s doc comment): reject a negative or
+                // out-of-bounds length before allocating the fill buffer.
+                let Ok((_, len)) = checked_guest_range(&caller, memory, buf_ptr, buf_len) else {
+                    return WASI_ERRNO_FAULT;
+                };
+                let mut buf = vec![0u8; len];
                 if getrandom::getrandom(&mut buf).is_err() {
                     // RNG failure: never hand the guest a zero-filled buffer with
                     // a success errno — that would silently produce non-random
