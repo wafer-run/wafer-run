@@ -30,8 +30,27 @@ fn err_to_wafer(e: AuthError) -> WaferError {
 
 fn service_role_to_wire(r: &Role) -> String {
     match r {
-        Role::User => "User".to_string(),
-        Role::Admin => "Admin".to_string(),
+        Role::User => "user".to_string(),
+        Role::Admin => "admin".to_string(),
+    }
+}
+
+/// Parse the `x-auth-role` header value into a [`Role`], case-insensitively.
+///
+/// Fails closed: an unrecognized value returns `InvalidArgument` rather than
+/// silently defaulting to `Role::User` (the weakest role) — mirrors the
+/// `x-auth-scope` handling in `AUTH_REQUIRE_TOKEN` below. Accepts the same
+/// lowercase spelling `service_role_to_wire` emits on the response side, so a
+/// caller can round-trip a `profile.role` value straight back into this
+/// header without it silently downgrading to `Role::User`.
+fn parse_required_role(header: &str) -> Result<Role, WaferError> {
+    match header.to_ascii_lowercase().as_str() {
+        "admin" => Ok(Role::Admin),
+        "user" => Ok(Role::User),
+        _ => Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!("unknown role: {header}"),
+        )),
     }
 }
 
@@ -80,9 +99,9 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
             }
         }
         ServiceOp::AUTH_REQUIRE_ROLE => {
-            let role = match msg.header("x-auth-role") {
-                "admin" => Role::Admin,
-                _ => Role::User,
+            let role = match parse_required_role(msg.header("x-auth-role")) {
+                Ok(r) => r,
+                Err(e) => return OutputStream::error(e),
             };
             match service.require_role(msg, role).await {
                 Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
@@ -100,5 +119,59 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
             ErrorCode::Unimplemented,
             format!("unknown auth op: {other}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_role_rejects_unknown_role_header_instead_of_defaulting_to_user() {
+        // Silently mapping any non-"admin" header to Role::User means a caller
+        // passing an unrecognized value gets the weakest check — fail-open.
+        let err = parse_required_role("Superuser")
+            .expect_err("unknown role must be InvalidArgument, not Role::User");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn require_role_is_case_insensitive_for_admin() {
+        assert_eq!(parse_required_role("Admin").unwrap(), Role::Admin);
+        assert_eq!(parse_required_role("admin").unwrap(), Role::Admin);
+        assert_eq!(parse_required_role("ADMIN").unwrap(), Role::Admin);
+    }
+
+    #[test]
+    fn require_role_is_case_insensitive_for_user() {
+        assert_eq!(parse_required_role("User").unwrap(), Role::User);
+        assert_eq!(parse_required_role("user").unwrap(), Role::User);
+    }
+
+    #[test]
+    fn require_role_rejects_empty_header() {
+        // An absent `x-auth-role` header resolves to `""` via
+        // `Message::header`, which must not be treated as any role.
+        let err = parse_required_role("")
+            .expect_err("missing role header must be InvalidArgument, not a default role");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn service_role_to_wire_uses_canonical_lowercase() {
+        // The request-header format (`parse_required_role`) and the
+        // response-profile format (`service_role_to_wire`) must agree on one
+        // casing so `profile.role` round-trips straight back into
+        // `require_role` without failing open.
+        assert_eq!(service_role_to_wire(&Role::Admin), "admin");
+        assert_eq!(service_role_to_wire(&Role::User), "user");
+        assert_eq!(
+            parse_required_role(&service_role_to_wire(&Role::Admin)).unwrap(),
+            Role::Admin
+        );
+        assert_eq!(
+            parse_required_role(&service_role_to_wire(&Role::User)).unwrap(),
+            Role::User
+        );
     }
 }

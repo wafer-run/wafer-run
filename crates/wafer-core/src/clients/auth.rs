@@ -52,8 +52,12 @@ dual_api! {
     }
 
     /// Like `require_user`, but additionally requires the caller's role to
-    /// match `role` (case-insensitive: `"admin"` → `Role::Admin`, anything
-    /// else → `Role::User`). Role is forwarded via the `x-auth-role` header.
+    /// match `role`. Accepted values are `"admin"` and `"user"`, matched
+    /// case-insensitively — the same lowercase spelling `user_profile`
+    /// returns in `UserProfileResponse::role`, so a caller can round-trip
+    /// `profile.role` straight back into this argument. Any other value is
+    /// rejected with `InvalidArgument` rather than silently falling open to
+    /// `Role::User`. Role is forwarded via the `x-auth-role` header.
     pub fn require_role(ctx, msg: &Message, role: &str) -> Result<String, WaferError> {
         let mut fwd = forward_msg(msg, ServiceOp::AUTH_REQUIRE_ROLE);
         fwd.set_meta("http.header.x-auth-role", role);
@@ -220,7 +224,7 @@ mod tests {
             .expect("user_profile");
         assert_eq!(profile.id, "u-1");
         assert_eq!(profile.email, "alice@example.test");
-        assert_eq!(profile.role, "User");
+        assert_eq!(profile.role, "user");
     }
 
     #[test]
