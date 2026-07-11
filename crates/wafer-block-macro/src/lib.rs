@@ -5,7 +5,7 @@ use syn::{
     parse2,
     punctuated::Punctuated,
     spanned::Spanned,
-    Expr, ExprArray, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
+    Expr, ExprLit, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, Token,
 };
 
 // ---------------------------------------------------------------------------
@@ -224,30 +224,19 @@ impl FlatArgs {
         })
     }
 
-    fn get_str_list(&self, key: &str) -> Vec<String> {
+    /// Returns the string-array value of `key = [...]`, or an empty list if
+    /// `key` is absent. If `key` is present but its value isn't an array of
+    /// string literals, returns a spanned error rather than silently dropping
+    /// the malformed entries — an attribute like `requires` is a runtime
+    /// access-control gate, so a mistyped value (e.g. a bare string instead of
+    /// an array) must never resolve to an empty ("unrestricted") list.
+    fn get_str_list(&self, key: &str) -> syn::Result<Vec<String>> {
         self.pairs
             .iter()
             .find(|kv| kv.key == key)
-            .map(|kv| {
-                if let Expr::Array(ExprArray { elems, .. }) = &kv.value {
-                    elems
-                        .iter()
-                        .filter_map(|e| {
-                            if let Expr::Lit(ExprLit {
-                                lit: Lit::Str(s), ..
-                            }) = e
-                            {
-                                Some(s.value())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            })
-            .unwrap_or_default()
+            .map(|kv| parse_string_list(&kv.value))
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 }
 
@@ -648,7 +637,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     let instance_mode_str = args
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
-    let requires = args.get_str_list("requires");
+    let requires = args.get_str_list("requires")?;
 
     let struct_ty = &input.self_ty;
 

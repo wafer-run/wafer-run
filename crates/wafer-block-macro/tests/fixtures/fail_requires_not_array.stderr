@@ -1,0 +1,5 @@
+error: #[wafer_block]: expected array expression `[...]`
+  --> tests/fixtures/fail_requires_not_array.rs:55:16
+   |
+55 |     requires = "wafer-run/database"
+   |                ^^^^^^^^^^^^^^^^^^^^
