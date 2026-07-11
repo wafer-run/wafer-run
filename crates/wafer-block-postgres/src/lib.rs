@@ -57,21 +57,21 @@ wafer_core::service_block! {
 
             let tables = match config.get("collections") {
                 Some(v) => {
-                    match serde_json::from_value::<HashMap<String, CollectionDef>>(v.clone()) {
-                        Ok(colls) => collections_to_tables(&colls).map_err(|e| {
-                            WaferError::new(
-                                ErrorCode::FailedPrecondition,
-                                format!("wafer-run/postgres: invalid collections config: {e}"),
-                            )
-                        })?,
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "failed to parse database collections config"
-                            );
-                            Vec::new()
-                        }
-                    }
+                    let colls = serde_json::from_value::<HashMap<String, CollectionDef>>(
+                        v.clone(),
+                    )
+                    .map_err(|e| {
+                        WaferError::new(
+                            ErrorCode::FailedPrecondition,
+                            format!("wafer-run/postgres: invalid collections config: {e}"),
+                        )
+                    })?;
+                    collections_to_tables(&colls).map_err(|e| {
+                        WaferError::new(
+                            ErrorCode::FailedPrecondition,
+                            format!("wafer-run/postgres: invalid collections config: {e}"),
+                        )
+                    })?
                 }
                 None => Vec::new(),
             };
@@ -108,7 +108,8 @@ wafer_block::register_static_block!("wafer-run/postgres", PostgresDatabaseBlock)
 #[cfg(test)]
 mod tests {
     use wafer_block::{
-        Block, Context, ErrorCode, InputStream, Message, OutputStream, TerminalNotResponse,
+        Block, Context, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message,
+        OutputStream, TerminalNotResponse,
     };
 
     use super::PostgresDatabaseBlock;
@@ -159,5 +160,34 @@ mod tests {
             }
             other => panic!("expected typed pre-Init error terminal, got: {other:?}"),
         }
+    }
+
+    /// A malformed `collections` config value (a string, not the expected
+    /// `HashMap<String, CollectionDef>` object) must not be swallowed and
+    /// replaced with an empty table list — that would boot the block with
+    /// zero tables and silently skip every migration. It must hard-fail
+    /// Init instead, matching the adjacent `collections_to_tables` arm.
+    #[tokio::test]
+    async fn init_fails_when_collections_config_is_malformed() {
+        let block = PostgresDatabaseBlock::new();
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(&serde_json::json!({
+                "collections": "not-an-array"
+            }))
+            .expect("serialize test config"),
+        };
+
+        let err = block
+            .lifecycle(&NoopContext, event)
+            .await
+            .expect_err("malformed collections config must fail Init");
+
+        assert_eq!(err.code, ErrorCode::FailedPrecondition);
+        assert!(
+            err.message.contains("collections"),
+            "expected error message to mention collections, got: {}",
+            err.message
+        );
     }
 }
