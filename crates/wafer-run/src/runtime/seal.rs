@@ -46,7 +46,7 @@ impl Wafer {
         self.expand_declarative_flow_configs();
         self.gather_uses_configs();
 
-        self.compute_effective_capabilities();
+        self.compute_effective_capabilities()?;
 
         self.resolve_block_references().await?;
 
@@ -70,7 +70,11 @@ impl Wafer {
     /// Compute effective capabilities per block: declared ∩ config ∩ host.
     /// Also strips the reserved `capabilities` subkey from each block config
     /// so it doesn't leak into `ctx.config_get(...)`.
-    fn compute_effective_capabilities(&mut self) {
+    ///
+    /// Refuses boot (`RuntimeError::Config`) if any block's `capabilities`
+    /// subkey fails to parse — a mistyped override must never silently fall
+    /// back to the block's declared (often unrestricted) capabilities.
+    fn compute_effective_capabilities(&mut self) -> Result<(), RuntimeError> {
         let mut eff: std::collections::HashMap<String, wafer_block::BlockCapabilities> =
             std::collections::HashMap::new();
         for (name, block) in &self.registration.blocks {
@@ -80,7 +84,7 @@ impl Wafer {
                 .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
 
             let config_overrides =
-                take_capability_overrides(name, self.registration.block_configs.get_mut(name));
+                take_capability_overrides(name, self.registration.block_configs.get_mut(name))?;
 
             let effective = declared.apply_config_overrides(&config_overrides);
 
@@ -96,6 +100,7 @@ impl Wafer {
             eff.insert(name.clone(), effective);
         }
         self.registration.wrap.effective_capabilities = Arc::new(eff);
+        Ok(())
     }
 
     /// Resolve remote blocks referenced by flow steps and router routes.
@@ -216,25 +221,24 @@ impl Wafer {
 
 /// Strip the reserved `capabilities` subkey from `cfg` (when present) and
 /// parse it into `ConfigCapabilityOverrides`. Returns defaults when there is
-/// no config for the block, the config isn't an object, the subkey is absent,
-/// or parsing fails (with a warning naming the block).
+/// no config for the block, the config isn't an object, or the subkey is
+/// absent. Refuses (`RuntimeError::Config`) when the subkey is present but
+/// fails to parse — a mistyped override (e.g. a string where a bool is
+/// expected) must fail closed rather than silently drop to "no override",
+/// which would leave the block at its declared (often unrestricted)
+/// capabilities. Matches the `fail_on_rejected_grants` precedent.
 fn take_capability_overrides(
     name: &str,
     cfg: Option<&mut serde_json::Value>,
-) -> wafer_block::capabilities::ConfigCapabilityOverrides {
+) -> Result<wafer_block::capabilities::ConfigCapabilityOverrides, RuntimeError> {
     let Some(raw) = cfg
         .and_then(|c| c.as_object_mut())
         .and_then(|obj| obj.remove("capabilities"))
     else {
-        return wafer_block::capabilities::ConfigCapabilityOverrides::default();
+        return Ok(wafer_block::capabilities::ConfigCapabilityOverrides::default());
     };
-    serde_json::from_value(raw).unwrap_or_else(|e| {
-        tracing::warn!(
-            block = %name,
-            error = %e,
-            "failed to parse `capabilities` subkey — ignoring"
-        );
-        wafer_block::capabilities::ConfigCapabilityOverrides::default()
+    serde_json::from_value(raw).map_err(|e| {
+        RuntimeError::Config(format!("block {name}: invalid `capabilities` config: {e}"))
     })
 }
 

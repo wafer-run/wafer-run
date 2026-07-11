@@ -10,7 +10,7 @@ use wafer_block::{
     types::BlockInfo,
     Block, Context, LifecycleEvent, Message, WaferError,
 };
-use wafer_run::Wafer;
+use wafer_run::{RuntimeError, Wafer};
 
 struct DeclaringNative {
     info: BlockInfo,
@@ -105,4 +105,43 @@ async fn config_capabilities_subkey_stripped_from_regular_config() {
     // the config-presence test for `KEEP_THIS` existing in the context is
     // covered by other tests; this test's mere compilation + successful start
     // proves the strip didn't break config loading.
+}
+
+#[tokio::test]
+async fn seal_refuses_boot_when_capabilities_override_is_malformed() {
+    // A narrowing typo (string where a bool is expected) must fail closed,
+    // matching the fail_on_rejected_grants precedent — not silently drop the
+    // override (serde_json::from_value fails on the whole struct) and leave
+    // the block with its declared (here: unrestricted-default) capabilities.
+    let info = BlockInfo::new("test/malformed-caps", "0.1.0", "middleware@v1", "");
+    let block = Arc::new(DeclaringNative { info });
+
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
+    w.register_block("test/malformed-caps", block).unwrap();
+    w.add_block_config(
+        "test/malformed-caps",
+        json!({
+            "capabilities": { "raw_sql": "false" }
+        }),
+    );
+
+    match w.start().await {
+        Err(RuntimeError::Config(msg)) => {
+            assert!(
+                msg.contains("test/malformed-caps"),
+                "error should name the offending block: {msg}"
+            );
+        }
+        other => panic!(
+            "expected Err(RuntimeError::Config(_)), got {}",
+            match &other {
+                Ok(_) => "Ok(_)".to_string(),
+                Err(e) => format!("Err({e})"),
+            }
+        ),
+    }
 }
