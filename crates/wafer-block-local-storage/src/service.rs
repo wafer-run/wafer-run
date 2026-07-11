@@ -62,8 +62,9 @@ impl LocalStorageService {
         // relative path. `validate_path` then re-joins it onto the
         // canonicalized root, producing a doubled-prefix path like
         // `/cwd/data/storage/data/storage/folder/key` that `fs::write`
-        // can't find. `put`/`get`/`delete` use the validate_path return
-        // value directly; only `create_folder` happens to ignore it.
+        // can't find. Every op (`put`/`get`/`delete`/`create_folder`/
+        // `delete_folder`/`list`) uses the `validate_path` return value
+        // directly rather than the raw joined path.
         let root = root.canonicalize().map_err(|e| {
             StorageError::Internal(format!("canonicalize storage root {root:?}: {e}"))
         })?;
@@ -183,14 +184,13 @@ impl StorageService for LocalStorageService {
     }
 
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
-        let dir = self.folder_path(folder);
+        let dir = self.validate_path(&self.folder_path(folder))?;
         if !dir.exists() {
             return Ok(ObjectList {
                 objects: Vec::new(),
                 total_count: 0,
             });
         }
-        self.validate_path(&dir)?;
 
         let mut objects = Vec::new();
         Self::list_recursive(&dir, &dir, &opts.prefix, &mut objects)?;
@@ -214,20 +214,17 @@ impl StorageService for LocalStorageService {
     }
 
     async fn create_folder(&self, name: &str, _public: bool) -> Result<(), StorageError> {
-        let path = self.folder_path(name);
-        // Create the directory first so validate_path can canonicalize
+        let path = self.validate_path(&self.folder_path(name))?;
         fs::create_dir_all(&path)
             .map_err(|e| StorageError::Internal(format!("create folder {path:?}: {e}")))?;
-        self.validate_path(&path)?;
         Ok(())
     }
 
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
-        let path = self.folder_path(name);
+        let path = self.validate_path(&self.folder_path(name))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
         fs::remove_dir_all(&path)
             .map_err(|e| StorageError::Internal(format!("delete folder {path:?}: {e}")))
     }
@@ -402,6 +399,89 @@ mod tests {
             !escape_target.exists(),
             "no directory may be created outside the storage root, found {escape_target:?}"
         );
+    }
+
+    /// Regression: `create_folder` used to call `fs::create_dir_all` on the
+    /// raw joined path BEFORE `validate_path`, identical to the `put` bug
+    /// above. A traversal folder name materialized a directory *outside*
+    /// the storage root before the create was ever refused. Validation
+    /// must happen first, and `create_dir_all` must only ever run on the
+    /// normalized, in-root result.
+    #[tokio::test]
+    async fn create_folder_rejects_traversal_name_without_creating_dirs_outside_root() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        let escape_target = svc.root.parent().unwrap().join("evil");
+
+        let err = svc
+            .create_folder("../evil", false)
+            .await
+            .expect_err("traversal name must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert!(
+            !escape_target.exists(),
+            "no directory may be created outside the storage root, found {escape_target:?}"
+        );
+    }
+
+    /// Regression: `delete_folder` used to check `path.exists()` BEFORE
+    /// `validate_path`, turning filesystem existence into an oracle for
+    /// out-of-root paths (and only rejecting traversal for paths that
+    /// happened to exist). Validation must run first so a traversal name
+    /// is always rejected with the traversal error, not treated as a
+    /// (non-)existence question.
+    #[tokio::test]
+    async fn delete_folder_rejects_traversal_name_before_existence_check() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let err = svc
+            .delete_folder("../../etc")
+            .await
+            .expect_err("traversal name must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}, expected traversal error"),
+        }
+    }
+
+    /// Regression: `list` used to check `dir.exists()` BEFORE
+    /// `validate_path`, turning filesystem existence into an oracle for
+    /// out-of-root paths (a traversal folder that didn't exist silently
+    /// returned an empty list instead of being rejected). Validation must
+    /// run first so a traversal name is always rejected with the
+    /// traversal error, not treated as an empty-list case.
+    #[tokio::test]
+    async fn list_rejects_traversal_folder_before_existence_check() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let opts = ListOptions {
+            prefix: String::new(),
+            offset: 0,
+            limit: 0,
+        };
+        let err = svc
+            .list("../../etc", &opts)
+            .await
+            .expect_err("traversal folder must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}, expected traversal error"),
+        }
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
