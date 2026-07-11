@@ -1,3 +1,21 @@
+//! Expression parser and evaluator for `when`/`each` conditions.
+//!
+//! ## Precedence and associativity
+//!
+//! From loosest to tightest binding:
+//!
+//! 1. `||` (logical or)
+//! 2. `&&` (logical and)
+//! 3. comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`) and membership (`in`,
+//!    `not in`)
+//!
+//! `||` binds looser than `&&`, matching every mainstream language: `a ||
+//! b && c` parses as `a || (b && c)`, not `(a || b) && c`. Both `&&` and
+//! `||` are left-associative (`a || b || c` is `(a || b) || c`).
+//!
+//! Explicit grouping with `(...)` is supported and overrides the default
+//! precedence, e.g. `($.a || $.b) && $.c`.
+
 use serde_json::Value;
 
 use crate::error::ExprError;
@@ -111,16 +129,22 @@ pub fn parse_expr(s: &str) -> Result<Expr, ExprError> {
 }
 
 /// Scan `s` and invoke `f(i, bytes)` for each byte index `i` that lies
-/// *outside* a string literal, where `bytes` is `s.as_bytes()`. String
-/// literals are delimited by `"` or `'`; a delimiter preceded by an odd
-/// number of backslashes is treated as escaped (so `\"` stays inside the
-/// string but `\\"` closes it). This is the single owner of the
-/// in-string/escape skeleton shared by the operator/keyword scanners below.
+/// *outside* a string literal and *outside* a parenthesized group, where
+/// `bytes` is `s.as_bytes()`. String literals are delimited by `"` or `'`;
+/// a delimiter preceded by an odd number of backslashes is treated as
+/// escaped (so `\"` stays inside the string but `\\"` closes it).
+/// Parenthesized groups (`(...)`, which may nest) are skipped entirely so
+/// operators and keywords inside an explicit `(...)` grouping never split
+/// the enclosing expression — [`parse_atom`] is responsible for unwrapping
+/// a fully-parenthesized atom back into its inner expression. This is the
+/// single owner of the in-string/in-paren skeleton shared by the
+/// operator/keyword scanners below.
 fn for_each_unquoted(s: &str, mut f: impl FnMut(usize, &[u8])) {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut in_string = false;
     let mut string_char = b'"';
+    let mut paren_depth: i32 = 0;
 
     while i < bytes.len() {
         if in_string {
@@ -136,9 +160,72 @@ fn for_each_unquoted(s: &str, mut f: impl FnMut(usize, &[u8])) {
             i += 1;
             continue;
         }
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b')' {
+            paren_depth = (paren_depth - 1).max(0);
+            i += 1;
+            continue;
+        }
+        if paren_depth > 0 {
+            i += 1;
+            continue;
+        }
         f(i, bytes);
         i += 1;
     }
+}
+
+/// If `s` is a single expression fully wrapped in one matching pair of
+/// parentheses — the leading `(` and trailing `)` are partners, i.e. paren
+/// depth returns to zero only at the final byte — return the inner content
+/// (trimmed). Returns `None` if `s` isn't parenthesized at all, or if the
+/// leading `(` closes before the final character (e.g. `(a) && (b)`, where
+/// the parens are two separate groups rather than one outer wrap); in that
+/// case the operator scan in [`for_each_unquoted`] already found the
+/// top-level split and this helper must not also unwrap it.
+fn strip_outer_parens(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut string_char = b'"';
+    for (idx, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if b == string_char && !is_escaped(bytes, idx) {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => {
+                in_string = true;
+                string_char = b;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 && idx != bytes.len() - 1 {
+                    // Closed before the end: not a single outer wrap.
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        // Unbalanced: the leading '(' never found its partner (e.g.
+        // `((a)`, where an extra unmatched leading '(' leaves depth > 0
+        // after the scan). Depth must return to zero exactly at the final
+        // byte, per the doc comment above.
+        return None;
+    }
+    Some(s[1..s.len() - 1].trim())
 }
 
 /// True if the byte at `i` is escaped by a preceding run of backslashes of
@@ -154,29 +241,40 @@ fn is_escaped(bytes: &[u8], i: usize) -> bool {
 }
 
 fn try_parse_logical(s: &str) -> Result<Option<Expr>, ExprError> {
-    // Split on && or || (scan left-to-right, respecting strings).
-    // We find the rightmost logical operator to make it left-associative.
-    let mut best_pos = None;
-    let mut best_op = None;
-    let mut best_len = 0;
+    // `||` binds looser than `&&` (standard precedence: `a || b && c` ==
+    // `a || (b && c)`, matching every mainstream language). We implement
+    // this by precedence climbing at the string level: scan once for the
+    // rightmost top-level `&&` AND the rightmost top-level `||`
+    // independently, then split at the `||` if one exists at all — even
+    // when a `&&` occurs further to the right — and only fall back to
+    // splitting on `&&` when no `||` is present. Both operators are
+    // left-associative: splitting at the rightmost occurrence of the
+    // chosen operator and recursing on the left/right halves (which may
+    // still contain earlier occurrences of the same or the other
+    // operator) naturally builds a left-leaning tree at each precedence
+    // level.
+    let mut best_and_pos = None;
+    let mut best_or_pos = None;
 
     for_each_unquoted(s, |i, bytes| {
         if i + 1 < bytes.len() {
             if &bytes[i..i + 2] == b"&&" {
-                best_pos = Some(i);
-                best_op = Some(LogicalOp::And);
-                best_len = 2;
+                best_and_pos = Some(i);
             } else if &bytes[i..i + 2] == b"||" {
-                best_pos = Some(i);
-                best_op = Some(LogicalOp::Or);
-                best_len = 2;
+                best_or_pos = Some(i);
             }
         }
     });
 
-    if let (Some(pos), Some(op)) = (best_pos, best_op) {
+    let split = match (best_or_pos, best_and_pos) {
+        (Some(pos), _) => Some((pos, LogicalOp::Or)),
+        (None, Some(pos)) => Some((pos, LogicalOp::And)),
+        (None, None) => None,
+    };
+
+    if let Some((pos, op)) = split {
         let left = s[..pos].trim();
-        let right = s[pos + best_len..].trim();
+        let right = s[pos + 2..].trim();
         if left.is_empty() || right.is_empty() {
             return Err(ExprError::Parse(format!(
                 "missing operand for logical operator in '{s}'"
@@ -318,6 +416,18 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
 
 fn parse_atom(s: &str) -> Result<Expr, ExprError> {
     let s = s.trim();
+
+    // Parenthesized grouping: `(expr)` recurses into the full expression
+    // parser so `($.a || $.b) && $.c` groups explicitly, overriding the
+    // default `||`-looser-than-`&&` precedence.
+    if let Some(inner) = strip_outer_parens(s) {
+        if inner.is_empty() {
+            return Err(ExprError::Parse(format!(
+                "empty parenthesized group in '{s}'"
+            )));
+        }
+        return parse_expr(inner);
+    }
 
     // Path expression.
     if s.starts_with("$.") {
@@ -726,6 +836,84 @@ mod tests {
     }
 
     #[test]
+    fn or_binds_looser_than_and() {
+        // `a || b && c` must parse as `a || (b && c)`, matching every
+        // mainstream language's precedence. With a=1 (so `$.a == 1` is
+        // true), b=0, c=0 (so both `$.b == 1` and `$.c == 1` are false),
+        // the correct result is `true` because `||` short-circuits on its
+        // left operand. The equal-precedence bug instead splits at the
+        // rightmost operator of either kind (here `&&`), producing
+        // `(a || b) && c` = `true && false` = `false`.
+        let ctx = json!({ "a": 1, "b": 0, "c": 0 });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr("$.a == 1 || $.b == 1 && $.c == 1").unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or_in_middle() {
+        // `a && b || c` must parse as `(a && b) || c`. With a=0 (false),
+        // b=1 (true), c=1 (true): `(a && b) || c` = `false || true` =
+        // `true`, while the wrong grouping `a && (b || c)` would give
+        // `false && true` = `false`.
+        let ctx = json!({ "a": 0, "b": 1, "c": 1 });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr("$.a == 1 && $.b == 1 || $.c == 1").unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn parenthesized_grouping_overrides_precedence() {
+        // Explicit parens must override the default `||`-looser-than-`&&`
+        // precedence. With a=1, b=0, c=0 (the same context as
+        // `or_binds_looser_than_and`), the unparenthesized expression
+        // `a || b && c` is `true` (a || (b && c)). Wrapping the `||` in
+        // parens forces `(a || b) && c` instead, which evaluates to
+        // `false` — the opposite answer, proving the grouping took effect.
+        let ctx = json!({ "a": 1, "b": 0, "c": 0 });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr("($.a == 1 || $.b == 1) && $.c == 1").unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(false));
+    }
+
+    #[test]
+    fn redundant_nested_parens_unwrap_to_atom() {
+        let expr = parse_expr("(($.a))").unwrap();
+        assert_eq!(expr, Expr::Path(vec!["a".to_string()]));
+    }
+
+    #[test]
+    fn unbalanced_parens_are_a_parse_error() {
+        assert!(parse_expr("($.a || $.b").is_err());
+    }
+
+    #[test]
+    fn separate_paren_groups_still_split_at_top_level_operator() {
+        // `(a) && (b)` has two independent groups, not one outer wrap;
+        // strip_outer_parens must not collapse them into a single atom.
+        let ctx = json!({ "a": 1, "b": 1 });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr("($.a == 1) && ($.b == 1)").unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(true));
+    }
+
+    #[test]
     fn escaped_backslash_before_quote_closes_string() {
         // The first literal ends with an escaped backslash (`\\`) immediately
         // before its closing quote. A naive `bytes[i-1] != '\\'` escape check
@@ -752,5 +940,77 @@ mod tests {
             }
             other => panic!("expected logical expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_outer_parens_rejects_unbalanced_depth() {
+        // `((a)` — an extra unmatched leading '(' — has '(' as its first
+        // byte and ')' as its last, so the surface check alone would
+        // accept it. But paren depth ends the scan at 1, not 0: the
+        // leading '(' never found its partner. Before Fix 1,
+        // strip_outer_parens returned `Some("(a")` here anyway, violating
+        // its own doc contract ("depth returns to zero only at the final
+        // byte"). It must now reject this input.
+        assert_eq!(strip_outer_parens("((a)"), None);
+
+        // Valid single-wrap cases must be unaffected by the new check.
+        assert_eq!(strip_outer_parens("(a)"), Some("a"));
+        assert_eq!(strip_outer_parens("((a))"), Some("(a)"));
+        assert_eq!(strip_outer_parens("($.a || $.b)"), Some("$.a || $.b"));
+    }
+
+    #[test]
+    fn stray_close_paren_is_a_parse_error() {
+        // `a) || b` shape: a stray, unmatched close paren with no opener
+        // at all. Must surface as a parse error (unrecognized token),
+        // never panic.
+        assert!(parse_expr("$.a == 1) || $.b == 2").is_err());
+    }
+
+    #[test]
+    fn excess_open_paren_is_a_parse_error() {
+        // `((a` shape: excess unmatched open parens swallow the rest of
+        // the expression (for_each_unquoted never sees depth return to
+        // zero), and the whole thing falls through every atom check.
+        // Must surface as a parse error, never panic or hang.
+        assert!(parse_expr("(($.a == 1").is_err());
+    }
+
+    #[test]
+    fn empty_paren_group_is_a_parse_error() {
+        // `()` shape: an empty parenthesized group. strip_outer_parens
+        // happily unwraps it (depth is balanced) to an empty inner
+        // string, which parse_atom explicitly rejects. Must surface as a
+        // parse error, never panic.
+        assert!(parse_expr("$.a == 1 && ()").is_err());
+    }
+
+    #[test]
+    fn unmatched_leading_paren_is_a_parse_error() {
+        // `((a)` shape at full-expression scope — the exact case Fix 1
+        // closes in strip_outer_parens (see
+        // strip_outer_parens_rejects_unbalanced_depth for the direct
+        // unit test). Must surface as a parse error, never panic or
+        // silently misparse into the wrong tree.
+        assert!(parse_expr("(($.a == 1)").is_err());
+    }
+
+    #[test]
+    fn quotes_inside_paren_group_are_literal_not_operators() {
+        // Operators (`||`, `==`) and parens *inside* a quoted literal
+        // must stay literal text, not structural tokens, even when the
+        // literal sits inside an explicit paren group. `a` is chosen so
+        // the left comparison is false, forcing evaluation of the right
+        // comparison too — both quoted-paren-content literals must
+        // actually parse and compare correctly, not just short-circuit
+        // away.
+        let ctx = json!({ "a": "nope", "b": ")" });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr(r#"($.a == "(" || $.b == ")")"#).unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(true));
     }
 }
