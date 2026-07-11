@@ -62,8 +62,9 @@ impl LocalStorageService {
         // relative path. `validate_path` then re-joins it onto the
         // canonicalized root, producing a doubled-prefix path like
         // `/cwd/data/storage/data/storage/folder/key` that `fs::write`
-        // can't find. `put`/`get`/`delete` use the validate_path return
-        // value directly; only `create_folder` happens to ignore it.
+        // can't find. Every op (`put`/`get`/`delete`/`create_folder`/
+        // `delete_folder`/`list`) uses the `validate_path` return value
+        // directly rather than the raw joined path.
         let root = root.canonicalize().map_err(|e| {
             StorageError::Internal(format!("canonicalize storage root {root:?}: {e}"))
         })?;
@@ -129,22 +130,19 @@ impl StorageService for LocalStorageService {
         data: &[u8],
         _content_type: &str,
     ) -> Result<(), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
         }
-        // Validate after parent dirs are created so canonicalize can resolve
-        let path = self.validate_path(&path)?;
         fs::write(&path, data).map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
 
         let metadata = fs::metadata(&path)
             .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
@@ -178,23 +176,21 @@ impl StorageService for LocalStorageService {
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
-        let path = self.object_path(folder, key);
+        let path = self.validate_path(&self.object_path(folder, key))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
         fs::remove_file(&path).map_err(|e| StorageError::Internal(format!("delete {path:?}: {e}")))
     }
 
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
-        let dir = self.folder_path(folder);
+        let dir = self.validate_path(&self.folder_path(folder))?;
         if !dir.exists() {
             return Ok(ObjectList {
                 objects: Vec::new(),
                 total_count: 0,
             });
         }
-        self.validate_path(&dir)?;
 
         let mut objects = Vec::new();
         Self::list_recursive(&dir, &dir, &opts.prefix, &mut objects)?;
@@ -218,20 +214,17 @@ impl StorageService for LocalStorageService {
     }
 
     async fn create_folder(&self, name: &str, _public: bool) -> Result<(), StorageError> {
-        let path = self.folder_path(name);
-        // Create the directory first so validate_path can canonicalize
+        let path = self.validate_path(&self.folder_path(name))?;
         fs::create_dir_all(&path)
             .map_err(|e| StorageError::Internal(format!("create folder {path:?}: {e}")))?;
-        self.validate_path(&path)?;
         Ok(())
     }
 
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
-        let path = self.folder_path(name);
+        let path = self.validate_path(&self.folder_path(name))?;
         if !path.exists() {
             return Err(StorageError::NotFound);
         }
-        let path = self.validate_path(&path)?;
         fs::remove_dir_all(&path)
             .map_err(|e| StorageError::Internal(format!("delete folder {path:?}: {e}")))
     }
@@ -372,6 +365,137 @@ mod tests {
         let inside = svc.root.join("new_folder").join("new_key");
         let ok = svc.validate_path(&inside).expect("should accept");
         assert!(ok.starts_with(svc.root.canonicalize().unwrap()));
+    }
+
+    /// Regression: `put` used to call `fs::create_dir_all` on the raw
+    /// joined path BEFORE `validate_path`. `create_dir_all` resolves `..`
+    /// components at the syscall level as it walks up creating ancestors,
+    /// so a traversal key materialized directories *outside* the storage
+    /// root before the write was ever refused. Validation must happen
+    /// first, and `create_dir_all` must only ever run on its normalized,
+    /// in-root result.
+    #[tokio::test]
+    async fn put_rejects_traversal_key_without_creating_dirs_outside_root() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        // Escapes only the root's own directory, landing in the root's
+        // parent (still inside the writable system temp dir) — not the
+        // filesystem root, so the test doesn't depend on `/` permissions.
+        let escape_target = svc.root.parent().unwrap().join("evil");
+
+        let err = svc
+            .put("f", "../../evil/x", b"data", "text/plain")
+            .await
+            .expect_err("traversal key must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert!(
+            !escape_target.exists(),
+            "no directory may be created outside the storage root, found {escape_target:?}"
+        );
+    }
+
+    /// Regression: `create_folder` used to call `fs::create_dir_all` on the
+    /// raw joined path BEFORE `validate_path`, identical to the `put` bug
+    /// above. A traversal folder name materialized a directory *outside*
+    /// the storage root before the create was ever refused. Validation
+    /// must happen first, and `create_dir_all` must only ever run on the
+    /// normalized, in-root result.
+    #[tokio::test]
+    async fn create_folder_rejects_traversal_name_without_creating_dirs_outside_root() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        let escape_target = svc.root.parent().unwrap().join("evil");
+
+        let err = svc
+            .create_folder("../evil", false)
+            .await
+            .expect_err("traversal name must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert!(
+            !escape_target.exists(),
+            "no directory may be created outside the storage root, found {escape_target:?}"
+        );
+    }
+
+    /// Regression: `delete_folder` used to check `path.exists()` BEFORE
+    /// `validate_path`, turning filesystem existence into an oracle for
+    /// out-of-root paths: a traversal name was only rejected with the
+    /// traversal error if the resolved target happened to exist; if it
+    /// didn't exist, the buggy code early-returned `NotFound` instead
+    /// (silently confirming *non*-existence of an out-of-root path).
+    /// The target below is guaranteed absent (it resolves to a filesystem-
+    /// root-level path that nothing creates), so this specifically
+    /// exercises that divergence: validation must run first so a traversal
+    /// name is always rejected with the traversal error, never treated as
+    /// a (non-)existence question.
+    #[tokio::test]
+    async fn delete_folder_rejects_traversal_name_before_existence_check() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let err = svc
+            .delete_folder("../../wafer-local-storage-nonexistent-delete-folder-wr10")
+            .await
+            .expect_err("traversal name must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!(
+                "unexpected error variant: {other:?}, expected traversal error (got NotFound would mean the pre-validation existence check fired again)"
+            ),
+        }
+    }
+
+    /// Regression: `list` used to check `dir.exists()` BEFORE
+    /// `validate_path`, turning filesystem existence into an oracle for
+    /// out-of-root paths: a traversal folder that didn't exist silently
+    /// returned an empty list (`Ok`) instead of being rejected, while one
+    /// that DID exist fell through to validation and got the traversal
+    /// error — so existence alone decided whether traversal was even
+    /// checked. The target below is guaranteed absent (it resolves to a
+    /// filesystem-root-level path that nothing creates), so this
+    /// specifically exercises that divergence: validation must run first
+    /// so a traversal name is always rejected with the traversal error,
+    /// never treated as an empty-list case.
+    #[tokio::test]
+    async fn list_rejects_traversal_folder_before_existence_check() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let opts = ListOptions {
+            prefix: String::new(),
+            offset: 0,
+            limit: 0,
+        };
+        let err = svc
+            .list("../../wafer-local-storage-nonexistent-list-wr10", &opts)
+            .await
+            .expect_err("traversal folder must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("path traversal"),
+                "expected traversal error, got: {msg}"
+            ),
+            other => panic!(
+                "unexpected error variant: {other:?}, expected traversal error (got Ok(empty list) would mean the pre-validation existence check fired again)"
+            ),
+        }
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
