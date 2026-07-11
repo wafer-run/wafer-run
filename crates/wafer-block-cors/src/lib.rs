@@ -36,6 +36,15 @@ const DEFAULT_ALLOWED_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 /// in [`CorsBlock::handle`].
 const DEFAULT_ALLOWED_HEADERS: &str = "Content-Type, Authorization, X-Requested-With";
 
+/// Whether a fail-closed (SEC-087, `allowed_origins` unset) request warrants
+/// a denial warning. Same-origin and non-browser requests carry no `Origin`
+/// header, so nothing is being denied and a warning would just spam the log
+/// on every ordinary request. Only a real cross-origin request — one that
+/// presents an `Origin` — is actually denied here and worth surfacing.
+fn unconfigured_denial_is_loggable(origin: &str) -> bool {
+    !origin.is_empty()
+}
+
 /// CorsBlock handles CORS preflight and sets CORS headers.
 ///
 /// # Configuration
@@ -167,14 +176,16 @@ impl Block for CorsBlock {
 
         match origins {
             None => {
-                // SEC-087: no configuration → deny cross-origin.
-                // We do NOT emit Access-Control-Allow-Origin. Same-origin
-                // requests are unaffected (the browser doesn't require
-                // CORS headers for those).
-                tracing::warn!(
-                    "CORS: allowed_origins unconfigured — denying cross-origin request \
-                     (set `allowed_origins` in the block config or per-flow-step config)",
-                );
+                // SEC-087: no configuration → deny cross-origin. We do NOT
+                // emit Access-Control-Allow-Origin; same-origin requests are
+                // unaffected. Warn only for genuinely-denied cross-origin
+                // requests — see `unconfigured_denial_is_loggable`.
+                if unconfigured_denial_is_loggable(&origin) {
+                    tracing::warn!(
+                        "CORS: allowed_origins unconfigured — denying cross-origin request \
+                         (set `allowed_origins` in the block config or per-flow-step config)",
+                    );
+                }
             }
             Some(allowed) if !origin.is_empty() => {
                 if allowed == "*" {
@@ -574,5 +585,17 @@ mod tests {
             }
             other => panic!("expected Err(Halt), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unconfigured_denial_is_silent_for_same_origin_requests() {
+        // No `Origin` header (same-origin or non-browser): nothing is denied,
+        // so it must not warn — otherwise every ordinary request spams the log.
+        assert!(!unconfigured_denial_is_loggable(""));
+    }
+
+    #[test]
+    fn unconfigured_denial_warns_for_real_cross_origin_requests() {
+        assert!(unconfigured_denial_is_loggable("https://cross.example"));
     }
 }
