@@ -54,13 +54,47 @@ impl From<SinkClosed> for SinkSendError {
 /// Producer handle paired with an OutputStream. The producing task holds this sink
 /// and calls send_chunk / send_meta for non-terminal events, then exactly one of
 /// complete / error / drop_request / continue_with as the terminal event.
+///
+/// Terminal delivery is guaranteed: construction reserves one dedicated channel
+/// slot (an [`mpsc::OwnedPermit`]) for the terminal event, so both the explicit
+/// terminal methods and the Drop auto-`Complete` safety net can always deliver
+/// their terminal even when the body channel is full. Body sends
+/// (`send_chunk`/`send_meta`) still see exactly the requested capacity of
+/// backpressure; terminals never backpressure.
 pub struct OutputSink {
     tx: mpsc::Sender<StreamEvent>,
-    terminal_sent: bool,
+    /// Channel slot reserved at construction for the single terminal event.
+    /// `Some` until a terminal is sent; taken by the explicit terminal
+    /// methods and, if still present, by `Drop`'s auto-`Complete` safety net
+    /// (which therefore cannot double-send after an explicit terminal).
+    terminal_permit: Option<mpsc::OwnedPermit<StreamEvent>>,
     any_body_sent: std::sync::atomic::AtomicBool,
 }
 
 impl OutputSink {
+    /// Send the terminal event through the reserved permit.
+    ///
+    /// The slot was reserved at construction, so this cannot fail on a full
+    /// channel — the historical race where a producer's final `send_chunk`
+    /// filled the channel and the terminal was silently lost (surfacing as
+    /// `TerminalNotResponse::Malformed` → a spurious 500) is structurally
+    /// impossible. If the consumer already dropped the receiver, the event is
+    /// discarded by the channel and `Err(SinkClosed)` is returned, matching
+    /// the previous `tx.send(..).await` semantics.
+    fn send_terminal(&mut self, event: StreamEvent) -> Result<(), SinkClosed> {
+        let permit = self
+            .terminal_permit
+            .take()
+            .expect("terminal methods consume `self`, so the permit is still present");
+        let closed = self.tx.is_closed();
+        let _sender = permit.send(event);
+        if closed {
+            Err(SinkClosed)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Send a body chunk. Awaits when the channel is full (backpressure).
     /// Returns Err if the consumer has dropped the stream.
     pub async fn send_chunk(&self, bytes: Vec<u8>) -> Result<(), SinkClosed> {
@@ -82,22 +116,16 @@ impl OutputSink {
             .map_err(|_| SinkClosed)
     }
 
-    /// Terminal. Must be called exactly once per sink.
+    /// Terminal. Must be called exactly once per sink. Delivered via the
+    /// reserved terminal slot, so it never blocks on a full body channel.
     pub async fn complete(mut self, meta: Vec<MetaEntry>) -> Result<(), SinkClosed> {
-        self.terminal_sent = true;
-        self.tx
-            .send(StreamEvent::Complete { meta })
-            .await
-            .map_err(|_| SinkClosed)
+        self.send_terminal(StreamEvent::Complete { meta })
     }
 
-    /// Terminal. The block encountered an error.
+    /// Terminal. The block encountered an error. Delivered via the reserved
+    /// terminal slot, so it never blocks on a full body channel.
     pub async fn error(mut self, err: WaferError) -> Result<(), SinkClosed> {
-        self.terminal_sent = true;
-        self.tx
-            .send(StreamEvent::Error(Box::new(err)))
-            .await
-            .map_err(|_| SinkClosed)
+        self.send_terminal(StreamEvent::Error(Box::new(err)))
     }
 
     /// Terminal. The block chose to drop the request (HTTP 204-equivalent).
@@ -114,11 +142,8 @@ impl OutputSink {
             tracing::warn!("Drop terminal cannot follow Chunk or Meta events; refusing");
             return Err(SinkSendError::BodyAlreadySent("Drop"));
         }
-        self.terminal_sent = true;
-        self.tx
-            .send(StreamEvent::Drop)
-            .await
-            .map_err(|_| SinkSendError::Closed)
+        self.send_terminal(StreamEvent::Drop)
+            .map_err(SinkSendError::from)
     }
 
     /// Terminal. Forward to another block instead of handling.
@@ -135,11 +160,8 @@ impl OutputSink {
             tracing::warn!("Continue terminal cannot follow Chunk or Meta events; refusing");
             return Err(SinkSendError::BodyAlreadySent("Continue"));
         }
-        self.terminal_sent = true;
-        self.tx
-            .send(StreamEvent::Continue(msg))
-            .await
-            .map_err(|_| SinkSendError::Closed)
+        self.send_terminal(StreamEvent::Continue(msg))
+            .map_err(SinkSendError::from)
     }
 
     /// Terminal. Block produced a response AND requests short-circuit.
@@ -151,23 +173,27 @@ impl OutputSink {
         body: Vec<u8>,
         meta: Vec<crate::core_types::MetaEntry>,
     ) -> Result<(), SinkClosed> {
-        self.terminal_sent = true;
-        self.tx
-            .send(StreamEvent::Halt { body, meta })
-            .await
-            .map_err(|_| SinkClosed)
+        self.send_terminal(StreamEvent::Halt { body, meta })
     }
 }
 
 impl Drop for OutputSink {
     fn drop(&mut self) {
-        if !self.terminal_sent {
-            // Safety net: a producer dropped the sink without an explicit
-            // terminal. `from_producer` documents this as auto-`Complete`, so
-            // we keep the consumer's stream terminating — but for any other
-            // code path it usually means a forgotten terminal, so we warn to
-            // surface the case. If a body was streamed first, this is an
-            // empty-meta Complete, which is the intended close.
+        // Safety net: a producer dropped the sink without an explicit
+        // terminal. `from_producer` documents this as auto-`Complete`, so
+        // we keep the consumer's stream terminating — but for any other
+        // code path it usually means a forgotten terminal, so we warn to
+        // surface the case. If a body was streamed first, this is an
+        // empty-meta Complete, which is the intended close.
+        //
+        // The permit is `None` when an explicit terminal already consumed it,
+        // so this can never double-send. Sending through the reserved permit
+        // cannot fail on a full channel (Drop cannot `.await`, and
+        // `OwnedPermit::send` does not await) — previously a lossy `try_send`
+        // here silently dropped the auto-`Complete` when the body channel was
+        // full, turning a successful stream into a race-dependent
+        // `TerminalNotResponse::Malformed` → 500.
+        if let Some(permit) = self.terminal_permit.take() {
             if self
                 .any_body_sent
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -178,20 +204,31 @@ impl Drop for OutputSink {
                     "OutputSink dropped without any event or terminal; auto-completing (likely a forgotten terminal)"
                 );
             }
-            let _ = self.tx.try_send(StreamEvent::Complete { meta: vec![] });
+            let _sender = permit.send(StreamEvent::Complete { meta: vec![] });
         }
     }
 }
 
 /// Internal constructor used by OutputStream::new_streaming.
+///
+/// `capacity` is the BODY capacity: the underlying channel is allocated with
+/// one extra slot which is immediately reserved (as an [`mpsc::OwnedPermit`])
+/// for the terminal event. Body sends therefore see exactly `capacity` slots
+/// of backpressure, while the terminal can always be delivered — even when
+/// every body slot is occupied at the moment the sink is dropped.
 pub(crate) fn new_streaming_channel(
     capacity: usize,
 ) -> (mpsc::Receiver<StreamEvent>, OutputSink, CancellationToken) {
-    let (tx, rx) = mpsc::channel(capacity);
+    assert!(capacity > 0, "OutputStream channel capacity must be >= 1");
+    let (tx, rx) = mpsc::channel(capacity + 1);
+    let terminal_permit = tx
+        .clone()
+        .try_reserve_owned()
+        .expect("freshly-allocated channel always has the terminal slot free");
     let cancel = CancellationToken::new();
     let sink = OutputSink {
         tx,
-        terminal_sent: false,
+        terminal_permit: Some(terminal_permit),
         any_body_sent: std::sync::atomic::AtomicBool::new(false),
     };
     (rx, sink, cancel)
@@ -297,6 +334,20 @@ impl OutputStream {
     /// Returns a reference to the paired `CancellationToken`.
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel
+    }
+
+    /// Test-only: build an `OutputStream` over a raw event channel, bypassing
+    /// [`OutputSink`] entirely. Used to synthesize protocol-violating streams
+    /// (e.g. ending without a terminal event) that the sink can no longer
+    /// produce now that terminal delivery is guaranteed via a reserved permit
+    /// — such streams can still reach consumers from non-sink sources like a
+    /// buggy remote producer decoded off the wire.
+    #[cfg(test)]
+    pub(crate) fn from_raw_receiver(rx: mpsc::Receiver<StreamEvent>) -> Self {
+        Self {
+            rx: ReceiverStream::new(rx),
+            cancel: CancellationToken::new(),
+        }
     }
 
     /// Convert a `Result<Vec<u8>, WaferError>` into an `OutputStream`.
@@ -492,7 +543,9 @@ impl OutputStream {
     /// call `sink.send_chunk()` / `sink.send_meta()` for non-terminal events. When
     /// the closure returns, the sink is dropped — if no terminal was explicitly sent
     /// (via `sink.complete()`, `sink.error()`, etc.), an auto-`Complete { meta: vec![] }`
-    /// is emitted.
+    /// is emitted. The auto-`Complete` is delivered through a channel slot reserved
+    /// at construction, so it cannot be lost even if the body channel is full at
+    /// the moment the sink drops.
     ///
     /// For explicit error handling, call `sink.error(e).await` before returning.
     ///
@@ -719,13 +772,17 @@ mod tests {
     #[tokio::test]
     async fn new_streaming_with_capacity_applies() {
         let (stream, sink, _cancel) = OutputStream::new_streaming_with_capacity(1);
-        // Fill the buffer (capacity 1) — a second send should block.
+        // Fill the body buffer (capacity 1) — a second send would block.
         sink.send_chunk(b"a".to_vec()).await.unwrap();
         // Don't assert blocking here (hard to time-sensitive-test) — just confirm
-        // that send + drain still works with non-default capacity.
+        // that send + drain still works with non-default capacity, and that the
+        // drop-auto-Complete terminal is delivered even though the body slot is
+        // full (the terminal has its own reserved slot).
         drop(sink);
         let events: Vec<_> = stream.collect().await;
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "Chunk + auto-Complete terminal");
+        assert_eq!(events[0], StreamEvent::Chunk(b"a".to_vec()));
+        assert!(matches!(events[1], StreamEvent::Complete { .. }));
     }
 
     #[tokio::test]
@@ -1001,6 +1058,60 @@ mod tests {
         assert!(items[0].is_ok());
         assert!(items[1].is_err());
         assert_eq!(items[1].as_ref().unwrap_err().message, "upstream");
+    }
+
+    #[tokio::test]
+    async fn drop_delivers_terminal_even_when_channel_is_full() {
+        // Capacity 1: the sole body slot is filled by send_chunk, forcing
+        // the channel to be exactly full at the moment the sink is dropped
+        // without an explicit terminal. This is the real race from the bug
+        // report — `send_chunk` can return as soon as it occupies the last
+        // free slot, so "channel full at drop" is not a contrived scenario.
+        let (mut rx, sink, _cancel) = new_streaming_channel(1);
+        sink.send_chunk(b"last".to_vec()).await.unwrap();
+        drop(sink); // no explicit terminal — Drop's auto-Complete must still land
+
+        let chunk = rx.recv().await.expect("chunk should have been delivered");
+        assert_eq!(chunk, StreamEvent::Chunk(b"last".to_vec()));
+
+        let terminal = rx.recv().await.expect(
+            "a full channel at drop must still deliver a terminal event, not close silently \
+             (consumer would otherwise see TerminalNotResponse::Malformed -> a race-dependent 500)",
+        );
+        assert!(
+            matches!(terminal, StreamEvent::Complete { ref meta } if meta.is_empty()),
+            "expected an auto-Complete terminal after Drop, got: {terminal:?}"
+        );
+        assert!(
+            rx.recv().await.is_none(),
+            "channel should close after the terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_terminal_still_delivers_when_body_channel_is_full() {
+        // Same forced-full setup, but this time the producer calls an
+        // explicit terminal instead of relying on Drop. The reserved permit
+        // must protect this path too, not just the Drop safety net: without
+        // it, a terminal queued behind body backpressure deadlocks here
+        // (there is deliberately no concurrent consumer draining the
+        // channel), so the send is bounded by a timeout to keep the failure
+        // mode a clean assertion instead of a hung test.
+        let (mut rx, sink, _cancel) = new_streaming_channel(1);
+        sink.send_chunk(b"last".to_vec()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), sink.complete(vec![]))
+            .await
+            .expect("explicit terminal must not block behind a full body channel")
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            StreamEvent::Chunk(b"last".to_vec())
+        );
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            StreamEvent::Complete { .. }
+        ));
     }
 
     #[tokio::test]
