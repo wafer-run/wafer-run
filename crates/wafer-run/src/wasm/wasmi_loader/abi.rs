@@ -213,6 +213,76 @@ pub(super) fn error_code_to_neg_i64(code: ErrorCode) -> i64 {
 // ---------------------------------------------------------------------------
 // Guest memory helpers
 // ---------------------------------------------------------------------------
+//
+// Every host import that turns a guest-supplied `(ptr, len)` pair into a
+// host allocation MUST validate the range through `checked_guest_range` (or
+// its `read_guest_slice` wrapper) before allocating anything. `ptr`/`len`
+// arrive straight off the wasm stack as `i32`s fully controlled by the
+// guest:
+//
+//   - A negative `len` cast blindly to `usize` sign-extends to a value near
+//     `usize::MAX`. Sizing a `vec![0u8; len as usize]` from that panics with
+//     a capacity overflow — on native that's an unwind, but on wasm32 (this
+//     runtime is itself compiled to wasm32 for solobase-web) a panic aborts
+//     the whole embedding process.
+//   - Even a well-formed non-negative `len`/`ptr` can run past the end of
+//     the guest's own linear memory, or be huge enough on its own to force
+//     a multi-GiB host allocation for a guest whose real memory is a few
+//     pages — a memory-amplification DoS.
+//
+// Both must be rejected *before* anything is allocated, which is why the
+// helpers below only ever call `Memory::data_size` (no allocation) until the
+// range is known to be valid.
+
+/// Validate a guest-supplied `(ptr, len)` byte range against the current
+/// size of `memory`, without allocating anything. Returns the range as
+/// `(start, len)` in host `usize`s on success.
+///
+/// Rejects `len < 0` outright, then rejects `ptr + len` overflowing or
+/// exceeding `memory.data_size()`. `ptr`/`len` are reinterpreted as
+/// unsigned 32-bit wasm addresses (`as u32`) before widening to `u64` for
+/// the range arithmetic, so a negative bit pattern cannot wrap the check
+/// via signed-to-unsigned sign extension.
+pub(super) fn checked_guest_range<C: wasmi::AsContext>(
+    ctx: &C,
+    memory: wasmi::Memory,
+    ptr: i32,
+    len: i32,
+) -> Result<(usize, usize), wasmi::Error> {
+    if len < 0 {
+        return Err(wasmi::Error::new(format!(
+            "invalid length {len}: guest-supplied lengths must be non-negative"
+        )));
+    }
+    let ptr_u64 = u64::from(ptr as u32);
+    let len_u64 = u64::from(len as u32);
+    let mem_size = memory.data_size(ctx) as u64;
+    ptr_u64
+        .checked_add(len_u64)
+        .filter(|end| *end <= mem_size)
+        .ok_or_else(|| {
+            wasmi::Error::new(format!(
+                "guest memory access out of bounds: ptr={ptr_u64} len={len_u64} \
+                 exceeds memory size {mem_size}"
+            ))
+        })?;
+    Ok((ptr_u64 as usize, len_u64 as usize))
+}
+
+/// Copy `len` bytes at `ptr` out of the guest's exported linear memory,
+/// validating the range first via [`checked_guest_range`]. Reads via a
+/// subslice of `memory.data(ctx)` — bounds-checked for free, and avoids the
+/// zeroed intermediate allocation a `vec![0u8; len]` + `memory.read` pair
+/// would otherwise force.
+pub(super) fn read_guest_slice<C: wasmi::AsContext>(
+    ctx: &C,
+    memory: wasmi::Memory,
+    ptr: i32,
+    len: i32,
+) -> Result<Vec<u8>, wasmi::Error> {
+    let (start, len) = checked_guest_range(ctx, memory, ptr, len)?;
+    Ok(memory.data(ctx)[start..start + len].to_vec())
+}
 
 /// Read `len` bytes starting at `offset` from the guest's exported `memory`.
 pub(super) fn read_guest_bytes(
@@ -221,11 +291,8 @@ pub(super) fn read_guest_bytes(
     offset: u32,
     len: u32,
 ) -> Result<Vec<u8>, RuntimeError> {
-    let mut buf = vec![0u8; len as usize];
-    memory
-        .read(store, offset as usize, &mut buf)
-        .map_err(|e| RuntimeError::Wasm(format!("reading guest memory at {offset}+{len}: {e}")))?;
-    Ok(buf)
+    read_guest_slice(store, memory, offset as i32, len as i32)
+        .map_err(|e| RuntimeError::Wasm(format!("reading guest memory at {offset}+{len}: {e}")))
 }
 
 /// Allocate space in guest memory via `__wafer_alloc`, then write `data`.
@@ -244,4 +311,87 @@ pub(super) fn write_guest_bytes(
         .write(&mut *store, ptr as usize, data)
         .map_err(|e| RuntimeError::Wasm(format!("writing {len} bytes at guest ptr {ptr}: {e}")))?;
     Ok(ptr as u32)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use wasmi::{Engine, Memory, MemoryType, Store};
+
+    use super::*;
+
+    /// Build a bare `Store<()>` + `Memory` pair sized to `bytes` (rounded up
+    /// to the nearest 64 KiB wasm page) — no `WasmiHostState` or guest module
+    /// needed since `checked_guest_range`/`read_guest_slice` only touch the
+    /// `Memory` and a generic `AsContext`.
+    fn test_memory_with_size(bytes: u32) -> (Store<()>, Memory) {
+        let engine = Engine::default();
+        let mut store = Store::new(&engine, ());
+        let pages = bytes.div_ceil(65536);
+        let ty = MemoryType::new(pages, Some(pages)).expect("valid memory type");
+        let memory = Memory::new(&mut store, ty).expect("memory allocation");
+        (store, memory)
+    }
+
+    #[test]
+    fn read_guest_slice_rejects_negative_length() {
+        // A negative i32 length sign-extends to a near-usize::MAX capacity and
+        // panics `vec![0u8; ..]` with capacity overflow — on wasm32 deployments
+        // that aborts the whole runtime. Reject before allocating.
+        let (store, memory) = test_memory_with_size(16 * 65536); // 16 MiB guest memory
+        let err = read_guest_slice(&store, memory, /* ptr */ 0, /* len */ -1)
+            .expect_err("negative length must be rejected, not allocated");
+        assert!(
+            err.to_string().contains("invalid length"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn read_guest_slice_rejects_len_past_memory_size() {
+        let (store, memory) = test_memory_with_size(16 * 65536);
+        let err = read_guest_slice(&store, memory, /* ptr */ 0, /* len */ i32::MAX)
+            .expect_err("length exceeding guest memory must be rejected pre-alloc");
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn read_guest_slice_rejects_ptr_plus_len_past_memory_size() {
+        // Individually in-bounds ptr and len whose sum overflows the memory
+        // size must also be rejected pre-alloc (not just len alone).
+        let (store, memory) = test_memory_with_size(65536); // 1 page = 64 KiB
+        let err = read_guest_slice(&store, memory, /* ptr */ 65530, /* len */ 100)
+            .expect_err("ptr+len past memory size must be rejected");
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn read_guest_slice_reads_valid_range() {
+        let (mut store, memory) = test_memory_with_size(65536);
+        memory
+            .write(&mut store, 4, &[1, 2, 3, 4])
+            .expect("write within bounds");
+        let bytes = read_guest_slice(&store, memory, 4, 4).expect("in-bounds read must succeed");
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn checked_guest_range_rejects_negative_length() {
+        let (store, memory) = test_memory_with_size(65536);
+        let err = checked_guest_range(&store, memory, 0, -1)
+            .expect_err("negative length must be rejected, not allocated");
+        assert!(
+            err.to_string().contains("invalid length"),
+            "unexpected error message: {err}"
+        );
+    }
 }
