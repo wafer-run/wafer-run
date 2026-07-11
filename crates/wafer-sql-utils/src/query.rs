@@ -1,4 +1,4 @@
-use sea_query::{Asterisk, Cond, Expr, Order, Query, SelectStatement, SimpleExpr};
+use sea_query::{Asterisk, Cond, Expr, LikeExpr, Order, Query, SelectStatement, SimpleExpr};
 use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 
 use crate::{ident::DynCol, value::json_to_sea_value, Backend};
@@ -35,7 +35,14 @@ pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
         FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
         FilterOp::Like => {
             if let Some(pattern) = filter.value.as_str() {
-                Expr::col(col).like(pattern.to_string())
+                // Explicit ESCAPE clause: SQLite/D1's LIKE has no default
+                // escape character, so without this a caller's
+                // backslash-escaped wildcards (`\%`, `\_`, `\\`) render as
+                // inert literal backslashes and the escaping silently does
+                // nothing. `\` is one well-defined escape char on both
+                // backends — mirrors `vector::build_list_meta_tables`, which
+                // appends the same `ESCAPE '\'` by hand for its raw-SQL path.
+                Expr::col(col).like(LikeExpr::new(pattern).escape('\\'))
             } else {
                 // Fail-safe: a `Like` filter whose value isn't a JSON
                 // string is malformed input. Emit an always-false predicate
@@ -685,6 +692,47 @@ mod tests {
         assert!(
             stmt.to_uppercase().contains("LIKE"),
             "string Like should render a LIKE clause: {stmt}"
+        );
+    }
+
+    #[test]
+    fn like_filter_renders_explicit_escape_clause() {
+        // SQLite/D1 LIKE has no default escape character, so a caller's
+        // backslash-escaped wildcards (`\%`, `\_`, `\\`) are inert unless the
+        // rendered SQL carries an explicit ESCAPE clause. Assert on the
+        // literal clause text, not just presence of "LIKE".
+        let filters = vec![Filter {
+            field: "name".into(),
+            operator: FilterOp::Like,
+            value: serde_json::json!("a\\_b"),
+        }];
+        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let stmt = build_delete_where_with(cond);
+        assert!(
+            stmt.contains("ESCAPE '\\'"),
+            "LIKE must emit ESCAPE '\\' so backslash-escaping works on SQLite/D1: {stmt}"
+        );
+    }
+
+    #[test]
+    fn like_filter_renders_escape_clause_on_postgres_too() {
+        // One escaping contract on both backends — not just SQLite. Postgres
+        // renders backslash-containing literals as `E'...'` (its standard
+        // escape-string syntax), so the clause is `ESCAPE E'\\'` rather than
+        // SQLite's `ESCAPE '\'` — both are valid SQL for "escape char is a
+        // single backslash" on their respective backend.
+        let filters = vec![Filter {
+            field: "name".into(),
+            operator: FilterOp::Like,
+            value: serde_json::json!("a\\_b"),
+        }];
+        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let mut query = Query::delete();
+        query.from_table(DynCol("t".into())).cond_where(cond);
+        let (sql, _) = crate::render_delete(query, Backend::Postgres);
+        assert!(
+            sql.contains("ESCAPE E'\\\\'"),
+            "Postgres LIKE must also emit an explicit ESCAPE clause: {sql}"
         );
     }
 
