@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build wasm test fixtures consumed by wafer-run integration tests.
-# Idempotent — each fixture is rebuilt only if missing.
+# Idempotent — cargo's own fingerprinting decides whether a fixture is
+# actually recompiled, so repeat runs are fast no-ops when nothing changed.
 #
 # Run after a fresh `git clone` to seed the testdata directory and the
 # per-fixture target/ output paths. The pre-commit hook calls this
@@ -23,18 +24,26 @@ if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-wasip1$'; the
 fi
 
 # Build (cargo) and optionally copy (mv-shaped) a wasm fixture into place.
-# - If the destination already exists, skip entirely.
-# - If the build artifact and the destination are the same path
-#   (fixtures 2 and 3 — built in-place), skip the copy step. `cp` would
-#   error with "same file" otherwise.
-build_if_missing() {
+#
+# `cargo build` runs unconditionally — cargo's own fingerprint-based
+# staleness detection (which covers the fixture's own sources *and* its
+# path-dependencies, e.g. wafer-sdk/wafer-block) decides whether a
+# recompile is actually needed, so this is fast when nothing changed. Do
+# NOT reintroduce a "skip if $dest already exists" shortcut here: that
+# check only proves the file is present, not that it reflects the current
+# source — it previously let a wasm built before a guest-source change
+# (e.g. new dispatch arms) sit stale indefinitely, both locally and via any
+# CI cache that restores target/ keyed on Cargo.lock (which a source-only
+# change doesn't invalidate), silently short-circuiting the tests that
+# exercise the new code path.
+#
+# If the build artifact and the destination are the same path (fixtures 2-4
+# — built in-place), skip the copy step. `cp` would error with "same file"
+# otherwise.
+build_fixture() {
     local dest="$1"
     local manifest="$2"
     local artifact="$3"
-
-    if [ -f "$dest" ]; then
-        return 0
-    fi
 
     echo "building $dest"
     cargo build --release --target wasm32-wasip1 --manifest-path "$manifest" >&2
@@ -47,21 +56,21 @@ build_if_missing() {
 
 # echo_block.wasm — consumed by wasmi_block_test.rs via include_bytes!
 # Built in examples/wasmi-block, copied to testdata.
-build_if_missing \
+build_fixture \
     crates/wafer-run/testdata/echo_block.wasm \
     examples/wasmi-block/Cargo.toml \
     examples/wasmi-block/target/wasm32-wasip1/release/wafer_example_wasmi_echo.wasm
 
 # attachment_dispatch_guest.wasm — consumed by attachment_e2e_wasmi.rs
 # at runtime via Path. Built in place; no copy needed.
-build_if_missing \
+build_fixture \
     crates/wafer-run/tests/attachment_dispatch/target/wasm32-wasip1/release/attachment_dispatch_guest.wasm \
     crates/wafer-run/tests/attachment_dispatch/Cargo.toml \
     crates/wafer-run/tests/attachment_dispatch/target/wasm32-wasip1/release/attachment_dispatch_guest.wasm
 
 # dispatch_guest.wasm — consumed by dispatch_streaming.rs at runtime
 # via Path. Built in place; no copy needed.
-build_if_missing \
+build_fixture \
     crates/wafer-run/tests/dispatch_guest/target/wasm32-wasip1/release/dispatch_guest.wasm \
     crates/wafer-run/tests/dispatch_guest/Cargo.toml \
     crates/wafer-run/tests/dispatch_guest/target/wasm32-wasip1/release/dispatch_guest.wasm
@@ -69,7 +78,7 @@ build_if_missing \
 # service_client_guest.wasm — consumed by service_client_e2e.rs at runtime
 # via Path. The first fixture built against `wafer-core --features
 # wasm-component`, exercising TODO #103's call_service. Built in place.
-build_if_missing \
+build_fixture \
     crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm \
     crates/wafer-run/tests/service_client_guest/Cargo.toml \
     crates/wafer-run/tests/service_client_guest/target/wasm32-wasip1/release/service_client_guest.wasm
@@ -78,7 +87,7 @@ build_if_missing \
 # via Path. An ordinary, unprivileged public-SDK guest (SP-A Stage 1 task 8
 # hostile-guest end-to-end regression test — no WRAP meta at all). Built in
 # place.
-build_if_missing \
+build_fixture \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm \
     crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm
