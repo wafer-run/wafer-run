@@ -218,6 +218,13 @@ fn strip_outer_parens(s: &str) -> Option<&str> {
             _ => {}
         }
     }
+    if depth != 0 {
+        // Unbalanced: the leading '(' never found its partner (e.g.
+        // `((a)`, where an extra unmatched leading '(' leaves depth > 0
+        // after the scan). Depth must return to zero exactly at the final
+        // byte, per the doc comment above.
+        return None;
+    }
     Some(s[1..s.len() - 1].trim())
 }
 
@@ -933,5 +940,77 @@ mod tests {
             }
             other => panic!("expected logical expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_outer_parens_rejects_unbalanced_depth() {
+        // `((a)` — an extra unmatched leading '(' — has '(' as its first
+        // byte and ')' as its last, so the surface check alone would
+        // accept it. But paren depth ends the scan at 1, not 0: the
+        // leading '(' never found its partner. Before Fix 1,
+        // strip_outer_parens returned `Some("(a")` here anyway, violating
+        // its own doc contract ("depth returns to zero only at the final
+        // byte"). It must now reject this input.
+        assert_eq!(strip_outer_parens("((a)"), None);
+
+        // Valid single-wrap cases must be unaffected by the new check.
+        assert_eq!(strip_outer_parens("(a)"), Some("a"));
+        assert_eq!(strip_outer_parens("((a))"), Some("(a)"));
+        assert_eq!(strip_outer_parens("($.a || $.b)"), Some("$.a || $.b"));
+    }
+
+    #[test]
+    fn stray_close_paren_is_a_parse_error() {
+        // `a) || b` shape: a stray, unmatched close paren with no opener
+        // at all. Must surface as a parse error (unrecognized token),
+        // never panic.
+        assert!(parse_expr("$.a == 1) || $.b == 2").is_err());
+    }
+
+    #[test]
+    fn excess_open_paren_is_a_parse_error() {
+        // `((a` shape: excess unmatched open parens swallow the rest of
+        // the expression (for_each_unquoted never sees depth return to
+        // zero), and the whole thing falls through every atom check.
+        // Must surface as a parse error, never panic or hang.
+        assert!(parse_expr("(($.a == 1").is_err());
+    }
+
+    #[test]
+    fn empty_paren_group_is_a_parse_error() {
+        // `()` shape: an empty parenthesized group. strip_outer_parens
+        // happily unwraps it (depth is balanced) to an empty inner
+        // string, which parse_atom explicitly rejects. Must surface as a
+        // parse error, never panic.
+        assert!(parse_expr("$.a == 1 && ()").is_err());
+    }
+
+    #[test]
+    fn unmatched_leading_paren_is_a_parse_error() {
+        // `((a)` shape at full-expression scope — the exact case Fix 1
+        // closes in strip_outer_parens (see
+        // strip_outer_parens_rejects_unbalanced_depth for the direct
+        // unit test). Must surface as a parse error, never panic or
+        // silently misparse into the wrong tree.
+        assert!(parse_expr("(($.a == 1)").is_err());
+    }
+
+    #[test]
+    fn quotes_inside_paren_group_are_literal_not_operators() {
+        // Operators (`||`, `==`) and parens *inside* a quoted literal
+        // must stay literal text, not structural tokens, even when the
+        // literal sits inside an explicit paren group. `a` is chosen so
+        // the left comparison is false, forcing evaluation of the right
+        // comparison too — both quoted-paren-content literals must
+        // actually parse and compare correctly, not just short-circuit
+        // away.
+        let ctx = json!({ "a": "nope", "b": ")" });
+        let resolve = |segments: &[String]| -> Result<Value, ExprError> {
+            ctx.get(segments.first().map(String::as_str).unwrap_or_default())
+                .cloned()
+                .ok_or_else(|| ExprError::UnresolvedReference(segments.join(".")))
+        };
+        let expr = parse_expr(r#"($.a == "(" || $.b == ")")"#).unwrap();
+        assert_eq!(eval(&expr, &resolve).unwrap(), json!(true));
     }
 }
