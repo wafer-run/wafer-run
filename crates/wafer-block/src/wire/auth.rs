@@ -54,7 +54,10 @@ pub struct UserProfileResponse {
     pub display_name: String,
     /// Optional avatar URL.
     pub avatar_url: Option<String>,
-    /// `"User"` or `"Admin"` — matches `auth::service::Role` serde repr.
+    /// `"user"` or `"admin"` (lowercase) — the canonical wire casing shared
+    /// with the `x-auth-role` request header read by
+    /// `interfaces::auth::handler::parse_required_role`, so this value can be
+    /// round-tripped straight back into a `require_role` call.
     pub role: String,
     /// Orgs this user is a member of.
     pub orgs: Vec<OrgSummary>,
@@ -92,7 +95,7 @@ mod tests {
             email: "a@b.test".into(),
             display_name: "Alice".into(),
             avatar_url: Some("https://example.test/a.png".into()),
-            role: "User".into(),
+            role: "user".into(),
             orgs: vec![OrgSummary {
                 name: "acme".into(),
                 verified_via: Some("github".into()),

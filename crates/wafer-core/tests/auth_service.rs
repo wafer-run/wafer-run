@@ -118,7 +118,7 @@ async fn auth_user_profile_happy_path() {
     assert_eq!(decoded.id, user.id.0);
     assert_eq!(decoded.email, user.email);
     assert_eq!(decoded.display_name, user.display_name);
-    assert_eq!(decoded.role, "User");
+    assert_eq!(decoded.role, "user");
     assert!(decoded.orgs.is_empty());
 }
 
