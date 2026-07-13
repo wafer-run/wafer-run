@@ -161,7 +161,7 @@ fn dispatch(msg: &Message, _body: &[u8]) -> GuestResult {
         }
         "test.query_raw_secrets" => {
             let req = QueryRawRequest {
-                query: "SELECT * FROM suppers_ai__other_block__secrets".to_string(),
+                query: "SELECT * FROM my_org__other_block__secrets".to_string(),
                 args: vec![],
             };
             match database::query_raw(&req) {

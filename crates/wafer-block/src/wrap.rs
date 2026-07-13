@@ -30,7 +30,7 @@ pub const STORAGE_LIST_ALL_RESOURCE: &str = "__storage_list_all__";
 
 /// Extract the owning block ID from a namespaced resource name.
 ///
-/// Convention: `suppers_ai__auth__users` → `suppers-ai/auth`
+/// Convention: `my_org__auth__users` → `my-org/auth`
 ///
 /// Splits on the first two `__` segments, lowercases, converts `__` → `/`
 /// and `_` → `-`. Returns `None` if the name doesn't have at least two `__`
@@ -50,14 +50,14 @@ pub fn resource_owner(name: &str) -> Option<String> {
     let first = lower.find("__")?;
     let rest = &lower[first + 2..];
     let second = rest.find("__")?;
-    // prefix = "suppers_ai__auth"
+    // prefix = "my_org__auth"
     let prefix = &lower[..first + 2 + second];
     Some(prefix.replace("__", "/").replace('_', "-"))
 }
 
 /// Convert a block ID to its resource name prefix.
 ///
-/// `suppers-ai/auth` → `suppers_ai__auth__`
+/// `my-org/auth` → `my_org__auth__`
 ///
 /// # Invariant
 ///
@@ -74,15 +74,15 @@ pub fn resource_prefix(block_id: &str) -> String {
 }
 
 /// Extract the owning block id from a storage path of the form
-/// `{org}/{block}/{rest}` (with optional leading `@` used by SolobaseStorageBlock
+/// `{org}/{block}/{rest}` (with optional leading `@` used by an app storage block
 /// to mark cross-block access in source code).
 ///
 /// Returns `None` if the path doesn't have at least two slash-separated
 /// segments.
 ///
 /// ```ignore
-/// assert_eq!(storage_resource_owner("suppers-ai/files/photos/a.png"),
-///            Some("suppers-ai/files".to_string()));
+/// assert_eq!(storage_resource_owner("my-org/files/photos/a.png"),
+///            Some("my-org/files".to_string()));
 /// assert_eq!(storage_resource_owner("@wafer-run/web/public/index.html"),
 ///            Some("wafer-run/web".to_string()));
 /// assert_eq!(storage_resource_owner("just-one-segment"), None);
@@ -131,7 +131,7 @@ pub fn typed_resource_owner(
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
-/// For Storage (slash-separated paths; SolobaseStorageBlock-style intercept
+/// For Storage (slash-separated paths; storage-block-style intercept
 /// enforces per-block isolation):
 /// 1. Own-namespace self-admit — any non-`@` resource for an attributable
 ///    caller is treated as caller's own namespace (either the path is
@@ -307,7 +307,7 @@ pub fn check_access(
     }
 
     // Rule 3 (Storage only): own-namespace self-admit. Two shapes count
-    // as own-namespace under the convention SolobaseStorageBlock-style
+    // as own-namespace under the convention storage-block-style
     // intercepts enforce:
     //
     //   (a) Non-`@` resource — the storage block will rewrite to
@@ -401,7 +401,7 @@ fn grant_allows(
 ///    Subdomain wildcards (`*.example.com`) match exactly one label.
 /// 2. Non-URL patterns (storage paths, namespaces) — substring glob with
 ///    `*` wildcards, used for things like `wafer-run/web/*` or
-///    `suppers_ai__auth__*`.
+///    `my_org__auth__*`.
 ///
 /// The URL branch closes the substring-glob bypass (SEC-007): patterns
 /// like `https://*.example.com/*` no longer match attacker-controlled
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn storage_list_all_sentinel_is_admin_only() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Admin allowed.
         assert!(check_access(
             Some(admin),
@@ -607,11 +607,11 @@ mod tests {
 
     #[test]
     fn vector_is_namespace_based_and_self_admits() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Owner self-admits its own index namespace (read and write).
         assert!(check_access(
-            Some("suppers-ai/vector"),
-            "suppers_ai__vector__docs",
+            Some("my-org/vector"),
+            "my_org__vector__docs",
             false,
             Some(&ResourceType::Vector),
             &[],
@@ -619,8 +619,8 @@ mod tests {
         )
         .is_ok());
         assert!(check_access(
-            Some("suppers-ai/vector"),
-            "suppers_ai__vector__docs",
+            Some("my-org/vector"),
+            "my_org__vector__docs",
             true,
             Some(&ResourceType::Vector),
             &[],
@@ -630,7 +630,7 @@ mod tests {
         // A different block with no grant is denied.
         assert!(check_access(
             Some("evil/block"),
-            "suppers_ai__vector__docs",
+            "my_org__vector__docs",
             false,
             Some(&ResourceType::Vector),
             &[],
@@ -651,15 +651,14 @@ mod tests {
 
     #[test]
     fn vector_grant_satisfies_only_vector_requests() {
-        let admin = "suppers-ai/admin";
-        let grants = vec![
-            ResourceGrant::read("reader/block", "suppers_ai__vector__docs")
-                .typed(ResourceType::Vector),
-        ];
+        let admin = "my-org/admin";
+        let grants =
+            vec![ResourceGrant::read("reader/block", "my_org__vector__docs")
+                .typed(ResourceType::Vector)];
         // Same-type read is allowed via the grant.
         assert!(check_access(
             Some("reader/block"),
-            "suppers_ai__vector__docs",
+            "my_org__vector__docs",
             false,
             Some(&ResourceType::Vector),
             &grants,
@@ -670,7 +669,7 @@ mod tests {
         // (and, being cross-namespace, is denied).
         assert!(check_access(
             Some("reader/block"),
-            "suppers_ai__vector__docs",
+            "my_org__vector__docs",
             false,
             Some(&ResourceType::Db),
             &grants,
@@ -682,16 +681,16 @@ mod tests {
     #[test]
     fn test_resource_owner() {
         assert_eq!(
-            resource_owner("suppers_ai__auth__users"),
-            Some("suppers-ai/auth".to_string())
+            resource_owner("my_org__auth__users"),
+            Some("my-org/auth".to_string())
         );
         assert_eq!(
-            resource_owner("SUPPERS_AI__AUTH__JWT_SECRET"),
-            Some("suppers-ai/auth".to_string())
+            resource_owner("MY_ORG__AUTH__JWT_SECRET"),
+            Some("my-org/auth".to_string())
         );
         assert_eq!(
-            resource_owner("suppers_ai__admin__roles"),
-            Some("suppers-ai/admin".to_string())
+            resource_owner("my_org__admin__roles"),
+            Some("my-org/admin".to_string())
         );
         // Not enough __ segments
         assert_eq!(resource_owner("auth_users"), None);
@@ -702,34 +701,18 @@ mod tests {
 
     #[test]
     fn test_resource_prefix() {
-        assert_eq!(resource_prefix("suppers-ai/auth"), "suppers_ai__auth__");
+        assert_eq!(resource_prefix("my-org/auth"), "my_org__auth__");
         assert_eq!(resource_prefix("wafer-run/web"), "wafer_run__web__");
     }
 
     #[test]
     fn test_ddl_permissive_for_any_block() {
         let grants = vec![];
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Non-admin block can DDL its own tables (write).
-        assert!(check_access(
-            Some("suppers-ai/auth"),
-            "__ddl__",
-            true,
-            None,
-            &grants,
-            admin
-        )
-        .is_ok());
+        assert!(check_access(Some("my-org/auth"), "__ddl__", true, None, &grants, admin).is_ok());
         // Another non-admin block likewise.
-        assert!(check_access(
-            Some("suppers-ai/files"),
-            "__ddl__",
-            true,
-            None,
-            &grants,
-            admin
-        )
-        .is_ok());
+        assert!(check_access(Some("my-org/files"), "__ddl__", true, None, &grants, admin).is_ok());
         // Admin too (sanity).
         assert!(check_access(Some(admin), "__ddl__", true, None, &grants, admin).is_ok());
         // Anonymous (no caller) is still denied — DDL needs an attributable caller.
@@ -741,43 +724,35 @@ mod tests {
         let grants = vec![];
         // Admin can use raw SQL
         assert!(check_access(
-            Some("suppers-ai/admin"),
+            Some("my-org/admin"),
             "__raw_sql__",
             false,
             None,
             &grants,
-            "suppers-ai/admin"
+            "my-org/admin"
         )
         .is_ok());
         // Non-admin cannot
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "__raw_sql__",
             false,
             None,
             &grants,
-            "suppers-ai/admin"
+            "my-org/admin"
         )
         .is_err());
         // No caller cannot
-        assert!(check_access(
-            None,
-            "__raw_sql__",
-            false,
-            None,
-            &grants,
-            "suppers-ai/admin"
-        )
-        .is_err());
+        assert!(check_access(None, "__raw_sql__", false, None, &grants, "my-org/admin").is_err());
     }
 
     #[test]
     fn test_shared_resources() {
         let grants = vec![];
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Any *attributable* block can read shared
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "WAFER_RUN_SHARED__APP_NAME",
             false,
             None,
@@ -799,7 +774,7 @@ mod tests {
         .is_err());
         // Only admin can write shared
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "WAFER_RUN_SHARED__APP_NAME",
             true,
             None,
@@ -808,7 +783,7 @@ mod tests {
         )
         .is_err());
         assert!(check_access(
-            Some("suppers-ai/admin"),
+            Some("my-org/admin"),
             "WAFER_RUN_SHARED__APP_NAME",
             true,
             None,
@@ -821,11 +796,11 @@ mod tests {
     #[test]
     fn test_own_resource() {
         let grants = vec![];
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Auth block can access its own resources
         assert!(check_access(
-            Some("suppers-ai/auth"),
-            "suppers_ai__auth__users",
+            Some("my-org/auth"),
+            "my_org__auth__users",
             true,
             None,
             &grants,
@@ -834,8 +809,8 @@ mod tests {
         .is_ok());
         // But not another block's resources
         assert!(check_access(
-            Some("suppers-ai/auth"),
-            "suppers_ai__admin__roles",
+            Some("my-org/auth"),
+            "my_org__admin__roles",
             false,
             None,
             &grants,
@@ -847,10 +822,10 @@ mod tests {
     #[test]
     fn test_admin_full_access() {
         let grants = vec![];
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         assert!(check_access(
             Some(admin),
-            "suppers_ai__auth__users",
+            "my_org__auth__users",
             true,
             None,
             &grants,
@@ -861,15 +836,12 @@ mod tests {
 
     #[test]
     fn test_grant_matching() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Read grant: admin can read auth users
-        let grants = vec![ResourceGrant::read(
-            "suppers-ai/admin",
-            "suppers_ai__auth__users",
-        )];
+        let grants = vec![ResourceGrant::read("my-org/admin", "my_org__auth__users")];
         assert!(check_access(
-            Some("suppers-ai/admin"),
-            "suppers_ai__auth__users",
+            Some("my-org/admin"),
+            "my_org__auth__users",
             false,
             None,
             &grants,
@@ -878,8 +850,8 @@ mod tests {
         .is_ok());
         // Write denied with read-only grant
         assert!(check_access(
-            Some("suppers-ai/admin"),
-            "suppers_ai__auth__users",
+            Some("my-org/admin"),
+            "my_org__auth__users",
             true,
             None,
             &grants,
@@ -888,13 +860,10 @@ mod tests {
         .is_err());
 
         // Wildcard grant
-        let grants = vec![ResourceGrant::read(
-            "suppers-ai/admin",
-            "suppers_ai__auth__*",
-        )];
+        let grants = vec![ResourceGrant::read("my-org/admin", "my_org__auth__*")];
         assert!(check_access(
-            Some("suppers-ai/admin"),
-            "suppers_ai__auth__users",
+            Some("my-org/admin"),
+            "my_org__auth__users",
             false,
             None,
             &grants,
@@ -902,8 +871,8 @@ mod tests {
         )
         .is_ok());
         assert!(check_access(
-            Some("suppers-ai/admin"),
-            "suppers_ai__auth__tokens",
+            Some("my-org/admin"),
+            "my_org__auth__tokens",
             false,
             None,
             &grants,
@@ -912,10 +881,10 @@ mod tests {
         .is_ok());
 
         // Wildcard grantee
-        let grants = vec![ResourceGrant::read("*", "suppers_ai__admin__network_rules")];
+        let grants = vec![ResourceGrant::read("*", "my_org__admin__network_rules")];
         assert!(check_access(
-            Some("suppers-ai/files"),
-            "suppers_ai__admin__network_rules",
+            Some("my-org/files"),
+            "my_org__admin__network_rules",
             false,
             None,
             &grants,
@@ -927,10 +896,10 @@ mod tests {
     #[test]
     fn test_unnamespaced_denied() {
         let grants = vec![];
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         // Unnamespaced resource names are denied in strict mode
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "auth_users",
             false,
             None,
@@ -1052,7 +1021,7 @@ mod tests {
         ));
         assert!(!grant_matches_resource(
             "wafer-run/web/*",
-            "suppers-ai/files/uploads"
+            "my-org/files/uploads"
         ));
 
         // No match
@@ -1063,26 +1032,26 @@ mod tests {
 
         // Namespace patterns (backward compat)
         assert!(grant_matches_resource(
-            "suppers_ai__auth__*",
-            "suppers_ai__auth__users"
+            "my_org__auth__*",
+            "my_org__auth__users"
         ));
         assert!(grant_matches_resource(
-            "suppers_ai__auth__*",
-            "suppers_ai__auth__tokens"
+            "my_org__auth__*",
+            "my_org__auth__tokens"
         ));
     }
 
     #[test]
     fn test_read_write_grant() {
         let grants = vec![ResourceGrant::read_write(
-            "suppers-ai/auth",
-            "suppers_ai__admin__user_roles",
+            "my-org/auth",
+            "my_org__admin__user_roles",
         )];
         let admin = "some-other/admin";
         // Read OK
         assert!(check_access(
-            Some("suppers-ai/auth"),
-            "suppers_ai__admin__user_roles",
+            Some("my-org/auth"),
+            "my_org__admin__user_roles",
             false,
             None,
             &grants,
@@ -1091,8 +1060,8 @@ mod tests {
         .is_ok());
         // Write OK
         assert!(check_access(
-            Some("suppers-ai/auth"),
-            "suppers_ai__admin__user_roles",
+            Some("my-org/auth"),
+            "my_org__admin__user_roles",
             true,
             None,
             &grants,
@@ -1103,12 +1072,12 @@ mod tests {
 
     #[test]
     fn test_network_resource_type() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         let net = Some(&ResourceType::Network);
 
         // No grants → denied (default deny for network)
         assert!(check_access(
-            Some("suppers-ai/products"),
+            Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
             false,
             net,
@@ -1120,7 +1089,7 @@ mod tests {
         // Wildcard grant for all blocks → allowed
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Network)];
         assert!(check_access(
-            Some("suppers-ai/products"),
+            Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
             false,
             net,
@@ -1131,11 +1100,11 @@ mod tests {
 
         // Specific URL grant
         let grants = vec![
-            ResourceGrant::read("suppers-ai/products", "https://api.stripe.com/*")
+            ResourceGrant::read("my-org/products", "https://api.stripe.com/*")
                 .typed(ResourceType::Network),
         ];
         assert!(check_access(
-            Some("suppers-ai/products"),
+            Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
             false,
             net,
@@ -1145,7 +1114,7 @@ mod tests {
         .is_ok());
         // Different block → denied
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "https://api.stripe.com/v1/charges",
             false,
             net,
@@ -1155,7 +1124,7 @@ mod tests {
         .is_err());
         // Different URL → denied
         assert!(check_access(
-            Some("suppers-ai/products"),
+            Some("my-org/products"),
             "https://evil.com/steal",
             false,
             net,
@@ -1170,7 +1139,7 @@ mod tests {
         // Network grant doesn't satisfy Db request
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Network)];
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "auth_users",
             false,
             None, // untyped / Db
@@ -1182,25 +1151,17 @@ mod tests {
 
     #[test]
     fn test_crypto_resource_type() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         let crypto = Some(&ResourceType::Crypto);
 
         // No grants → denied (default deny for crypto, like network/storage)
-        assert!(check_access(Some("suppers-ai/auth"), "sign", false, crypto, &[], admin).is_err());
+        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &[], admin).is_err());
 
         // Wildcard grant for all blocks on all crypto ops → allowed
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Crypto)];
+        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &grants, admin).is_ok());
         assert!(check_access(
-            Some("suppers-ai/auth"),
-            "sign",
-            false,
-            crypto,
-            &grants,
-            admin
-        )
-        .is_ok());
-        assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "random_bytes",
             false,
             crypto,
@@ -1210,11 +1171,10 @@ mod tests {
         .is_ok());
 
         // Operation-specific grant: only random_bytes, not sign
-        let grants = vec![
-            ResourceGrant::read("suppers-ai/auth", "random_bytes").typed(ResourceType::Crypto)
-        ];
+        let grants =
+            vec![ResourceGrant::read("my-org/auth", "random_bytes").typed(ResourceType::Crypto)];
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "random_bytes",
             false,
             crypto,
@@ -1222,15 +1182,7 @@ mod tests {
             admin
         )
         .is_ok());
-        assert!(check_access(
-            Some("suppers-ai/auth"),
-            "sign",
-            false,
-            crypto,
-            &grants,
-            admin
-        )
-        .is_err());
+        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &grants, admin).is_err());
 
         // Admin always allowed
         assert!(check_access(Some(admin), "sign", false, crypto, &[], admin).is_ok());
@@ -1240,7 +1192,7 @@ mod tests {
         // "sign" / "random_bytes".
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Crypto)];
         assert!(check_access(
-            Some("suppers-ai/auth"),
+            Some("my-org/auth"),
             "sign",
             false,
             None, // untyped / Db
@@ -1252,12 +1204,12 @@ mod tests {
 
     #[test]
     fn test_storage_resource_type() {
-        let admin = "suppers-ai/admin";
+        let admin = "my-org/admin";
         let storage = Some(&ResourceType::Storage);
 
         // Cross-block access with `@` prefix + no grants → denied
         assert!(check_access(
-            Some("suppers-ai/files"),
+            Some("my-org/files"),
             "@wafer-run/web/public",
             false,
             storage,
@@ -1267,11 +1219,11 @@ mod tests {
         .is_err());
 
         // Grant for specific path covers `@`-prefixed cross-block reads
-        let grants =
-            vec![ResourceGrant::read("suppers-ai/files", "wafer-run/web/*")
-                .typed(ResourceType::Storage)];
+        let grants = vec![
+            ResourceGrant::read("my-org/files", "wafer-run/web/*").typed(ResourceType::Storage)
+        ];
         assert!(check_access(
-            Some("suppers-ai/files"),
+            Some("my-org/files"),
             "@wafer-run/web/public",
             false,
             storage,
@@ -1281,7 +1233,7 @@ mod tests {
         .is_ok());
         // Write denied via cross-block read-only grant
         assert!(check_access(
-            Some("suppers-ai/files"),
+            Some("my-org/files"),
             "@wafer-run/web/public",
             true,
             storage,
@@ -1319,7 +1271,7 @@ mod tests {
         // so check_access has to trust the convention.
         assert!(check_access(Some("wafer-run/web"), "photos", true, storage, &[], admin).is_ok());
         assert!(check_access(
-            Some("suppers-ai/files"),
+            Some("my-org/files"),
             "photos/a.png",
             true,
             storage,
@@ -1330,7 +1282,7 @@ mod tests {
         // Cross-block storage (explicit `@` prefix) still requires a grant
         assert!(check_access(
             Some("wafer-run/web"),
-            "@suppers-ai/files/photos/a.png",
+            "@my-org/files/photos/a.png",
             false,
             storage,
             &[],
@@ -1342,7 +1294,7 @@ mod tests {
         // (the storage block will re-prefix to `{caller}/...`).
         assert!(check_access(
             Some("wafer-run/web"),
-            "suppers-ai/files/photos/a.png",
+            "my-org/files/photos/a.png",
             false,
             storage,
             &[],
@@ -1356,8 +1308,8 @@ mod tests {
     #[test]
     fn test_storage_resource_owner_parser() {
         assert_eq!(
-            storage_resource_owner("suppers-ai/files/photos/a.png"),
-            Some("suppers-ai/files".to_string())
+            storage_resource_owner("my-org/files/photos/a.png"),
+            Some("my-org/files".to_string())
         );
         assert_eq!(
             storage_resource_owner("@wafer-run/web/public/index.html"),
@@ -1378,28 +1330,25 @@ mod tests {
     fn test_typed_resource_owner_dispatch() {
         // Storage → slash parser
         assert_eq!(
-            typed_resource_owner(
-                "suppers-ai/files/photos/a.png",
-                Some(&ResourceType::Storage)
-            ),
-            Some("suppers-ai/files".to_string())
+            typed_resource_owner("my-org/files/photos/a.png", Some(&ResourceType::Storage)),
+            Some("my-org/files".to_string())
         );
         // Db / untyped → __-parser
         assert_eq!(
-            typed_resource_owner("suppers_ai__auth__users", Some(&ResourceType::Db)),
-            Some("suppers-ai/auth".to_string())
+            typed_resource_owner("my_org__auth__users", Some(&ResourceType::Db)),
+            Some("my-org/auth".to_string())
         );
         assert_eq!(
-            typed_resource_owner("suppers_ai__auth__users", None),
-            Some("suppers-ai/auth".to_string())
+            typed_resource_owner("my_org__auth__users", None),
+            Some("my-org/auth".to_string())
         );
         // Mismatched format returns None
         assert_eq!(
-            typed_resource_owner("suppers-ai/files/photos", Some(&ResourceType::Db)),
+            typed_resource_owner("my-org/files/photos", Some(&ResourceType::Db)),
             None
         );
         assert_eq!(
-            typed_resource_owner("suppers_ai__auth__users", Some(&ResourceType::Storage)),
+            typed_resource_owner("my_org__auth__users", Some(&ResourceType::Storage)),
             None
         );
     }

@@ -19,7 +19,7 @@ WAFER-Go is the runtime layer that sits between the WAFER spec and applications 
 ```
 ┌─────────────────────────────────────────────┐
 │           APPLICATION LAYER                 │
-│  (e.g., Solobase — see WAFER_SOLOBASE.md)  │
+│  (e.g., a BaaS application)                 │
 ├─────────────────────────────────────────────┤
 │              WAFER-GO                      │
 │    Runtime, SDK, WASM Loader, CLI           │
@@ -35,7 +35,7 @@ WAFER-Go provides:
 - WASM block loader using wazero
 - CLI tools for development
 
-For a real-world example of an application built on WAFER-Go, see Solobase — a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
+A representative real-world example of an application built on WAFER-Go is a BaaS (Backend as a Service) where every feature is a block with optional standalone UI.
 
 ---
 
@@ -230,9 +230,9 @@ This approach lets you:
 - Use flows only where block composition makes sense
 - Mix WAFER logic with regular code freely
 
-### Real-World Example: Solobase
+### Real-World Example: a BaaS Platform
 
-Solobase embeds WAFER-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional Preact UI page. Flows compose blocks for request processing:
+A representative consuming application embeds WAFER-Go to build a block-based BaaS platform. Each feature (auth, database admin, storage, IAM, etc.) is a block with its own backend logic and optional standalone UI page. Flows compose blocks for request processing:
 
 ```
 HTTP Request → Router
@@ -241,7 +241,7 @@ HTTP Request → Router
   └── POST /api/database/*    → admin-guard → database flow
 ```
 
-See the Solobase documentation for full architecture details.
+See the consuming application's documentation for full architecture details.
 
 ---
 
@@ -1735,7 +1735,7 @@ In this configuration:
 ## Related Documents
 
 - **[WAFER Spec](./WAFER_SPEC.md)** — The specification that WAFER-Go implements (blocks, flows, interfaces, registry)
-- **Solobase** — BaaS platform built on WAFER-Go (block-based architecture with Preact UIs)
+- **Example BaaS platform** — a BaaS platform built on WAFER-Go (block-based architecture with standalone UIs)
 
 ---
 

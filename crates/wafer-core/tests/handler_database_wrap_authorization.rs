@@ -332,7 +332,7 @@ async fn query_raw_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::QueryRawRequest {
-        query: "SELECT * FROM suppers_ai__auth__users".into(),
+        query: "SELECT * FROM my_org__auth__users".into(),
         args: vec![],
     };
     let body = codec::encode(&req).unwrap();
@@ -355,7 +355,7 @@ async fn exec_raw_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::ExecRawRequest {
-        query: "DELETE FROM suppers_ai__auth__users".into(),
+        query: "DELETE FROM my_org__auth__users".into(),
         args: vec![],
     };
     let body = codec::encode(&req).unwrap();
@@ -381,7 +381,7 @@ async fn ddl_denied_never_reaches_service() {
     // (the host-authoritative op, not something forgeable via meta) must
     // still be denied when it has no `__ddl__` grant.
     let req = wire::database::ExecRawRequest {
-        query: "CREATE TABLE suppers_ai__auth__evil (id TEXT)".into(),
+        query: "CREATE TABLE my_org__auth__evil (id TEXT)".into(),
         args: vec![],
     };
     let body = codec::encode(&req).unwrap();
@@ -404,7 +404,7 @@ async fn foreign_collection_list_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::ListRequest {
-        collection: "suppers_ai__other_block__secrets".into(),
+        collection: "my_org__other_block__secrets".into(),
         filters: vec![],
         sort: vec![],
         limit: 10,
@@ -432,7 +432,7 @@ async fn foreign_collection_create_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::CreateRequest {
-        collection: "suppers_ai__other_block__secrets".into(),
+        collection: "my_org__other_block__secrets".into(),
         data: Default::default(),
     };
     let body = codec::encode(&req).unwrap();
@@ -455,7 +455,7 @@ async fn foreign_collection_upsert_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__other_block__secrets".into(),
+        collection: "my_org__other_block__secrets".into(),
         data: vec![("id".into(), serde_json::json!("1"))],
         conflict_columns: vec!["id".into()],
         on_conflict: wire::database::OnConflict::SetColumns(vec!["id".into()]),
@@ -482,7 +482,7 @@ async fn granted_ctx_allows_upsert_reaches_service() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: vec![
             ("id".into(), serde_json::json!("1")),
             ("name".into(), serde_json::json!("alice")),
@@ -517,7 +517,7 @@ async fn upsert_bad_identifier_in_windowed_counter_is_invalid_argument() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: vec![
             ("id".into(), serde_json::json!("rl-1")),
             ("key".into(), serde_json::json!("user:1:login")),
@@ -567,7 +567,7 @@ async fn upsert_windowed_counter_missing_id_is_invalid_argument() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: vec![("key".into(), serde_json::json!("user:1:login"))],
         conflict_columns: vec!["key".into()],
         on_conflict: wire::database::OnConflict::WindowedCounter {
@@ -612,7 +612,7 @@ async fn upsert_windowed_counter_missing_key_is_invalid_argument() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: vec![("id".into(), serde_json::json!("rl-1"))],
         conflict_columns: vec!["key".into()],
         on_conflict: wire::database::OnConflict::WindowedCounter {
@@ -658,7 +658,7 @@ async fn upsert_windowed_counter_empty_conflict_columns_is_invalid_argument() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
     let req = wire::database::UpsertRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: vec![
             ("id".into(), serde_json::json!("rl-1")),
             ("key".into(), serde_json::json!("user:1:login")),
@@ -742,7 +742,7 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
     .await;
 
     let ddl_body = codec::encode(&wire::database::ExecRawRequest {
-        query: "CREATE TABLE suppers_ai__auth__widgets (id TEXT)".into(),
+        query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
         args: vec![],
     })
     .unwrap();
@@ -758,7 +758,7 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
     .await;
 
     let list_body = codec::encode(&wire::database::ListRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         filters: vec![],
         sort: vec![],
         limit: 10,
@@ -779,7 +779,7 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
     .await;
 
     let create_body = codec::encode(&wire::database::CreateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         data: Default::default(),
     })
     .unwrap();

@@ -44,7 +44,7 @@ The [Release workflow](../../actions/workflows/release.yml) will automatically:
 
 - [ ] Verify the [GitHub Release](../../releases) was created
 - [ ] Verify the [registry repo](https://github.com/wafer-run/registry) was updated with new manifests
-- [ ] Update solobase's wafer-run dependency if needed
+- [ ] Update downstream consumers' wafer-run dependency if needed
 
 ## Hotfix Process
 

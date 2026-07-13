@@ -545,7 +545,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
     //   2 = CLOCK_PROCESS_CPUTIME_ID
     //   3 = CLOCK_THREAD_CPUTIME_ID
     // We use `web_time` so this works both natively and when the runtime is
-    // itself compiled to WASM and embedded in a browser (solobase-web): on
+    // itself compiled to WASM and embedded in a browser (the browser build): on
     // wasm32 the call delegates to `Date.now()` / `Performance.now()`.
     linker
         .func_wrap(

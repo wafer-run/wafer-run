@@ -15,13 +15,13 @@
 //! - The only consumer is the [`wafer-flow-http-server`] flow, which is gated
 //!   behind `wafer-site`'s `target-native` feature; the `target-cloudflare`
 //!   build does not pull it in.
-//! - Cloudflare Workers production paths (`solobase` on `wafer.run`) use
-//!   solobase-core's own `UserRateLimiter`, which is D1-backed via the
-//!   generic windowed-counter builder,
+//! - Cloudflare Workers production paths (the consuming application on
+//!   `wafer.run`) use the application's own `UserRateLimiter`, which is
+//!   D1-backed via the generic windowed-counter builder,
 //!   `wafer-sql-utils::upsert::build_windowed_counter_upsert`.
 //!
 //! If a durable, cross-instance rate-limit primitive is ever needed at this
-//! layer, follow the solobase `UserRateLimiter` pattern (D1 upsert under
+//! layer, follow that `UserRateLimiter` pattern (D1 upsert under
 //! `cfg(target_arch = "wasm32")`) rather than extending this in-memory block.
 //!
 //! [`wafer-flow-http-server`]: ../wafer_flow_http_server/index.html

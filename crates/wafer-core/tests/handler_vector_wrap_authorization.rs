@@ -172,7 +172,7 @@ mod vec_fakes {
 
 // --- Helpers -------------------------------------------------------------
 
-const IDX: &str = "suppers_ai__vector__docs";
+const IDX: &str = "my_org__vector__docs";
 
 fn msg(kind: &str) -> Message {
     Message::new(kind)
@@ -219,7 +219,7 @@ fn body_for(op: &str) -> Vec<u8> {
         ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index: IDX.into() }),
         ServiceOp::VECTOR_LIST_INDEXES => codec::encode(&wire::ListIndexesRequest {
             // The namespace prefix of IDX — list authorizes on the prefix itself.
-            prefix: "suppers_ai__vector__".into(),
+            prefix: "my_org__vector__".into(),
         }),
         ServiceOp::VECTOR_DESCRIBE_INDEX => {
             codec::encode(&wire::DescribeIndexRequest { index: IDX.into() })

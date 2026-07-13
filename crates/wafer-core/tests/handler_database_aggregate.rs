@@ -263,7 +263,7 @@ fn count_agg(alias: &str) -> wire::AggregateColumnDef {
 #[tokio::test]
 async fn aggregate_with_grant_returns_rows() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec!["status".into()],
         aggregates: vec![count_agg("cnt")],
         filters: vec![],
@@ -289,7 +289,7 @@ async fn aggregate_with_grant_returns_rows() {
 #[tokio::test]
 async fn aggregate_without_grant_returns_permission_denied() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__orders".into(),
+        collection: "my_org__auth__orders".into(),
         select_columns: vec![],
         aggregates: vec![count_agg("cnt")],
         filters: vec![],
@@ -303,7 +303,7 @@ async fn aggregate_without_grant_returns_permission_denied() {
         .expect("expected PERMISSION_DENIED");
     assert_eq!(err.code, ErrorCode::PermissionDenied, "{}", err.message);
     assert!(
-        err.message.contains("suppers_ai__auth__orders"),
+        err.message.contains("my_org__auth__orders"),
         "error should name the denied collection; got: {}",
         err.message
     );
@@ -316,7 +316,7 @@ async fn aggregate_without_grant_returns_permission_denied() {
 #[tokio::test]
 async fn aggregate_empty_aggregates_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![],
         filters: vec![],
@@ -330,7 +330,7 @@ async fn aggregate_empty_aggregates_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_bad_alias_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![count_agg("cnt); DROP TABLE users;--")],
         filters: vec![],
@@ -344,7 +344,7 @@ async fn aggregate_bad_alias_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_bad_group_by_column_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![count_agg("cnt")],
         filters: vec![],
@@ -358,7 +358,7 @@ async fn aggregate_bad_group_by_column_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_bad_sum_field_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![wire::AggregateColumnDef::Sum {
             field: "amount) FROM x --".into(),
@@ -375,7 +375,7 @@ async fn aggregate_bad_sum_field_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_bad_max_field_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![wire::AggregateColumnDef::Max {
             field: "value) FROM x --".into(),
@@ -392,7 +392,7 @@ async fn aggregate_bad_max_field_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_bad_date_bucket_field_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![count_agg("cnt")],
         filters: vec![],
@@ -408,7 +408,7 @@ async fn aggregate_bad_date_bucket_field_is_invalid_argument() {
 #[tokio::test]
 async fn aggregate_empty_case_when_is_invalid_argument() {
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![wire::AggregateColumnDef::CaseWhenSum {
             when: vec![],
@@ -427,7 +427,7 @@ async fn aggregate_filter_group_is_invalid_argument() {
     // Aggregation filters are AND-of-leaves; a group node is rejected, same as
     // count/sum.
     let req = wire::AggregateRequest {
-        collection: "suppers_ai__auth__users".into(),
+        collection: "my_org__auth__users".into(),
         select_columns: vec![],
         aggregates: vec![count_agg("cnt")],
         filters: vec![wire::FilterNode::Any {

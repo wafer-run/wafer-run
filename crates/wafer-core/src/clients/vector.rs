@@ -2,7 +2,7 @@
 //!
 //! Vector ops are routed to the `wafer-run/vector` block. Embedding calls
 //! accept a caller-provided block name so app blocks can dispatch by model
-//! (e.g. `suppers-ai/fastembed`, `suppers-ai/openai-embed`).
+//! (e.g. `my-org/fastembed`, `my-org/openai-embed`).
 //!
 //! WRAP authorization is enforced host-side in the `wafer-run/vector`
 //! handler, keyed on the decoded index name (`ResourceType::Vector`): a
@@ -197,7 +197,7 @@ dual_api! {
     /// Call an embedding block to embed the given texts.
     ///
     /// `embedding_block` is the name of any block implementing `embedding@v1`
-    /// (e.g. `suppers-ai/fastembed`). Returns `(model, dimensions, vectors)`.
+    /// (e.g. `my-org/fastembed`). Returns `(model, dimensions, vectors)`.
     pub fn embed(
         ctx,
         embedding_block: &str,

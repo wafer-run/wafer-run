@@ -151,8 +151,8 @@ impl Wafer {
     ///
     /// `config_source` is the per-block env-var config source consulted on
     /// first init. Pass `Arc::new(StaticConfigSource::default())` for tests;
-    /// production callers wire in `EnvConfigSource` (solobase-core) or
-    /// `D1ConfigSource` (solobase-cloudflare).
+    /// production callers wire in `EnvConfigSource` (the native app) or
+    /// `D1ConfigSource` (the Cloudflare Workers app).
     ///
     /// Returns an error if either path fails: a duplicate block name,
     /// a malformed lockfile, or a cache miss for a lockfile entry. A
@@ -262,7 +262,7 @@ impl Wafer {
     /// before this call are collected. This is the recommended path for
     /// embedders that auto-register blocks via `linkme` during
     /// `WaferBuilder::build()` and only know the admin block id after
-    /// construction (e.g. solobase).
+    /// construction (e.g. the consuming application).
     ///
     /// External grants previously added via [`Wafer::add_wrap_grants`] are
     /// preserved across the rescan.
@@ -646,7 +646,7 @@ pub(crate) async fn run_init_pipeline(
 // BlockRegistry implementation
 // ---------------------------------------------------------------------------
 
-/// Convert a block name like `suppers-ai/auth` to its config variable prefix `SUPPERS_AI__AUTH__`.
+/// Convert a block name like `my-org/auth` to its config variable prefix `MY_ORG__AUTH__`.
 ///
 /// Convention: `-` → `_`, `/` → `__`, uppercase, trailing `__`.
 fn block_name_to_var_prefix(name: &str) -> String {
@@ -835,23 +835,20 @@ mod tests {
 
     #[test]
     fn test_block_name_to_var_prefix() {
-        assert_eq!(
-            block_name_to_var_prefix("suppers-ai/auth"),
-            "SUPPERS_AI__AUTH__"
-        );
+        assert_eq!(block_name_to_var_prefix("my-org/auth"), "MY_ORG__AUTH__");
         assert_eq!(
             block_name_to_var_prefix("wafer-run/web"),
             "WAFER_RUN__WEB__"
         );
         assert_eq!(
-            block_name_to_var_prefix("suppers-ai/products"),
-            "SUPPERS_AI__PRODUCTS__"
+            block_name_to_var_prefix("my-org/products"),
+            "MY_ORG__PRODUCTS__"
         );
     }
 
     #[test]
     fn test_validate_block_name_valid() {
-        assert!(validate_block_name("suppers-ai/auth").is_ok());
+        assert!(validate_block_name("my-org/auth").is_ok());
         assert!(validate_block_name("wafer-run/sqlite").is_ok());
         assert!(validate_block_name("some-long-repo/test-block").is_ok());
         assert!(validate_block_name("a/b").is_ok());

@@ -17,7 +17,7 @@
 //! async-mutex machinery. The decisive reason for the switch was that
 //! `Drop for InitGuard` is sync and used to fall back to `tokio::spawn`
 //! when `try_lock` failed; that hard-required `tokio/rt`, which is not
-//! available in `wasm32-unknown-unknown` workers (solobase-cloudflare).
+//! available in `wasm32-unknown-unknown` workers (the Cloudflare Workers app).
 //! With a sync mutex `Drop` is straightforward and the tokio-rt
 //! dependency vanishes from the lock path.
 //!

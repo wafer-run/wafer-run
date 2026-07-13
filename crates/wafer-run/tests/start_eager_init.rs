@@ -116,7 +116,7 @@ async fn start_runs_init_before_start_and_bind() {
 
 /// The decomposed public boot steps (`seal` → `init_all_blocks` →
 /// `run_start_lifecycle` → `bind_all`) must be equivalent to `start()`.
-/// Consumers that drive their own boot funnel (e.g. solobase's native
+/// Consumers that drive their own boot funnel (e.g. a native application's
 /// `builder::boot`) compose these directly, so each must fire exactly once in
 /// the same order `start()` guarantees (Init before Start before bind).
 #[tokio::test]

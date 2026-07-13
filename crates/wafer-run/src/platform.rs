@@ -11,7 +11,7 @@ use std::{future::Future, pin::Pin};
 /// Re-exported from [`web_time`], which is a zero-cost re-export of
 /// [`std::time::Instant`] on native targets and a `Performance.now()`-backed
 /// monotonic clock on wasm32 (browser) targets. The runtime is compiled to
-/// wasm32 only for the in-browser host (solobase-web), where `Performance.now()`
+/// wasm32 only for the in-browser host (the browser build), where `Performance.now()`
 /// is available, so deadline checks and elapsed-time measurements compute real
 /// durations on every supported target.
 ///

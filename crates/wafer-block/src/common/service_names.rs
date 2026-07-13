@@ -1,5 +1,5 @@
 /// Service name constants for WAFER. Used as the `block` segment of the
-/// service-op string and as alias keys registered by `solobase-core`.
+/// service-op string and as alias keys registered by the consuming application.
 pub struct ServiceName;
 
 impl ServiceName {

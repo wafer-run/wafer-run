@@ -48,7 +48,7 @@ pub enum InputType {
 /// - URL validated on write: `input_type == Url`
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigVar {
-    /// Full config key (e.g., `SUPPERS_AI__AUTH__JWT_SECRET`).
+    /// Full config key (e.g., `MY_ORG__AUTH__JWT_SECRET`).
     pub key: String,
     /// Display label for the admin UI (e.g., "JWT Secret").
     #[serde(default)]

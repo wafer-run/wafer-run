@@ -37,7 +37,7 @@ impl SQLiteDatabaseService {
     }
 
     /// Open a SQLite database file at `path` (creating it if absent) and
-    /// return a configured service. Used by `solobase-native` to back the
+    /// return a configured service. Used by a native application build to back the
     /// `wafer-run/sqlite` block with an on-disk DB.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
         let conn = Connection::open(path)

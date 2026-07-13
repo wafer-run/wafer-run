@@ -190,7 +190,7 @@ impl Wafer {
     /// - [`Wafer::start`] (native), which needs every block initialized
     ///   before `bind()` because some blocks (e.g. `wafer-run/http-listener`)
     ///   read their config in Init and consume it in `bind()`.
-    /// - Cloudflare Workers' boot path (`solobase-cloudflare`), which calls
+    /// - Cloudflare Workers' boot path (the Cloudflare Workers app), which calls
     ///   [`Wafer::seal`] but not `start()`/`bind()`. Without an eager pass,
     ///   blocks that need Init-time side effects (e.g. admin block running
     ///   its own migrations) never fire until a request happens to touch
@@ -298,7 +298,7 @@ impl Wafer {
     ///
     /// Runs after init — either inside the eager
     /// [`Wafer::start_with_priority`] funnel, or called directly by a consumer
-    /// that drives its own boot sequence (e.g. solobase's native
+    /// that drives its own boot sequence (e.g. a native application's
     /// `builder::boot`) after it has sealed, seeded, and run
     /// [`Wafer::init_all_blocks`]. Each block gets its own startup context so
     /// WRAP attributes self-resource access to the correct caller. Failures

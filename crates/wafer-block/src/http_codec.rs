@@ -2,8 +2,8 @@
 //!
 //! The **single implementation** of the HTTP-to-WAFER protocol mapping. Every
 //! HTTP adapter — the native axum listener (`wafer-block-http-listener`), the
-//! `wafer-run/router` block's config tokens, and the solobase Cloudflare /
-//! browser adapters — delegates here instead of carrying its own copy of the
+//! `wafer-run/router` block's config tokens, and the consuming application's
+//! Cloudflare / browser adapters — delegates here instead of carrying its own copy of the
 //! method→action table, the request-meta layout, the response-meta
 //! classifier, or the `ErrorCode`→status map.
 //!
@@ -651,7 +651,7 @@ mod tests {
 
     /// DRIFT TABLE: the canonical codec honors ONLY the canonical response
     /// meta keys. Every legacy alias that pre-consolidation adapters
-    /// (solobase-cloudflare/browser convert.rs, solobase-core pipeline.rs)
+    /// (the application's Cloudflare/browser convert.rs, core pipeline.rs)
     /// tolerated is deliberately ignored — same key, same format,
     /// everywhere. Blocks emitting these keys must move to the canonical
     /// `resp.*` vocabulary.

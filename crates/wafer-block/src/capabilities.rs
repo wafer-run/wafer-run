@@ -824,20 +824,20 @@ mod tests {
     #[test]
     fn allows_vector_index_wildcard_and_exact() {
         let unrestricted = BlockCapabilities::unrestricted();
-        assert!(unrestricted.allows_vector_index("suppers_ai__vector__docs"));
+        assert!(unrestricted.allows_vector_index("my_org__vector__docs"));
 
         let none = BlockCapabilities::none();
-        assert!(!none.allows_vector_index("suppers_ai__vector__docs"));
+        assert!(!none.allows_vector_index("my_org__vector__docs"));
 
         let scoped = BlockCapabilities {
-            vector_indexes: ["suppers_ai__vector__docs"]
+            vector_indexes: ["my_org__vector__docs"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
             ..Default::default()
         };
-        assert!(scoped.allows_vector_index("suppers_ai__vector__docs"));
-        assert!(!scoped.allows_vector_index("suppers_ai__vector__other"));
+        assert!(scoped.allows_vector_index("my_org__vector__docs"));
+        assert!(!scoped.allows_vector_index("my_org__vector__other"));
     }
 
     #[test]

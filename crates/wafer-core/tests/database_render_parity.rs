@@ -3,7 +3,7 @@
 //! SP-B1 introduces the typed `DATABASE_UPSERT` / `DATABASE_AGGREGATE` ops and
 //! the `FilterNode` predicate tree / column-projection additions to
 //! `DATABASE_LIST` / `DATABASE_UPDATE_WHERE`. SP-B2 will migrate the ~33
-//! solobase execute/query sites onto these ops. This file proves that
+//! consuming-application execute/query sites onto these ops. This file proves that
 //! migration is a **pure re-plumbing**: for every migrated shape, feeding
 //! inputs through the real transport + handler conversion path
 //!
@@ -17,7 +17,7 @@
 //! `wafer_sql_utils` builder call a consumer writes by hand today. Both halves
 //! are produced independently — the "direct" half hand-builds the
 //! builder-input types (`Filter` / `GroupedQueryConfig` / plain data pairs)
-//! exactly as current solobase sites do; the "via-wire" half constructs the
+//! exactly as current application sites do; the "via-wire" half constructs the
 //! wire request, serialises + deserialises it through [`codec`] (the same
 //! MessagePack transport the runtime uses), and runs it through the *same*
 //! conversion the host handler calls before reaching the builder. A tautology
@@ -100,7 +100,7 @@ fn update_where_parity(backend: Backend) {
         ("attempts".to_string(), json!(3)),
     ];
 
-    // (a) DIRECT — hand-built `Filter`s, as a solobase update_where site writes today.
+    // (a) DIRECT — hand-built `Filter`s, as an application update_where site writes today.
     let filters_direct = vec![
         Filter {
             field: "id".to_string(),
@@ -418,8 +418,8 @@ fn upsert_windowed_counter_render_parity_postgres() {
 //
 // Covers, in one request, the three distinct aggregate features: a grouped
 // Count, a CaseWhenSum conditional count, and a DateBucket group — the exact
-// shape `solobase admin/pages/network.rs` builds a `GroupedQueryConfig` for by
-// hand today.
+// shape a consuming application's admin network page builds a
+// `GroupedQueryConfig` for by hand today.
 // ---------------------------------------------------------------------------
 
 fn aggregate_parity(backend: Backend) {

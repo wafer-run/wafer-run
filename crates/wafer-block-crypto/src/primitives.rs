@@ -13,9 +13,9 @@
 //! # Policy decisions
 //!
 //! These functions back the native [`Argon2JwtCryptoService`] and are the
-//! intended replacement for the per-repo copies that previously lived in
-//! solobase-core, solobase-cloudflare, and solobase-browser — each of which
-//! had drifted subtly. The unified policy:
+//! intended replacement for the per-repo copies that previously lived in the
+//! consuming application's native, Cloudflare, and browser crates — each of
+//! which had drifted subtly. The unified policy:
 //!
 //! - **HMAC argument order is `(key, data)`**, matching the textbook
 //!   HMAC(K, m) notation. (One historical copy used `(data, key)`.)
@@ -569,26 +569,26 @@ mod tests {
     // -- per-block key derivation --
 
     /// Pinned known-answer vector: HKDF-SHA256(salt=∅, ikm="test-master-secret",
-    /// info="wafer-jwt|suppers-ai/auth", 32 bytes) hex-encoded.
+    /// info="wafer-jwt|my-org/auth", 32 bytes) hex-encoded.
     ///
-    /// This is a CROSS-REPO CONTRACT — solobase-core, solobase-cloudflare,
-    /// and solobase-browser derive verification keys with the same inputs
-    /// and must produce this exact value. If this test breaks, token
-    /// verification between components breaks. Do not update the expected
+    /// This is a CROSS-REPO CONTRACT — every consuming application component
+    /// (native, Cloudflare, and browser builds) derives verification keys with
+    /// the same inputs and must produce this exact value. If this test breaks,
+    /// token verification between components breaks. Do not update the expected
     /// value to make the test pass; fix the derivation instead.
     #[test]
     fn derive_block_key_known_answer() {
         assert_eq!(
-            derive_block_key(b"test-master-secret", "suppers-ai/auth"),
-            "35d13eb8846253b6c1fa61bfe10294b3f7cb2e9fcf10c89f0035346ff696c7d1"
+            derive_block_key(b"test-master-secret", "my-org/auth"),
+            "dd87bf9e0e9b5fd74c6aab9cacf016fdf64e084731630d2a37cb813badac3757"
         );
     }
 
     #[test]
     fn derive_block_key_is_deterministic_and_block_scoped() {
-        let a1 = derive_block_key(b"master", "suppers-ai/auth");
-        let a2 = derive_block_key(b"master", "suppers-ai/auth");
-        let b = derive_block_key(b"master", "suppers-ai/admin");
+        let a1 = derive_block_key(b"master", "my-org/auth");
+        let a2 = derive_block_key(b"master", "my-org/auth");
+        let b = derive_block_key(b"master", "my-org/admin");
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
         assert_eq!(a1.len(), 64, "32-byte key hex-encodes to 64 chars");

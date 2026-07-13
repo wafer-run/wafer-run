@@ -55,7 +55,7 @@ pub use wafer_block::{
     },
     executor::{extract_path_vars, match_path, matches_pattern},
     // Canonical hash/hex helpers (from wafer_block::hash) — re-exported at the
-    // root so consumers (e.g. solobase-core) use this single implementation
+    // root so consumers (e.g. the consuming application) use this single implementation
     // instead of carrying copies. (#163)
     hex_encode,
     meta::*,

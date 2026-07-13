@@ -280,7 +280,7 @@ async fn foreign_folder_list_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = storage_fakes::RecordingStorage::new(calls.clone());
     let req = wire::storage::ListRequest {
-        folder: "suppers_ai__other_block__secrets".into(),
+        folder: "my_org__other_block__secrets".into(),
         prefix: String::new(),
         limit: 10,
         offset: 0,

@@ -57,7 +57,7 @@ impl LocalStorageService {
         fs::create_dir_all(&root)
             .map_err(|e| StorageError::Internal(format!("create storage root {root:?}: {e}")))?;
         // Canonicalize so the root is always absolute. Without this, a
-        // caller-supplied relative root (e.g. solobase's default
+        // caller-supplied relative root (e.g. an application's default
         // `data/storage`) makes `object_path(folder, key)` return a
         // relative path. `validate_path` then re-joins it onto the
         // canonicalized root, producing a doubled-prefix path like

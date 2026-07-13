@@ -1,6 +1,6 @@
 //! Auto-discovery of WASM block files and flow JSON files.
 //!
-//! These helpers are used by platform builders (e.g. Solobase) to scan
+//! These helpers are used by platform builders (e.g. a consuming application) to scan
 //! the working directory for user-defined blocks and flows at startup.
 
 use std::path::{Path, PathBuf};
