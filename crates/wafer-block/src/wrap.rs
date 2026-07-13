@@ -124,7 +124,7 @@ pub fn typed_resource_owner(
 /// 2. `__ddl__` → any attributable caller (NOT admin-only). Convention is that
 ///    blocks only DDL their own (`{org}__{block}__*`) tables; this is enforced
 ///    by code review + the WRAP-grant audit script, not by parsing SQL here.
-/// 3. `SOLOBASE_SHARED__*` → any block reads, admin-only writes
+/// 3. `WAFER_RUN_SHARED__*` → any block reads, admin-only writes
 /// 4. Own resource (`resource_owner(resource) == caller_id`) → Ok
 /// 5. Admin (`caller_id == admin_block`) → Ok
 /// 6. Grant match (grantee + resource pattern + write flag) → Ok
@@ -200,15 +200,15 @@ pub fn check_access(
             };
         }
 
-        // Rule 2: SOLOBASE_SHARED__ resources
+        // Rule 2: WAFER_RUN_SHARED__ resources
         //
         // Writes: admin only.
         // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
         // callers (None) are denied — shared config may carry secrets and
         // there is no reason an unauthenticated context should read them.
         if resource
-            .get(..crate::types::SOLOBASE_SHARED_PREFIX.len())
-            .is_some_and(|p| p.eq_ignore_ascii_case(crate::types::SOLOBASE_SHARED_PREFIX))
+            .get(..crate::types::WAFER_RUN_SHARED_PREFIX.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(crate::types::WAFER_RUN_SHARED_PREFIX))
         {
             if is_write {
                 return match caller_id {
@@ -216,7 +216,7 @@ pub fn check_access(
                     _ => Err(WaferError::new(
                         ErrorCode::PermissionDenied,
                         format!(
-                            "WRAP: only admin can write SOLOBASE_SHARED__ resources (caller: {caller_id:?})"
+                            "WRAP: only admin can write WAFER_RUN_SHARED__ resources (caller: {caller_id:?})"
                         ),
                     )),
                 };
@@ -226,7 +226,7 @@ pub fn check_access(
                 None => Err(WaferError::new(
                     ErrorCode::PermissionDenied,
                     format!(
-                        "WRAP: SOLOBASE_SHARED__ read denied for anonymous caller (resource: {resource})"
+                        "WRAP: WAFER_RUN_SHARED__ read denied for anonymous caller (resource: {resource})"
                     ),
                 )),
             };
@@ -696,8 +696,8 @@ mod tests {
         // Not enough __ segments
         assert_eq!(resource_owner("auth_users"), None);
         assert_eq!(resource_owner("simple"), None);
-        // SOLOBASE_SHARED has only one __ before the var name
-        assert_eq!(resource_owner("SOLOBASE_SHARED__APP_NAME"), None);
+        // IMPRESSPRESS_SHARED has only one __ before the var name
+        assert_eq!(resource_owner("WAFER_RUN_SHARED__APP_NAME"), None);
     }
 
     #[test]
@@ -778,7 +778,7 @@ mod tests {
         // Any *attributable* block can read shared
         assert!(check_access(
             Some("suppers-ai/auth"),
-            "SOLOBASE_SHARED__APP_NAME",
+            "WAFER_RUN_SHARED__APP_NAME",
             false,
             None,
             &grants,
@@ -790,7 +790,7 @@ mod tests {
         // should access it.
         assert!(check_access(
             None,
-            "SOLOBASE_SHARED__APP_NAME",
+            "WAFER_RUN_SHARED__APP_NAME",
             false,
             None,
             &grants,
@@ -800,7 +800,7 @@ mod tests {
         // Only admin can write shared
         assert!(check_access(
             Some("suppers-ai/auth"),
-            "SOLOBASE_SHARED__APP_NAME",
+            "WAFER_RUN_SHARED__APP_NAME",
             true,
             None,
             &grants,
@@ -809,7 +809,7 @@ mod tests {
         .is_err());
         assert!(check_access(
             Some("suppers-ai/admin"),
-            "SOLOBASE_SHARED__APP_NAME",
+            "WAFER_RUN_SHARED__APP_NAME",
             true,
             None,
             &grants,

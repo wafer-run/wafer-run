@@ -264,7 +264,7 @@ impl RegistrationCore {
         crate::runtime::validate_block_name(name)?;
 
         // Reject declared config keys under platform-reserved prefixes
-        // (e.g. SOLOBASE_SHARED__): those keys are platform-owned, not
+        // (e.g. WAFER_RUN_SHARED__): those keys are platform-owned, not
         // block-owned. Fails boot loudly rather than silently accepting a
         // key the block can never legitimately write.
         let info = block.info();

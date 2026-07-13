@@ -1,4 +1,4 @@
-//! Typed client for the unified auth block (`suppers-ai/auth`).
+//! Typed client for the unified auth block (`wafer-run/auth`).
 //!
 //! Mirrors `clients::crypto` shape. Three of the four ops forward the
 //! caller's incoming `Message` (so the auth block can read Bearer / Cookie
@@ -20,7 +20,7 @@ use wafer_block::{
 
 use super::{call_service, call_service_with_msg, decode, dual_api, svc, svc_msg};
 
-const BLOCK: &str = "suppers-ai/auth";
+const BLOCK: &str = "wafer-run/auth";
 
 /// Clone `msg`, override `kind`, and return the new message ready to forward.
 ///
@@ -168,7 +168,7 @@ mod tests {
             msg: Message,
             input: InputStream,
         ) -> OutputStream {
-            assert_eq!(block_name, "suppers-ai/auth");
+            assert_eq!(block_name, "wafer-run/auth");
             self.block.handle(self, msg, input).await
         }
         fn is_cancelled(&self) -> bool {

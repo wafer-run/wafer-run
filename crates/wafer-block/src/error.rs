@@ -54,7 +54,7 @@ pub enum RuntimeError {
     },
 
     /// A block declared a config var under a platform-reserved prefix (e.g.
-    /// `SOLOBASE_SHARED__`). Wraps the typed failure produced by
+    /// `WAFER_RUN_SHARED__`). Wraps the typed failure produced by
     /// [`crate::BlockInfo::validate`].
     #[error(transparent)]
     ReservedConfigKey(#[from] crate::types::BlockInfoError),

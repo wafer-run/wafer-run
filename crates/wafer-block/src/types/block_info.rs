@@ -1,7 +1,7 @@
 //! Block identity and admin metadata — [`BlockInfo`] and its builders.
 
 use super::{
-    config_var::{ConfigVar, SOLOBASE_SHARED_PREFIX},
+    config_var::{ConfigVar, WAFER_RUN_SHARED_PREFIX},
     endpoint::BlockEndpoint,
     grants::ResourceGrant,
     schema::CollectionSchema,
@@ -43,11 +43,11 @@ fn default_instance_mode() -> crate::InstanceMode {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BlockInfoError {
     /// A block declared a `config_keys` / `flow_config` entry whose name
-    /// starts with [`SOLOBASE_SHARED_PREFIX`]. That prefix is platform-owned
+    /// starts with [`WAFER_RUN_SHARED_PREFIX`]. That prefix is platform-owned
     /// (shared variables are seeded and write-gated centrally), so a block
     /// declaring one would create a key it cannot legitimately own.
     #[error(
-        "block '{block}' declares reserved config key '{key}': keys starting with '{SOLOBASE_SHARED_PREFIX}' are platform-owned and cannot be declared by a block"
+        "block '{block}' declares reserved config key '{key}': keys starting with '{WAFER_RUN_SHARED_PREFIX}' are platform-owned and cannot be declared by a block"
     )]
     ReservedConfigKey {
         /// Name of the block that declared the offending key.
@@ -201,7 +201,7 @@ impl BlockInfo {
     /// Validate declared config keys against platform-reserved prefixes.
     ///
     /// A block may not *declare* a `config_keys` or `flow_config` entry whose
-    /// name starts with [`SOLOBASE_SHARED_PREFIX`]. That prefix is owned by the
+    /// name starts with [`WAFER_RUN_SHARED_PREFIX`]. That prefix is owned by the
     /// platform — shared variables are seeded and write-gated centrally (see
     /// [`ConfigVar::is_deletable`] and `wafer_block::wrap::check_access`), so a
     /// block declaring one would create a key it cannot legitimately own.
@@ -211,7 +211,7 @@ impl BlockInfo {
     /// callers can match on the failure rather than parse a string.
     pub fn validate(&self) -> Result<(), BlockInfoError> {
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
-            if var.key.starts_with(SOLOBASE_SHARED_PREFIX) {
+            if var.key.starts_with(WAFER_RUN_SHARED_PREFIX) {
                 return Err(BlockInfoError::ReservedConfigKey {
                     block: self.name.clone(),
                     key: var.key.clone(),
@@ -388,7 +388,7 @@ mod block_info_tests {
 
     #[test]
     fn validate_rejects_reserved_prefix_in_config_keys() {
-        let key = format!("{SOLOBASE_SHARED_PREFIX}APP_NAME");
+        let key = format!("{WAFER_RUN_SHARED_PREFIX}APP_NAME");
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
             .config_keys(vec![ConfigVar::new(&key, "desc", "")]);
         let err = info
@@ -403,7 +403,7 @@ mod block_info_tests {
         );
         // Display still carries the operator-facing context.
         let msg = err.to_string();
-        assert!(msg.contains(SOLOBASE_SHARED_PREFIX), "message: {msg}");
+        assert!(msg.contains(WAFER_RUN_SHARED_PREFIX), "message: {msg}");
         assert!(msg.contains("org/b"), "message: {msg}");
         assert!(msg.contains(&key), "message: {msg}");
     }
@@ -411,7 +411,11 @@ mod block_info_tests {
     #[test]
     fn validate_rejects_reserved_prefix_in_flow_config() {
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").flow_config(vec![
-            ConfigVar::new(&format!("{SOLOBASE_SHARED_PREFIX}feature_flag"), "desc", ""),
+            ConfigVar::new(
+                &format!("{WAFER_RUN_SHARED_PREFIX}feature_flag"),
+                "desc",
+                "",
+            ),
         ]);
         assert!(info.validate().is_err());
     }

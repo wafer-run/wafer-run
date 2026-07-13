@@ -16,7 +16,7 @@ use wafer_core::interfaces::storage::{handler, service::StorageService};
 const ENDPOINT_ENV: &str = "WAFER_RUN__S3__ENDPOINT";
 const REGION_ENV: &str = "WAFER_RUN__S3__REGION";
 const DEFAULT_REGION: &str = "us-east-1";
-const DEFAULT_BUCKET: &str = "solobase";
+const DEFAULT_BUCKET: &str = "wafer";
 
 wafer_core::service_block! {
     /// The S3-compatible storage block.

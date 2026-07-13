@@ -12,7 +12,7 @@ use crate::interfaces::auth::{handler, service::AuthService};
 crate::service_block! {
     /// Unified auth block. Wraps any `AuthService` implementation.
     block: pub AuthBlock,
-    name: "suppers-ai/auth",
+    name: "wafer-run/auth",
     version: "0.0.1",
     interface: "auth@v1",
     description: "Identity, sessions, PATs, orgs — see auth-block-design spec",
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn block_info_embeds_service_grants() {
         let grant =
-            wafer_block::types::ResourceGrant::read("test/consumer", "suppers_ai__auth__sessions");
+            wafer_block::types::ResourceGrant::read("test/consumer", "wafer_run__auth__sessions");
         let svc = Arc::new(GrantsService {
             grants: vec![grant],
         });
@@ -154,7 +154,7 @@ mod tests {
             "grants should round-trip from service"
         );
         assert_eq!(info.grants[0].grantee, "test/consumer");
-        assert_eq!(info.grants[0].resource, "suppers_ai__auth__sessions");
+        assert_eq!(info.grants[0].resource, "wafer_run__auth__sessions");
         assert!(!info.grants[0].write);
     }
 
