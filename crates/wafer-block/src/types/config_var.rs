@@ -1,5 +1,5 @@
 //! Config variable declarations — [`ConfigVar`], [`InputType`], and the
-//! platform-reserved [`SOLOBASE_SHARED_PREFIX`].
+//! platform-reserved [`WAFER_RUN_SHARED_PREFIX`].
 
 /// Reserved prefix for cross-block shared config variables.
 ///
@@ -12,7 +12,7 @@
 ///
 /// Same literal everywhere — env vars, D1, and the config API all use this
 /// exact string with no translation.
-pub const SOLOBASE_SHARED_PREFIX: &str = "SOLOBASE_SHARED__";
+pub const WAFER_RUN_SHARED_PREFIX: &str = "WAFER_RUN_SHARED__";
 
 /// Input type for config variable UI rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,11 +44,11 @@ pub enum InputType {
 /// Validation rules are derived from naming conventions:
 /// - Sensitive (masked in API): `input_type == Password`
 /// - Can't be emptied: `input_type == Password`
-/// - Can't be deleted: key starts with `SOLOBASE_SHARED__`
+/// - Can't be deleted: key starts with `WAFER_RUN_SHARED__`
 /// - URL validated on write: `input_type == Url`
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigVar {
-    /// Full config key (e.g., `SUPPERS_AI__AUTH__JWT_SECRET`).
+    /// Full config key (e.g., `MY_ORG__AUTH__JWT_SECRET`).
     pub key: String,
     /// Display label for the admin UI (e.g., "JWT Secret").
     #[serde(default)]
@@ -150,7 +150,7 @@ impl ConfigVar {
     /// Whether this variable can be deleted by an admin.
     /// Shared system vars cannot be deleted.
     pub fn is_deletable(&self) -> bool {
-        !self.key.starts_with(SOLOBASE_SHARED_PREFIX)
+        !self.key.starts_with(WAFER_RUN_SHARED_PREFIX)
     }
 
     /// Whether this variable can be set to an empty value.

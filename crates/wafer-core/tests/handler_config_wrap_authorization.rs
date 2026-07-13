@@ -188,7 +188,7 @@ async fn get_denied_never_reaches_service_body_path() {
     let calls = new_calls();
     let svc = config_fakes::RecordingConfig::new(calls.clone());
     let req = wire::config::GetRequest {
-        key: "SOLOBASE__JWT_SECRET".into(),
+        key: "MY_ORG__JWT_SECRET".into(),
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_without_wrap_meta(ServiceOp::CONFIG_GET);
@@ -210,7 +210,7 @@ async fn get_denied_never_reaches_service_meta_fallback_path() {
     // No codec-encoded body — the handler falls back to the `key` meta
     // field. That fallback must still be gated by ctx.
     let mut msg = msg_without_wrap_meta(ServiceOp::CONFIG_GET);
-    msg.set_meta("key", "SOLOBASE__JWT_SECRET");
+    msg.set_meta("key", "MY_ORG__JWT_SECRET");
 
     let out = wafer_core::interfaces::config::handler::handle_message(&svc, &DenyCtx, &msg, &[]);
     expect_permission_denied(out).await;
@@ -227,7 +227,7 @@ async fn set_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = config_fakes::RecordingConfig::new(calls.clone());
     let req = wire::config::SetRequest {
-        key: "SOLOBASE__JWT_SECRET".into(),
+        key: "MY_ORG__JWT_SECRET".into(),
         value: "evil-value".into(),
     };
     let body = codec::encode(&req).unwrap();

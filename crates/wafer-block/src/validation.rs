@@ -24,7 +24,7 @@ pub struct ValidationReport {
 /// A single block that failed declared-key validation.
 #[derive(Debug, Clone)]
 pub struct BrokenBlock {
-    /// Name of the block (e.g. `suppers-ai/auth`) that failed validation.
+    /// Name of the block (e.g. `my-org/auth`) that failed validation.
     pub block: String,
     /// Missing required keys. Currently carries at most one entry — the
     /// underlying `ConfigSource::load_for_block` short-circuits on the

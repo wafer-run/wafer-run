@@ -342,7 +342,7 @@ fn service_record_list_to_wire(l: service::RecordList) -> wire::RecordList {
 /// Substrings of structured backend errors that are safe to surface to
 /// callers. These are operator-authored DDL outcomes (column names,
 /// table names) — never user-supplied content — so they don't leak
-/// secrets, and consumers like `solobase-core::migration_helper` need to
+/// secrets, and consumers like an application's `migration_helper` need to
 /// see them to decide whether a failure is benign (e.g. re-running an
 /// `ALTER TABLE … ADD COLUMN` after the column already exists).
 ///

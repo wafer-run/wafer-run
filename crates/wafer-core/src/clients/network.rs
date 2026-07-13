@@ -53,7 +53,7 @@ pub async fn do_request(
 /// `wafer-run/network`.
 ///
 /// This allows callers to route through an alternative block (e.g.
-/// `solobase/dispatcher`) that accepts the same `network.do` message format.
+/// `my-org/dispatcher`) that accepts the same `network.do` message format.
 #[cfg(not(feature = "wasm-component"))]
 pub async fn do_request_via(
     ctx: &dyn Context,

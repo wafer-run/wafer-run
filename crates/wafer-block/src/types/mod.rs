@@ -17,7 +17,7 @@ mod schema;
 mod skill;
 
 pub use block_info::{BlockCategory, BlockInfo, BlockInfoError, BlockRuntime};
-pub use config_var::{ConfigVar, InputType, SOLOBASE_SHARED_PREFIX};
+pub use config_var::{ConfigVar, InputType, WAFER_RUN_SHARED_PREFIX};
 pub use endpoint::{AuthLevel, BlockEndpoint, HttpMethod};
 pub use grants::{ResourceGrant, ResourceType, UnknownResourceType};
 pub use interface_spec::{ActionSpec, InterfaceSpec};

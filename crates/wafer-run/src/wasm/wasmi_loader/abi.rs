@@ -223,7 +223,7 @@ pub(super) fn error_code_to_neg_i64(code: ErrorCode) -> i64 {
 //   - A negative `len` cast blindly to `usize` sign-extends to a value near
 //     `usize::MAX`. Sizing a `vec![0u8; len as usize]` from that panics with
 //     a capacity overflow — on native that's an unwind, but on wasm32 (this
-//     runtime is itself compiled to wasm32 for solobase-web) a panic aborts
+//     runtime is itself compiled to wasm32 for the browser build) a panic aborts
 //     the whole embedding process.
 //   - Even a well-formed non-negative `len`/`ptr` can run past the end of
 //     the guest's own linear memory, or be huge enough on its own to force

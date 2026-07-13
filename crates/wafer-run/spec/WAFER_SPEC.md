@@ -505,7 +505,7 @@ In this example:
 
 ## Aliases
 
-Aliases provide indirection for block and flow names. An alias maps a short name (e.g., `db`) to a concrete block (e.g., `wafer-run/database` or `solobase/d1`), allowing blocks to be swapped without changing any flow definitions or `call_block()` calls.
+Aliases provide indirection for block and flow names. An alias maps a short name (e.g., `db`) to a concrete block (e.g., `wafer-run/database` or `my-org/d1`), allowing blocks to be swapped without changing any flow definitions or `call_block()` calls.
 
 ### Configuration
 

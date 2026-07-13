@@ -164,7 +164,7 @@ pub struct CountResponse {
 /// Request for `vector.list_indexes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListIndexesRequest {
-    /// Namespace prefix to scan (e.g. `suppers_ai__vector__`). Doubles as the
+    /// Namespace prefix to scan (e.g. `my_org__vector__`). Doubles as the
     /// WRAP authorization resource: it must parse to an owner via
     /// `resource_owner`, so partial prefixes fail closed.
     pub prefix: String,
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn list_indexes_request_round_trips() {
         let original = ListIndexesRequest {
-            prefix: "suppers_ai__vector__".into(),
+            prefix: "my_org__vector__".into(),
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListIndexesRequest = codec::decode(&encoded).expect("decode");
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn list_indexes_response_round_trips() {
         let original = ListIndexesResponse {
-            indexes: vec!["suppers_ai__vector__docs".into()],
+            indexes: vec!["my_org__vector__docs".into()],
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListIndexesResponse = codec::decode(&encoded).expect("decode");
@@ -603,7 +603,7 @@ mod tests {
             .equals
             .insert("document_id".into(), serde_json::json!("doc-1"));
         let original = ListIdsRequest {
-            index: "suppers_ai__vector__docs".into(),
+            index: "my_org__vector__docs".into(),
             filter,
         };
         let encoded = codec::encode(&original).expect("encode");

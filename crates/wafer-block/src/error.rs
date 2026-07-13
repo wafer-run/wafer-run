@@ -54,7 +54,7 @@ pub enum RuntimeError {
     },
 
     /// A block declared a config var under a platform-reserved prefix (e.g.
-    /// `SOLOBASE_SHARED__`). Wraps the typed failure produced by
+    /// `WAFER_RUN_SHARED__`). Wraps the typed failure produced by
     /// [`crate::BlockInfo::validate`].
     #[error(transparent)]
     ReservedConfigKey(#[from] crate::types::BlockInfoError),
@@ -384,8 +384,8 @@ mod tests {
 
         let err = RuntimeError::GrantsRejected(vec![
             GrantValidationError {
-                block: "suppers-ai/files".into(),
-                grant: ResourceGrant::read_write("suppers-ai/files", "*"),
+                block: "my-org/files".into(),
+                grant: ResourceGrant::read_write("my-org/files", "*"),
                 reason: "typed Storage grants may only be declared by the admin block".into(),
             },
             GrantValidationError {
@@ -399,7 +399,7 @@ mod tests {
             display.contains("2 typed grant(s) rejected"),
             "display: {display}"
         );
-        assert!(display.contains("suppers-ai/files"), "display: {display}");
+        assert!(display.contains("my-org/files"), "display: {display}");
         assert!(display.contains("example/foo"), "display: {display}");
         assert!(display.contains("typed Storage"), "display: {display}");
         assert!(display.contains("typed Network"), "display: {display}");

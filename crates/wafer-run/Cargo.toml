@@ -53,7 +53,7 @@ getrandom = { version = "0.2", optional = true }
 # `web-time` polyfills `SystemTime` / `Instant` on wasm32 (via Date.now /
 # Performance.now) and is a zero-cost re-export of `std::time` on native.
 # Needed everywhere because the wasmi host imports (clock_time_get) run in
-# both native and wasm-compiled runtimes (solobase-web embeds wasmi too).
+# both native and wasm-compiled runtimes (the browser build embeds wasmi too).
 web-time = "1"
 
 # Network (reqwest for WASM remote block downloads)

@@ -117,7 +117,7 @@ fn scaffold_go(dir: &Path, full_name: &str, block_name: &str) -> anyhow::Result<
 
 go 1.22
 
-require github.com/suppers-ai/wafer-sdk-go v0.1.0
+require github.com/wafer-run/wafer-sdk-go v0.1.0
 "#
     );
     write_file(dir, "go.mod", &go_mod)?;
@@ -129,7 +129,7 @@ package main
 import (
 	"encoding/json"
 
-	wafer "github.com/suppers-ai/wafer-sdk-go"
+	wafer "github.com/wafer-run/wafer-sdk-go"
 )
 
 // {struct_name} implements the wafer.Block interface.

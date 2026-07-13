@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Request for `config.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
-    /// Full config key (e.g. `SOLOBASE__JWT_SECRET`).
+    /// Full config key (e.g. `MY_ORG__JWT_SECRET`).
     pub key: String,
 }
 

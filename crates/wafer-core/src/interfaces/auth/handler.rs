@@ -2,7 +2,7 @@
 //!
 //! Mirrors `crypto/handler.rs` shape. Dispatches `auth.require_user`,
 //! `auth.require_token`, `auth.require_role` to the `AuthService` trait
-//! supplied by consumers (solobase-core `blocks::auth::block::register`).
+//! supplied by consumers (the consuming application's `blocks::auth::block::register`).
 //!
 //! The handler reads scope/role hints from request meta keys
 //! `http.header.x-auth-scope` and `http.header.x-auth-role` (the same

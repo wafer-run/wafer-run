@@ -1,7 +1,7 @@
 //! LlmService trait + shared data types.
 //!
-//! Mirrors the layout of `interfaces::database::service`. See solobase spec
-//! `2026-04-15-llm-service-refactor-design.md`.
+//! Mirrors the layout of `interfaces::database::service`. See the application's
+//! `2026-04-15-llm-service-refactor-design.md` design spec.
 //!
 //! The data types (`ChatRequest`, `ChatChunk`, `ModelInfo`, …) are the
 //! canonical wire types from `wafer_block::wire::llm`, re-exported here so

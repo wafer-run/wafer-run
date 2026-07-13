@@ -224,7 +224,7 @@ source = "registry+https://wafer.run"
             source: "registry+https://wafer.run".into(),
         });
         lf.insert_or_replace(LockfilePackage {
-            name: "suppers-ai/auth".into(),
+            name: "my-org/auth".into(),
             version: "1.2.0".into(),
             sha256: "a".repeat(64),
             source: "path+./local".into(),
@@ -240,7 +240,7 @@ sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 source = "registry+https://wafer.run"
 
 [[package]]
-name = "suppers-ai/auth"
+name = "my-org/auth"
 version = "1.2.0"
 sha256 = "{}"
 source = "path+./local"

@@ -583,11 +583,11 @@ fn database_op_body(op: &str) -> Vec<u8> {
 
     let encoded = match op {
         ServiceOp::DATABASE_GET => codec::encode(&wire::GetRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             id: "1".into(),
         }),
         ServiceOp::DATABASE_LIST => codec::encode(&wire::ListRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
             sort: vec![],
             limit: 10,
@@ -596,52 +596,52 @@ fn database_op_body(op: &str) -> Vec<u8> {
             columns: None,
         }),
         ServiceOp::DATABASE_CREATE => codec::encode(&wire::CreateRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             data: HashMap::new(),
         }),
         ServiceOp::DATABASE_UPDATE => codec::encode(&wire::UpdateRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             id: "1".into(),
             data: HashMap::new(),
         }),
         ServiceOp::DATABASE_UPDATE_WHERE => codec::encode(&wire::UpdateWhereRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
             data: HashMap::new(),
         }),
         ServiceOp::DATABASE_UPDATE_WHERE_COUNT => codec::encode(&wire::UpdateWhereCountRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
             data: HashMap::new(),
         }),
         ServiceOp::DATABASE_DELETE => codec::encode(&wire::DeleteRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             id: "1".into(),
         }),
         ServiceOp::DATABASE_DELETE_WHERE => codec::encode(&wire::DeleteWhereRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
         }),
         ServiceOp::DATABASE_DELETE_WHERE_COUNT => codec::encode(&wire::DeleteWhereCountRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
         }),
         ServiceOp::DATABASE_TAKE_WHERE => codec::encode(&wire::TakeWhereRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
         }),
         ServiceOp::DATABASE_COUNT => codec::encode(&wire::CountRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             filters: vec![],
         }),
         ServiceOp::DATABASE_SUM => codec::encode(&wire::SumRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             field: "amount".into(),
             filters: vec![],
         }),
         ServiceOp::DATABASE_INCREMENT_FIELD_WHERE => {
             codec::encode(&wire::IncrementFieldWhereRequest {
-                collection: "suppers_ai__auth__users".into(),
+                collection: "my_org__auth__users".into(),
                 col: "count".into(),
                 delta: 1,
                 filters: vec![],
@@ -652,21 +652,21 @@ fn database_op_body(op: &str) -> Vec<u8> {
             args: vec![],
         }),
         ServiceOp::DATABASE_EXEC_RAW => codec::encode(&wire::ExecRawRequest {
-            query: "DELETE FROM suppers_ai__auth__users".into(),
+            query: "DELETE FROM my_org__auth__users".into(),
             args: vec![],
         }),
         ServiceOp::DATABASE_DDL => codec::encode(&wire::ExecRawRequest {
-            query: "CREATE TABLE suppers_ai__auth__widgets (id TEXT)".into(),
+            query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
             args: vec![],
         }),
         ServiceOp::DATABASE_UPSERT => codec::encode(&wire::UpsertRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             data: vec![("id".into(), serde_json::json!("1"))],
             conflict_columns: vec!["id".into()],
             on_conflict: wire::OnConflict::SetColumns(vec!["id".into()]),
         }),
         ServiceOp::DATABASE_AGGREGATE => codec::encode(&wire::AggregateRequest {
-            collection: "suppers_ai__auth__users".into(),
+            collection: "my_org__auth__users".into(),
             select_columns: vec![],
             aggregates: vec![wire::AggregateColumnDef::Count {
                 alias: "cnt".into(),
@@ -827,7 +827,7 @@ async fn database_ops_all_deny_under_deny_ctx() {
 
 fn vector_op_body(op: &str) -> Vec<u8> {
     use wafer_block::wire::vector as wire;
-    let index = "suppers_ai__vector__docs".to_string();
+    let index = "my_org__vector__docs".to_string();
     let encoded = match op {
         ServiceOp::VECTOR_CREATE_INDEX => codec::encode(&wire::CreateIndexRequest {
             config: wire::VectorIndexConfig {
@@ -854,7 +854,7 @@ fn vector_op_body(op: &str) -> Vec<u8> {
         ServiceOp::VECTOR_DELETE => codec::encode(&wire::DeleteRequest { index, ids: vec![] }),
         ServiceOp::VECTOR_COUNT => codec::encode(&wire::CountRequest { index }),
         ServiceOp::VECTOR_LIST_INDEXES => codec::encode(&wire::ListIndexesRequest {
-            prefix: "suppers_ai__vector__".into(),
+            prefix: "my_org__vector__".into(),
         }),
         ServiceOp::VECTOR_DESCRIBE_INDEX => codec::encode(&wire::DescribeIndexRequest { index }),
         ServiceOp::VECTOR_LIST_IDS => codec::encode(&wire::ListIdsRequest {

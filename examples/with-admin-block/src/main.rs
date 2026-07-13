@@ -4,8 +4,8 @@
 //! The application calls `set_admin_block(...)` so the runtime accepts
 //! those typed grants. A separate feature block consumes the resource.
 //!
-//! Production reference: `solobase-core/src/builder.rs:309` calls
-//! `wafer.set_admin_block("suppers-ai/admin")` for exactly this reason
+//! Production reference: a consuming application's builder calls
+//! `wafer.set_admin_block("my-org/admin")` for exactly this reason
 //! — the admin block owns the typed Storage grant the `files` feature
 //! block needs.
 //!
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Admin block — only purpose here is to declare the typed Storage
-/// grant. In production (see solobase) the admin block also serves
+/// grant. In production (see a consuming application) the admin block also serves
 /// the admin UI; this example keeps it grant-only for clarity.
 struct AdminBlock;
 

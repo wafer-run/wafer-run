@@ -41,7 +41,7 @@ pub struct SkillTool {
 /// existing loader do not.
 ///
 /// `timeout_ms` lets the block override the host's default load timeout
-/// (currently 120s in solobase-browser's `bridge.js`). `None` keeps the
+/// (currently 120s in the browser build's `bridge.js`). `None` keeps the
 /// host default. Useful for assets whose CDN download legitimately takes
 /// longer than the default on slow links (e.g. ffmpeg-core ~31 MB).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -275,7 +275,7 @@ async fn update_where_count_with_grant_returns_matching_row_count() {
     let mut data = HashMap::new();
     data.insert("status".to_string(), serde_json::json!("archived"));
     let req = wire::UpdateWhereCountRequest {
-        collection: "suppers_ai__purchases__orders".into(),
+        collection: "my_org__purchases__orders".into(),
         filters: vec![eq_filter("status", "active")],
         data,
     };
@@ -293,7 +293,7 @@ async fn update_where_count_zero_when_no_rows_match() {
     let mut data = HashMap::new();
     data.insert("status".to_string(), serde_json::json!("archived"));
     let req = wire::UpdateWhereCountRequest {
-        collection: "suppers_ai__purchases__orders".into(),
+        collection: "my_org__purchases__orders".into(),
         filters: vec![eq_filter("status", "pending")],
         data,
     };
@@ -316,7 +316,7 @@ async fn update_where_count_zero_when_no_rows_match() {
 #[tokio::test]
 async fn update_where_count_without_grant_returns_permission_denied() {
     let req = wire::UpdateWhereCountRequest {
-        collection: "suppers_ai__purchases__orders".into(),
+        collection: "my_org__purchases__orders".into(),
         filters: vec![eq_filter("status", "active")],
         data: HashMap::new(),
     };
@@ -326,7 +326,7 @@ async fn update_where_count_without_grant_returns_permission_denied() {
         .expect("expected PERMISSION_DENIED");
     assert_eq!(err.code, ErrorCode::PermissionDenied, "{}", err.message);
     assert!(
-        err.message.contains("suppers_ai__purchases__orders"),
+        err.message.contains("my_org__purchases__orders"),
         "error should name the denied collection; got: {}",
         err.message
     );

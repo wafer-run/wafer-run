@@ -1,7 +1,7 @@
 //! Per-block lazy config loading.
 //!
-//! Implementations live with their consumers (D1 in solobase-cloudflare,
-//! env in solobase-core, static here for tests).
+//! Implementations live with their consumers (D1 in the Cloudflare Workers app,
+//! env in the native app, static here for tests).
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
@@ -75,8 +75,8 @@ pub enum ConfigError {
 ///
 /// Implementations:
 /// - `StaticConfigSource` — in-memory `HashMap` for tests (this module).
-/// - `EnvConfigSource` — reads `std::env::var` (solobase-core, PR 2).
-/// - `D1ConfigSource` — reads Cloudflare D1 (solobase-cloudflare, PR 2).
+/// - `EnvConfigSource` — reads `std::env::var` (the native app, PR 2).
+/// - `D1ConfigSource` — reads Cloudflare D1 (the Cloudflare Workers app, PR 2).
 #[wafer_async_trait]
 pub trait ConfigSource: MaybeSend + MaybeSync + 'static {
     /// Load the values for `block`'s declared env-var config keys.

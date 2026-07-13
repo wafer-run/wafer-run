@@ -25,7 +25,7 @@ pub struct SqliteVecService {
 
 impl SqliteVecService {
     /// Wrap an existing `rusqlite::Connection` that already has the
-    /// `sqlite-vec` extension loaded. Used by `solobase-core` to bind a
+    /// `sqlite-vec` extension loaded. Used by the consuming application to bind a
     /// shared on-disk DB to the vector service.
     pub fn new(db: Connection) -> Self {
         Self { db: Mutex::new(db) }

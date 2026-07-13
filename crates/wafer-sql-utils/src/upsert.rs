@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn windowed_counter_upsert_uses_parameterized_columns() {
         let stmt = build_windowed_counter_upsert(
-            "suppers_ai__rl__buckets",
+            "my_org__rl__buckets",
             "key",
             "row-1",
             "user:1:login",
@@ -438,7 +438,7 @@ mod tests {
         assert!(stmt.sql.contains("ON CONFLICT"), "{}", stmt.sql);
         assert!(stmt.sql.contains("\"count\""), "{}", stmt.sql);
         assert!(stmt.sql.contains("\"window_start\""), "{}", stmt.sql);
-        assert_eq!(stmt.collection, "suppers_ai__rl__buckets");
+        assert_eq!(stmt.collection, "my_org__rl__buckets");
     }
 
     // Regression (semantic-drift guard): `created_fields` are INSERT-only —

@@ -71,7 +71,7 @@ impl fmt::Display for AssetLoadError {
 ///
 /// On native targets the future is `Send` (matches the rest of the runtime).
 /// On wasm32 the future is `!Send` so impls can use single-threaded
-/// browser primitives like `JsFuture` (the SW host in solobase-web does
+/// browser primitives like `JsFuture` (the SW host in the browser build does
 /// this). The supertrait bound uses `wafer_block::compat::{MaybeSend,
 /// MaybeSync}`, matching the pattern already applied to `Block`.
 #[wafer_async_trait]

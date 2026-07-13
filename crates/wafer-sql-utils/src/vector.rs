@@ -420,12 +420,12 @@ mod tests {
 
     #[test]
     fn list_meta_tables_pattern_treats_prefix_literally() {
-        let (sql, pattern) = build_list_meta_tables("suppers_ai__vector__");
+        let (sql, pattern) = build_list_meta_tables("my_org__vector__");
         assert_eq!(
             sql,
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ESCAPE '\\' ORDER BY name"
         );
-        assert_eq!(pattern, "suppers\\_ai\\_\\_vector\\_\\_%\\_meta");
+        assert_eq!(pattern, "my\\_org\\_\\_vector\\_\\_%\\_meta");
     }
 
     #[test]

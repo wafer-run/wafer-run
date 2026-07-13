@@ -2,7 +2,7 @@
 //!
 //! Vector index ops route to the `wafer-run/vector` block. The embedding
 //! op (`embedding.embed`) routes to a caller-provided block name — any
-//! block implementing the embedding service (e.g. `suppers-ai/fastembed`).
+//! block implementing the embedding service (e.g. `my-org/fastembed`).
 //! All ops are buffered single-frame request/response. Index ops that
 //! mutate state (`create_index`, `delete_index`, `upsert`, `delete`)
 //! return an empty acknowledgement.
@@ -56,7 +56,7 @@ pub fn count(request: &CountRequest) -> Result<CountResponse, WaferError> {
 /// Call an embedding block to embed the given texts.
 ///
 /// `embedding_block` is the name of any block implementing the embedding
-/// service (e.g. `suppers-ai/fastembed`). The op itself is
+/// service (e.g. `my-org/fastembed`). The op itself is
 /// [`ServiceOp::EMBEDDING_EMBED`]; the response carries the model name,
 /// dimensionality, and one f32 vector per input text.
 pub fn embed(embedding_block: &str, request: &EmbedRequest) -> Result<EmbedResponse, WaferError> {

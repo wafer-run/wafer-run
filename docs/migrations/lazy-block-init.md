@@ -1,7 +1,7 @@
 # Migrating to lazy block init
 
 This release switches `wafer-run` from eager `lifecycle(Init)` at boot to
-lazy per-block init on first dispatch. Embedders (solobase, gizza-ai, etc.)
+lazy per-block init on first dispatch. Embedders (consuming applications)
 need to update their construction path.
 
 ## Before
@@ -12,12 +12,12 @@ use wafer_run::Wafer;
 
 // Pre-load all block configs into a single HashMap.
 let mut config = HashMap::new();
-config.insert("SUPPERS_AI__AUTH__JWT_SECRET".to_string(), secret);
+config.insert("MY_ORG__AUTH__JWT_SECRET".to_string(), secret);
 // ... many more keys ...
 
 let mut wafer = Wafer::new()?;  // old signature: no args
-wafer.register_block("suppers-ai/auth", Arc::new(AuthBlock::new()))?;
-wafer.add_block_config("suppers-ai/auth", auth_json);
+wafer.register_block("my-org/auth", Arc::new(AuthBlock::new()))?;
+wafer.add_block_config("my-org/auth", auth_json);
 // ...
 wafer.start_without_bind().await?;
 // Init was dispatched eagerly to every block; if any failed, this errored.
@@ -36,11 +36,11 @@ let cfg_source: Arc<dyn wafer_run::ConfigSource> =
 
 // 2. Construct the runtime with the source.
 let mut wafer = Wafer::new(cfg_source)?;
-wafer.register_block("suppers-ai/auth", Arc::new(AuthBlock::new()))?;
+wafer.register_block("my-org/auth", Arc::new(AuthBlock::new()))?;
 // add_block_config still works for composite/uses config, but it
 // no longer feeds the block's lifecycle(Init) payload — init config
 // comes from the ConfigSource on first dispatch.
-wafer.add_block_config("suppers-ai/auth", auth_composite_json);
+wafer.add_block_config("my-org/auth", auth_composite_json);
 
 // 3. Finalize: composite/uses expansion + capability resolution
 //    + snapshot finalization. Replaces start_without_bind() and resolve().
@@ -54,7 +54,7 @@ if !report.broken.is_empty() {
 
 // 5. First dispatch triggers Init on the target block lazily.
 let out = wafer
-    .run_block("suppers-ai/auth", msg, input)
+    .run_block("my-org/auth", msg, input)
     .await;
 // Init errors surface as OutputStream::error events on first dispatch.
 ```

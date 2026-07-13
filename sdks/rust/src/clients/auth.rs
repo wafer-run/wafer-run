@@ -1,6 +1,6 @@
 //! Typed client for the auth service.
 //!
-//! The auth block is owned by solobase (`suppers-ai/auth`) rather than
+//! The auth block is a runtime-provided service (`wafer-run/auth`) rather than
 //! wafer-run.
 //!
 //! The three `require_*` ops carry their parameters in `Message::meta`
@@ -15,7 +15,7 @@ use wafer_block::{
 
 use super::common::{call, call_no_body};
 
-const BLOCK: &str = "suppers-ai/auth";
+const BLOCK: &str = "wafer-run/auth";
 
 const SCOPE_META_KEY: &str = "http.header.x-auth-scope";
 const ROLE_META_KEY: &str = "http.header.x-auth-role";

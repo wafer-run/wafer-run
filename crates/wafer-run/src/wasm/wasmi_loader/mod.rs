@@ -350,7 +350,7 @@ impl WasmiBlock {
     }
 
     /// Replace the asset loader used by `__wafer_host_load_asset`. Called by
-    /// hosts (e.g. solobase-web) during startup to inject a real loader that
+    /// hosts (e.g. the browser build) during startup to inject a real loader that
     /// fetches CDN assets, verifies sha256, and returns readiness.
     pub fn set_asset_loader(&self, loader: Arc<dyn crate::asset_loader::LoadAssetCallback>) {
         *self.asset_loader.write() = loader;

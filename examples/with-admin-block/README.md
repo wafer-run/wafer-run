@@ -7,10 +7,9 @@ Demonstrates the production pattern for typed-resource grants:
 3. The runtime accepts typed grants declared on that block.
 4. A separate **feature block** consumes the resource at runtime.
 
-This is the pattern solobase uses at
-[`solobase-core/src/builder.rs:309`](../../../solobase/crates/solobase-core/src/builder.rs)
-— the admin block `suppers-ai/admin` owns the typed Storage grant
-that the `suppers-ai/files` feature block needs.
+This is the pattern a consuming application uses in its runtime builder
+— the admin block `my-org/admin` owns the typed Storage grant
+that the `my-org/files` feature block needs.
 
 ## Why `set_admin_block` is load-bearing
 

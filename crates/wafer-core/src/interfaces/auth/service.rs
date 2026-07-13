@@ -1,4 +1,4 @@
-//! AuthService cross-block contract — implemented by suppers-ai/auth.
+//! AuthService cross-block contract — implemented by my-org/auth.
 //!
 //! See docs/superpowers/specs/2026-04-21-auth-block-design.md §4.
 
@@ -89,7 +89,7 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// WRAP resource grants this auth block declares for other blocks.
     ///
     /// Default empty; concrete services override to declare grants for
-    /// consumer blocks (e.g. `suppers-ai/auth-ui`, `admin`, `userportal`).
+    /// consumer blocks (e.g. `my-org/auth-ui`, `admin`, `userportal`).
     /// The framework `AuthBlock::info()` embeds the result of this method
     /// into `BlockInfo::grants` so the runtime registers the grants at
     /// startup.

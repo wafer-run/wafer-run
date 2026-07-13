@@ -41,8 +41,8 @@ pub struct RuntimeContext {
     /// Embedder-supplied env-style configuration snapshot, shared `Arc` with
     /// the [`Wafer`] that produced this context (see
     /// [`Wafer::set_config_snapshot`]). Layered under [`Self::config`] —
-    /// override wins. Empty by default; populated by consumers such as
-    /// `solobase-cloudflare` and `solobase-native` once they have loaded
+    /// override wins. Empty by default; populated by consumers such as the
+    /// Cloudflare Workers and native application builds once they have loaded
     /// env vars / D1 variables at boot.
     pub(crate) config_snapshot: Arc<HashMap<String, String>>,
     /// Shared cancellation flag — set by the runtime when the flow is aborted.
@@ -60,7 +60,7 @@ pub struct RuntimeContext {
     pub snapshot: Arc<crate::snapshot::StartupSnapshot>,
     /// Warn-once tracking for unknown interfaces. Shared Arc with the Wafer.
     pub warned_unknown_interfaces: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
-    /// Alias mappings (e.g. `"@db"` → `"solobase/sqlite"`).
+    /// Alias mappings (e.g. `"@db"` → `"my-org/sqlite"`).
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
     /// `None` means unrestricted. `Some(list)` enforces the allowlist.
@@ -778,9 +778,9 @@ mod tests {
         // Admin caller (== wrap_admin_block) is allowed for raw SQL even
         // with no explicit grant.
         let mut w = test_wafer();
-        w.set_admin_block("suppers-ai/admin");
+        w.set_admin_block("my-org/admin");
         let mut ctx = test_ctx(&w);
-        ctx.caller_id = Some("suppers-ai/admin".to_string());
+        ctx.caller_id = Some("my-org/admin".to_string());
         assert!(ctx
             .check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
             .is_ok());
@@ -789,22 +789,22 @@ mod tests {
         // is allowed for its own collection.
         let mut w2 = test_wafer();
         w2.register_block(
-            "suppers-ai/auth",
+            "my-org/auth",
             Arc::new(UnrestrictedTestBlock {
-                name: "suppers-ai/auth",
+                name: "my-org/auth",
             }),
         )
         .expect("register native block");
         w2.rebuild_all_blocks();
         let mut ctx2 = test_ctx(&w2);
-        ctx2.caller_id = Some("suppers-ai/auth".to_string());
+        ctx2.caller_id = Some("my-org/auth".to_string());
         assert!(ctx2
-            .check_resource_access("suppers_ai__auth__widgets", ResourceType::Db, false)
+            .check_resource_access("my_org__auth__widgets", ResourceType::Db, false)
             .is_ok());
     }
 
     /// Task 8 regression: DDL/migration at `Init`. A domain block (e.g.
-    /// `suppers-ai/auth`) running its own `CREATE TABLE` migration during
+    /// `my-org/auth`) running its own `CREATE TABLE` migration during
     /// `lifecycle(Init)` calls the database block, which authorizes the
     /// migrating block against `DDL_RESOURCE`. Per `wrap.rs` Rule 1a, DDL
     /// does not require an explicit `ResourceGrant` — only an *attributable*
@@ -815,15 +815,15 @@ mod tests {
     fn cra_allows_attributable_caller_for_ddl() {
         let mut w = test_wafer();
         w.register_block(
-            "suppers-ai/auth",
+            "my-org/auth",
             Arc::new(UnrestrictedTestBlock {
-                name: "suppers-ai/auth",
+                name: "my-org/auth",
             }),
         )
         .expect("register native block");
         w.rebuild_all_blocks();
         let mut ctx = test_ctx(&w);
-        ctx.caller_id = Some("suppers-ai/auth".to_string());
+        ctx.caller_id = Some("my-org/auth".to_string());
 
         assert!(
             ctx.check_resource_access(wafer_block::wrap::DDL_RESOURCE, ResourceType::Db, true)
@@ -865,7 +865,7 @@ mod tests {
             ErrorCode::PermissionDenied
         );
         assert_eq!(
-            ctx.check_resource_access("suppers_ai__auth__widgets", ResourceType::Db, false)
+            ctx.check_resource_access("my_org__auth__widgets", ResourceType::Db, false)
                 .unwrap_err()
                 .code,
             ErrorCode::PermissionDenied,

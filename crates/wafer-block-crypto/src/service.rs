@@ -117,7 +117,7 @@ mod tests {
     /// always stamps `exp`, so an exp-less token was not minted by this
     /// service and must be rejected rather than treated as never-expiring.
     /// (This pins the resolution of the historical exp-optional vs
-    /// exp-required drift between the runtime and solobase copies.)
+    /// exp-required drift between the runtime and consuming-application copies.)
     #[test]
     fn verify_rejects_token_without_exp() {
         use crate::primitives::{b64url_encode, hmac_sha256};
@@ -143,12 +143,8 @@ mod tests {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token_a = svc
-            .sign_for("suppers-ai/auth", test_claims(), expiry)
-            .unwrap();
-        let token_b = svc
-            .sign_for("suppers-ai/admin", test_claims(), expiry)
-            .unwrap();
+        let token_a = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
+        let token_b = svc.sign_for("my-org/admin", test_claims(), expiry).unwrap();
 
         // Tokens signed with different derived keys must differ (the signature
         // portion will be different even though the payload is the same).
@@ -160,10 +156,8 @@ mod tests {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token = svc
-            .sign_for("suppers-ai/auth", test_claims(), expiry)
-            .unwrap();
-        let claims = svc.verify_for("suppers-ai/auth", &token).unwrap();
+        let token = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
+        let claims = svc.verify_for("my-org/auth", &token).unwrap();
         assert_eq!(claims.get("sub").unwrap(), &serde_json::json!("user-1"));
     }
 
@@ -172,10 +166,8 @@ mod tests {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token = svc
-            .sign_for("suppers-ai/auth", test_claims(), expiry)
-            .unwrap();
-        let result = svc.verify_for("suppers-ai/admin", &token);
+        let token = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
+        let result = svc.verify_for("my-org/admin", &token);
         assert!(
             result.is_err(),
             "token signed for auth must not verify under admin"
@@ -188,9 +180,7 @@ mod tests {
         let expiry = Duration::from_secs(3600);
 
         let token_plain = svc.sign(test_claims(), expiry).unwrap();
-        let token_block = svc
-            .sign_for("suppers-ai/auth", test_claims(), expiry)
-            .unwrap();
+        let token_block = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
 
         assert_ne!(token_plain, token_block);
     }

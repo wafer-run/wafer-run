@@ -14,8 +14,8 @@
 //! ## Why it doesn't happen (verified against the real topology)
 //!
 //! Resource-access handlers (database/storage/config/network/crypto) are
-//! never the *direct* top-level dispatch target in production. Solobase's
-//! real chain (`wafer-run/http-listener` → flow `site-main` →
+//! never the *direct* top-level dispatch target in production. The consuming
+//! application's real chain (`wafer-run/http-listener` → flow `site-main` →
 //! `wafer-run/router` → domain block → `wafer-run/{sqlite,s3,...}`) always
 //! puts at least one attributable hop between the top-level frame and any
 //! resource-owning block, because:
@@ -30,8 +30,8 @@
 //! - `wafer-run/router` (`wafer-block-router`) only ever forwards via
 //!   `ctx.call_block()` (`lib.rs:192`) — it never calls
 //!   `check_resource_access` on its own `None`-caller_id frame.
-//! - Solobase's HTTP listener is configured with `"flow": "site-main"`
-//!   (`solobase-native/src/serve.rs`), i.e. `DispatchTarget::Flow`, not
+//! - The application's HTTP listener is configured with `"flow": "site-main"`
+//!   (the native app's `src/serve.rs`), i.e. `DispatchTarget::Flow`, not
 //!   `DispatchTarget::Block` — so production never dispatches
 //!   `wafer-run/sqlite`/`postgres`/`s3`/crypto/config/network directly as
 //!   the top-level target either.
@@ -63,7 +63,7 @@ use wafer_block::{
 use wafer_block_router as _;
 use wafer_run::{Context, StaticConfigSource, Wafer};
 
-/// Stands in for a domain block like `suppers-ai/auth`: invoked by the
+/// Stands in for a domain block like `my-org/auth`: invoked by the
 /// router, forwards to the resource-owning block below it via its own
 /// `ctx.call_block()` — exactly like a real domain block calling
 /// `wafer-run/sqlite`.

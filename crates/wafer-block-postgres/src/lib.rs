@@ -7,7 +7,7 @@
 
 /// PostgreSQL implementation of `wafer_core::interfaces::database::service::DatabaseService`.
 ///
-/// Exposed publicly so native consumers (e.g. `solobase-native`) can construct
+/// Exposed publicly so native consumers (e.g. a native application build) can construct
 /// the service directly from a connection URL when running outside the
 /// block lifecycle.
 pub mod service;

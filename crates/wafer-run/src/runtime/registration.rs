@@ -264,14 +264,14 @@ impl RegistrationCore {
         crate::runtime::validate_block_name(name)?;
 
         // Reject declared config keys under platform-reserved prefixes
-        // (e.g. SOLOBASE_SHARED__): those keys are platform-owned, not
+        // (e.g. WAFER_RUN_SHARED__): those keys are platform-owned, not
         // block-owned. Fails boot loudly rather than silently accepting a
         // key the block can never legitimately write.
         let info = block.info();
         info.validate().map_err(RuntimeError::ReservedConfigKey)?;
 
         // Validate that all config_keys use the block's own prefix.
-        // Block "suppers-ai/auth" may only declare keys starting with "SUPPERS_AI__AUTH__".
+        // Block "my-org/auth" may only declare keys starting with "MY_ORG__AUTH__".
         if !info.config_keys.is_empty() {
             let expected_prefix = crate::runtime::block_name_to_var_prefix(name);
             for var in &info.config_keys {

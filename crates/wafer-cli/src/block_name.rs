@@ -96,8 +96,8 @@ mod tests {
     #[test]
     fn parse_org_block_accepts_underscore_and_hyphen() {
         assert_eq!(
-            parse_org_block("suppers_ai/my-block").unwrap(),
-            ("suppers_ai".into(), "my-block".into())
+            parse_org_block("my_org/my-block").unwrap(),
+            ("my_org".into(), "my-block".into())
         );
     }
 
