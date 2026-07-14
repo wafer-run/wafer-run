@@ -22,7 +22,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -51,18 +51,19 @@ pub enum CacheError {
     InvalidSegment { field: &'static str, value: String },
 }
 
-/// Reject anything that isn't exactly one `Component::Normal` matching
-/// `value` verbatim. This rejects `..`, `.`, absolute paths, empty strings,
-/// and any embedded separator (including a trailing `/`, which `Path`
-/// normalizes away — the post-match string-equality check catches that).
+/// Reject anything that isn't a single safe path segment (no `..`, `.`,
+/// absolute path, empty string, or embedded separator). Delegates to
+/// [`wafer_block::lockfile::is_valid_path_segment`] — the same check the
+/// runtime lockfile loader applies (SEC-05) — so the installer and loader
+/// cannot drift.
 fn validate_segment(field: &'static str, value: &str) -> Result<(), CacheError> {
-    let mut components = Path::new(value).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(seg)), None) if seg.to_str() == Some(value) => Ok(()),
-        _ => Err(CacheError::InvalidSegment {
+    if wafer_block::lockfile::is_valid_path_segment(value) {
+        Ok(())
+    } else {
+        Err(CacheError::InvalidSegment {
             field,
             value: value.to_string(),
-        }),
+        })
     }
 }
 

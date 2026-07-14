@@ -180,7 +180,12 @@ pub(crate) fn split_name(pkg: &LockfilePackage) -> Result<(String, String), Lock
             path: PathBuf::new(),
             reason: format!("invalid package name '{}': expected 'org/block'", pkg.name),
         })?;
-    if org.is_empty() || block.is_empty() || block.contains('/') {
+    // SEC-05: reject path-traversal in the org/block coordinates — a value
+    // like `..` or an absolute component would escape / replace the cache root
+    // once joined. Shared with the CLI installer via wafer-block.
+    if !wafer_block::lockfile::is_valid_path_segment(org)
+        || !wafer_block::lockfile::is_valid_path_segment(block)
+    {
         return Err(LockLoaderError::CacheMiss {
             name: pkg.name.clone(),
             version: pkg.version.clone(),
@@ -243,6 +248,17 @@ pub(crate) fn validate_cache(
     pkg: &LockfilePackage,
 ) -> Result<PathBuf, LockLoaderError> {
     let (org, block) = split_name(pkg)?;
+    // SEC-05: the version is joined onto the cache root too, so it must be a
+    // safe single component (registries echo it back — `version = "../../.."`
+    // would escape the cache).
+    if !wafer_block::lockfile::is_valid_path_segment(&pkg.version) {
+        return Err(LockLoaderError::CacheMiss {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            path: PathBuf::new(),
+            reason: format!("invalid version segment '{}'", pkg.version),
+        });
+    }
     let dir = cache_root.join(&org).join(&block).join(&pkg.version);
     if !dir.is_dir() {
         return Err(LockLoaderError::CacheMiss {
@@ -444,6 +460,33 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join(format!("{name}.wasm")), MINIMAL_WASM).unwrap();
+    }
+
+    // SEC-05: a lockfile whose coordinates contain path-traversal must be
+    // rejected before those values are joined onto the cache root.
+    #[test]
+    fn split_name_rejects_traversal_segments() {
+        assert!(
+            split_name(&mk_pkg("../evil", "0.1.0", "registry+https://wafer.run")).is_err(),
+            "org '..' must be rejected"
+        );
+        assert!(
+            split_name(&mk_pkg("acme/..", "0.1.0", "registry+https://wafer.run")).is_err(),
+            "block '..' must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_cache_rejects_traversal_version() {
+        let tmp = tempdir().unwrap();
+        let pkg = mk_pkg("acme/widget", "../../../etc", "registry+https://wafer.run");
+        match validate_cache(tmp.path(), &pkg) {
+            Err(LockLoaderError::CacheMiss { reason, .. }) => assert!(
+                reason.contains("invalid version segment"),
+                "version must be rejected at validation, not by an incidental missing dir; got: {reason}"
+            ),
+            other => panic!("expected version-segment rejection, got {other:?}"),
+        }
     }
 
     #[test]

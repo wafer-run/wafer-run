@@ -91,9 +91,37 @@ impl Default for Lockfile {
     }
 }
 
+/// Whether `s` is a safe single path component — exactly one
+/// `std::path::Component::Normal` equal to `s`: no `.`/`..`, no path
+/// separators, not absolute, not empty.
+///
+/// Shared by the CLI installer and the runtime lockfile loader (SEC-05) so
+/// both reject path-traversal in package coordinates (`org`, `block`,
+/// `version`) identically — a value like `..`, `../evil`, `/etc`, or
+/// `a/b` must never be joined onto the cache root, where `..` could escape it
+/// and an absolute component could replace the whole path.
+pub fn is_valid_path_segment(s: &str) -> bool {
+    use std::path::{Component, Path};
+    let mut components = Path::new(s).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(seg)), None) if seg.to_str() == Some(s)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_path_segment_accepts_normal_rejects_traversal() {
+        for ok in ["widget", "acme", "0.1.0", "my-block_2"] {
+            assert!(is_valid_path_segment(ok), "{ok} should be valid");
+        }
+        for bad in ["", ".", "..", "../evil", "a/b", "/etc", "./x", "../../.."] {
+            assert!(!is_valid_path_segment(bad), "{bad:?} should be rejected");
+        }
+    }
 
     fn pkg(name: &str, version: &str) -> LockfilePackage {
         LockfilePackage {
