@@ -40,14 +40,38 @@ pub fn save(cf: &CredentialsFile) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let s = toml::to_string_pretty(cf)?;
-    fs::write(&p, s)?;
+
+    // SEC-11: write the token file atomically and 0600-from-creation. The old
+    // path — `fs::write` then `set_permissions(0600)` — left a window in which
+    // a freshly created file inherited a permissive umask (world-readable
+    // token), and the in-place truncate was not crash-atomic. Instead: create a
+    // temp sibling with mode 0600, write + fsync it, then rename over the
+    // target. The token is never visible under weak permissions, and a reader
+    // sees either the old file or the new one, never a partial write.
+    let tmp = p.with_extension("toml.tmp");
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&p)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&p, perms)?;
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        // Remove any stale temp from a previous crashed write before create_new.
+        let _ = fs::remove_file(&tmp);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(s.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("sync {}", tmp.display()))?;
     }
+    #[cfg(not(unix))]
+    {
+        fs::write(&tmp, &s).with_context(|| format!("write {}", tmp.display()))?;
+    }
+
+    fs::rename(&tmp, &p).with_context(|| format!("rename {} -> {}", tmp.display(), p.display()))?;
     Ok(())
 }
 
@@ -123,6 +147,54 @@ mod tests {
             let p = path().unwrap();
             let m = std::fs::metadata(&p).unwrap();
             assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    // SEC-11: saving over an existing token file is atomic (temp sibling +
+    // rename) and leaves no temp file behind; the result stays 0600.
+    #[test]
+    fn save_overwrites_atomically_and_leaves_no_tmp() {
+        let _guard = env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        let mut cf = CredentialsFile::default();
+        upsert(
+            &mut cf,
+            None,
+            Entry {
+                registry: "https://wafer.run".into(),
+                token: "first".into(),
+            },
+        );
+        save(&cf).unwrap();
+
+        upsert(
+            &mut cf,
+            None,
+            Entry {
+                registry: "https://wafer.run".into(),
+                token: "second".into(),
+            },
+        );
+        save(&cf).unwrap();
+
+        assert_eq!(load().unwrap().default.as_ref().unwrap().token, "second");
+
+        let p = path().unwrap();
+        assert!(
+            !p.with_extension("toml.tmp").exists(),
+            "temp file must be renamed away, not left behind"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
