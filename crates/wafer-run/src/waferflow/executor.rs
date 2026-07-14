@@ -164,10 +164,31 @@ pub async fn execute(
         if let Some(next_entries) = &step.next {
             let mut jumped = false;
             for entry in next_entries {
-                let should_take = entry
-                    .when
-                    .as_ref()
-                    .is_none_or(|condition| state.acc.eval_condition(condition).unwrap_or(false));
+                let should_take = match &entry.when {
+                    None => true,
+                    Some(condition) => match state.acc.eval_condition(condition) {
+                        Ok(taken) => taken,
+                        // COR-03: a condition that fails to evaluate at runtime
+                        // (a missing/undefined reference or a type error) is an
+                        // authoring or data error — surface it as a typed flow
+                        // error instead of silently swallowing it to `false`,
+                        // which would route to a different branch and make the
+                        // mistake look like a valid business decision. (An
+                        // explicit JSON `null` still evaluates to `false` by
+                        // design in the expression layer; only genuine
+                        // evaluation errors reach here.)
+                        Err(e) => {
+                            return OutputStream::error(WaferError::new(
+                                ErrorCode::InvalidArgument,
+                                format!(
+                                    "flow '{}' step '{}': condition '{condition}' failed to \
+                                     evaluate: {e}",
+                                    flow.id, step.id
+                                ),
+                            ));
+                        }
+                    },
+                };
                 if should_take {
                     if let Some(target_step) = &entry.step {
                         match steps.iter().position(|s| s.id == *target_step) {

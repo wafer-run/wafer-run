@@ -1571,6 +1571,44 @@ async fn test_waferflow_conditional_routing() {
     assert_eq!(output, serde_json::json!({ "result": "non-positive" }));
 }
 
+// COR-03: a next-condition that fails to evaluate at runtime (here, a
+// reference to a field that does not exist in the accumulator) must surface as
+// a typed flow error — NOT be silently swallowed to `false` and routed down
+// the fallback branch, which would hide the data/authoring mistake.
+#[tokio::test]
+async fn flow_condition_eval_error_surfaces_as_typed_error() {
+    let mut w = empty_wafer();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
+
+    let flow_json = r#"{
+        "id": "cond-err",
+        "name": "Cond Err",
+        "version": "0.1.0",
+        "steps": [
+            {
+                "id": "a",
+                "block": "test/echo",
+                "next": [
+                    { "when": "$.a.nonexistent.deep == true", "step": "b" },
+                    { "step": "b" }
+                ]
+            },
+            { "id": "b", "block": "test/echo" }
+        ]
+    }"#;
+    w.add_flow_json(flow_json).expect("add flow json");
+    w.seal().await.expect("seal");
+
+    match run_flow(&w, "cond-err", Message::new("pipeline"), b"{}".to_vec()).await {
+        TestResult::Error(e) => assert_eq!(
+            e.code,
+            ErrorCode::InvalidArgument,
+            "a failed condition evaluation must surface as a typed error"
+        ),
+        other => panic!("expected InvalidArgument from failed condition eval, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_waferflow_validation_errors() {
     let mut w = empty_wafer();
