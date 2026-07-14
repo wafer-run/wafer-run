@@ -33,7 +33,18 @@ pub extern "C" fn __wafer_info() -> i64 {
         "0.0.0",
         "handler@v1",
         "E2E dispatch test guest — exercises wafer-sdk typed network client",
-    );
+    )
+    // SEC-02: declare the network service block this guest calls and the
+    // network capability its requests exercise (checked against the
+    // caller's caps in `check_resource_access`).
+    .capabilities(wafer_sdk::BlockCapabilities {
+        callable_blocks: ["wafer-run/network"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        network: true,
+        ..wafer_sdk::BlockCapabilities::none()
+    });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;

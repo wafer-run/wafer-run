@@ -30,7 +30,17 @@ pub extern "C" fn __wafer_info() -> i64 {
         "0.0.0",
         "handler@v1",
         "E2E fixture — exercises wafer-core's wasm-component typed config client",
-    );
+    )
+    // SEC-02: declare the config service block this guest calls and the
+    // config capability its reads exercise.
+    .capabilities(wafer_sdk::BlockCapabilities {
+        callable_blocks: ["wafer-run/config"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        config: true,
+        ..wafer_sdk::BlockCapabilities::none()
+    });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;

@@ -75,7 +75,19 @@ pub extern "C" fn __wafer_info() -> i64 {
         "0.0.0",
         "handler@v1",
         "Task 8 e2e fixture — an ordinary SDK guest with no WRAP grants",
-    );
+    )
+    // SEC-02: an "honest but unprivileged" guest still declares what it
+    // legitimately uses: it calls the database block and operates on its
+    // OWN collection. Foreign-namespace / raw-SQL attempts remain denied by
+    // WRAP attribution (step 1 of check_resource_access), not by a missing
+    // capability — so the PermissionDenied regression tests keep their
+    // meaning, while the InvalidArgument tests (own-collection aggregates)
+    // now reach the query validator instead of being capability-denied.
+    .capabilities(wafer_sdk::BlockCapabilities {
+        callable_blocks: [DATABASE_BLOCK].into_iter().map(String::from).collect(),
+        collections: [OWN_COLLECTION].into_iter().map(String::from).collect(),
+        ..wafer_sdk::BlockCapabilities::none()
+    });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;

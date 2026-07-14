@@ -78,10 +78,24 @@ impl Wafer {
         let mut eff: std::collections::HashMap<String, wafer_block::BlockCapabilities> =
             std::collections::HashMap::new();
         for (name, block) in &self.registration.blocks {
-            let declared = block
-                .info()
-                .capabilities
-                .unwrap_or_else(wafer_block::BlockCapabilities::unrestricted);
+            let info = block.info();
+            let declared = match info.capabilities {
+                Some(caps) => caps,
+                // SEC-02: an omitted capability declaration must default by
+                // runtime type, not unconditionally to `unrestricted()`. A
+                // WASM guest is untrusted — fail closed to `none()` so a
+                // missing declaration cannot silently grant crypto, network,
+                // raw SQL, DDL, config, storage, vector, and `call_block` to
+                // every registered block. Native blocks are compiled into the
+                // host binary and trusted, so they retain the historical
+                // unrestricted default.
+                None => match info.runtime {
+                    wafer_block::BlockRuntime::Wasm => wafer_block::BlockCapabilities::none(),
+                    wafer_block::BlockRuntime::Native => {
+                        wafer_block::BlockCapabilities::unrestricted()
+                    }
+                },
+            };
 
             let config_overrides =
                 take_capability_overrides(name, self.registration.block_configs.get_mut(name))?;

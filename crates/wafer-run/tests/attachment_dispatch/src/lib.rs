@@ -26,7 +26,17 @@ pub extern "C" fn __wafer_info() -> i64 {
         "0.0.0",
         "handler@v1",
         "Exercises attach + lookup_attachment ABI",
-    );
+    )
+    // SEC-02: WASM guests fail closed by default, so this fixture must
+    // declare the one block it calls — itself (it opens a streaming call
+    // back into its own block under "test.echo_attachment").
+    .capabilities(wafer_sdk::BlockCapabilities {
+        callable_blocks: ["test/attachment-dispatch-guest"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        ..wafer_sdk::BlockCapabilities::none()
+    });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;
