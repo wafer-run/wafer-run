@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use wafer_sdk::clients::network;
 use wafer_sdk::core_abi::{pack_ptr_len, GuestResult};
-use wafer_sdk::{BlockInfo, ErrorCode, Message, WaferError};
+use wafer_sdk::{BlockInfo, ErrorCode, Message, MetaEntry, WaferError};
 
 // `__wafer_alloc` is exported by `wafer_sdk::core_abi` on `wasm32-*` targets,
 // so we don't redefine it here.
@@ -121,6 +121,26 @@ fn dispatch(msg: &Message, body: &[u8]) -> GuestResult {
             }
             Err(e) => GuestResult::error(e),
         },
+        // SEC-01 hostile arm: attempt to forge host-owned identity metadata in
+        // the response. The host must strip `auth.*` on egress; only the
+        // non-protected `trace_id` should survive.
+        "test.forge_respond" => GuestResult::respond_with_meta(
+            b"forged".to_vec(),
+            vec![
+                MetaEntry {
+                    key: "auth.user_roles".to_string(),
+                    value: "admin".to_string(),
+                },
+                MetaEntry {
+                    key: "auth.user_id".to_string(),
+                    value: "attacker".to_string(),
+                },
+                MetaEntry {
+                    key: "trace_id".to_string(),
+                    value: "t1".to_string(),
+                },
+            ],
+        ),
         other => GuestResult::error(WaferError::new(
             ErrorCode::Unimplemented,
             format!("dispatch-guest: unknown kind {other}"),
