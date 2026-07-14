@@ -403,7 +403,7 @@ impl Wafer {
             cancelled,
             deadline,
             all_blocks: self.all_blocks_arc(),
-            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
