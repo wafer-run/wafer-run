@@ -54,6 +54,12 @@ pub(super) struct WasmiHostState {
     /// to [`DEFAULT_MAX_WASM_MEMORY_PAGES`](crate::DEFAULT_MAX_WASM_MEMORY_PAGES)
     /// (256 pages = 16 MiB).
     pub(super) max_memory_pages: u32,
+    /// Maximum WebAssembly table elements for this store. The
+    /// [`wasmi::ResourceLimiter`] impl denies any `table.grow` beyond it
+    /// (SEC-03). Seeded at [`instantiate`](super::instantiate) from the block's
+    /// configured [`ResourceLimits`](crate::ResourceLimits); defaults to
+    /// [`DEFAULT_MAX_TABLE_ELEMENTS`](crate::runtime::wasm_state::DEFAULT_MAX_TABLE_ELEMENTS).
+    pub(super) max_table_elements: u32,
     /// Capabilities (resource limits) for this block.
     /// Used by host function enforcement (e.g. `allows_call_block`).
     pub(super) capabilities: BlockCapabilities,
@@ -105,10 +111,12 @@ impl wasmi::ResourceLimiter for WasmiHostState {
     fn table_growing(
         &mut self,
         _current: usize,
-        _desired: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmi::errors::TableError> {
-        Ok(true)
+        // SEC-03: bound table growth. Previously unconditionally `Ok(true)`,
+        // so the linear-memory cap did not constrain WebAssembly tables.
+        Ok(desired <= self.max_table_elements as usize)
     }
 }
 
@@ -334,6 +342,37 @@ mod tests {
         let ty = MemoryType::new(pages, Some(pages)).expect("valid memory type");
         let memory = Memory::new(&mut store, ty).expect("memory allocation");
         (store, memory)
+    }
+
+    fn host_state_with_table_cap(max_table_elements: u32) -> WasmiHostState {
+        WasmiHostState {
+            context: None,
+            max_memory_pages: 256,
+            max_table_elements,
+            capabilities: BlockCapabilities::none(),
+            streams: StreamRegistry::new(),
+            pending_stream_finish: None,
+            pending_stream_read: None,
+            pending_stream_take_error: None,
+            pending_load_asset: None,
+            current_attachments: None,
+        }
+    }
+
+    // SEC-03: table growth is bounded (was unconditionally `Ok(true)`, so the
+    // linear-memory cap did not constrain WebAssembly tables).
+    #[test]
+    fn table_growing_is_bounded_by_max_table_elements() {
+        use wasmi::ResourceLimiter;
+        let mut state = host_state_with_table_cap(100);
+        assert!(
+            state.table_growing(0, 100, None).unwrap(),
+            "growing to exactly the cap is allowed"
+        );
+        assert!(
+            !state.table_growing(0, 101, None).unwrap(),
+            "growing past the cap is denied"
+        );
     }
 
     #[test]
