@@ -412,6 +412,30 @@ async fn run_block_enforces_requires_read_from_snapshot() {
     }
 }
 
+// SEC-04: `requires` enforcement must not depend on the invocation path.
+// The same block that is denied a disallowed `call_block` under top-level
+// dispatch must also be denied when it runs as a flow step. Before the fix
+// the flow executor built its context with `caller_requires: None`
+// (unrestricted), so the disallowed call silently succeeded.
+#[tokio::test]
+async fn flow_step_enforces_requires() {
+    let mut w = empty_wafer();
+    w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
+        .unwrap();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
+    w.add_flow(single_step_flow("requires-flow", "test/requires-caller"));
+    w.seal().await.expect("seal");
+
+    match run_flow(&w, "requires-flow", Message::new("test.req"), Vec::new()).await {
+        TestResult::Error(e) => assert_eq!(
+            e.code,
+            ErrorCode::PermissionDenied,
+            "call_block outside the declared requires list must be denied on the flow-step path too"
+        ),
+        other => panic!("expected PERMISSION_DENIED from flow step, got {other:?}"),
+    }
+}
+
 // ===========================================================================
 // 7. Observability hooks
 // ===========================================================================
