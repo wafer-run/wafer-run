@@ -41,6 +41,11 @@ pub extern "C" fn __wafer_info() -> i64 {
             .collect(),
         ..wafer_sdk::BlockCapabilities::none()
     });
+    // Pooled-arm variant (PERF-01 Part B): declare a state-retaining
+    // instance mode so the warm instance pool engages. The default build
+    // stays undeclared (PerNode → cold), keeping the baseline arms honest.
+    #[cfg(feature = "singleton")]
+    let info = info.instance_mode(wafer_sdk::InstanceMode::Singleton);
     let bytes = wafer_sdk::codec::encode(&info).expect("BlockInfo is codec-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;

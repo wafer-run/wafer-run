@@ -4,10 +4,13 @@
 //! Coverage:
 //!
 //! 1. **Guest instantiation** — module compile (`WasmiBlock::load_from_bytes`)
-//!    and the per-call cost of `handle` on a preloaded block. Today every
-//!    `handle` creates a fresh `Store` + `Instance` (and re-runs `_start` for
-//!    TinyGo guests), so "warm" calls still pay the full instantiation —
-//!    exactly the overhead PERF-01 targets.
+//!    and the per-call cost of `handle` on a preloaded block. For undeclared
+//!    (PerNode) guests every `handle` creates a fresh `Store` + `Instance`
+//!    (and re-runs `_start` for TinyGo guests) — the overhead PERF-01
+//!    targets. The `pooled_call_preloaded` arms measure the same dispatch on
+//!    Singleton-declared variants of the same guests, where the warm
+//!    instance pool (PERF-01 Part B) reuses the instance across calls (with
+//!    a recycle every 256 calls amortized into the mean).
 //! 2. **ABI round-trips** — 1 KiB / 64 KiB / 1 MiB bodies echoed through a
 //!    Rust guest, measuring the JSON `(Message, Vec<u8>)` framing (JSON
 //!    encodes bytes as integer arrays, expanding payloads several-fold).
@@ -51,12 +54,37 @@ fn bench_guest_wasm() -> Vec<u8> {
     })
 }
 
+/// Path to the prebuilt Singleton-declared Rust bench guest — identical code
+/// to `bench_guest.wasm`, but its `BlockInfo` declares
+/// `InstanceMode::Singleton`, so `WasmiBlock`'s warm instance pool (PERF-01
+/// Part B) engages on the `handle` path. Panics with a build hint when
+/// missing.
+fn bench_guest_singleton_wasm() -> Vec<u8> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest_singleton.wasm");
+    std::fs::read(&p).unwrap_or_else(|e| {
+        panic!(
+            "failed to read singleton bench guest wasm at {}: {e}\n\
+             Did you build the fixtures first?\n  bash scripts/build-fixtures.sh",
+            p.display()
+        )
+    })
+}
+
 /// Path to the prebuilt TinyGo bench guest. `None` when the fixture was not
 /// built (TinyGo is a local toolchain, not a CI dependency) — the TinyGo
 /// benchmarks are skipped with a note in that case.
 fn tinygo_guest_wasm() -> Option<Vec<u8>> {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("benches/fixtures/tinygo_guest/target/tinygo_guest.wasm");
+    std::fs::read(&p).ok()
+}
+
+/// Singleton-declared TinyGo variant (built with `-tags singleton`) for the
+/// pooled arm. Same best-effort presence rule as [`tinygo_guest_wasm`].
+fn tinygo_guest_singleton_wasm() -> Option<Vec<u8>> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("benches/fixtures/tinygo_guest/target/tinygo_guest_singleton.wasm");
     std::fs::read(&p).ok()
 }
 
@@ -193,9 +221,10 @@ fn bench_instantiation(c: &mut Criterion) {
         });
     }
 
-    // Warm: `handle` on a preloaded block. Under today's loader this still
-    // creates a fresh Store + Instance per call (and re-runs `_start` for
-    // TinyGo) — the per-call floor PERF-01 targets.
+    // Warm: `handle` on a preloaded block. For these undeclared (PerNode)
+    // guests the loader still creates a fresh Store + Instance per call
+    // (and re-runs `_start` for TinyGo) — the per-call floor PERF-01
+    // Part A left in place.
     let rust_block = WasmiBlock::load_from_bytes(&rust_wasm).expect("load rust guest");
     group.bench_function("warm_call_preloaded/rust_guest", |b| {
         b.to_async(&rt)
@@ -206,6 +235,41 @@ fn bench_instantiation(c: &mut Criterion) {
         group.bench_function("warm_call_preloaded/tinygo_guest", |b| {
             b.to_async(&rt).iter(|| async {
                 black_box(handle_once(&tinygo_block, "bench.ignored", Vec::new()).await)
+            })
+        });
+    }
+
+    // Pooled (PERF-01 Part B): dispatch through `WasmiBlock::handle` on a
+    // guest whose BlockInfo declares InstanceMode::Singleton — after one
+    // priming call the warm pool serves every iteration, skipping per-call
+    // instantiation (and `_start` for TinyGo). Guest code is byte-for-byte
+    // the cold fixture's, so the delta vs `warm_call_preloaded` is pure
+    // pooling. The priming call also asserts the pool actually engaged, so
+    // a policy regression fails the bench loudly instead of silently
+    // measuring cold calls.
+    let pooled_rust = WasmiBlock::load_from_bytes(&bench_guest_singleton_wasm())
+        .expect("load singleton rust guest");
+    rt.block_on(handle_once(&pooled_rust, "bench.echo", Vec::new()));
+    assert_eq!(
+        pooled_rust.pooled_instance_count(),
+        1,
+        "singleton bench guest must engage the warm pool"
+    );
+    group.bench_function("pooled_call_preloaded/rust_guest", |b| {
+        b.to_async(&rt)
+            .iter(|| async { black_box(handle_once(&pooled_rust, "bench.echo", Vec::new()).await) })
+    });
+    if let Some(wasm) = &tinygo_guest_singleton_wasm() {
+        let pooled_tinygo = WasmiBlock::load_from_bytes(wasm).expect("load singleton tinygo guest");
+        rt.block_on(handle_once(&pooled_tinygo, "bench.ignored", Vec::new()));
+        assert_eq!(
+            pooled_tinygo.pooled_instance_count(),
+            1,
+            "singleton tinygo guest must engage the warm pool"
+        );
+        group.bench_function("pooled_call_preloaded/tinygo_guest", |b| {
+            b.to_async(&rt).iter(|| async {
+                black_box(handle_once(&pooled_tinygo, "bench.ignored", Vec::new()).await)
             })
         });
     }

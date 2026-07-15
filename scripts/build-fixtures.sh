@@ -44,9 +44,16 @@ build_fixture() {
     local dest="$1"
     local manifest="$2"
     local artifact="$3"
+    shift 3
+    # Any remaining args are extra cargo flags (e.g. `--features percall`
+    # for a variant build of the same fixture crate). Variant builds share
+    # the crate's artifact path, so each variant must be copied to its
+    # variant-named destination before the next build overwrites the
+    # artifact — order the calls accordingly, and keep any in-place
+    # (artifact == dest) build LAST so the artifact ends up being it.
 
     echo "building $dest"
-    cargo build --release --target wasm32-wasip1 --manifest-path "$manifest" >&2
+    cargo build --release --target wasm32-wasip1 --manifest-path "$manifest" "$@" >&2
 
     if [ "$artifact" != "$dest" ]; then
         mkdir -p "$(dirname "$dest")"
@@ -92,9 +99,39 @@ build_fixture \
     crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm
 
+# pool_guest_{singleton,percall}.wasm — consumed by wasm_instance_pooling.rs
+# at runtime via Path. Two variant builds of one crate (PERF-01 Part B): the
+# default build declares InstanceMode::Singleton (pool-eligible); the
+# `percall` feature build declares PerExecution (the cold control). Both
+# share the crate's artifact path, so each build is copied to its
+# variant-named destination before the next build overwrites the artifact.
+build_fixture \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest_singleton.wasm \
+    crates/wafer-run/tests/pool_guest/Cargo.toml \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest.wasm
+
+build_fixture \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest_percall.wasm \
+    crates/wafer-run/tests/pool_guest/Cargo.toml \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest.wasm \
+    --features percall
+
+# bench_guest_singleton.wasm — the pooled-dispatch bench arm variant
+# (PERF-01 Part B): identical guest code, but declares
+# InstanceMode::Singleton so WasmiBlock's warm pool engages. Built BEFORE
+# the default bench_guest.wasm below, which is consumed in place — the
+# in-place build must run last so the artifact path holds the default
+# (cold) build, not this variant.
+build_fixture \
+    crates/wafer-run/benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest_singleton.wasm \
+    crates/wafer-run/benches/fixtures/bench_guest/Cargo.toml \
+    crates/wafer-run/benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest.wasm \
+    --features singleton
+
 # bench_guest.wasm — consumed by the criterion benches (benches/wasm_guest.rs)
 # at runtime via Path. Echo + nested call_block arms for the PERF-01
-# measurement suite. Built in place; no copy needed.
+# measurement suite. Built in place; no copy needed. Keep this AFTER the
+# singleton variant build above (see its comment).
 build_fixture \
     crates/wafer-run/benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest.wasm \
     crates/wafer-run/benches/fixtures/bench_guest/Cargo.toml \
@@ -111,6 +148,15 @@ if command -v tinygo >/dev/null 2>&1; then
     mkdir -p crates/wafer-run/benches/fixtures/tinygo_guest/target
     (cd crates/wafer-run/benches/fixtures/tinygo_guest && \
         tinygo build -target wasip1 -o target/tinygo_guest.wasm .) >&2
+    # Pooled-arm variant (PERF-01 Part B): same guest, but built with
+    # `-tags singleton` so the declared instance_mode is "Singleton" and
+    # WasmiBlock's warm pool engages — the arm that amortizes TinyGo's
+    # per-call `_start`. (Build tags, not -ldflags -X: TinyGo's compile-time
+    # interp folds the infoJSON initializer before link-time overrides.)
+    echo "building crates/wafer-run/benches/fixtures/tinygo_guest/target/tinygo_guest_singleton.wasm"
+    (cd crates/wafer-run/benches/fixtures/tinygo_guest && \
+        tinygo build -target wasip1 -tags singleton \
+            -o target/tinygo_guest_singleton.wasm .) >&2
 else
     echo "note: tinygo not on PATH — skipping tinygo_guest.wasm (TinyGo benches will be skipped)" >&2
 fi

@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "pool-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[features]
+# Variant build for the cold-control tests: declares
+# InstanceMode::PerExecution instead of Singleton, so the warm instance
+# pool must NOT engage. scripts/build-fixtures.sh builds both variants
+# (pool_guest_singleton.wasm / pool_guest_percall.wasm) from this one crate.
+percall = []
+
+[dependencies]
+wafer-sdk = { path = "../../../../sdks/rust" }
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+panic = "abort"

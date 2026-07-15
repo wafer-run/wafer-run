@@ -10,6 +10,16 @@ publish = false
 crate-type = ["cdylib"]
 path = "src/lib.rs"
 
+[features]
+# Variant for the pooled-dispatch bench arm: declares InstanceMode::Singleton
+# so WasmiBlock's warm instance pool (PERF-01 Part B) engages. The default
+# build stays undeclared (PerNode → cold per-call instantiation), keeping the
+# cold/warm baseline arms measuring the default behavior. Guest code is
+# otherwise identical, so cold-vs-pooled deltas are pure pooling.
+# scripts/build-fixtures.sh builds both (bench_guest.wasm /
+# bench_guest_singleton.wasm).
+singleton = []
+
 [dependencies]
 wafer-sdk = { path = "../../../../../sdks/rust" }
 serde_json = "1"

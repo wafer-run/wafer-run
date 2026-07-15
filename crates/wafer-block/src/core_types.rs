@@ -182,22 +182,24 @@ impl fmt::Display for WaferError {
     }
 }
 
-/// Declared block instance lifecycle — **advisory, not enforced**.
+/// Declared block instance lifecycle.
 ///
-/// No runtime consumer reads this today. Actual instantiation behavior
-/// is fixed by runtime type, regardless of the declared mode:
+/// Actual instantiation behavior by runtime type:
 ///
 /// - **Native** blocks: one shared `Arc<dyn Block>` per registration —
 ///   effectively a per-runtime-process singleton serving concurrent
-///   calls (blocks are `Send + Sync` and must be thread-safe).
-/// - **WASM** blocks: a fresh store + instance for every call —
-///   effectively `PerExecution`; no guest state survives between calls.
-///
-/// A WASM block that declares one of the state-retaining modes
-/// (`Singleton`, `PerFlow`) draws a warning at `seal()`, since per-call
-/// instantiation cannot honor it. Enforcement (a real instance manager
-/// keyed on this declaration) is future work tied to instance pooling;
-/// until then the declaration only documents intent.
+///   calls (blocks are `Send + Sync` and must be thread-safe). The
+///   declared mode is advisory for native blocks.
+/// - **WASM** blocks: a fresh store + instance per call by default
+///   (`PerNode` — the undeclared default — and `PerExecution`). A block
+///   that declares a state-retaining mode (`Singleton`, `PerFlow`) opts
+///   into the runtime's warm instance pool (PERF-01): `handle`-path
+///   instances are reused across calls, so guest globals and heap
+///   survive between invocations of the *same* block. Reuse is same-block
+///   only — cross-block isolation is unchanged — and hosts can force
+///   every wasm block cold with the `WAFER_RUN_WASM_POOLING=off` env
+///   var (the isolation escape hatch for third-party wasm that wrongly
+///   declared a state-retaining mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceMode {
     /// One instance per node (the runtime process).
