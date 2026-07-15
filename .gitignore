@@ -1,6 +1,8 @@
 # Rust
 /target
 **/target/
+# scripts/measure-artifacts.sh per-artifact clean-build dirs + results
+/target-measure/
 
 # Node
 node_modules/
