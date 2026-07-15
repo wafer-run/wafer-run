@@ -11,7 +11,7 @@ use wafer_block::{
 use wafer_block_macro::wafer_async_trait;
 use wasmi::{Engine, Linker, Module, Store, TypedResumableCall, Val};
 
-use super::{capabilities::BlockCapabilities, host::ContextGuard, stream::StreamRegistry};
+use super::{capabilities::BlockCapabilities, stream::StreamRegistry};
 use crate::{
     context::Context,
     runtime::wasm_state::{FuelLimit, ResourceLimits},
@@ -129,26 +129,20 @@ fn instantiate(
 // ContextScope — RAII install/clear of the borrowed Context in the store
 // ---------------------------------------------------------------------------
 
-/// RAII guard that installs a borrowed [`Context`] into the wasmi store's
+/// RAII guard that installs an owned [`Context`] into the wasmi store's
 /// `context` slot for the duration of a single guest invocation and clears it
 /// on drop — on *every* exit path (`?`, early `return Err`, the unhandled-trap
 /// branch, or success).
 ///
-/// The slot holds a cloned `Arc` produced from a [`ContextGuard`] that
-/// `transmute`s a non-`'static` `&dyn Context`. If that `Arc` outlives the
-/// guard it dereferences freed memory, so `ContextGuard::drop` asserts its
-/// strong count is exactly 1. Clearing the slot here (which drops the store's
-/// `Arc` clone) before the inner `ContextGuard` drops is what keeps that
-/// assertion satisfiable. Doing it via `Drop` removes the need for manual
-/// `store.data_mut().context = None` on each return path — a single missed
-/// clear would crash the host.
+/// The slot holds an owned `Arc<dyn Context>` minted via
+/// [`Context::clone_arc`], so host imports may hold it across await points
+/// with no lifetime hazard (this replaced the old `ContextGuard`, which
+/// `transmute`d a borrowed `&dyn Context` to `'static` and policed the lie
+/// with a strong-count assertion at drop). Clearing the slot on drop is now
+/// hygiene — a stale context must not leak into the next invocation — not a
+/// use-after-free guard.
 struct ContextScope<'s> {
     store: &'s mut Store<WasmiHostState>,
-    // The store's `context` Arc is cleared in `ContextScope::drop` (below),
-    // which runs before any field is dropped — so by the time this
-    // `ContextGuard` drops and asserts its strong count is 1, the store's clone
-    // is already gone. Field order is not load-bearing for that invariant.
-    _guard: ContextGuard,
 }
 
 impl<'s> ContextScope<'s> {
@@ -161,16 +155,12 @@ impl<'s> ContextScope<'s> {
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
         inbound_protected: Vec<MetaEntry>,
     ) -> Self {
-        let guard = ContextGuard::new(ctx);
-        store.data_mut().context = Some(guard.as_arc());
+        store.data_mut().context = Some(ctx.clone_arc());
         store.data_mut().current_attachments = attachments;
         // SEC-01: seed the host-owned identity for this frame so nested
         // `call_block`s the guest makes inherit it and cannot forge their own.
         store.data_mut().inbound_protected_meta = inbound_protected;
-        Self {
-            store,
-            _guard: guard,
-        }
+        Self { store }
     }
 
     /// Shared access to the underlying store.
@@ -186,8 +176,8 @@ impl<'s> ContextScope<'s> {
 
 impl Drop for ContextScope<'_> {
     fn drop(&mut self) {
-        // Clear the store's Arc clone before `_guard` drops so the strong-count
-        // assertion in `ContextGuard::drop` holds on every exit path.
+        // Clear the slot so a stale context never leaks into a later
+        // invocation that forgets to install its own.
         self.store.data_mut().context = None;
     }
 }
@@ -592,12 +582,12 @@ impl WasmiBlock {
             self.limits,
         )?;
 
-        // Install the borrowed context (and inbound attachments) for the
-        // duration of this call. `ContextScope::drop` clears the store's
-        // `context` slot on *every* exit path — `?`, early `return Err`, the
-        // unhandled-trap branch, or success — so the strong-count assertion in
-        // `ContextGuard::drop` always holds. From here on the store is reached
-        // through `scope`.
+        // Install an owned clone of the context (and inbound attachments)
+        // for the duration of this call. `ContextScope::drop` clears the
+        // store's `context` slot on *every* exit path — `?`, early
+        // `return Err`, the unhandled-trap branch, or success — so a stale
+        // context never leaks into a later invocation. From here on the
+        // store is reached through `scope`.
         let mut scope = ContextScope::new(&mut store, ctx, attachments, inbound_protected);
 
         let (func, arg0, arg1) = setup(scope.store_mut(), instance)?;
