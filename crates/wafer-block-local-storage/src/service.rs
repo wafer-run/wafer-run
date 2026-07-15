@@ -121,8 +121,30 @@ impl LocalStorageService {
     }
 }
 
+/// Map a `spawn_blocking` join failure (panicked or cancelled walk task).
+fn join_err(e: &tokio::task::JoinError) -> StorageError {
+    StorageError::Internal(format!("storage walk task failed: {e}"))
+}
+
+/// Map a metadata probe to the existence semantics the sync code had:
+/// missing file → `NotFound`, any other error → `Internal`.
+fn metadata_or_not_found(
+    path: &Path,
+    res: std::io::Result<std::fs::Metadata>,
+) -> Result<std::fs::Metadata, StorageError> {
+    res.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            StorageError::NotFound
+        } else {
+            StorageError::Internal(format!("metadata {path:?}: {e}"))
+        }
+    })
+}
+
 #[wafer_async_trait]
 impl StorageService for LocalStorageService {
+    /// Streams `data` through `tokio::fs` (no payload copy into a
+    /// `spawn_blocking` closure — PERF-02: the executor thread only awaits).
     async fn put(
         &self,
         folder: &str,
@@ -130,22 +152,25 @@ impl StorageService for LocalStorageService {
         data: &[u8],
         _content_type: &str,
     ) -> Result<(), StorageError> {
+        use tokio::io::AsyncWriteExt;
+
         let path = self.validate_path(&self.object_path(folder, key))?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
         }
-        fs::write(&path, data).map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| StorageError::Internal(format!("create {path:?}: {e}")))?;
+        file.write_all(data)
+            .await
+            .map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
         let path = self.validate_path(&self.object_path(folder, key))?;
-        if !path.exists() {
-            return Err(StorageError::NotFound);
-        }
-
-        let metadata = fs::metadata(&path)
-            .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
+        let metadata = metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
 
         // Limit file reads to 100 MB to prevent OOM on huge files
         const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -158,8 +183,9 @@ impl StorageService for LocalStorageService {
             )));
         }
 
-        let data =
-            fs::read(&path).map_err(|e| StorageError::Internal(format!("read {path:?}: {e}")))?;
+        let data = tokio::fs::read(&path)
+            .await
+            .map_err(|e| StorageError::Internal(format!("read {path:?}: {e}")))?;
 
         let last_modified = metadata
             .modified()
@@ -177,81 +203,96 @@ impl StorageService for LocalStorageService {
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
         let path = self.validate_path(&self.object_path(folder, key))?;
-        if !path.exists() {
-            return Err(StorageError::NotFound);
-        }
-        fs::remove_file(&path).map_err(|e| StorageError::Internal(format!("delete {path:?}: {e}")))
+        metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| StorageError::Internal(format!("delete {path:?}: {e}")))
     }
 
+    /// The recursive walk is one `spawn_blocking` hop (many small syscalls —
+    /// cheaper as a single blocking task than as per-entry async calls).
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
         let dir = self.validate_path(&self.folder_path(folder))?;
-        if !dir.exists() {
-            return Ok(ObjectList {
-                objects: Vec::new(),
-                total_count: 0,
-            });
-        }
-
-        let mut objects = Vec::new();
-        Self::list_recursive(&dir, &dir, &opts.prefix, &mut objects)?;
-
-        let total_count = objects.len() as i64;
-
-        // Apply pagination
+        let prefix = opts.prefix.clone();
         let offset = opts.offset as usize;
-        let limit = if opts.limit > 0 {
-            opts.limit as usize
-        } else {
-            objects.len()
-        };
+        let limit = opts.limit;
 
-        let objects: Vec<ObjectInfo> = objects.into_iter().skip(offset).take(limit).collect();
+        tokio::task::spawn_blocking(move || {
+            if !dir.exists() {
+                return Ok(ObjectList {
+                    objects: Vec::new(),
+                    total_count: 0,
+                });
+            }
 
-        Ok(ObjectList {
-            objects,
-            total_count,
+            let mut objects = Vec::new();
+            Self::list_recursive(&dir, &dir, &prefix, &mut objects)?;
+
+            let total_count = objects.len() as i64;
+
+            // Apply pagination
+            let limit = if limit > 0 {
+                limit as usize
+            } else {
+                objects.len()
+            };
+            let objects: Vec<ObjectInfo> = objects.into_iter().skip(offset).take(limit).collect();
+
+            Ok(ObjectList {
+                objects,
+                total_count,
+            })
         })
+        .await
+        .map_err(|e| join_err(&e))?
     }
 
     async fn create_folder(&self, name: &str, _public: bool) -> Result<(), StorageError> {
         let path = self.validate_path(&self.folder_path(name))?;
-        fs::create_dir_all(&path)
+        tokio::fs::create_dir_all(&path)
+            .await
             .map_err(|e| StorageError::Internal(format!("create folder {path:?}: {e}")))?;
         Ok(())
     }
 
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
         let path = self.validate_path(&self.folder_path(name))?;
-        if !path.exists() {
-            return Err(StorageError::NotFound);
-        }
-        fs::remove_dir_all(&path)
+        metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
+        tokio::fs::remove_dir_all(&path)
+            .await
             .map_err(|e| StorageError::Internal(format!("delete folder {path:?}: {e}")))
     }
 
+    /// Directory scan runs as one `spawn_blocking` hop, like [`Self::list`].
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
-        let mut folders = Vec::new();
-        let entries = fs::read_dir(&self.root)
-            .map_err(|e| StorageError::Internal(format!("read dir {:?}: {}", self.root, e)))?;
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut folders = Vec::new();
+            let entries = fs::read_dir(&root)
+                .map_err(|e| StorageError::Internal(format!("read dir {root:?}: {e}")))?;
 
-        for entry in entries {
-            let entry = entry.map_err(|e| StorageError::Internal(format!("read entry: {e}")))?;
-            let metadata = entry
-                .metadata()
-                .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
-            if metadata.is_dir() {
-                let created_at = metadata
-                    .created()
-                    .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
-                folders.push(FolderInfo {
-                    name: entry.file_name().to_string_lossy().to_string(),
-                    public: false,
-                    created_at,
-                });
+            for entry in entries {
+                let entry =
+                    entry.map_err(|e| StorageError::Internal(format!("read entry: {e}")))?;
+                let metadata = entry
+                    .metadata()
+                    .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
+                if metadata.is_dir() {
+                    let created_at = metadata
+                        .created()
+                        .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
+                    folders.push(FolderInfo {
+                        name: entry.file_name().to_string_lossy().to_string(),
+                        public: false,
+                        created_at,
+                    });
+                }
             }
-        }
 
-        Ok(folders)
+            Ok(folders)
+        })
+        .await
+        .map_err(|e| join_err(&e))?
     }
 }
 

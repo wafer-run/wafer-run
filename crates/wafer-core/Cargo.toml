@@ -29,6 +29,11 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Blocking-pool offload for CPU-heavy crypto ops (PERF-02); wasm32 builds
+# keep the pure sync path and never link the runtime.
+tokio = { workspace = true, features = ["rt", "sync"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 async-stream = "0.3"

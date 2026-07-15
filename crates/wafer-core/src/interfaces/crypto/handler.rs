@@ -149,3 +149,88 @@ pub fn handle_message(
         )),
     }
 }
+
+/// Concurrency bound for Argon2 offload jobs: half the cores, clamped to
+/// [1, 4]. Each Argon2id hash pins a thread for tens of milliseconds and
+/// ~19 MiB of memory, so the cap keeps a burst of auth attempts from
+/// saturating the blocking pool (the queue of *waiting* callers is bounded
+/// upstream by the server's request/rate limits — waiters here are cheap,
+/// cancellable futures, not threads).
+#[cfg(not(target_arch = "wasm32"))]
+fn argon2_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        tokio::sync::Semaphore::new((cores / 2).clamp(1, 4))
+    })
+}
+
+/// Run a CPU-heavy crypto closure on the blocking pool, bounded by
+/// [`argon2_permits`].
+#[cfg(not(target_arch = "wasm32"))]
+async fn offload_blocking<T, F>(f: F) -> Result<T, CryptoError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CryptoError> + Send + 'static,
+{
+    let _permit = argon2_permits()
+        .acquire()
+        .await
+        .map_err(|e| CryptoError::Other(format!("crypto offload semaphore closed: {e}")))?;
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CryptoError::Other(format!("crypto blocking task failed: {e}")))?
+}
+
+/// Native variant of [`handle_message`]: Argon2 password hashing and
+/// verification are CPU-expensive by design, so the `hash` and
+/// `compare_hash` ops run on the blocking pool (behind a small semaphore)
+/// instead of on an async executor thread (PERF-02). Decode + WRAP
+/// authorization happen inline exactly as in the sync path; every other op
+/// (cheap HMAC/RNG work) delegates to [`handle_message`] unchanged, as does
+/// the wasm32 build, which has no blocking pool.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn handle_message_native(
+    service: &std::sync::Arc<dyn CryptoService>,
+    ctx: &dyn Context,
+    caller_id: Option<&str>,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
+    match msg.kind.as_str() {
+        ServiceOp::CRYPTO_HASH => {
+            let req =
+                match decode_and_authorize::<wire::HashRequest>(ctx, body, "crypto.hash", |_r| {
+                    ("hash".to_string(), ResourceType::Crypto, false)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
+            let svc = std::sync::Arc::clone(service);
+            match offload_blocking(move || svc.hash(&req.password)).await {
+                Ok(hash) => to_output(&wire::HashResponse { hash }),
+                Err(e) => OutputStream::error(crypto_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::CRYPTO_COMPARE_HASH => {
+            let req = match decode_and_authorize::<wire::CompareHashRequest>(
+                ctx,
+                body,
+                "crypto.compare_hash",
+                |_r| ("compare_hash".to_string(), ResourceType::Crypto, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            let svc = std::sync::Arc::clone(service);
+            match offload_blocking(move || svc.compare_hash(&req.password, &req.hash)).await {
+                Ok(()) => to_output(&wire::CompareHashResponse { matches: true }),
+                Err(CryptoError::PasswordMismatch) => {
+                    to_output(&wire::CompareHashResponse { matches: false })
+                }
+                Err(e) => OutputStream::error(crypto_error_to_wafer(e)),
+            }
+        }
+        _ => handle_message(service.as_ref(), ctx, caller_id, msg, body),
+    }
+}

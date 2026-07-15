@@ -12,6 +12,15 @@ crate::service_block! {
     category: Service,
     fields: { service: Arc<dyn CryptoService> },
     handle: |this, ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), ctx, ctx.caller_id(), &msg, &body)
+        // Native: Argon2-heavy ops offload to the blocking pool (PERF-02);
+        // wasm32 has no blocking pool and keeps the pure sync path.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            handler::handle_message_native(&this.service, ctx, ctx.caller_id(), &msg, &body).await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            handler::handle_message(this.service.as_ref(), ctx, ctx.caller_id(), &msg, &body)
+        }
     },
 }
