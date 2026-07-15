@@ -164,6 +164,10 @@ struct PooledInstance {
 
 /// Parse the raw [`WASM_POOLING_ENV`] value. `None`/empty means "not
 /// configured" → pooling permitted for declared blocks.
+///
+/// Compiled out on `wasm32` targets (no process environment to parse —
+/// see [`wasm_pooling_host_override`]).
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_wasm_pooling(raw: Option<&str>) -> Result<bool, String> {
     let Some(raw) = raw else {
         return Ok(true);
@@ -1468,7 +1472,7 @@ mod capabilities_update_tests {
 // Unit tests for the pooling kill-switch parser
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod pooling_env_tests {
     use super::*;
 
