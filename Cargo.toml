@@ -96,7 +96,11 @@ base64ct = { version = "1", features = ["alloc"] }
 subtle = "2"
 
 # Storage
-aws-sdk-s3 = "1"
+# default-features would enable BOTH AWS HTTP stacks: `rustls` (legacy
+# hyper 0.14 + rustls 0.21 + ring) alongside `default-https-client` (hyper 1 +
+# rustls 0.23 + aws-lc). Selecting features drops the entire legacy stack from
+# every s3-linking binary (PERF-06, docs/perf/2026-07-15-artifact-size-and-compile-time.md).
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
 aws-config = "1"
 
 # Network
