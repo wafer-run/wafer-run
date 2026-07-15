@@ -104,6 +104,11 @@ pub struct ObjectList {
     /// Objects in this page.
     pub objects: Vec<ObjectInfo>,
     /// Total number of objects matching the filter (across all pages).
+    ///
+    /// Backends where an exact total would require walking the entire
+    /// keyspace (e.g. S3) may return a lower bound when a `limit` was
+    /// given and the listing stopped early; the bound stays strictly
+    /// greater than `offset + limit` while more objects exist.
     pub total_count: i64,
 }
 

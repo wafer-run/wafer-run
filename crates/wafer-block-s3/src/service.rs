@@ -89,34 +89,11 @@ impl S3StorageService {
     fn to_chrono_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> DateTime<Utc> {
         DateTime::from_timestamp(dt.secs(), dt.subsec_nanos()).unwrap_or_else(Utc::now)
     }
-
-    /// Fetch every `ListObjectsV2` page under `prefix` and return each
-    /// page's objects. The SDK paginator owns the `is_truncated` /
-    /// `next_continuation_token` plumbing, so pagination edge cases live
-    /// in exactly one place. `err_ctx` prefixes error messages with the
-    /// calling operation's context (e.g. `"S3 ListObjectsV2"`).
-    async fn list_pages(
-        &self,
-        prefix: &str,
-        err_ctx: &str,
-    ) -> Result<Vec<Vec<aws_sdk_s3::types::Object>>, StorageError> {
-        let mut stream = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(prefix)
-            .into_paginator()
-            .send();
-
-        let mut pages = Vec::new();
-        while let Some(page) = stream.next().await {
-            let page =
-                page.map_err(|e| StorageError::Internal(format!("{err_ctx} {prefix}: {e}")))?;
-            pages.push(page.contents().to_vec());
-        }
-        Ok(pages)
-    }
 }
+
+/// The S3 `ListObjectsV2` per-page key maximum (also the `DeleteObjects`
+/// per-request key limit).
+const MAX_KEYS_PER_PAGE: usize = 1000;
 
 #[wafer_async_trait]
 impl StorageService for S3StorageService {
@@ -203,6 +180,20 @@ impl StorageService for S3StorageService {
         Ok(())
     }
 
+    /// List objects with pagination pushed down to S3 (PERF-04).
+    ///
+    /// Pages are walked via continuation tokens and the scan stops as soon
+    /// as `offset + limit` objects (plus one peek object) have been seen —
+    /// the old implementation buffered *every* page before slicing the
+    /// window in memory. Each request also caps `MaxKeys` to what the scan
+    /// still needs, so the final page is not a full 1000-key fetch.
+    ///
+    /// `total_count` is exact when the scan reached the end of the listing.
+    /// When the scan stopped early it is a lower bound of
+    /// `offset + limit + 1` — strictly greater than `offset + limit`, so
+    /// "more pages exist" checks (`total_count > offset + limit`) remain
+    /// correct. S3 has no way to report an exact total without walking the
+    /// whole keyspace.
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
         let prefix = self.folder_prefix(folder);
         let search_prefix = if opts.prefix.is_empty() {
@@ -211,49 +202,79 @@ impl StorageService for S3StorageService {
             format!("{}{}", prefix, opts.prefix)
         };
 
-        let mut all_objects = Vec::new();
-        let pages = self.list_pages(&search_prefix, "S3 ListObjectsV2").await?;
-        for obj in pages.iter().flatten() {
-            let full_key = obj.key().unwrap_or_default();
+        let offset = usize::try_from(opts.offset).unwrap_or(0);
+        let limit = usize::try_from(opts.limit).ok().filter(|l| *l > 0);
+        // Stop scanning once the window plus one peek object has been seen.
+        // The peek keeps `total_count` an honest more-pages-exist signal
+        // without walking the rest of the keyspace. `limit == 0` means
+        // "no limit": scan everything, `total_count` is exact.
+        let scan_cap = limit.map(|l| offset.saturating_add(l).saturating_add(1));
 
-            // Strip the folder prefix to get the relative key
-            let relative_key = full_key
-                .strip_prefix(&prefix)
-                .unwrap_or(full_key)
-                .to_string();
+        let mut continuation_token: Option<String> = None;
+        let mut seen: usize = 0; // objects observed, folder marker excluded
+        let mut objects: Vec<ObjectInfo> = Vec::new();
 
-            // Skip the folder marker itself (empty key after prefix strip)
-            if relative_key.is_empty() {
-                continue;
+        'pages: loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&search_prefix);
+            if let Some(cap) = scan_cap {
+                // Ask S3 for no more keys than the scan still needs. The +1
+                // leaves room for the folder-marker key (skipped below) so
+                // the common case finishes without an extra round trip.
+                let remaining = cap - seen + 1;
+                req = req.max_keys(remaining.min(MAX_KEYS_PER_PAGE) as i32);
+            }
+            if let Some(token) = &continuation_token {
+                req = req.continuation_token(token);
+            }
+            let page = req.send().await.map_err(|e| {
+                StorageError::Internal(format!("S3 ListObjectsV2 {search_prefix}: {e}"))
+            })?;
+
+            for obj in page.contents() {
+                let full_key = obj.key().unwrap_or_default();
+
+                // Strip the folder prefix to get the relative key
+                let relative_key = full_key
+                    .strip_prefix(&prefix)
+                    .unwrap_or(full_key)
+                    .to_string();
+
+                // Skip the folder marker itself (empty key after prefix strip)
+                if relative_key.is_empty() {
+                    continue;
+                }
+
+                seen += 1;
+                if seen > offset && limit.is_none_or(|l| objects.len() < l) {
+                    let last_modified = obj
+                        .last_modified()
+                        .map_or_else(Utc::now, Self::to_chrono_datetime);
+
+                    objects.push(ObjectInfo {
+                        key: relative_key,
+                        size: obj.size().unwrap_or(0),
+                        content_type: String::new(), // S3 ListObjects doesn't return content-type
+                        last_modified,
+                    });
+                }
+                if scan_cap.is_some_and(|cap| seen >= cap) {
+                    break 'pages;
+                }
             }
 
-            let last_modified = obj
-                .last_modified()
-                .map_or_else(Utc::now, Self::to_chrono_datetime);
-
-            all_objects.push(ObjectInfo {
-                key: relative_key,
-                size: obj.size().unwrap_or(0),
-                content_type: String::new(), // S3 ListObjects doesn't return content-type
-                last_modified,
-            });
+            match page.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => break,
+            }
         }
-
-        let total_count = all_objects.len() as i64;
-
-        // Apply pagination (offset / limit)
-        let offset = opts.offset as usize;
-        let limit = if opts.limit > 0 {
-            opts.limit as usize
-        } else {
-            all_objects.len()
-        };
-
-        let objects: Vec<ObjectInfo> = all_objects.into_iter().skip(offset).take(limit).collect();
 
         Ok(ObjectList {
             objects,
-            total_count,
+            total_count: seen as i64,
         })
     }
 
@@ -277,12 +298,25 @@ impl StorageService for S3StorageService {
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
         let prefix = self.folder_prefix(name);
 
-        // List all objects under this folder prefix, then delete them in
-        // per-page batches (a ListObjectsV2 page holds at most 1000 keys —
-        // the DeleteObjects request limit).
-        for page in self.list_pages(&prefix, "S3 list for delete").await? {
+        // Stream ListObjectsV2 pages and delete each page's keys in one
+        // DeleteObjects batch (a page holds at most 1000 keys — the
+        // DeleteObjects request limit) instead of buffering the whole
+        // listing first. Deleted keys are always behind the continuation
+        // cursor, so paging stays consistent while deleting.
+        let mut stream = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(&prefix)
+            .into_paginator()
+            .send();
+
+        while let Some(page) = stream.next().await {
+            let page = page
+                .map_err(|e| StorageError::Internal(format!("S3 list for delete {prefix}: {e}")))?;
             // Build batch delete request
             let objects_to_delete: Vec<aws_sdk_s3::types::ObjectIdentifier> = page
+                .contents()
                 .iter()
                 .filter_map(|obj| {
                     let k = obj.key()?;
@@ -317,41 +351,300 @@ impl StorageService for S3StorageService {
         Ok(())
     }
 
+    /// List top-level folders, paginating until the delimiter listing is
+    /// exhausted. The previous implementation issued a single
+    /// `ListObjectsV2` request, silently truncating buckets whose
+    /// first page didn't hold every common prefix (PERF-04).
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
         let prefix = self.root_prefix();
 
-        let resp = self
+        let mut stream = self
             .client
             .list_objects_v2()
             .bucket(&self.bucket)
             .prefix(&prefix)
             .delimiter("/")
-            .send()
-            .await
-            .map_err(|e| StorageError::Internal(format!("S3 list folders: {e}")))?;
+            .into_paginator()
+            .send();
 
         let mut folders = Vec::new();
 
-        for cp in resp.common_prefixes() {
-            if let Some(pfx) = cp.prefix() {
-                // Strip the root prefix and trailing `/` to get the folder name
-                let name = pfx
-                    .strip_prefix(&prefix)
-                    .unwrap_or(pfx)
-                    .trim_end_matches('/');
+        while let Some(page) = stream.next().await {
+            let page = page.map_err(|e| StorageError::Internal(format!("S3 list folders: {e}")))?;
+            for cp in page.common_prefixes() {
+                if let Some(pfx) = cp.prefix() {
+                    // Strip the root prefix and trailing `/` to get the folder name
+                    let name = pfx
+                        .strip_prefix(&prefix)
+                        .unwrap_or(pfx)
+                        .trim_end_matches('/');
 
-                if name.is_empty() {
-                    continue;
+                    if name.is_empty() {
+                        continue;
+                    }
+
+                    folders.push(FolderInfo {
+                        name: name.to_string(),
+                        public: false,          // S3 doesn't track this natively
+                        created_at: Utc::now(), // S3 doesn't expose folder creation time
+                    });
                 }
-
-                folders.push(FolderInfo {
-                    name: name.to_string(),
-                    public: false,          // S3 doesn't track this natively
-                    created_at: Utc::now(), // S3 doesn't expose folder creation time
-                });
             }
         }
 
         Ok(folders)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aws_sdk_s3::{
+        operation::{delete_objects::DeleteObjectsOutput, list_objects_v2::ListObjectsV2Output},
+        types::{CommonPrefix, Object},
+    };
+    use aws_smithy_mocks::{mock, mock_client, RuleMode};
+
+    use super::*;
+
+    /// Service under test wired to a mocked S3 client — no HTTP involved.
+    fn service(client: Client) -> S3StorageService {
+        S3StorageService {
+            client,
+            bucket: "bucket".to_string(),
+            prefix: String::new(),
+        }
+    }
+
+    fn obj(key: &str, size: i64) -> Object {
+        Object::builder().key(key).size(size).build()
+    }
+
+    /// PERF-04: `list` must stop paging as soon as `offset + limit` (plus
+    /// the one-object peek) is satisfied, cap `MaxKeys` to what the scan
+    /// still needs, and thread continuation tokens between requests. A
+    /// third page exists but must never be fetched.
+    #[tokio::test]
+    async fn list_stops_fetching_once_window_is_satisfied() {
+        // offset=1, limit=2 → scan cap 4 (window + 1 peek).
+        // First request: no token, MaxKeys = cap - seen + 1 = 5.
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| {
+                req.continuation_token().is_none()
+                    && req.max_keys() == Some(5)
+                    && req.prefix() == Some("folder/")
+            })
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/a", 1))
+                    .contents(obj("folder/b", 2))
+                    .is_truncated(true)
+                    .next_continuation_token("tok1")
+                    .build()
+            });
+        // Second request: token from page 1, MaxKeys = 4 - 2 + 1 = 3.
+        let page2 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| {
+                req.continuation_token() == Some("tok1") && req.max_keys() == Some(3)
+            })
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/c", 3))
+                    .contents(obj("folder/d", 4))
+                    .contents(obj("folder/e", 5))
+                    .is_truncated(true)
+                    .next_continuation_token("tok2")
+                    .build()
+            });
+        // Third page: exists, but the scan must stop before requesting it.
+        let page3 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token() == Some("tok2"))
+            .then_output(|| ListObjectsV2Output::builder().build());
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&page1, &page2, &page3]);
+        let svc = service(client);
+
+        let list = svc
+            .list(
+                "folder",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 1,
+                },
+            )
+            .await
+            .expect("list succeeds");
+
+        let keys: Vec<&str> = list.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["b", "c"],
+            "window is objects offset..offset+limit"
+        );
+        assert_eq!(
+            list.total_count, 4,
+            "early-stopped scan reports the lower bound offset + limit + 1"
+        );
+        assert_eq!(page1.num_calls(), 1);
+        assert_eq!(page2.num_calls(), 1);
+        assert_eq!(
+            page3.num_calls(),
+            0,
+            "pages past the satisfied window must not be fetched"
+        );
+    }
+
+    /// `limit == 0` means no limit: the scan walks every page (no MaxKeys
+    /// pushdown), skips the folder-marker key, and `total_count` is exact.
+    #[tokio::test]
+    async fn list_without_limit_walks_all_pages_and_reports_exact_total() {
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token().is_none() && req.max_keys().is_none())
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/", 0)) // folder marker — skipped
+                    .contents(obj("folder/a", 1))
+                    .contents(obj("folder/b", 2))
+                    .is_truncated(true)
+                    .next_continuation_token("tok1")
+                    .build()
+            });
+        let page2 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token() == Some("tok1"))
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/c", 3))
+                    .build()
+            });
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&page1, &page2]);
+        let svc = service(client);
+
+        let list = svc
+            .list("folder", &ListOptions::default())
+            .await
+            .expect("list succeeds");
+
+        let keys: Vec<&str> = list.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+        assert_eq!(
+            list.total_count, 3,
+            "exhausted scan reports the exact total"
+        );
+        assert_eq!(
+            page2.num_calls(),
+            1,
+            "all pages fetched when no limit is set"
+        );
+    }
+
+    /// Offset beyond the keyspace: empty window, exact total (the scan
+    /// exhausted the listing before reaching the cap).
+    #[tokio::test]
+    async fn list_offset_beyond_total_returns_empty_window_and_exact_total() {
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token().is_none())
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/a", 1))
+                    .contents(obj("folder/b", 2))
+                    .contents(obj("folder/c", 3))
+                    .build()
+            });
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&page1]);
+        let svc = service(client);
+
+        let list = svc
+            .list(
+                "folder",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 5,
+                    offset: 10,
+                },
+            )
+            .await
+            .expect("list succeeds");
+
+        assert!(list.objects.is_empty());
+        assert_eq!(list.total_count, 3);
+    }
+
+    /// PERF-04: `list_folders` must accumulate common prefixes across
+    /// continuation tokens instead of silently truncating at one page.
+    #[tokio::test]
+    async fn list_folders_accumulates_across_pages() {
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| {
+                req.continuation_token().is_none() && req.delimiter() == Some("/")
+            })
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .common_prefixes(CommonPrefix::builder().prefix("alpha/").build())
+                    .common_prefixes(CommonPrefix::builder().prefix("beta/").build())
+                    .is_truncated(true)
+                    .next_continuation_token("tok1")
+                    .build()
+            });
+        let page2 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token() == Some("tok1"))
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .common_prefixes(CommonPrefix::builder().prefix("gamma/").build())
+                    .build()
+            });
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&page1, &page2]);
+        let svc = service(client);
+
+        let folders = svc.list_folders().await.expect("list_folders succeeds");
+        let names: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta", "gamma"],
+            "folders from every page must be accumulated"
+        );
+        assert_eq!(page2.num_calls(), 1);
+    }
+
+    /// `delete_folder` streams listing pages and issues one DeleteObjects
+    /// batch per page instead of buffering the whole listing first.
+    #[tokio::test]
+    async fn delete_folder_deletes_in_per_page_batches() {
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token().is_none())
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("gone/x", 1))
+                    .contents(obj("gone/y", 2))
+                    .is_truncated(true)
+                    .next_continuation_token("tok1")
+                    .build()
+            });
+        let page2 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| req.continuation_token() == Some("tok1"))
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("gone/z", 3))
+                    .build()
+            });
+        let delete_batch_of_two = mock!(aws_sdk_s3::Client::delete_objects)
+            .match_requests(|req| req.delete().is_some_and(|d| d.objects().len() == 2))
+            .then_output(|| DeleteObjectsOutput::builder().build());
+        let delete_batch_of_one = mock!(aws_sdk_s3::Client::delete_objects)
+            .match_requests(|req| req.delete().is_some_and(|d| d.objects().len() == 1))
+            .then_output(|| DeleteObjectsOutput::builder().build());
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            [&page1, &page2, &delete_batch_of_two, &delete_batch_of_one]
+        );
+        let svc = service(client);
+
+        svc.delete_folder("gone").await.expect("delete succeeds");
+        assert_eq!(delete_batch_of_two.num_calls(), 1);
+        assert_eq!(delete_batch_of_one.num_calls(), 1);
     }
 }
