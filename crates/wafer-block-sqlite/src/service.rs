@@ -1,7 +1,10 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use base64ct::{Base64, Encoding};
-use rusqlite::{types::Value as SqlValue, Connection, Row};
+use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row};
 use wafer_block::db::{Filter, ListOptions};
 use wafer_block_macro::wafer_async_trait;
 #[cfg(test)]
@@ -15,43 +18,144 @@ use wafer_core::interfaces::database::{
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
 
+use crate::worker::{ConnWorker, WORKER_GONE};
+
+/// Read-only workers opened alongside the write connection for file-backed
+/// databases. WAL journaling allows readers to run concurrently with the
+/// writer and each other, so reads no longer queue behind writes (or behind
+/// other reads) the way they did on the single shared mutex. Two is enough
+/// to overlap a slow scan with point reads without multiplying page-cache
+/// memory; in-memory databases cannot share state across connections and
+/// use the write worker for everything.
+const READ_WORKERS: usize = 2;
+
 /// SQLite implementation of the DatabaseService.
+///
+/// A dedicated worker thread owns the write connection (see
+/// [`ConnWorker`]); file-backed databases add [`READ_WORKERS`] read-only
+/// worker connections that serve the fetch/scalar paths. Async callers only
+/// await channel sends and replies — SQLite I/O never runs on an executor
+/// thread (PERF-02).
 pub struct SQLiteDatabaseService {
-    db: Mutex<Connection>,
+    write: ConnWorker,
+    readers: Vec<ConnWorker>,
+    next_reader: AtomicUsize,
+}
+
+/// Apply the standard connection PRAGMAs: WAL journaling, foreign-key
+/// enforcement, and a 5s busy timeout. Failures are logged but non-fatal
+/// so callers always get a usable service.
+fn apply_pragmas(db: &Connection) {
+    if let Err(e) = db.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA foreign_keys=ON;
+         PRAGMA busy_timeout=5000;",
+    ) {
+        tracing::warn!(error = %e, "failed to set SQLite PRAGMAs — performance and safety may be degraded");
+    }
 }
 
 impl SQLiteDatabaseService {
-    /// Wrap an open `rusqlite::Connection`, enabling WAL journaling,
-    /// foreign-key enforcement, and a 5s busy timeout. PRAGMA failures
-    /// are logged but non-fatal so callers always get a usable service.
+    /// Wrap an open `rusqlite::Connection`, applying the standard PRAGMAs
+    /// and moving it onto a dedicated worker thread. No read pool: the
+    /// connection's origin (file, memory, shared cache) is unknown here, so
+    /// additional connections cannot be opened safely.
     pub(crate) fn new(db: Connection) -> Self {
-        // Enable WAL mode and foreign keys
-        if let Err(e) = db.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;
-             PRAGMA busy_timeout=5000;",
-        ) {
-            tracing::warn!(error = %e, "failed to set SQLite PRAGMAs — performance and safety may be degraded");
+        apply_pragmas(&db);
+        Self {
+            write: ConnWorker::spawn(db, "sqlite-write"),
+            readers: Vec::new(),
+            next_reader: AtomicUsize::new(0),
         }
-        Self { db: Mutex::new(db) }
     }
 
     /// Open a SQLite database file at `path` (creating it if absent) and
     /// return a configured service. Used by a native application build to back the
     /// `wafer-run/sqlite` block with an on-disk DB.
+    ///
+    /// Alongside the write connection, [`READ_WORKERS`] read-only reader
+    /// connections are opened so WAL-mode reads run concurrently with
+    /// writes. A reader failing to open degrades to fewer/no readers (the
+    /// write worker serves reads then) rather than failing the service,
+    /// matching the PRAGMA warn-and-continue policy above.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
         let conn = Connection::open(path)
             .map_err(|e| DatabaseError::Internal(format!("open database: {e}")))?;
-        Ok(Self::new(conn))
+        apply_pragmas(&conn);
+
+        let mut readers = Vec::new();
+        for i in 0..READ_WORKERS {
+            // Read-only at the SQLite level: the fetch/scalar paths (including
+            // admin QUERY_RAW) are read APIs, so a write statement smuggled
+            // through them now fails loudly instead of silently mutating.
+            match Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ) {
+                Ok(rconn) => {
+                    if let Err(e) = rconn.execute_batch("PRAGMA busy_timeout=5000;") {
+                        tracing::warn!(error = %e, "failed to set reader busy_timeout");
+                    }
+                    readers.push(ConnWorker::spawn(rconn, &format!("sqlite-read-{i}")));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open read-only sqlite reader; reads fall back to the write worker");
+                    break;
+                }
+            }
+        }
+
+        Ok(Self {
+            write: ConnWorker::spawn(conn, "sqlite-write"),
+            readers,
+            next_reader: AtomicUsize::new(0),
+        })
     }
 
     /// Open an in-memory SQLite database for tests and ephemeral
-    /// workloads. The connection lives for the lifetime of the returned
-    /// service and is dropped with it.
+    /// workloads. The connection lives for the lifetime of the worker
+    /// thread and is dropped with the service.
     pub fn open_in_memory() -> Result<Self, DatabaseError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| DatabaseError::Internal(format!("open in-memory database: {e}")))?;
         Ok(Self::new(conn))
+    }
+
+    /// Run a job on the write worker (all statements with side effects, and
+    /// anything that must observe its own prior writes in program order).
+    async fn on_write<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> T + Send + 'static,
+    {
+        self.write
+            .run(f)
+            .await
+            .map_err(|()| DatabaseError::Internal(WORKER_GONE.to_string()))
+    }
+
+    /// Run a read job on the next reader (round-robin), falling back to the
+    /// write worker when no readers exist (in-memory / wrapped connections).
+    ///
+    /// Read-your-writes stays intact: WAL readers always see the latest
+    /// COMMITTED state, and by the time an async caller issues a follow-up
+    /// read, its write job has already completed (the write's reply is what
+    /// resumed the caller).
+    async fn on_read<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> T + Send + 'static,
+    {
+        if self.readers.is_empty() {
+            return self.on_write(f).await;
+        }
+        let i = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len();
+        self.readers[i]
+            .run(f)
+            .await
+            .map_err(|()| DatabaseError::Internal(WORKER_GONE.to_string()))
     }
 
     fn row_to_record(row: &Row) -> rusqlite::Result<Record> {
@@ -168,38 +272,33 @@ fn has_integer_pk(db: &Connection, table: &str) -> bool {
     false
 }
 
+/// Bind owned [`SqlValue`]s as a `ToSql` slice. Runs inside worker jobs —
+/// the conversion from JSON happens on the async side, the borrow for the
+/// rusqlite call happens on the worker.
+fn as_params(sql_params: &[SqlValue]) -> Vec<&dyn rusqlite::types::ToSql> {
+    sql_params
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect()
+}
+
 #[wafer_async_trait]
 impl DbExec for SQLiteDatabaseService {
     const BACKEND: Backend = Backend::Sqlite;
 
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "guard must span prepare→query_map→collect; the prepared statement and MappedRows iterator both borrow the guard, so it cannot drop until rows is collected. Scope is already minimized to the inner block whose tail is the owned Vec."
-    )]
     async fn run_fetch(
         &self,
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let records: Vec<Record> = {
-            let db = self
-                .db
-                .lock()
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        self.on_read(move |db| {
             let mut prepared = db
-                .prepare(sql)
+                .prepare(&sql)
                 .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-            // Bind to a `let` (rather than letting this be the block's tail
-            // expression) so the `MappedRows` iterator temporary — which borrows
-            // `prepared`/`db` — is dropped at the `;` before the guard goes out
-            // of scope, while still keeping the lock held only for this block.
-            let rows: Vec<Record> = prepared
-                .query_map(query_params.as_slice(), Self::row_to_record)
+            let records: Vec<Record> = prepared
+                .query_map(as_params(&sql_params).as_slice(), Self::row_to_record)
                 .map_err(|e| DatabaseError::Internal(e.to_string()))?
                 .filter_map(|r| match r {
                     Ok(record) => Some(record),
@@ -209,9 +308,9 @@ impl DbExec for SQLiteDatabaseService {
                     }
                 })
                 .collect();
-            rows
-        };
-        Ok(records)
+            Ok(records)
+        })
+        .await?
     }
 
     async fn run_fetch_one(
@@ -219,20 +318,16 @@ impl DbExec for SQLiteDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<Record, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(sql, query_params.as_slice(), Self::row_to_record)
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
-                _ => DatabaseError::Internal(e.to_string()),
-            })
+        self.on_read(move |db| {
+            db.query_row(&sql, as_params(&sql_params).as_slice(), Self::row_to_record)
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                    _ => DatabaseError::Internal(e.to_string()),
+                })
+        })
+        .await?
     }
 
     async fn run_execute(
@@ -240,20 +335,15 @@ impl DbExec for SQLiteDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = db
-            .execute(sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        drop(db);
-        Ok(rows as i64)
+        self.on_write(move |db| {
+            let rows = db
+                .execute(&sql, as_params(&sql_params).as_slice())
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            Ok(rows as i64)
+        })
+        .await?
     }
 
     async fn run_scalar_i64(
@@ -261,17 +351,13 @@ impl DbExec for SQLiteDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(sql, query_params.as_slice(), |row| row.get(0))
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        self.on_read(move |db| {
+            db.query_row(&sql, as_params(&sql_params).as_slice(), |row| row.get(0))
+                .map_err(|e| DatabaseError::Internal(e.to_string()))
+        })
+        .await?
     }
 
     async fn run_scalar_f64(
@@ -279,17 +365,13 @@ impl DbExec for SQLiteDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<f64, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.query_row(sql, query_params.as_slice(), |row| row.get(0))
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+        self.on_read(move |db| {
+            db.query_row(&sql, as_params(&sql_params).as_slice(), |row| row.get(0))
+                .map_err(|e| DatabaseError::Internal(e.to_string()))
+        })
+        .await?
     }
 
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
@@ -297,35 +379,31 @@ impl DbExec for SQLiteDatabaseService {
         Ok(self.run_scalar_i64(&sql, &params).await? > 0)
     }
 
-    /// Lock-spanning insert: `last_insert_rowid()` is only meaningful while no
-    /// other insert can run on the connection, so the guard covers both calls.
+    /// Job-spanning insert: `last_insert_rowid()` is only meaningful while no
+    /// other insert can run on the connection, so one worker job covers both
+    /// calls (jobs on the write worker are strictly sequential).
     async fn run_insert(
         &self,
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<Option<i64>, DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        let query_params: Vec<&dyn rusqlite::types::ToSql> = sql_params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-        db.execute(sql, query_params.as_slice())
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let rowid = db.last_insert_rowid();
-        drop(db);
-        Ok(Some(rowid))
+        self.on_write(move |db| {
+            db.execute(&sql, as_params(&sql_params).as_slice())
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            Ok(Some(db.last_insert_rowid()))
+        })
+        .await?
     }
 
     /// Tables with `INTEGER PRIMARY KEY` autoincrement generate their own id;
     /// `create` must not synthesize a UUID for them.
     async fn table_autogenerates_id(&self, table: &str) -> bool {
-        self.db
-            .lock()
-            .map_or(false, |db| has_integer_pk(&db, table))
+        let table = table.to_string();
+        self.on_read(move |db| has_integer_pk(db, &table))
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -459,50 +537,75 @@ impl DatabaseService for SQLiteDatabaseService {
 
     // --- Schema management ---
 
+    /// One worker job spans the whole create/alter/index sequence, matching
+    /// the previous single continuous lock hold. All SQL is built on the
+    /// async side (no connection needed); only execution queues to the
+    /// write worker.
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        let create_stmt = ddl::build_create_table(table, Backend::Sqlite).map_err(|e| {
-            DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
-        })?;
-        db.execute_batch(&create_stmt.sql)
-            .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
+        let table_name = table.name.clone();
+        let create_sql = ddl::build_create_table(table, Backend::Sqlite)
+            .map_err(|e| {
+                DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
+            })?
+            .sql;
+        // (lowercased name, display name, ALTER sql) per declared column.
+        let column_adds: Vec<(String, String, String)> = table
+            .columns
+            .iter()
+            .map(|col| {
+                (
+                    col.name.to_lowercase(),
+                    col.name.clone(),
+                    ddl::build_add_column(&table.name, col, Backend::Sqlite).sql,
+                )
+            })
+            .collect();
+        let mut index_sqls = Vec::new();
+        for idx in &table.indexes {
+            index_sqls.push(
+                ddl::build_create_index(&table.name, idx, Backend::Sqlite)
+                    .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?
+                    .sql,
+            );
+        }
+        let fk_sqls: Vec<String> = ddl::build_fk_indexes(table, Backend::Sqlite)
+            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?
+            .into_iter()
+            .map(|stmt| stmt.sql)
+            .collect();
 
-        // Add any missing columns. The table was just created above, so a
-        // failure to read its columns is a real error, not "no columns" —
-        // propagate it (matches `table_columns`' fail-loud contract). The
-        // individual `ADD COLUMN` adds stay best-effort/warn since a duplicate
-        // column is a benign re-run.
-        let existing = table_columns(&db, &table.name)?;
-        for col in &table.columns {
-            if !existing.contains(&col.name.to_lowercase()) {
-                let alter = ddl::build_add_column(&table.name, col, Backend::Sqlite);
-                if let Err(e) = db.execute_batch(&alter.sql) {
-                    tracing::warn!(table = %table.name, column = %col.name, error = %e, "failed to add column");
+        self.on_write(move |db| {
+            db.execute_batch(&create_sql).map_err(|e| {
+                DatabaseError::Internal(format!("create table {table_name}: {e}"))
+            })?;
+
+            // Add any missing columns. The table was just created above, so a
+            // failure to read its columns is a real error, not "no columns" —
+            // propagate it (matches `table_columns`' fail-loud contract). The
+            // individual `ADD COLUMN` adds stay best-effort/warn since a
+            // duplicate column is a benign re-run.
+            let existing = table_columns(db, &table_name)?;
+            for (lower, name, alter_sql) in &column_adds {
+                if !existing.contains(lower) {
+                    if let Err(e) = db.execute_batch(alter_sql) {
+                        tracing::warn!(table = %table_name, column = %name, error = %e, "failed to add column");
+                    }
                 }
             }
-        }
 
-        // Ensure indexes
-        for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Sqlite)
-                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
-            db.execute_batch(&idx_stmt.sql)
-                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
-        }
+            for sql in &index_sqls {
+                db.execute_batch(sql)
+                    .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
+            }
 
-        // Create indexes for columns with foreign keys
-        let fk_stmts = ddl::build_fk_indexes(table, Backend::Sqlite)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
-        for stmt in fk_stmts {
-            db.execute_batch(&stmt.sql)
-                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
-        }
-        drop(db);
-
-        Ok(())
+            // Indexes for columns with foreign keys
+            for sql in &fk_sqls {
+                db.execute_batch(sql)
+                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
+            }
+            Ok(())
+        })
+        .await?
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
@@ -787,6 +890,15 @@ mod tests {
 
     fn make_test_svc() -> SQLiteDatabaseService {
         SQLiteDatabaseService::open_in_memory().unwrap()
+    }
+
+    /// Raw multi-statement setup executed on the write worker — the test-side
+    /// replacement for the retired direct `svc.db.lock()` access.
+    async fn exec_batch_for_tests(svc: &SQLiteDatabaseService, sql: &str) {
+        let sql = sql.to_string();
+        svc.on_write(move |db| db.execute_batch(&sql).unwrap())
+            .await
+            .unwrap();
     }
 
     async fn seed_rows(
@@ -1125,22 +1237,20 @@ mod tests {
         // builder wrongly re-stamped created_at in DO UPDATE SET, the sentinel
         // would be overwritten with CURRENT_TIMESTAMP. `key` is UNIQUE — the
         // conflict target.
-        {
-            let db = svc.db.lock().unwrap();
-            db.execute_batch(
-                "CREATE TABLE rl (
-                     id TEXT PRIMARY KEY,
-                     key TEXT UNIQUE,
-                     count INTEGER,
-                     window_start INTEGER,
-                     created_at TEXT,
-                     updated_at TEXT
-                 );
-                 INSERT INTO rl (id, key, count, window_start, created_at, updated_at)
-                 VALUES ('seed', 'user:1:login', 1, 1700000000, 'SENTINEL-CREATED', 'SENTINEL-UPDATED');",
-            )
-            .unwrap();
-        }
+        exec_batch_for_tests(
+            &svc,
+            "CREATE TABLE rl (
+                 id TEXT PRIMARY KEY,
+                 key TEXT UNIQUE,
+                 count INTEGER,
+                 window_start INTEGER,
+                 created_at TEXT,
+                 updated_at TEXT
+             );
+             INSERT INTO rl (id, key, count, window_start, created_at, updated_at)
+             VALUES ('seed', 'user:1:login', 1, 1700000000, 'SENTINEL-CREATED', 'SENTINEL-UPDATED');",
+        )
+        .await;
 
         let now = 1_700_000_000_i64;
         let cutoff = now - 60; // 60s window; stored window_start (=now) is NOT expired
@@ -1478,13 +1588,11 @@ mod tests {
         // synthesize a UUID, and the rowid from the lock-spanning run_insert
         // is folded into the returned record.
         let svc = make_test_svc();
-        {
-            let db = svc.db.lock().unwrap();
-            db.execute_batch(
-                "CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
-            )
-            .unwrap();
-        }
+        exec_batch_for_tests(
+            &svc,
+            "CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+        )
+        .await;
         let mut data = std::collections::HashMap::new();
         data.insert("name".to_string(), serde_json::json!("first"));
         let created = DatabaseService::create(&svc, "counters", data)
@@ -1741,5 +1849,94 @@ mod tests {
         assert!(DatabaseService::schema_table_exists(&svc, "widgets")
             .await
             .unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // PERF-02 worker routing (file-backed SQLite with read pool)
+    // -----------------------------------------------------------------------
+
+    /// Unique on-disk DB path; minimal tempfile stand-in (no new dev-dep).
+    fn tempdb_path(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!(
+            "wafer-sqlite-test-{tag}-{}-{nonce}.db",
+            std::process::id()
+        ))
+    }
+
+    /// PERF-02 evidence: reads are served by the read-only reader workers,
+    /// so they complete while the write worker is stalled. Deterministic:
+    /// the stall job is enqueued on the write worker FIRST and holds it
+    /// until the gate releases — were reads routed through the write
+    /// worker they would queue behind the stall and the timeout would hit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_proceed_while_write_worker_is_stalled() {
+        let path = tempdb_path("stall");
+        let svc = SQLiteDatabaseService::open(path.to_str().unwrap()).unwrap();
+        assert!(
+            !svc.readers.is_empty(),
+            "file-backed service must open reader workers"
+        );
+        seed_rows(&svc, "rows", vec![serde_json::json!({"id": "a", "v": "1"})]).await;
+
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let stalled = {
+            let write = svc.write.clone();
+            tokio::spawn(async move {
+                write
+                    .run(move |_conn| {
+                        let _ = gate_rx.recv();
+                    })
+                    .await
+            })
+        };
+
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            DatabaseService::get(&svc, "rows", "a"),
+        )
+        .await
+        .expect("read must not queue behind the stalled write worker")
+        .expect("get");
+        assert_eq!(got.id, "a");
+
+        gate_tx.send(()).expect("stall job dropped its gate");
+        stalled
+            .await
+            .expect("join")
+            .expect("stall job must complete");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The fetch/scalar paths run on read-only connections: a write
+    /// statement smuggled through them errors and mutates nothing (the
+    /// mutex-era code silently EXECUTED such writes).
+    #[tokio::test]
+    async fn fetch_path_is_read_only_on_file_backed_service() {
+        let path = tempdb_path("ro");
+        let svc = SQLiteDatabaseService::open(path.to_str().unwrap()).unwrap();
+        assert!(
+            !svc.readers.is_empty(),
+            "file-backed service must open reader workers"
+        );
+        seed_rows(&svc, "rows", vec![serde_json::json!({"id": "a", "v": "1"})]).await;
+
+        let err = svc
+            .run_fetch_one("INSERT INTO rows (id) VALUES ('evil')", &[])
+            .await
+            .expect_err("write through the read path must fail");
+        assert!(
+            err.to_string().to_lowercase().contains("readonly"),
+            "expected a readonly-database error, got: {err}"
+        );
+
+        let count = svc
+            .run_scalar_i64("SELECT COUNT(*) FROM rows", &[])
+            .await
+            .expect("count");
+        assert_eq!(count, 1, "the smuggled INSERT must not have executed");
+        let _ = std::fs::remove_file(&path);
     }
 }
