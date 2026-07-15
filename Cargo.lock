@@ -6277,6 +6277,7 @@ dependencies = [
  "tracing",
  "wafer-block-macro",
  "wafer-core",
+ "wafer-net-security",
 ]
 
 [[package]]
@@ -6440,6 +6441,7 @@ dependencies = [
  "uuid",
  "wafer-block",
  "wafer-block-macro",
+ "wafer-net-security",
  "wafer-schema",
  "wafer-sql-utils",
 ]
@@ -6478,6 +6480,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wafer-net-security"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "wafer-run"
 version = "0.1.0"
 dependencies = [
@@ -6502,6 +6513,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "url",
  "wafer-block",
  "wafer-block-cors",
  "wafer-block-ip-rate-limit",
@@ -6514,12 +6526,14 @@ dependencies = [
  "wafer-block-sqlite",
  "wafer-core",
  "wafer-flow",
+ "wafer-net-security",
  "wafer-schema",
  "wafer-sdk",
  "wafer-test-support",
  "wasmi",
  "wat",
  "web-time",
+ "wiremock",
 ]
 
 [[package]]

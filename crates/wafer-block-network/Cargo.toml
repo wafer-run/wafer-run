@@ -7,6 +7,7 @@ description = "WAFER block: outbound network requests via NetworkService"
 
 [dependencies]
 wafer-core = { path = "../wafer-core", default-features = false }
+wafer-net-security = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -23,8 +24,10 @@ default = []
 # loopback, and link-local addresses are permitted. Intended for local
 # development and integration tests; must NOT be enabled in production
 # builds. Replaces the prior `ALLOW_PRIVATE_NETWORK` env var (SEC-018) so
-# the bypass cannot be flipped on a live deploy.
-allow-private-network = []
+# the bypass cannot be flipped on a live deploy. Forwarded to
+# wafer-net-security so the shared `SsrfFilteringResolver` (SEC-09) and this
+# crate's URL-level checks always agree.
+allow-private-network = ["wafer-net-security/allow-private-network"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

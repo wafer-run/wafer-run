@@ -18,6 +18,7 @@ members = [
     "crates/wafer-block-s3",
     "crates/wafer-block-security-headers",
     "crates/wafer-block-sqlite",
+    "crates/wafer-net-security",
     "crates/wafer-schema",
     "crates/wafer-sql-utils",
     "crates/wafer-test-support",
@@ -52,6 +53,7 @@ wafer-core = { path = "crates/wafer-core" }
 wafer-schema = { path = "crates/wafer-schema" }
 wafer-sql-utils = { path = "crates/wafer-sql-utils" }
 wafer-flow = { path = "crates/wafer-flow" }
+wafer-net-security = { path = "crates/wafer-net-security" }
 
 # Core
 serde = { version = "1", features = ["derive"] }
