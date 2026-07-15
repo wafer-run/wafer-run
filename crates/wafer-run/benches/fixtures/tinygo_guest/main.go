@@ -19,7 +19,7 @@ import "unsafe"
 // the pointers handed to the host remain valid after the exported calls
 // return (the host copies them out before the next guest call).
 var (
-	infoJSON = []byte(`{"name":"bench/tinygo-guest","version":"0.0.0","interface":"handler@v1","summary":"TinyGo minimal bench guest"}`)
+	infoJSON = []byte(`{"name":"bench/tinygo-guest","version":"0.0.0","interface":"handler@v1","summary":"TinyGo minimal bench guest","instance_mode":"` + instanceMode + `"}`)
 	respJSON = []byte(`{"action":"Respond","response":{"data":[]}}`)
 	okJSON   = []byte(`{"Ok":null}`)
 	allocBuf []byte
