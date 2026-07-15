@@ -91,3 +91,26 @@ build_fixture \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm \
     crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm
+
+# bench_guest.wasm — consumed by the criterion benches (benches/wasm_guest.rs)
+# at runtime via Path. Echo + nested call_block arms for the PERF-01
+# measurement suite. Built in place; no copy needed.
+build_fixture \
+    crates/wafer-run/benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest.wasm \
+    crates/wafer-run/benches/fixtures/bench_guest/Cargo.toml \
+    crates/wafer-run/benches/fixtures/bench_guest/target/wasm32-wasip1/release/bench_guest.wasm
+
+# tinygo_guest.wasm — consumed by the criterion benches (benches/wasm_guest.rs)
+# for the cold/warm TinyGo comparison: a TinyGo wasi module exports `_start`,
+# which the loader re-runs on every per-call instantiation. TinyGo is a local
+# toolchain, not a CI dependency, so this fixture is best-effort: skipped with
+# a note when `tinygo` is not on PATH (the benches skip the TinyGo group when
+# the .wasm is absent).
+if command -v tinygo >/dev/null 2>&1; then
+    echo "building crates/wafer-run/benches/fixtures/tinygo_guest/target/tinygo_guest.wasm"
+    mkdir -p crates/wafer-run/benches/fixtures/tinygo_guest/target
+    (cd crates/wafer-run/benches/fixtures/tinygo_guest && \
+        tinygo build -target wasip1 -o target/tinygo_guest.wasm .) >&2
+else
+    echo "note: tinygo not on PATH — skipping tinygo_guest.wasm (TinyGo benches will be skipped)" >&2
+fi
