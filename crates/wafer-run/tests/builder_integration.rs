@@ -57,13 +57,16 @@ fn explicit_lockfile_path_loads_block_from_cache() {
     let lock_path = home.join("wafer.lock");
     fs::write(
         &lock_path,
-        r#"version = 1
+        // wasm_sha256 is the sha256 of MINIMAL_WASM (what seed_cache writes),
+        // so the SEC-05 integrity check passes.
+        r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 source = "registry+https://example.test"
 sha256 = "deadbeef"
+wasm_sha256 = "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
 "#,
     )
     .unwrap();
@@ -162,13 +165,15 @@ fn wafer_lockfile_env_var_takes_precedence() {
     let lock_path: PathBuf = home.join("env.lock");
     fs::write(
         &lock_path,
-        r#"version = 1
+        // wasm_sha256 = sha256(MINIMAL_WASM) so the SEC-05 integrity check passes.
+        r#"version = 2
 
 [[package]]
 name = "acme/envvar"
 version = "0.2.0"
 source = "registry+https://example.test"
 sha256 = "deadbeef"
+wasm_sha256 = "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
 "#,
     )
     .unwrap();

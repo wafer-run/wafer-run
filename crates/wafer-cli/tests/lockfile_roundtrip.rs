@@ -36,8 +36,10 @@ fn cache_populated_with_matching_lockfile_skips_network() {
 
     // Seed matching lockfile entry.
     let sha = "deadbeef".repeat(8); // 64 hex chars; arbitrary for a cache-hit test.
+                                    // The cache-hit fast path reads the entry without loading the wasm, so
+                                    // wasm_sha256 only needs to satisfy the v2 schema here.
     let lockfile = format!(
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nsource = \"registry+http://127.0.0.1:1\"\n"
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nwasm_sha256 = \"{sha}\"\nsource = \"registry+http://127.0.0.1:1\"\n"
     );
     fs::write(cwd.join("wafer.lock"), lockfile).unwrap();
 
