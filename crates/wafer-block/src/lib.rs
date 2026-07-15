@@ -7,6 +7,7 @@
 
 #![warn(missing_docs)]
 
+pub mod abi;
 pub mod codec;
 pub mod core_types;
 pub mod error;

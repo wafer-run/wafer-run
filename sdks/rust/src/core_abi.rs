@@ -4,90 +4,25 @@
 //! - Pack/unpack helpers for the `i64` `(ptr << 32 | len)` pointer convention.
 //! - The `__wafer_alloc` export so the host can allocate guest memory.
 //! - Safe wrappers around the host imports (`log`, `is_cancelled`).
-//! - [`GuestResult`] / [`GuestResponse`]: the JSON-serializable result type that
-//!   `__wafer_handle` returns to the host. The `#[wafer_block]` macro generates
-//!   the ABI glue; block authors use these types directly in their `handle` impl.
+//! - [`GuestResult`] / [`GuestResponse`]: the result type that
+//!   `__wafer_handle` returns to the host (MessagePack under ABI v2; see
+//!   `wafer_block::abi`). The `#[wafer_block]` macro generates the ABI glue;
+//!   block authors use these types directly in their `handle` impl.
 //!
 //! The `extern "C"` FFI declarations and the `__wafer_alloc` export are only
 //! meaningful on `wasm32` targets. On all other targets the public wrappers
 //! compile to stub functions that panic, ensuring block code that calls them
 //! fails loudly rather than silently doing nothing.
 
-use wafer_block::{MetaEntry, WaferError};
-
 // ---------------------------------------------------------------------------
 // Guest result types — returned from __wafer_handle / __wafer_lifecycle
 // ---------------------------------------------------------------------------
 
-/// The result returned by a WASM block's `handle` function.
-///
-/// This is serialized as JSON and sent back to the host runtime. The host
-/// maps it to an `OutputStream` using the `LegacyResult` bridge layer.
-///
-/// Use [`GuestResult::respond`], [`GuestResult::error`], or
-/// [`GuestResult::drop_request`] to construct values.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GuestResult {
-    /// Discriminator (`"Respond"`, `"Error"`, or `"Drop"`) telling the host which arm to take.
-    pub action: String,
-    /// Response body and trailing meta when `action == "Respond"`.
-    pub response: Option<GuestResponse>,
-    /// Structured error when `action == "Error"`.
-    pub error: Option<WaferError>,
-    /// Optional updated `Message` to forward downstream alongside the response.
-    pub message: Option<wafer_block::Message>,
-}
-
-/// The response body returned by a successful WASM block invocation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GuestResponse {
-    /// Body bytes returned to the caller.
-    pub data: Vec<u8>,
-    /// Trailing meta entries appended to the response stream.
-    pub meta: Vec<MetaEntry>,
-}
-
-impl GuestResult {
-    /// Respond with a body (and optional trailing meta).
-    pub fn respond(data: Vec<u8>) -> Self {
-        Self {
-            action: "Respond".to_string(),
-            response: Some(GuestResponse { data, meta: vec![] }),
-            error: None,
-            message: None,
-        }
-    }
-
-    /// Respond with body and meta entries.
-    pub fn respond_with_meta(data: Vec<u8>, meta: Vec<MetaEntry>) -> Self {
-        Self {
-            action: "Respond".to_string(),
-            response: Some(GuestResponse { data, meta }),
-            error: None,
-            message: None,
-        }
-    }
-
-    /// Return an error to the caller.
-    pub fn error(err: WaferError) -> Self {
-        Self {
-            action: "Error".to_string(),
-            response: None,
-            error: Some(err),
-            message: None,
-        }
-    }
-
-    /// Drop the request (no response, no error).
-    pub fn drop_request() -> Self {
-        Self {
-            action: "Drop".to_string(),
-            response: None,
-            error: None,
-            message: None,
-        }
-    }
-}
+// The ABI frame/result types are defined once in `wafer_block::abi` (shared
+// verbatim with the host runtime so the two sides cannot drift) and
+// re-exported here so existing `wafer_sdk::core_abi::GuestResult` /
+// `wafer_sdk::GuestResult` imports keep working.
+pub use wafer_block::abi::{GuestResponse, GuestResult};
 
 // ---------------------------------------------------------------------------
 // Pack / unpack helpers (target-independent)

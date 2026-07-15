@@ -7,8 +7,8 @@
 //!
 //!   - `"bench.echo"` — returns the request body unchanged. Used by the
 //!     ABI round-trip benchmarks (1 KiB / 64 KiB / 1 MiB payloads): the
-//!     measured cost is per-call instantiation + the JSON `(Message, Vec<u8>)`
-//!     framing on both sides, not guest work.
+//!     measured cost is per-call instantiation + the core-ABI v2
+//!     (MessagePack, bin-encoded bodies) framing on both sides, not guest work.
 //!   - `"bench.nested_native"` — opens a streaming call to the native
 //!     `bench/native-echo` block, writes the request body as one chunk,
 //!     drains the response, and returns the concatenated bytes. Measures a
@@ -21,7 +21,7 @@ use wafer_sdk::core_abi::{pack_ptr_len, GuestResult};
 use wafer_sdk::stream::CallStream;
 use wafer_sdk::{BlockInfo, ErrorCode, Message, WaferError};
 
-/// Block metadata export. Returns a JSON-encoded `BlockInfo` packed as
+/// Block metadata export. Returns a codec-encoded `BlockInfo` packed as
 /// `(ptr << 32) | len` — the format `WasmiBlock::info()` expects.
 #[no_mangle]
 pub extern "C" fn __wafer_info() -> i64 {
@@ -41,37 +41,44 @@ pub extern "C" fn __wafer_info() -> i64 {
             .collect(),
         ..wafer_sdk::BlockCapabilities::none()
     });
-    let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");
+    let bytes = wafer_sdk::codec::encode(&info).expect("BlockInfo is codec-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;
     std::mem::forget(bytes);
     pack_ptr_len(ptr, len)
+}
+
+/// Core-ABI version export (v2 = MessagePack frames). The benches measure
+/// the framing the ecosystem actually ships, which is the current SDK's.
+#[no_mangle]
+pub extern "C" fn __wafer_abi_version() -> i32 {
+    wafer_sdk::abi::ABI_VERSION
 }
 
 /// Lifecycle hook — no-op for this fixture. Returns `Result<(), WaferError>::Ok(())`.
 #[no_mangle]
 pub extern "C" fn __wafer_lifecycle(_evt_ptr: i32, _evt_len: i32) -> i64 {
-    let bytes = serde_json::to_vec(&Ok::<(), WaferError>(()))
-        .expect("Result<(), WaferError>::Ok(()) is JSON-serialisable");
+    let bytes = wafer_sdk::codec::encode(&Ok::<(), WaferError>(()))
+        .expect("Result<(), WaferError>::Ok(()) is codec-serialisable");
     let ptr = bytes.as_ptr() as u32;
     let len = bytes.len() as u32;
     std::mem::forget(bytes);
     pack_ptr_len(ptr, len)
 }
 
-/// Standard wafer block handler entry point.
+/// Standard wafer block handler entry point (ABI v2: MessagePack frames).
 #[no_mangle]
 pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
     let msg_bytes = unsafe { std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize) };
-    let result = match serde_json::from_slice::<(Message, Vec<u8>)>(msg_bytes) {
-        Ok((msg, body)) => dispatch(&msg, body),
+    let result = match wafer_sdk::codec::decode::<wafer_sdk::abi::CallFrame>(msg_bytes) {
+        Ok(frame) => dispatch(&frame.0, frame.1.into_vec()),
         Err(e) => GuestResult::error(WaferError::new(
             ErrorCode::InvalidArgument,
-            format!("bench-guest: invalid (Message, body) tuple: {e}"),
+            format!("bench-guest: invalid call frame: {e}"),
         )),
     };
     let result_bytes =
-        serde_json::to_vec(&result).expect("GuestResult is always JSON-serialisable");
+        wafer_sdk::codec::encode(&result).expect("GuestResult is always codec-serialisable");
     let ptr = result_bytes.as_ptr() as u32;
     let len = result_bytes.len() as u32;
     std::mem::forget(result_bytes);
