@@ -13,7 +13,7 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-dirs = "5"
+dirs = "6"
 flate2 = "1"
 fs2 = "0.4"
 hex = "0.4"
