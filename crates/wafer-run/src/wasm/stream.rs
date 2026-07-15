@@ -271,25 +271,119 @@ fn precondition_err(message: &str) -> WaferError {
 
 /// Per-instance map of live stream handles. One registry lives inside each
 /// wasmi `Store`'s host state, so dropping the store cleans up orphan streams.
+///
+/// SEC-03: the registry also enforces two per-guest-call host-memory bounds
+/// that the wasmi linear-memory cap does NOT cover, because these bytes are
+/// copied *out* of guest memory into host-owned `Vec`s/maps:
+///  - `host_bytes` — running total of request-buffer + attachment bytes
+///    charged across all streams, capped at `max_host_bytes`. Monotonic: the
+///    per-call store (and this registry) is dropped when the guest call ends,
+///    so the budget bounds one invocation.
+///  - live stream count, capped at `max_live_streams`, so a guest cannot grow
+///    the handle map without limit by allocating streams it never closes.
 pub(crate) struct StreamRegistry {
     next_handle: AtomicU64,
     states: HashMap<u64, StreamState>,
+    /// Host bytes charged so far this call (request buffers + attachments).
+    host_bytes: usize,
+    /// Aggregate host-byte budget for this call.
+    max_host_bytes: usize,
+    /// Maximum number of concurrent live streams.
+    max_live_streams: usize,
 }
 
 impl StreamRegistry {
+    /// Registry with effectively-unbounded host budgets — used by unit tests
+    /// and any path that has no configured [`ResourceLimits`]. Production WASM
+    /// loading uses [`with_limits`](Self::with_limits).
     pub(crate) fn new() -> Self {
+        Self::with_limits(usize::MAX, usize::MAX)
+    }
+
+    /// Registry bounded by a per-call host-byte budget and a live-stream cap.
+    pub(crate) fn with_limits(max_host_bytes: usize, max_live_streams: usize) -> Self {
         Self {
             // Start at 1 so 0 can stand for "no handle / sentinel".
             next_handle: AtomicU64::new(1),
             states: HashMap::new(),
+            host_bytes: 0,
+            max_host_bytes,
+            max_live_streams,
         }
     }
 
-    /// Allocate a fresh handle and store the state. Returns the handle.
-    pub(crate) fn alloc(&mut self, state: StreamState) -> u64 {
+    /// Charge `n` host bytes against the per-call budget. Returns
+    /// `ResourceExhausted` (without mutating the counter) if the charge would
+    /// exceed `max_host_bytes`.
+    fn charge_host_bytes(&mut self, n: usize) -> Result<(), WaferError> {
+        let next = self.host_bytes.saturating_add(n);
+        if next > self.max_host_bytes {
+            return Err(WaferError::new(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "guest exceeded per-call host-memory budget of {} bytes",
+                    self.max_host_bytes
+                ),
+            ));
+        }
+        self.host_bytes = next;
+        Ok(())
+    }
+
+    /// Allocate a fresh handle and store the state. Returns `ResourceExhausted`
+    /// if the live-stream cap is already reached.
+    pub(crate) fn alloc(&mut self, state: StreamState) -> Result<u64, WaferError> {
+        if self.states.len() >= self.max_live_streams {
+            return Err(WaferError::new(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "guest exceeded the maximum of {} concurrent streams",
+                    self.max_live_streams
+                ),
+            ));
+        }
         let h = self.next_handle.fetch_add(1, Ordering::Relaxed);
         self.states.insert(h, state);
-        h
+        Ok(h)
+    }
+
+    /// Charge `chunk` against the host budget, then append it to the request
+    /// buffer of `handle`. Charging happens before the copy so an over-budget
+    /// guest cannot grow host memory past the cap.
+    pub(crate) fn write_chunk(&mut self, handle: u64, chunk: &[u8]) -> Result<(), WaferError> {
+        if !self.states.contains_key(&handle) {
+            return Err(WaferError::new(
+                ErrorCode::NotFound,
+                "unknown stream handle",
+            ));
+        }
+        self.charge_host_bytes(chunk.len())?;
+        // Present: checked above; charge succeeded.
+        self.states
+            .get_mut(&handle)
+            .expect("handle presence checked above")
+            .write_chunk(chunk)
+    }
+
+    /// Charge the attachment (payload bytes + id) against the host budget, then
+    /// add it to `handle`'s attachment map.
+    pub(crate) fn attach(
+        &mut self,
+        handle: u64,
+        id: String,
+        att: wafer_block::Attachment,
+    ) -> Result<(), WaferError> {
+        if !self.states.contains_key(&handle) {
+            return Err(WaferError::new(
+                ErrorCode::NotFound,
+                "unknown stream handle",
+            ));
+        }
+        self.charge_host_bytes(att.bytes.len().saturating_add(id.len()))?;
+        self.states
+            .get_mut(&handle)
+            .expect("handle presence checked above")
+            .attach(id, att)
     }
 
     pub(crate) fn get_mut(&mut self, handle: u64) -> Option<&mut StreamState> {
@@ -452,8 +546,8 @@ mod tests {
     #[test]
     fn registry_alloc_returns_unique_handles() {
         let mut reg = StreamRegistry::new();
-        let h1 = reg.alloc(StreamState::new("a".into(), msg()));
-        let h2 = reg.alloc(StreamState::new("b".into(), msg()));
+        let h1 = reg.alloc(StreamState::new("a".into(), msg())).unwrap();
+        let h2 = reg.alloc(StreamState::new("b".into(), msg())).unwrap();
         assert_ne!(h1, h2);
         assert!(h1 >= 1, "handle should be non-zero");
         assert!(reg.get_mut(h1).is_some());
@@ -463,7 +557,7 @@ mod tests {
     #[test]
     fn registry_close_removes_state() {
         let mut reg = StreamRegistry::new();
-        let h = reg.alloc(StreamState::new("a".into(), msg()));
+        let h = reg.alloc(StreamState::new("a".into(), msg())).unwrap();
         assert_eq!(reg.len(), 1);
         reg.close(h);
         assert_eq!(reg.len(), 0);
@@ -476,11 +570,56 @@ mod tests {
     fn drop_cleans_up_orphans() {
         let mut reg = StreamRegistry::new();
         for _ in 0..5 {
-            reg.alloc(StreamState::new("orphan".into(), msg()));
+            reg.alloc(StreamState::new("orphan".into(), msg())).unwrap();
         }
         assert_eq!(reg.len(), 5);
         // Dropping should drain without panicking.
         drop(reg);
+    }
+
+    // SEC-03: host-owned bytes copied out of guest memory (stream request
+    // buffers + attachments) are charged against a per-call aggregate budget,
+    // so a guest cannot repeatedly copy the same small chunk into unbounded
+    // host memory. write_chunk / attach charge before appending.
+    #[test]
+    fn write_chunk_over_host_byte_budget_is_resource_exhausted() {
+        let mut reg = StreamRegistry::with_limits(10, 8);
+        let h = reg.alloc(StreamState::new("t/b".into(), msg())).unwrap();
+        reg.write_chunk(h, b"12345678")
+            .expect("8 bytes is within the 10-byte host budget");
+        let err = reg
+            .write_chunk(h, b"12345678")
+            .expect_err("a second 8-byte chunk exceeds the 10-byte host budget");
+        assert_eq!(err.code, ErrorCode::ResourceExhausted);
+    }
+
+    #[test]
+    fn attach_charges_against_host_byte_budget() {
+        let mut reg = StreamRegistry::with_limits(4, 8);
+        let h = reg.alloc(StreamState::new("t/b".into(), msg())).unwrap();
+        let att = wafer_block::Attachment {
+            mime: "application/octet-stream".into(),
+            bytes: vec![0u8; 8],
+            filename: None,
+        };
+        let err = reg
+            .attach(h, "id".into(), att)
+            .expect_err("an 8-byte attachment exceeds the 4-byte host budget");
+        assert_eq!(err.code, ErrorCode::ResourceExhausted);
+    }
+
+    // SEC-03: the number of concurrent live streams is bounded, so a guest
+    // cannot grow the registry's HashMap without limit by allocating handles
+    // it never closes.
+    #[test]
+    fn alloc_over_max_live_streams_is_resource_exhausted() {
+        let mut reg = StreamRegistry::with_limits(1_000_000, 2);
+        reg.alloc(StreamState::new("t/b".into(), msg())).unwrap();
+        reg.alloc(StreamState::new("t/b".into(), msg())).unwrap();
+        let err = reg
+            .alloc(StreamState::new("t/b".into(), msg()))
+            .expect_err("a third live stream exceeds max_live_streams = 2");
+        assert_eq!(err.code, ErrorCode::ResourceExhausted);
     }
 
     #[tokio::test]

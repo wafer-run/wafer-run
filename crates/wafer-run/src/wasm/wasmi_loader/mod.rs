@@ -74,8 +74,9 @@ fn instantiate(
     let host_state = WasmiHostState {
         context: None,
         max_memory_pages: limits.memory_pages,
+        max_table_elements: limits.max_table_elements,
         capabilities: caps.clone(),
-        streams: StreamRegistry::new(),
+        streams: StreamRegistry::with_limits(limits.max_host_bytes, limits.max_live_streams),
         pending_stream_finish: None,
         pending_stream_read: None,
         pending_stream_take_error: None,

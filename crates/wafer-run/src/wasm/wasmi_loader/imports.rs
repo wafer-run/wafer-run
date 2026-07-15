@@ -151,8 +151,11 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                 };
 
                 let state = StreamState::new(block_name, msg);
-                let handle = caller.data_mut().streams.alloc(state);
-                Ok(handle as i64)
+                match caller.data_mut().streams.alloc(state) {
+                    Ok(handle) => Ok(handle as i64),
+                    // SEC-03: live-stream cap reached.
+                    Err(e) => Ok(error_code_to_neg_i64(e.code)),
+                }
             },
         )
         .map_err(|e| RuntimeError::Wasm(format!("linking __wafer_host_stream_init: {e}")))?;
@@ -179,14 +182,17 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .map_err(|e| WasmiError::new(format!("reading stream chunk: {e}")))?;
 
                 let mut caller = caller;
-                let Some(state) = caller.data_mut().streams.get_mut(handle as u64) else {
-                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
-                };
-                match state.write_chunk(&buf) {
+                // SEC-03: charge `buf` against the per-call host-byte budget
+                // before appending (registry-level accounting).
+                match caller.data_mut().streams.write_chunk(handle as u64, &buf) {
                     Ok(()) => Ok(0),
                     Err(e) => {
                         let code = e.code;
-                        state.record_error_and_close(e);
+                        // Close the offending stream on a precondition/budget
+                        // failure (no-op if the handle was unknown).
+                        if let Some(state) = caller.data_mut().streams.get_mut(handle as u64) {
+                            state.record_error_and_close(e);
+                        }
                         Ok(error_code_to_neg_i32(code))
                     }
                 }
@@ -225,13 +231,11 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                         Err(_) => return Ok(error_code_to_neg_i32(ErrorCode::InvalidArgument)),
                     };
 
-                let Some(stream_state) = caller.data_mut().streams.get_mut(handle as u64) else {
-                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
-                };
-
-                match stream_state.attach(id, att) {
+                // SEC-03: charge the attachment payload against the per-call
+                // host-byte budget before inserting (registry-level accounting).
+                match caller.data_mut().streams.attach(handle as u64, id, att) {
                     Ok(()) => Ok(0),
-                    Err(_) => Ok(error_code_to_neg_i32(ErrorCode::FailedPrecondition)),
+                    Err(e) => Ok(error_code_to_neg_i32(e.code)),
                 }
             },
         )

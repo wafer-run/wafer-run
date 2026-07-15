@@ -20,6 +20,24 @@ pub const DEFAULT_FUEL: u64 = 100_000_000;
 /// growth is bounded identically to before unless a consumer raises the cap.
 pub const DEFAULT_MAX_WASM_MEMORY_PAGES: u32 = 256;
 
+/// Default per-guest-call aggregate cap on host-owned bytes copied *out* of
+/// guest linear memory — stream request buffers plus attachment payloads
+/// (SEC-03). The wasmi linear-memory cap does not cover these host `Vec`s, so
+/// without this bound a guest can copy the same small chunk repeatedly into
+/// unbounded host memory. 256 MiB is generous for legitimate single-call
+/// streaming while still bounding the amplification.
+pub const DEFAULT_MAX_HOST_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default per-guest-call cap on concurrent live streams (SEC-03). Bounds the
+/// host stream registry so a guest cannot grow it without limit by opening
+/// handles it never closes.
+pub const DEFAULT_MAX_LIVE_STREAMS: usize = 1024;
+
+/// Default cap on WebAssembly table elements a guest may grow to (SEC-03).
+/// The `ResourceLimiter` previously permitted unbounded table growth, which
+/// the linear-memory cap does not constrain.
+pub const DEFAULT_MAX_TABLE_ELEMENTS: u32 = 100_000;
+
 /// Per-guest-call wasmi fuel budget for a [`Wafer`](super::Wafer) runtime.
 ///
 /// Fuel metering bounds how much work a single WASM guest invocation may do
@@ -89,6 +107,16 @@ pub struct ResourceLimits {
     /// `memory.grow` would exceed this is denied (the grow returns -1).
     /// Defaults to [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB).
     pub memory_pages: u32,
+    /// SEC-03: aggregate cap on host-owned bytes copied out of guest memory
+    /// (stream request buffers + attachments) per guest call. Defaults to
+    /// [`DEFAULT_MAX_HOST_BYTES`] (256 MiB).
+    pub max_host_bytes: usize,
+    /// SEC-03: cap on concurrent live streams per guest call. Defaults to
+    /// [`DEFAULT_MAX_LIVE_STREAMS`] (1024).
+    pub max_live_streams: usize,
+    /// SEC-03: cap on WebAssembly table elements. Defaults to
+    /// [`DEFAULT_MAX_TABLE_ELEMENTS`] (100_000).
+    pub max_table_elements: u32,
 }
 
 impl Default for ResourceLimits {
@@ -96,6 +124,9 @@ impl Default for ResourceLimits {
         Self {
             fuel: FuelLimit::default(),
             memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
+            max_host_bytes: DEFAULT_MAX_HOST_BYTES,
+            max_live_streams: DEFAULT_MAX_LIVE_STREAMS,
+            max_table_elements: DEFAULT_MAX_TABLE_ELEMENTS,
         }
     }
 }
@@ -145,6 +176,9 @@ impl WasmState {
         ResourceLimits {
             fuel: self.fuel,
             memory_pages: self.max_wasm_memory_pages,
+            // SEC-03 host-side caps are not builder-configurable yet; use the
+            // bounded defaults for runtime-loaded blocks.
+            ..ResourceLimits::default()
         }
     }
 }
