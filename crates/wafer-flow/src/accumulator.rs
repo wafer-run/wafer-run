@@ -1,7 +1,7 @@
 //! Runtime state for a flow execution: stores step outputs and resolves
 //! `$.step-id.field` references against them.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serde_json::Value;
 
@@ -13,8 +13,20 @@ use crate::{error::ExprError, expr};
 /// The executor creates one accumulator per flow invocation, seeds it with
 /// the caller's payload under the `input` key, then calls [`set`](Self::set)
 /// after every step.
+///
+/// # Branch layering
+///
+/// [`branch_from`](Self::branch_from) creates a copy-on-write child layer
+/// over a frozen parent: reads fall through to the parent, writes stay in
+/// the child. The executor uses this for `parallel` branches so forking a
+/// branch costs one `Arc` clone instead of a deep copy of every stored
+/// step output, and the branch's writes come back out as an explicit delta
+/// via [`into_data`](Self::into_data).
 #[derive(Debug, Clone)]
 pub struct Accumulator {
+    /// Frozen parent layer (only set for [`branch_from`](Self::branch_from)
+    /// accumulators). Never mutated through this handle.
+    parent: Option<Arc<Accumulator>>,
     data: HashMap<String, Value>,
 }
 
@@ -22,29 +34,68 @@ impl Accumulator {
     /// Create an empty accumulator with no stored step outputs.
     pub fn new() -> Self {
         Self {
+            parent: None,
             data: HashMap::new(),
         }
     }
 
-    /// Store a step's output under its id.
+    /// Create a copy-on-write child layer over `parent`.
+    ///
+    /// Reads ([`get`](Self::get), `$.` resolution, `when` evaluation) see
+    /// the parent's entries; writes ([`set`](Self::set)) land in the child
+    /// only and shadow same-named parent entries.
+    /// [`into_data`](Self::into_data) returns only the child's writes.
+    ///
+    /// [`remove`](Self::remove) only affects the child layer: removing a key
+    /// the *parent* also holds re-exposes the parent value rather than
+    /// hiding it. The executor never does that — it only removes transient
+    /// keys it set in the same layer (the `each` binding) — so no tombstone
+    /// mechanism is carried for it.
+    pub fn branch_from(parent: Arc<Accumulator>) -> Self {
+        Self {
+            parent: Some(parent),
+            data: HashMap::new(),
+        }
+    }
+
+    /// Store a step's output under its id (in this layer).
     pub fn set(&mut self, step_id: &str, value: Value) {
         self.data.insert(step_id.to_string(), value);
     }
 
-    /// Get the raw value for a step id.
+    /// Get the raw value for a step id, falling through to parent layers.
     pub fn get(&self, step_id: &str) -> Option<&Value> {
-        self.data.get(step_id)
+        let mut cur = self;
+        loop {
+            if let Some(v) = cur.data.get(step_id) {
+                return Some(v);
+            }
+            cur = cur.parent.as_deref()?;
+        }
     }
 
-    /// Remove a stored value (used by the executor to drop the transient
-    /// `each` binding after a fan-out step completes).
+    /// Remove a stored value from this layer (used by the executor to drop
+    /// the transient `each` binding after a fan-out step completes). See
+    /// [`branch_from`](Self::branch_from) for the layered caveat.
     pub fn remove(&mut self, step_id: &str) {
         self.data.remove(step_id);
     }
 
-    /// Iterate over the step ids currently stored.
+    /// Iterate over the step ids currently visible (this layer plus parent
+    /// layers, deduplicated).
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.data.keys().map(String::as_str)
+        let mut seen: Vec<&str> = Vec::new();
+        let mut cur = Some(self);
+        while let Some(acc) = cur {
+            for k in acc.data.keys() {
+                let k = k.as_str();
+                if !seen.contains(&k) {
+                    seen.push(k);
+                }
+            }
+            cur = acc.parent.as_deref();
+        }
+        seen.into_iter()
     }
 
     /// Resolve a path expression like `$.step-id.field.nested` to a value.
@@ -61,7 +112,6 @@ impl Accumulator {
 
         let root_key = &segments[0];
         let root = self
-            .data
             .get(root_key)
             .ok_or_else(|| ExprError::UnresolvedReference(format!("$.{root_key}")))?;
 
@@ -96,39 +146,24 @@ impl Accumulator {
 
     /// Walk a JSON value, resolving all `$.` string references.
     /// Non-expression strings and other value types are returned as-is.
+    ///
+    /// Parse-at-use twin of [`crate::compiled::CompiledTemplate`] (which is
+    /// the single source of the walk semantics).
     pub fn resolve_input(&self, input: &Value) -> Result<Value, ExprError> {
-        match input {
-            Value::String(s) if s.starts_with("$.") => self.resolve(s),
-            Value::Object(map) => {
-                let mut result = serde_json::Map::new();
-                for (k, v) in map {
-                    result.insert(k.clone(), self.resolve_input(v)?);
-                }
-                Ok(Value::Object(result))
-            }
-            Value::Array(arr) => {
-                let mut result = Vec::new();
-                for v in arr {
-                    result.push(self.resolve_input(v)?);
-                }
-                Ok(Value::Array(result))
-            }
-            other => Ok(other.clone()),
-        }
+        crate::compiled::CompiledTemplate::compile(input).resolve(self)
     }
 
     /// Evaluate a `when` condition expression against stored data.
+    ///
+    /// Parse-at-use twin of [`crate::compiled::CompiledCondition`] (which is
+    /// the single source of the truthiness semantics).
     pub fn eval_condition(&self, condition: &str) -> Result<bool, ExprError> {
-        let parsed = expr::parse_expr(condition)?;
-        let result = expr::eval(&parsed, &|segments| self.resolve_segments(segments))?;
-        Ok(match result {
-            Value::Bool(b) => b,
-            Value::Null => false,
-            _ => true,
-        })
+        crate::compiled::CompiledCondition::compile(condition).eval(self)
     }
 
-    /// Return all stored data.
+    /// Return this layer's stored data. For a plain accumulator that is
+    /// everything stored; for a [`branch_from`](Self::branch_from) layer it
+    /// is only the branch's own writes (the delta), without parent entries.
     pub fn into_data(self) -> HashMap<String, Value> {
         self.data
     }
@@ -231,5 +266,53 @@ mod tests {
     fn unresolved_reference() {
         let acc = Accumulator::new();
         assert!(acc.resolve("$.nonexistent.field").is_err());
+    }
+
+    #[test]
+    fn branch_layer_reads_through_to_parent() {
+        let mut parent = Accumulator::new();
+        parent.set("input", json!({ "v": 1 }));
+        parent.set("pre", json!({ "out": "x" }));
+        let parent = std::sync::Arc::new(parent);
+
+        let branch = Accumulator::branch_from(parent);
+        assert_eq!(branch.get("input"), Some(&json!({ "v": 1 })));
+        assert_eq!(branch.resolve("$.pre.out").unwrap(), json!("x"));
+        assert!(branch.eval_condition("$.input.v == 1").unwrap());
+    }
+
+    #[test]
+    fn branch_layer_writes_stay_local_and_shadow() {
+        let mut parent = Accumulator::new();
+        parent.set("input", json!(1));
+        let parent = std::sync::Arc::new(parent);
+
+        let mut branch = Accumulator::branch_from(parent.clone());
+        branch.set("b1", json!("branch-output"));
+        branch.set("input", json!(2)); // shadow
+
+        // Local read sees the shadow; parent is untouched.
+        assert_eq!(branch.get("input"), Some(&json!(2)));
+        assert_eq!(parent.get("input"), Some(&json!(1)));
+
+        // Delta contains only the branch's writes.
+        let delta = branch.into_data();
+        assert_eq!(delta.len(), 2);
+        assert_eq!(delta["b1"], json!("branch-output"));
+        assert_eq!(delta["input"], json!(2));
+    }
+
+    #[test]
+    fn branch_layer_keys_are_deduplicated_union() {
+        let mut parent = Accumulator::new();
+        parent.set("input", json!(1));
+        parent.set("pre", json!(2));
+        let mut branch = Accumulator::branch_from(std::sync::Arc::new(parent));
+        branch.set("b1", json!(3));
+        branch.set("pre", json!(4)); // shadow
+
+        let mut keys: Vec<&str> = branch.keys().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["b1", "input", "pre"]);
     }
 }
