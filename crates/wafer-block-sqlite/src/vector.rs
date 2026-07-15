@@ -1,7 +1,6 @@
 //! SQLite-backed VectorService using sqlite-vec for similarity search
 //! and FTS5 for optional keyword search.
 
-use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 use wafer_core::interfaces::vector::{
     rrf,
@@ -12,15 +11,19 @@ use wafer_core::interfaces::vector::{
 };
 use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema};
 
-use crate::ensure_vec_loaded;
+use crate::{
+    ensure_vec_loaded,
+    worker::{ConnWorker, WORKER_GONE},
+};
 
 /// `VectorService` backed by SQLite + `sqlite-vec` (`vec0` virtual
-/// tables) for ANN search and FTS5 for keyword search. A single pooled
-/// `rusqlite::Connection` is guarded by a `Mutex`; callers are expected
-/// to register the `sqlite-vec` auto-extension before opening the
-/// connection (see [`crate::ensure_vec_loaded`]).
+/// tables) for ANN search and FTS5 for keyword search. A dedicated worker
+/// thread owns the `rusqlite::Connection` (see [`ConnWorker`]) so vector
+/// I/O never blocks an async executor thread (PERF-02); callers are
+/// expected to register the `sqlite-vec` auto-extension before opening
+/// the connection (see [`crate::ensure_vec_loaded`]).
 pub struct SqliteVecService {
-    db: Mutex<Connection>,
+    worker: ConnWorker,
 }
 
 impl SqliteVecService {
@@ -28,7 +31,9 @@ impl SqliteVecService {
     /// `sqlite-vec` extension loaded. Used by the consuming application to bind a
     /// shared on-disk DB to the vector service.
     pub fn new(db: Connection) -> Self {
-        Self { db: Mutex::new(db) }
+        Self {
+            worker: ConnWorker::spawn(db, "sqlite-vec"),
+        }
     }
 
     /// Open an in-memory SQLite connection with `sqlite-vec` registered
@@ -43,6 +48,20 @@ impl SqliteVecService {
         ensure_vec_loaded(&probe)?;
         drop(probe);
         Ok(Self::new(Connection::open_in_memory()?))
+    }
+
+    /// Run a job on the connection worker, mapping a dead worker to
+    /// [`VectorError::Internal`]. Whole methods run as ONE job, preserving
+    /// the previous continuous-lock semantics (transactions included).
+    async fn on_conn<T, F>(&self, f: F) -> Result<T, VectorError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, VectorError> + Send + 'static,
+    {
+        self.worker
+            .run(f)
+            .await
+            .map_err(|()| VectorError::Internal(WORKER_GONE.to_string()))?
     }
 
     /// Validate `name` and compute the index's table names. Non-identifier
@@ -73,56 +92,20 @@ impl SqliteVecService {
     ) -> Result<bool, VectorError> {
         Self::table_exists(conn, &schema.fts_table)
     }
-}
 
-#[async_trait::async_trait]
-impl VectorService for SqliteVecService {
-    async fn create_index(&self, config: VectorIndexConfig) -> Result<(), VectorError> {
-        let conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = Self::schema_for(&config.name)?;
-        if Self::index_exists(&conn, &schema)? {
-            return Err(VectorError::IndexAlreadyExists(config.name));
-        }
-        // All 3 metric variants are accepted — sqlite-vec is distance-agnostic at storage;
-        // it operates as cosine distance in SQL queries regardless of the stored metric tag.
-        let _ = match config.metric {
-            DistanceMetric::Cosine | DistanceMetric::Euclidean | DistanceMetric::DotProduct => (),
-        };
-        conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions).sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        if config.keyword_search {
-            conn.execute_batch(&schema.build_create_fts().sql)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    async fn delete_index(&self, name: &str) -> Result<(), VectorError> {
-        let conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = Self::schema_for(name)?;
-        if !Self::index_exists(&conn, &schema)? {
-            return Err(VectorError::IndexNotFound(name.to_string()));
-        }
-        for drop_stmt in schema.build_drop_all() {
-            conn.execute(&drop_stmt.sql, [])
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    async fn upsert(&self, index: &str, entries: Vec<VectorEntry>) -> Result<(), VectorError> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let mut conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = Self::schema_for(index)?;
-        if !Self::index_exists(&conn, &schema)? {
+    /// Worker-side body of [`VectorService::upsert`]: validation that needs
+    /// the connection, then one transaction spanning every entry.
+    fn upsert_on_conn(
+        conn: &mut Connection,
+        schema: &VectorIndexSchema,
+        index: &str,
+        entries: Vec<VectorEntry>,
+    ) -> Result<(), VectorError> {
+        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(conn, schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let has_kw = Self::has_keyword_search(&conn, &schema)?;
+        let has_kw = Self::has_keyword_search(conn, schema)?;
         for e in &entries {
             if has_kw && e.text.is_none() {
                 return Err(VectorError::TextRequired);
@@ -193,6 +176,59 @@ impl VectorService for SqliteVecService {
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl VectorService for SqliteVecService {
+    async fn create_index(&self, config: VectorIndexConfig) -> Result<(), VectorError> {
+        let schema = Self::schema_for(&config.name)?;
+        // All 3 metric variants are accepted — sqlite-vec is distance-agnostic at storage;
+        // it operates as cosine distance in SQL queries regardless of the stored metric tag.
+        let _ = match config.metric {
+            DistanceMetric::Cosine | DistanceMetric::Euclidean | DistanceMetric::DotProduct => (),
+        };
+        self.on_conn(move |conn| {
+            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            if Self::index_exists(conn, &schema)? {
+                return Err(VectorError::IndexAlreadyExists(config.name));
+            }
+            conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions).sql)
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            if config.keyword_search {
+                conn.execute_batch(&schema.build_create_fts().sql)
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_index(&self, name: &str) -> Result<(), VectorError> {
+        let schema = Self::schema_for(name)?;
+        let name = name.to_string();
+        self.on_conn(move |conn| {
+            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            if !Self::index_exists(conn, &schema)? {
+                return Err(VectorError::IndexNotFound(name));
+            }
+            for drop_stmt in schema.build_drop_all() {
+                conn.execute(&drop_stmt.sql, [])
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn upsert(&self, index: &str, entries: Vec<VectorEntry>) -> Result<(), VectorError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let schema = Self::schema_for(index)?;
+        let index = index.to_string();
+        self.on_conn(move |conn| Self::upsert_on_conn(conn, &schema, &index, entries))
+            .await
+    }
 
     async fn query(
         &self,
@@ -203,13 +239,229 @@ impl VectorService for SqliteVecService {
         mode: SearchMode,
         keyword_query: Option<String>,
     ) -> Result<Vec<VectorMatch>, VectorError> {
-        let conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         let schema = Self::schema_for(index)?;
-        if !Self::index_exists(&conn, &schema)? {
+        let index = index.to_string();
+        self.on_conn(move |conn| {
+            Self::query_on_conn(
+                conn,
+                &schema,
+                &index,
+                &vector,
+                top_k,
+                filter,
+                mode,
+                keyword_query,
+            )
+        })
+        .await
+    }
+
+    async fn delete(&self, index: &str, ids: Vec<String>) -> Result<(), VectorError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let schema = Self::schema_for(index)?;
+        let index = index.to_string();
+        self.on_conn(move |conn| {
+            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            if !Self::index_exists(conn, &schema)? {
+                return Err(VectorError::IndexNotFound(index));
+            }
+            let has_kw = Self::has_keyword_search(conn, &schema)?;
+
+            let tx = conn
+                .transaction()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+            // Gather rowids first so we can delete from _vec by rowid.
+            let mut stmt = tx
+                .prepare(&schema.build_select_rowid_in(ids.len()).sql)
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let rowids: Vec<i64> = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+
+            let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
+            for rid in rowids {
+                tx.execute(&delete_vec_sql, params![rid])
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+            }
+            tx.execute(
+                &schema.build_delete_meta_in(ids.len()).sql,
+                rusqlite::params_from_iter(ids.iter()),
+            )
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            if has_kw {
+                tx.execute(
+                    &schema.build_delete_fts_in(ids.len()).sql,
+                    rusqlite::params_from_iter(ids.iter()),
+                )
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            }
+            tx.commit()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn count(&self, index: &str) -> Result<u64, VectorError> {
+        let schema = Self::schema_for(index)?;
+        let index = index.to_string();
+        self.on_conn(move |conn| {
+            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            if !Self::index_exists(conn, &schema)? {
+                return Err(VectorError::IndexNotFound(index));
+            }
+            let n: i64 = conn
+                .query_row(&schema.build_count_meta().sql, [], |r| r.get(0))
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            Ok(n as u64)
+        })
+        .await
+    }
+
+    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>, VectorError> {
+        let (sql, pattern) = build_list_meta_tables(prefix);
+        self.on_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let names = stmt
+                .query_map(params![pattern], |row| row.get::<_, String>(0))
+                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            // The LIKE pattern guarantees the `_meta` suffix; strip it to stems.
+            Ok(names
+                .into_iter()
+                .filter_map(|n| n.strip_suffix("_meta").map(str::to_string))
+                .collect())
+        })
+        .await
+    }
+
+    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse, VectorError> {
+        let schema = Self::schema_for(index)?;
+        self.on_conn(move |conn| {
+            // Keyed on the meta table (same source the catalog scan uses), not
+            // the vec table — describe reports the meta table's real state.
+            if !Self::table_exists(conn, &schema.meta_table)? {
+                return Ok(DescribeIndexResponse {
+                    exists: false,
+                    columns: Vec::new(),
+                    keyword_search: false,
+                });
+            }
+            let mut stmt = conn
+                .prepare("SELECT name, type FROM pragma_table_info(?1) ORDER BY cid")
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let columns = stmt
+                .query_map(params![&schema.meta_table], |row| {
+                    Ok(ColumnInfo {
+                        name: row.get(0)?,
+                        sql_type: row.get(1)?,
+                    })
+                })
+                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .collect::<Result<Vec<ColumnInfo>, _>>()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            drop(stmt);
+            let keyword_search = Self::has_keyword_search(conn, &schema)?;
+            Ok(DescribeIndexResponse {
+                exists: true,
+                columns,
+                keyword_search,
+            })
+        })
+        .await
+    }
+
+    async fn list_ids(
+        &self,
+        index: &str,
+        filter: MetadataFilter,
+    ) -> Result<Vec<String>, VectorError> {
+        if filter.equals.is_empty() {
+            return Err(VectorError::InvalidMetadataFilter(
+                "filter.equals must contain at least one condition".into(),
+            ));
+        }
+        let mut binds: Vec<rusqlite::types::Value> = Vec::with_capacity(filter.equals.len() * 2);
+        for (path, value) in &filter.equals {
+            binds.push(rusqlite::types::Value::Text(format!("$.{path}")));
+            match value {
+                serde_json::Value::String(s) => {
+                    binds.push(rusqlite::types::Value::Text(s.clone()));
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        binds.push(rusqlite::types::Value::Integer(i));
+                    } else if let Some(f) = n.as_f64() {
+                        binds.push(rusqlite::types::Value::Real(f));
+                    } else {
+                        return Err(VectorError::InvalidMetadataFilter(format!(
+                            "unrepresentable number for path {path:?}"
+                        )));
+                    }
+                }
+                other => {
+                    return Err(VectorError::InvalidMetadataFilter(format!(
+                        "value for path {path:?} must be a JSON string or number, got {other}"
+                    )));
+                }
+            }
+        }
+        let schema = Self::schema_for(index)?;
+        let index = index.to_string();
+        let sql = schema.build_select_ids_by_metadata(filter.equals.len()).sql;
+        self.on_conn(move |conn| {
+            if !Self::table_exists(conn, &schema.meta_table)? {
+                return Err(VectorError::IndexNotFound(index));
+            }
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let ids = stmt
+                .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            Ok(ids)
+        })
+        .await
+    }
+}
+
+impl SqliteVecService {
+    /// Worker-side body of [`VectorService::query`]: candidate ranking,
+    /// fusion, metadata lookup and filtering, all on the worker thread.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "1:1 with the trait method's parameters plus the connection and parsed schema"
+    )]
+    fn query_on_conn(
+        conn: &mut Connection,
+        schema: &VectorIndexSchema,
+        index: &str,
+        vector: &[f32],
+        top_k: usize,
+        filter: Option<MetadataFilter>,
+        mode: SearchMode,
+        keyword_query: Option<String>,
+    ) -> Result<Vec<VectorMatch>, VectorError> {
+        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        if !Self::index_exists(conn, schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
-        let has_kw = Self::has_keyword_search(&conn, &schema)?;
+        let has_kw = Self::has_keyword_search(conn, schema)?;
         match mode {
             SearchMode::Keyword | SearchMode::Hybrid if !has_kw => {
                 return Err(VectorError::KeywordSearchNotEnabled);
@@ -331,175 +583,6 @@ impl VectorService for SqliteVecService {
 
         Ok(out)
     }
-
-    async fn delete(&self, index: &str, ids: Vec<String>) -> Result<(), VectorError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let mut conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = Self::schema_for(index)?;
-        if !Self::index_exists(&conn, &schema)? {
-            return Err(VectorError::IndexNotFound(index.to_string()));
-        }
-        let has_kw = Self::has_keyword_search(&conn, &schema)?;
-
-        let tx = conn
-            .transaction()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-        // Gather rowids first so we can delete from _vec by rowid.
-        let mut stmt = tx
-            .prepare(&schema.build_select_rowid_in(ids.len()).sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let rowids: Vec<i64> = stmt
-            .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
-                r.get::<_, i64>(0)
-            })
-            .map_err(|e| VectorError::Internal(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
-        drop(stmt);
-
-        let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
-        for rid in rowids {
-            tx.execute(&delete_vec_sql, params![rid])
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
-        }
-        tx.execute(
-            &schema.build_delete_meta_in(ids.len()).sql,
-            rusqlite::params_from_iter(ids.iter()),
-        )
-        .map_err(|e| VectorError::Internal(e.to_string()))?;
-        if has_kw {
-            tx.execute(
-                &schema.build_delete_fts_in(ids.len()).sql,
-                rusqlite::params_from_iter(ids.iter()),
-            )
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        }
-        tx.commit()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn count(&self, index: &str) -> Result<u64, VectorError> {
-        let conn = self.db.lock();
-        ensure_vec_loaded(&conn).map_err(|e| VectorError::Internal(e.to_string()))?;
-        let schema = Self::schema_for(index)?;
-        if !Self::index_exists(&conn, &schema)? {
-            return Err(VectorError::IndexNotFound(index.to_string()));
-        }
-        let n: i64 = conn
-            .query_row(&schema.build_count_meta().sql, [], |r| r.get(0))
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        Ok(n as u64)
-    }
-
-    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>, VectorError> {
-        let conn = self.db.lock();
-        let (sql, pattern) = build_list_meta_tables(prefix);
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let names = stmt
-            .query_map(params![pattern], |row| row.get::<_, String>(0))
-            .map_err(|e| VectorError::Internal(e.to_string()))?
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        // The LIKE pattern guarantees the `_meta` suffix; strip it to stems.
-        Ok(names
-            .into_iter()
-            .filter_map(|n| n.strip_suffix("_meta").map(str::to_string))
-            .collect())
-    }
-
-    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse, VectorError> {
-        let conn = self.db.lock();
-        let schema = Self::schema_for(index)?;
-        // Keyed on the meta table (same source the catalog scan uses), not
-        // the vec table — describe reports the meta table's real state.
-        if !Self::table_exists(&conn, &schema.meta_table)? {
-            return Ok(DescribeIndexResponse {
-                exists: false,
-                columns: Vec::new(),
-                keyword_search: false,
-            });
-        }
-        let mut stmt = conn
-            .prepare("SELECT name, type FROM pragma_table_info(?1) ORDER BY cid")
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let columns = stmt
-            .query_map(params![&schema.meta_table], |row| {
-                Ok(ColumnInfo {
-                    name: row.get(0)?,
-                    sql_type: row.get(1)?,
-                })
-            })
-            .map_err(|e| VectorError::Internal(e.to_string()))?
-            .collect::<Result<Vec<ColumnInfo>, _>>()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let keyword_search = Self::has_keyword_search(&conn, &schema)?;
-        Ok(DescribeIndexResponse {
-            exists: true,
-            columns,
-            keyword_search,
-        })
-    }
-
-    async fn list_ids(
-        &self,
-        index: &str,
-        filter: MetadataFilter,
-    ) -> Result<Vec<String>, VectorError> {
-        if filter.equals.is_empty() {
-            return Err(VectorError::InvalidMetadataFilter(
-                "filter.equals must contain at least one condition".into(),
-            ));
-        }
-        let mut binds: Vec<rusqlite::types::Value> = Vec::with_capacity(filter.equals.len() * 2);
-        for (path, value) in &filter.equals {
-            binds.push(rusqlite::types::Value::Text(format!("$.{path}")));
-            match value {
-                serde_json::Value::String(s) => {
-                    binds.push(rusqlite::types::Value::Text(s.clone()));
-                }
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        binds.push(rusqlite::types::Value::Integer(i));
-                    } else if let Some(f) = n.as_f64() {
-                        binds.push(rusqlite::types::Value::Real(f));
-                    } else {
-                        return Err(VectorError::InvalidMetadataFilter(format!(
-                            "unrepresentable number for path {path:?}"
-                        )));
-                    }
-                }
-                other => {
-                    return Err(VectorError::InvalidMetadataFilter(format!(
-                        "value for path {path:?} must be a JSON string or number, got {other}"
-                    )));
-                }
-            }
-        }
-        let conn = self.db.lock();
-        let schema = Self::schema_for(index)?;
-        if !Self::table_exists(&conn, &schema.meta_table)? {
-            return Err(VectorError::IndexNotFound(index.to_string()));
-        }
-        let sql = schema.build_select_ids_by_metadata(filter.equals.len()).sql;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let ids = stmt
-            .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| VectorError::Internal(e.to_string()))?
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-        Ok(ids)
-    }
 }
 
 fn apply_filter(metadata: &Option<serde_json::Value>, filter: &MetadataFilter) -> bool {
@@ -535,26 +618,31 @@ mod tests {
         }
     }
 
+    /// Scalar assertion query executed on the connection worker — the
+    /// test-side replacement for the retired direct `svc.db.lock()` access.
+    async fn query_i64_for_tests(svc: &SqliteVecService, sql: &str) -> i64 {
+        let sql = sql.to_string();
+        svc.worker
+            .run(move |conn| conn.query_row(&sql, [], |r| r.get::<_, i64>(0)).unwrap())
+            .await
+            .expect("vector worker alive")
+    }
+
     #[tokio::test]
     async fn create_index_vector_only() {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", false)).await.unwrap();
-        let conn = svc.db.lock();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('docs_vec','docs_meta')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let count = query_i64_for_tests(
+            &svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('docs_vec','docs_meta')",
+        )
+        .await;
         assert_eq!(count, 2);
-        let fts_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='docs_fts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let fts_exists = query_i64_for_tests(
+            &svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='docs_fts'",
+        )
+        .await;
         assert_eq!(
             fts_exists, 0,
             "FTS table must NOT exist when keyword_search=false"
@@ -565,14 +653,11 @@ mod tests {
     async fn create_index_with_keyword_search() {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", true)).await.unwrap();
-        let conn = svc.db.lock();
-        let fts_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='docs_fts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let fts_exists = query_i64_for_tests(
+            &svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='docs_fts'",
+        )
+        .await;
         assert_eq!(fts_exists, 1);
     }
 
@@ -589,14 +674,11 @@ mod tests {
         let svc = SqliteVecService::open_in_memory().unwrap();
         svc.create_index(cfg("docs", true)).await.unwrap();
         svc.delete_index("docs").await.unwrap();
-        let conn = svc.db.lock();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'docs_%'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let n = query_i64_for_tests(
+            &svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'docs_%'",
+        )
+        .await;
         assert_eq!(n, 0);
     }
 
@@ -639,10 +721,7 @@ mod tests {
         .await
         .unwrap();
 
-        let conn = svc.db.lock();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
-            .unwrap();
+        let n = query_i64_for_tests(&svc, "SELECT COUNT(*) FROM docs_meta").await;
         assert_eq!(n, 2);
     }
 
@@ -684,14 +763,9 @@ mod tests {
         svc.upsert("docs", vec![entry("a", vec![0.0, 1.0, 0.0], None)])
             .await
             .unwrap();
-        let conn = svc.db.lock();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM docs_meta", [], |r| r.get(0))
-            .unwrap();
+        let n = query_i64_for_tests(&svc, "SELECT COUNT(*) FROM docs_meta").await;
         assert_eq!(n, 1);
-        let n_vec: i64 = conn
-            .query_row("SELECT COUNT(*) FROM docs_vec", [], |r| r.get(0))
-            .unwrap();
+        let n_vec = query_i64_for_tests(&svc, "SELECT COUNT(*) FROM docs_vec").await;
         assert_eq!(n_vec, 1);
     }
 

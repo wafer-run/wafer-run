@@ -317,3 +317,97 @@ async fn granted_ctx_allows_sign_hash_and_random_bytes() {
         "every op should have reached the service exactly once, in order"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PERF-02 native offload — `handle_message_native` moves hash/compare_hash
+// to the blocking pool. Authorization must gate the offload exactly like the
+// sync path (deny → service never runs), and granted requests must round-trip
+// through the blocking pool with intact results.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn native_offload_hash_denied_never_reaches_service() {
+    let calls = new_calls();
+    let svc: Arc<dyn wafer_core::interfaces::crypto::service::CryptoService> =
+        Arc::new(crypto_fakes::RecordingCrypto::new(calls.clone()));
+    let body = codec::encode(&wire::crypto::HashRequest {
+        password: "hunter2".into(),
+    })
+    .unwrap();
+
+    let out = wafer_core::interfaces::crypto::handler::handle_message_native(
+        &svc,
+        &DenyCtx,
+        None,
+        &msg_without_wrap_meta(ServiceOp::CRYPTO_HASH),
+        &body,
+    )
+    .await;
+    expect_permission_denied(out).await;
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "hash must not be offloaded on a denied request; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_offload_grants_hash_and_compare_and_delegates_other_ops() {
+    let calls = new_calls();
+    let svc: Arc<dyn wafer_core::interfaces::crypto::service::CryptoService> =
+        Arc::new(crypto_fakes::RecordingCrypto::new(calls.clone()));
+
+    let hash_body = codec::encode(&wire::crypto::HashRequest {
+        password: "hunter2".into(),
+    })
+    .unwrap();
+    expect_success(
+        wafer_core::interfaces::crypto::handler::handle_message_native(
+            &svc,
+            &AllowCtx,
+            None,
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_HASH),
+            &hash_body,
+        )
+        .await,
+    )
+    .await;
+
+    let compare_body = codec::encode(&wire::crypto::CompareHashRequest {
+        password: "hunter2".into(),
+        hash: "hash".into(),
+    })
+    .unwrap();
+    expect_success(
+        wafer_core::interfaces::crypto::handler::handle_message_native(
+            &svc,
+            &AllowCtx,
+            None,
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_COMPARE_HASH),
+            &compare_body,
+        )
+        .await,
+    )
+    .await;
+
+    // A non-offloaded op must delegate to the sync path unchanged.
+    let random_bytes_body = codec::encode(&wire::crypto::RandomBytesRequest { n: 16 }).unwrap();
+    expect_success(
+        wafer_core::interfaces::crypto::handler::handle_message_native(
+            &svc,
+            &AllowCtx,
+            None,
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_RANDOM_BYTES),
+            &random_bytes_body,
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["hash", "compare_hash", "random_bytes"],
+        "every op should have reached the service exactly once, in order"
+    );
+}

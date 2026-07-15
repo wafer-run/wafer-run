@@ -16,6 +16,7 @@ sqlite-vec = { version = "0.1", optional = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }

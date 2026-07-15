@@ -9,9 +9,15 @@
 
 /// SQLite-backed implementation of the `wafer-core` `DatabaseService`
 /// interface. Exposes `SQLiteDatabaseService`, which dispatches the
-/// schemaless CRUD/list/aggregate ops over a single pooled
-/// `rusqlite::Connection` guarded by a `Mutex`.
+/// schemaless CRUD/list/aggregate ops to dedicated connection-worker
+/// threads (a write worker plus read-only readers for file-backed DBs)
+/// so SQLite I/O never blocks an async executor thread.
 pub mod service;
+
+/// Dedicated connection-worker thread shared by the database and vector
+/// services (PERF-02): async callers queue closures; SQLite I/O never runs
+/// on an executor thread.
+mod worker;
 
 /// Register the `sqlite-vec` extension with SQLite's auto-extension list
 /// the first time this is called. Safe to call repeatedly — after the
