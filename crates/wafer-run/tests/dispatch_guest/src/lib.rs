@@ -17,9 +17,12 @@
 
 use std::collections::HashMap;
 
-use wafer_sdk::clients::network;
-use wafer_sdk::core_abi::{pack_ptr_len, GuestResult};
-use wafer_sdk::{BlockInfo, ErrorCode, Message, MetaEntry, WaferError};
+use wafer_sdk::{
+    clients::network,
+    core_abi::{pack_ptr_len, GuestResult},
+    stream::CallStream,
+    BlockInfo, ErrorCode, Message, MetaEntry, WaferError,
+};
 
 // `__wafer_alloc` is exported by `wafer_sdk::core_abi` on `wasm32-*` targets,
 // so we don't redefine it here.
@@ -38,7 +41,9 @@ pub extern "C" fn __wafer_info() -> i64 {
     // network capability its requests exercise (checked against the
     // caller's caps in `check_resource_access`).
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: ["wafer-run/network"]
+        // `test/recorder` is the SEC-01 nested-call e2e callee (a native
+        // meta-echo block registered by dispatch_streaming.rs).
+        callable_blocks: ["wafer-run/network", "test/recorder"]
             .into_iter()
             .map(String::from)
             .collect(),
@@ -72,9 +77,7 @@ pub extern "C" fn __wafer_lifecycle(_evt_ptr: i32, _evt_len: i32) -> i64 {
 /// on `msg.kind`, and returns a JSON-encoded `GuestResult`.
 #[no_mangle]
 pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
-    let msg_bytes = unsafe {
-        std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize)
-    };
+    let msg_bytes = unsafe { std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize) };
     let result = match serde_json::from_slice::<(Message, Vec<u8>)>(msg_bytes) {
         Ok((msg, body)) => dispatch(&msg, &body),
         Err(e) => GuestResult::error(WaferError::new(
@@ -82,8 +85,8 @@ pub extern "C" fn __wafer_handle(msg_ptr: i32, msg_len: i32) -> i64 {
             format!("dispatch-guest: invalid (Message, body) tuple: {e}"),
         )),
     };
-    let result_bytes = serde_json::to_vec(&result)
-        .expect("GuestResult is always JSON-serialisable");
+    let result_bytes =
+        serde_json::to_vec(&result).expect("GuestResult is always JSON-serialisable");
     let ptr = result_bytes.as_ptr() as u32;
     let len = result_bytes.len() as u32;
     std::mem::forget(result_bytes);
@@ -141,6 +144,39 @@ fn dispatch(msg: &Message, body: &[u8]) -> GuestResult {
                 },
             ],
         ),
+        // SEC-01 hostile arm: forge host-owned identity on the Continue path.
+        // The continuation message the guest hands to the next flow step
+        // claims to be an admin; the host must drop the forged `auth.*` keys
+        // and restore the inbound host-set values, preserving `trace_id`.
+        "test.forge_continue" => {
+            let mut next = Message::new("next.step");
+            next.set_meta("auth.user_id", "attacker");
+            next.set_meta("auth.user_roles", "admin");
+            next.set_meta("trace_id", "t1");
+            GuestResult {
+                action: "Continue".to_string(),
+                response: None,
+                error: None,
+                message: Some(next),
+            }
+        }
+        // SEC-01 hostile arm: forge host-owned identity on the nested
+        // `call_block` (streaming host ABI) path. The callee `test/recorder`
+        // echoes the meta it receives as its JSON body, so the outer test can
+        // assert exactly what identity crossed the boundary.
+        "test.forge_nested_call" => {
+            let mut nested = Message::new("record.echo");
+            nested.set_meta("auth.user_id", "attacker");
+            nested.set_meta("auth.user_roles", "admin");
+            nested.set_meta("trace_id", "t2");
+            let response = CallStream::open("test/recorder", &nested)
+                .and_then(|call| call.finish())
+                .and_then(|mut resp| Ok(resp.next_chunk()?.unwrap_or_default()));
+            match response {
+                Ok(body) => GuestResult::respond(body),
+                Err(e) => GuestResult::error(e),
+            }
+        }
         other => GuestResult::error(WaferError::new(
             ErrorCode::Unimplemented,
             format!("dispatch-guest: unknown kind {other}"),

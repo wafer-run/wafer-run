@@ -6205,6 +6205,7 @@ dependencies = [
  "async-trait",
  "percent-encoding",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-block-macro",

@@ -154,6 +154,38 @@ impl Block for FakeNetworkBlock {
 }
 
 // ---------------------------------------------------------------------------
+// RecorderBlock — echoes the meta it was called with (SEC-01 nested-call e2e)
+// ---------------------------------------------------------------------------
+
+/// Native callee for the SEC-01 nested-`call_block` test. It serializes the
+/// metadata it *received* into its response body as sorted `key=value` lines,
+/// so the outer test can assert exactly which identity crossed the boundary
+/// when a hostile guest forged `auth.*` on the nested call.
+struct RecorderBlock;
+
+#[async_trait]
+impl Block for RecorderBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/recorder",
+            "0.1.0",
+            "recorder@v1",
+            "Test callee — echoes received meta as its body",
+        )
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let mut lines: Vec<String> = msg
+            .meta
+            .iter()
+            .map(|e| format!("{}={}", e.key, e.value))
+            .collect();
+        lines.sort();
+        OutputStream::respond(lines.join("\n").into_bytes())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test harness
 // ---------------------------------------------------------------------------
 
@@ -257,6 +289,119 @@ async fn guest_cannot_forge_host_owned_identity_metadata() {
             .iter()
             .any(|e| e.key == "trace_id" && e.value == "t1"),
         "the guest's non-protected meta must be preserved"
+    );
+}
+
+// SEC-01 (Continue path): a guest cannot forge or alter host-owned identity on
+// the continuation message it hands to the next flow step. The host snapshots
+// the inbound `auth.*` values and restores them over whatever the guest wrote,
+// so a restricted guest sitting before a privileged block in a flow cannot
+// escalate by rewriting the principal. Non-protected meta (`trace_id`) is left
+// as the guest set it.
+#[tokio::test]
+async fn guest_cannot_forge_identity_on_continue() {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    let wasm = dispatch_guest_wasm();
+    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    wafer
+        .register_block("test/dispatch-guest", Arc::new(block))
+        .expect("register dispatch-guest");
+    let wafer = wafer.start().await.expect("start runtime");
+
+    // Host-established principal on the inbound message.
+    let mut inbound = Message::new("test.forge_continue");
+    inbound.set_meta("auth.user_id", "real-user");
+    inbound.set_meta("auth.user_roles", "viewer");
+
+    let out = wafer
+        .run_block("test/dispatch-guest", inbound, InputStream::empty())
+        .await;
+
+    // The guest returned Continue; observe the continuation message.
+    let msg = match out.collect_buffered().await {
+        Err(wafer_block::streams::output::TerminalNotResponse::Continue(msg)) => msg,
+        other => panic!("expected a Continue terminal, got {other:?}"),
+    };
+    let get = |k: &str| {
+        msg.meta
+            .iter()
+            .find(|e| e.key == k)
+            .map(|e| e.value.as_str())
+    };
+    assert_eq!(
+        get("auth.user_id"),
+        Some("real-user"),
+        "host-owned auth.user_id must be restored, not the forged value"
+    );
+    assert_eq!(
+        get("auth.user_roles"),
+        Some("viewer"),
+        "host-owned auth.user_roles must be restored, not the forged 'admin'"
+    );
+    assert_eq!(
+        get("trace_id"),
+        Some("t1"),
+        "the guest's non-protected meta must survive"
+    );
+}
+
+// SEC-01 (nested `call_block` path): a guest cannot forge host-owned identity
+// on the message it streams to a callee via the host-call ABI. The callee
+// (`RecorderBlock`) echoes the meta it received, and the outer test asserts the
+// callee saw the host's inbound principal — never the forged `attacker`/`admin`.
+#[tokio::test]
+async fn guest_cannot_forge_identity_on_nested_call() {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    wafer
+        .register_block("test/recorder", Arc::new(RecorderBlock))
+        .expect("register recorder");
+    let wasm = dispatch_guest_wasm();
+    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    wafer
+        .register_block("test/dispatch-guest", Arc::new(block))
+        .expect("register dispatch-guest");
+    let wafer = wafer.start().await.expect("start runtime");
+
+    let mut inbound = Message::new("test.forge_nested_call");
+    inbound.set_meta("auth.user_id", "real-user");
+    inbound.set_meta("auth.user_roles", "viewer");
+
+    let out = wafer
+        .run_block("test/dispatch-guest", inbound, InputStream::empty())
+        .await;
+
+    // The guest responds with the recorder's echoed body: the meta the callee
+    // actually received, as sorted `key=value` lines.
+    let buf = out
+        .collect_buffered()
+        .await
+        .expect("nested-call dispatch should produce a buffered Respond");
+    let recorded = String::from_utf8(buf.body).expect("recorder body is utf8");
+    let lines: Vec<&str> = recorded.lines().collect();
+
+    assert!(
+        lines.contains(&"auth.user_id=real-user"),
+        "callee must see the host principal, not the forged one: {recorded:?}"
+    );
+    assert!(
+        lines.contains(&"auth.user_roles=viewer"),
+        "callee must see the host role, not the forged 'admin': {recorded:?}"
+    );
+    assert!(
+        !recorded.contains("attacker") && !lines.contains(&"auth.user_roles=admin"),
+        "no forged identity may reach the callee: {recorded:?}"
+    );
+    assert!(
+        lines.contains(&"trace_id=t2"),
+        "the guest's non-protected meta must reach the callee: {recorded:?}"
     );
 }
 

@@ -277,3 +277,100 @@ fn extract_segment_after(path: &str, needle: &str) -> Option<String> {
 }
 
 wafer_block::register_static_block!("wafer-run/inspector", InspectorBlock);
+
+#[cfg(test)]
+mod auth_tests {
+    //! SEC-01: the inspector authorizes solely from message metadata
+    //! (`auth.user_id` / `auth.user_roles`). Since a WASM guest cannot forge
+    //! those keys across the trust boundary (host-owned protected namespace,
+    //! enforced in `wasmi_loader`), these tests pin the authorization decision
+    //! itself: default policy denies the unauthenticated and the wrong-role
+    //! caller, and the role list is parsed with comma-split + trim + empty
+    //! filtering.
+
+    use wafer_block::{
+        streams::{input::InputStream, output::TerminalNotResponse},
+        Context, ErrorCode, Message,
+    };
+
+    use super::InspectorBlock;
+
+    /// Minimal Context: the authorization arm returns before any Context
+    /// method is consulted, and a caller that *passes* auth then hits
+    /// `flow_introspection()` (defaulted to `None`) → `FailedPrecondition`,
+    /// which is exactly the signal these tests use to prove "auth passed".
+    #[derive(Clone)]
+    struct MockContext;
+
+    #[async_trait::async_trait]
+    impl Context for MockContext {
+        async fn call_block(
+            &self,
+            _name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> wafer_block::streams::output::OutputStream {
+            wafer_block::streams::output::OutputStream::error(wafer_block::WaferError::new(
+                ErrorCode::Unimplemented,
+                "mock",
+            ))
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+        fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+            std::sync::Arc::new(self.clone())
+        }
+    }
+
+    async fn handle_code(msg: Message) -> ErrorCode {
+        use wafer_block::Block;
+        let block = InspectorBlock::new();
+        let out = block.handle(&MockContext, msg, InputStream::empty()).await;
+        match out.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => e.code,
+            Ok(_) => panic!("inspector must not produce a Respond on a mock context"),
+            Err(other) => panic!("unexpected terminal: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_policy_denies_unauthenticated() {
+        // No auth.user_id → Unauthenticated, before any data is exposed.
+        let code = handle_code(Message::new("retrieve")).await;
+        assert_eq!(code, ErrorCode::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn default_policy_denies_wrong_role() {
+        // Authenticated but roles lack `admin` → PermissionDenied.
+        let mut msg = Message::new("retrieve");
+        msg.set_meta("auth.user_id", "u1");
+        msg.set_meta("auth.user_roles", "viewer,developer");
+        assert_eq!(handle_code(msg).await, ErrorCode::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn default_policy_admits_admin_role() {
+        // `admin` present among comma+whitespace-separated roles → auth passes;
+        // the next failure is FailedPrecondition (mock has no FlowIntrospection),
+        // which distinguishes "authorized" from "denied".
+        let mut msg = Message::new("retrieve");
+        msg.set_meta("auth.user_id", "u1");
+        msg.set_meta("auth.user_roles", " viewer , admin ");
+        assert_eq!(handle_code(msg).await, ErrorCode::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn role_parsing_ignores_empty_and_whitespace_entries() {
+        // Empty/whitespace fragments must not accidentally match; a role list
+        // of only separators leaves no roles → wrong-role denial.
+        let mut msg = Message::new("retrieve");
+        msg.set_meta("auth.user_id", "u1");
+        msg.set_meta("auth.user_roles", " , ,  ");
+        assert_eq!(handle_code(msg).await, ErrorCode::PermissionDenied);
+    }
+}
