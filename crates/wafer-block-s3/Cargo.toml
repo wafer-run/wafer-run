@@ -22,3 +22,7 @@ workspace = true
 [lib]
 name = "wafer_block_s3"
 path = "src/lib.rs"
+
+[dev-dependencies]
+aws-sdk-s3 = { workspace = true, features = ["test-util"] }
+aws-smithy-mocks = "0.3.0"

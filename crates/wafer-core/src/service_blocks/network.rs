@@ -18,7 +18,8 @@ crate::service_block! {
         "Maximum response body size in bytes accepted by the HTTP \
          network service. Responses exceeding this limit are rejected \
          with an error rather than buffered. Defaults to 50 MiB \
-         (52428800) when unset.",
+         (52428800) when unset. Parsed once at startup: an invalid \
+         value fails service construction (requires restart to apply).",
         "52428800",
     )
     .name("Max Response Body Bytes")]),

@@ -9,8 +9,11 @@ pub use wafer_core::interfaces::network::service::{
 };
 
 /// Config var key controlling the maximum response body size accepted by
-/// `HttpNetworkService`. Read from the process env at request time. When
-/// unset, defaults to [`DEFAULT_MAX_RESPONSE_BYTES`].
+/// `HttpNetworkService`. Read from the process env **once** at service
+/// construction ([`HttpNetworkService::from_env`], PERF-04). When unset,
+/// defaults to [`DEFAULT_MAX_RESPONSE_BYTES`]; a present-but-invalid value
+/// is an explicit construction error, never a silent fallback. Changes
+/// take effect on the next boot.
 ///
 /// Declared on the `wafer-run/network` block's `BlockInfo::config_keys` so
 /// the admin UI can surface and edit it (see `service_blocks::network`).
@@ -101,16 +104,51 @@ impl Resolve for SsrfFilteringResolver {
 /// `reqwest::Client::new()`, which has no SSRF resolver, no timeout,
 /// and no redirect policy, so a TLS build failure quietly disabled
 /// the security middleware.
+#[derive(Debug)]
 pub struct HttpNetworkService {
     client: std::sync::OnceLock<Result<reqwest::Client, String>>,
+    /// Response-body cap in bytes. Parsed once at construction (PERF-04) —
+    /// the old code re-read and re-parsed the env var on every request.
+    max_response_bytes: usize,
 }
 
 impl HttpNetworkService {
-    /// Construct a service with an uninitialised client; the underlying
-    /// `reqwest::Client` is built on the first call to [`Self::client`].
-    pub fn new() -> Self {
+    /// Construct the service, reading [`MAX_RESPONSE_BYTES_KEY`] from the
+    /// process env exactly once.
+    ///
+    /// - Unset → [`DEFAULT_MAX_RESPONSE_BYTES`] (documented default).
+    /// - Present but not a positive integer → explicit error, so a typo'd
+    ///   cap fails the boot loudly instead of silently reverting to the
+    ///   default (the old per-request parse swallowed invalid values).
+    pub fn from_env() -> Result<Self, NetworkError> {
+        let max_response_bytes = match std::env::var(MAX_RESPONSE_BYTES_KEY) {
+            Err(std::env::VarError::NotPresent) => DEFAULT_MAX_RESPONSE_BYTES,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(NetworkError::Other(format!(
+                    "{MAX_RESPONSE_BYTES_KEY} is not valid UTF-8: \
+                     expected a positive integer byte count"
+                )));
+            }
+            Ok(raw) => match raw.parse::<usize>() {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    return Err(NetworkError::Other(format!(
+                        "{MAX_RESPONSE_BYTES_KEY}={raw:?} is invalid: expected a positive \
+                         integer byte count (unset it to use the default \
+                         {DEFAULT_MAX_RESPONSE_BYTES})"
+                    )));
+                }
+            },
+        };
+        Ok(Self::with_max_response_bytes(max_response_bytes))
+    }
+
+    /// Construct with an explicit response-body cap in bytes (no env read).
+    /// The underlying `reqwest::Client` is built on the first request.
+    pub fn with_max_response_bytes(max_response_bytes: usize) -> Self {
         Self {
             client: std::sync::OnceLock::new(),
+            max_response_bytes,
         }
     }
 
@@ -132,22 +170,6 @@ impl HttpNetworkService {
                 NetworkError::RequestError(format!("HTTP client initialisation failed: {s}"))
             })
     }
-}
-
-impl Default for HttpNetworkService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Read the configured response body cap. Parses
-/// [`MAX_RESPONSE_BYTES_KEY`] from the env; falls back to
-/// [`DEFAULT_MAX_RESPONSE_BYTES`] when unset or unparseable.
-fn max_response_bytes() -> usize {
-    std::env::var(MAX_RESPONSE_BYTES_KEY)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES)
 }
 
 #[wafer_async_trait]
@@ -203,7 +225,7 @@ impl NetworkService for HttpNetworkService {
         // stream and bail once the cap is exceeded (handles chunked /
         // unknown-length responses without buffering the whole thing in
         // reqwest's internal Bytes first).
-        let cap = max_response_bytes();
+        let cap = self.max_response_bytes;
         if let Some(advertised) = response.content_length() {
             if advertised as usize > cap {
                 return Err(NetworkError::RequestError(format!(
@@ -271,7 +293,7 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[tokio::test]
     async fn http_request_rejected_when_dns_returns_private_ip() {
-        let svc = HttpNetworkService::new();
+        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
         // Use a URL whose host is NOT obviously private — `is_blocked_url`
         // only catches the `localhost` literal because that's what's in
         // the URL. We want to ensure the resolver kicks in, so we craft a
@@ -302,27 +324,44 @@ mod tests {
     /// the hot path branch-free after the first successful init.
     #[test]
     fn client_is_cached_across_calls() {
-        let svc = HttpNetworkService::new();
+        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
         let first = svc.client().expect("first build succeeds");
         let second = svc.client().expect("second call returns cached client");
         // Same shared instance — the closure ran exactly once.
         assert!(std::ptr::eq(first, second));
     }
 
-    /// SEC-020: response cap reads from env, with the documented default.
+    /// PERF-04: the response cap is parsed exactly once, at construction.
+    /// Unset → documented default; valid → parsed value; present-but-invalid
+    /// (non-numeric, zero, negative, empty) → explicit Init error, never a
+    /// silent fallback to the default.
     ///
-    /// Both halves (unset → default, set → parsed value) live in one test so
-    /// the env mutation is serialized — cargo runs `#[test]`s in parallel
-    /// threads which would otherwise race on the shared process env.
+    /// All cases live in one test so the env mutation is serialized — cargo
+    /// runs `#[test]`s in parallel threads which would otherwise race on the
+    /// shared process env. (The other tests in this module deliberately use
+    /// `with_max_response_bytes`, which never touches the env.)
     #[test]
-    fn max_response_bytes_reads_env_with_default() {
+    fn from_env_parses_cap_once_with_default_and_loud_invalid() {
         let prev = std::env::var(MAX_RESPONSE_BYTES_KEY).ok();
 
         std::env::remove_var(MAX_RESPONSE_BYTES_KEY);
-        assert_eq!(max_response_bytes(), DEFAULT_MAX_RESPONSE_BYTES);
+        let svc = HttpNetworkService::from_env().expect("unset env uses the default");
+        assert_eq!(svc.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES);
 
         std::env::set_var(MAX_RESPONSE_BYTES_KEY, "1234");
-        assert_eq!(max_response_bytes(), 1234);
+        let svc = HttpNetworkService::from_env().expect("valid value parses");
+        assert_eq!(svc.max_response_bytes, 1234);
+
+        for invalid in ["not-a-number", "0", "-5", "12.5", ""] {
+            std::env::set_var(MAX_RESPONSE_BYTES_KEY, invalid);
+            let err = HttpNetworkService::from_env()
+                .expect_err("present-but-invalid value must fail construction");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(MAX_RESPONSE_BYTES_KEY) && msg.contains(invalid),
+                "error must name the key and the offending value, got: {msg}"
+            );
+        }
 
         match prev {
             Some(v) => std::env::set_var(MAX_RESPONSE_BYTES_KEY, v),

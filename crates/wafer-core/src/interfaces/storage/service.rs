@@ -67,6 +67,13 @@ pub struct ObjectList {
     /// Objects in the current page.
     pub objects: Vec<ObjectInfo>,
     /// Total objects matching the query across all pages.
+    ///
+    /// Backends where an exact total would require walking the entire
+    /// keyspace (e.g. S3) may return a lower bound when a `limit` was
+    /// given and the listing stopped early. The bound is always strictly
+    /// greater than `offset + limit` when more objects exist, so
+    /// `total_count > offset + limit` remains a correct has-more-pages
+    /// check.
     pub total_count: i64,
 }
 
