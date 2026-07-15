@@ -170,7 +170,13 @@ impl ShardedBuckets {
         }
 
         bucket.count += 1;
-        (bucket.count, bucket.window_start)
+
+        // Copy the results out and release the shard lock before returning
+        // (clippy::significant_drop_tightening — and the whole point here is
+        // holding the shard lock no longer than necessary).
+        let result = (bucket.count, bucket.window_start);
+        drop(buckets);
+        result
     }
 }
 

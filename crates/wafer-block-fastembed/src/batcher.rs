@@ -31,11 +31,15 @@ const MAX_BATCH_TEXTS: usize = 256;
 /// channel is closed or it dropped a pending response).
 const WORKER_GONE: &str = "fastembed embedding worker thread has terminated";
 
+/// Result of one embedding request: one vector per input text, in order, or
+/// a service-error message.
+pub(crate) type EmbedResult = Result<Vec<Vec<f32>>, String>;
+
 /// One queued embedding request: input texts and the channel that receives
 /// the matching output vectors (one per text, in order).
 struct BatchRequest {
     texts: Vec<String>,
-    respond: oneshot::Sender<Result<Vec<Vec<f32>>, String>>,
+    respond: oneshot::Sender<EmbedResult>,
 }
 
 /// Handle to the dedicated embedding worker thread.
@@ -50,13 +54,13 @@ pub(crate) struct EmbedBatcher {
 pub(crate) struct PendingEmbed {
     /// `Err` when the request could not be queued (worker gone); otherwise
     /// the receiver for the worker's response.
-    rx: Result<oneshot::Receiver<Result<Vec<Vec<f32>>, String>>, String>,
+    rx: Result<oneshot::Receiver<EmbedResult>, String>,
 }
 
 impl PendingEmbed {
     /// Await the embeddings for the enqueued texts (one vector per text, in
     /// request order).
-    pub(crate) async fn wait(self) -> Result<Vec<Vec<f32>>, String> {
+    pub(crate) async fn wait(self) -> EmbedResult {
         match self.rx {
             Err(e) => Err(e),
             // A dropped sender means the worker died (e.g. panicked in the
@@ -71,7 +75,7 @@ impl EmbedBatcher {
     /// texts in, one embedding per text out, in order).
     pub(crate) fn spawn<F>(embed_fn: F) -> Self
     where
-        F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String> + Send + 'static,
+        F: FnMut(Vec<String>) -> EmbedResult + Send + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel::<BatchRequest>();
         std::thread::Builder::new()
@@ -102,7 +106,7 @@ impl EmbedBatcher {
 /// request. Exits when every [`EmbedBatcher`] handle is dropped.
 fn worker_loop<F>(rx: &std::sync::mpsc::Receiver<BatchRequest>, mut embed_fn: F)
 where
-    F: FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>,
+    F: FnMut(Vec<String>) -> EmbedResult,
 {
     while let Ok(first) = rx.recv() {
         let mut requests = vec![first];
@@ -165,7 +169,7 @@ mod tests {
     /// correct; a hit means a deadlock/lost-response regression, not slowness.
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-    async fn wait_with_timeout(pending: PendingEmbed) -> Result<Vec<Vec<f32>>, String> {
+    async fn wait_with_timeout(pending: PendingEmbed) -> EmbedResult {
         tokio::time::timeout(TEST_TIMEOUT, pending.wait())
             .await
             .expect("PendingEmbed::wait timed out — worker deadlocked or lost the request")
@@ -173,7 +177,7 @@ mod tests {
 
     /// Fake forward pass mapping each text to `[text.len() as f32]` so tests
     /// can verify per-request result routing by content.
-    fn len_embed(texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+    fn len_embed(texts: &[String]) -> EmbedResult {
         Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
     }
 
@@ -195,7 +199,7 @@ mod tests {
                 calls.lock().expect("calls mutex").push(texts.len());
                 entered_tx.send(()).expect("test dropped entered_rx");
                 gate_rx.recv().expect("test dropped gate_tx");
-                len_embed(texts)
+                len_embed(&texts)
             }
         });
 
@@ -242,7 +246,7 @@ mod tests {
             let calls = calls.clone();
             move |texts| {
                 calls.lock().expect("calls mutex").push(texts.len());
-                len_embed(texts)
+                len_embed(&texts)
             }
         });
 
@@ -267,7 +271,7 @@ mod tests {
             if texts.first().is_some_and(|t| t == "poison") {
                 Err("onnx exploded".to_string())
             } else {
-                len_embed(texts)
+                len_embed(&texts)
             }
         });
 
@@ -336,7 +340,7 @@ mod tests {
     /// work), then terminates without wedging the test binary.
     #[tokio::test]
     async fn drop_after_enqueue_still_answers_queued_request() {
-        let batcher = EmbedBatcher::spawn(len_embed);
+        let batcher = EmbedBatcher::spawn(|texts| len_embed(&texts));
         let pending = batcher.enqueue(vec!["hello".to_string()]);
         drop(batcher);
         assert_eq!(wait_with_timeout(pending).await, Ok(vec![vec![5.0]]));
