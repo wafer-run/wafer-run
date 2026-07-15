@@ -2,8 +2,12 @@
 //! references, fetching registry manifests, and downloading `.wasm` /
 //! `.flow.json` artifacts during [`Wafer::seal`].
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use futures::{StreamExt, TryStreamExt};
 use wafer_block::{error::RuntimeError, Block};
 
 use super::Wafer;
@@ -98,6 +102,11 @@ const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_FLOW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WASM_BYTES: usize = 64 * 1024 * 1024;
 
+/// PERF-04: bounded fan-out for registry manifest/artifact fetches during
+/// `seal()`. Small enough to stay polite to the registry origin, large
+/// enough to overlap network latency across independent candidates.
+const REMOTE_FETCH_CONCURRENCY: usize = 8;
+
 /// Read a response body into memory, refusing more than `max` bytes. The
 /// response must advertise a `Content-Length` (registry origins — GitHub raw,
 /// CDNs — always do); a missing length means an unbounded chunked stream, which
@@ -147,6 +156,14 @@ impl Wafer {
     }
 
     /// Resolve remote blocks for deferred registrations via the registry.
+    ///
+    /// PERF-04: all network work (manifest fetches + artifact downloads)
+    /// runs with bounded concurrency over immutable data (`&client` only);
+    /// runtime mutations (`add_flow`, wasm instantiation +
+    /// `register_remote_block`) are applied sequentially after the joins.
+    /// `buffered` (rather than `buffer_unordered`) keeps result order equal
+    /// to candidate order, so registration stays deterministic for a given
+    /// candidate list.
     pub(crate) async fn resolve_remote_entries(&mut self) -> Result<(), RuntimeError> {
         let candidates: Vec<String> = self
             .registration
@@ -167,147 +184,117 @@ impl Wafer {
 
         let client = Self::registry_http_client()?;
 
-        for name in candidates {
-            let Some(remote_ref) =
-                parse_versioned_block(&name).or_else(|| parse_unversioned_block(&name))
-            else {
-                continue;
-            };
+        // Phase 1 — network: fetch each candidate's manifest and artifact
+        // (flow JSON or wasm bytes) concurrently.
+        let fetched: Vec<(String, FetchedCandidate)> =
+            futures::stream::iter(candidates.into_iter().map(|name| {
+                let client = &client;
+                async move {
+                    let outcome = fetch_candidate(client, &name).await?;
+                    Ok::<_, RuntimeError>((name, outcome))
+                }
+            }))
+            .buffered(REMOTE_FETCH_CONCURRENCY)
+            .try_collect()
+            .await?;
 
-            let Some(entry) = fetch_manifest_entry(&client, &remote_ref, &name).await? else {
-                // Not in the registry (404) — skip this candidate.
-                continue;
-            };
-
-            if let Some(flow_url) = &entry.flow_url {
-                let flow = self
-                    .download_flow_from_url(&client, flow_url, &name)
-                    .await?;
-
-                // Pre-resolve block dependencies from the flow's blocks list
-                let blocks_to_resolve: Vec<String> = flow
-                    .blocks
-                    .as_ref()
-                    .map(|b| {
-                        b.iter()
-                            .filter(|b| !self.registration.blocks.contains_key(b.as_str()))
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                self.add_flow(flow);
-
-                for block_name in &blocks_to_resolve {
-                    if self.registration.blocks.contains_key(block_name.as_str()) {
-                        continue;
+        // Phase 2 — apply: register flows/blocks sequentially and collect
+        // the flow block-dependencies that still need resolving. Dedup so a
+        // dependency shared by several flows is fetched once; remember the
+        // first flow that wanted it for error context.
+        let mut deps: Vec<(String, String)> = Vec::new();
+        let mut dep_seen: HashSet<String> = HashSet::new();
+        for (name, outcome) in fetched {
+            match outcome {
+                FetchedCandidate::Skipped => {}
+                FetchedCandidate::Flow(flow) => {
+                    if let Some(blocks) = flow.blocks.as_ref() {
+                        for block_name in blocks {
+                            if !self.registration.blocks.contains_key(block_name.as_str())
+                                && dep_seen.insert(block_name.clone())
+                            {
+                                deps.push((block_name.clone(), name.clone()));
+                            }
+                        }
                     }
-                    match self.resolve_remote_block(&client, block_name).await {
-                        Ok(Some(block)) => {
-                            tracing::info!(block = %block_name, "downloaded remote block");
-                            self.registration.register_remote_block(block_name, block)?;
-                        }
-                        Ok(None) => {
-                            tracing::debug!(
-                                block = %block_name,
-                                "block not found in registry, will resolve during step resolution"
-                            );
-                        }
-                        Err(e) => {
-                            return Err(RuntimeError::Registry(format!(
-                                "failed to download block dependency {block_name:?} for flow {name:?}: {e}"
-                            )));
-                        }
+                    self.add_flow(*flow);
+                }
+                FetchedCandidate::Wasm(bytes) => {
+                    let block = self.load_wasm_block(&bytes, &name)?;
+                    tracing::info!(block = %name, "downloaded remote WASM block from registry");
+                    self.registration.register_remote_block(&name, block)?;
+                }
+            }
+        }
+
+        // A dependency may itself have been a candidate registered above.
+        deps.retain(|(block_name, _)| !self.registration.blocks.contains_key(block_name.as_str()));
+        if deps.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 3 — network: fetch dependency manifests + wasm bytes with
+        // the same bounded fan-out.
+        let fetched_deps: Vec<(String, String, Option<Vec<u8>>)> =
+            futures::stream::iter(deps.into_iter().map(|(block_name, flow_name)| {
+                let client = &client;
+                async move {
+                    match fetch_dependency_wasm(client, &block_name).await {
+                        Ok(bytes) => Ok((block_name, flow_name, bytes)),
+                        Err(e) => Err(RuntimeError::Registry(format!(
+                            "failed to download block dependency {block_name:?} for flow {flow_name:?}: {e}"
+                        ))),
                     }
                 }
-            } else if let Some(wasm_url) = &entry.wasm_url {
-                let block = self
-                    .download_wasm_from_url(&client, wasm_url, &name)
-                    .await?;
-                tracing::info!(block = %name, "downloaded remote WASM block from registry");
-                self.registration.register_remote_block(&name, block)?;
+            }))
+            .buffered(REMOTE_FETCH_CONCURRENCY)
+            .try_collect()
+            .await?;
+
+        // Phase 4 — apply: instantiate + register sequentially.
+        for (block_name, flow_name, bytes) in fetched_deps {
+            match bytes {
+                Some(bytes) => {
+                    let block = self.load_wasm_block(&bytes, &block_name).map_err(|e| {
+                        RuntimeError::Registry(format!(
+                            "failed to download block dependency {block_name:?} for flow {flow_name:?}: {e}"
+                        ))
+                    })?;
+                    tracing::info!(block = %block_name, "downloaded remote block");
+                    self.registration
+                        .register_remote_block(&block_name, block)?;
+                }
+                None => {
+                    tracing::debug!(
+                        block = %block_name,
+                        "block not found in registry, will resolve during step resolution"
+                    );
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Download a `.flow.json` from a direct URL and parse as WaferFlow.
-    async fn download_flow_from_url(
-        &self,
-        client: &reqwest::Client,
-        url: &str,
-        name: &str,
-    ) -> Result<wafer_flow::WaferFlow, RuntimeError> {
-        let resp = client
-            .get(url)
-            .header("User-Agent", "wafer-run/0.1.0")
-            .send()
-            .await
-            .map_err(|e| RuntimeError::Flow(format!("failed to download flow for {name}: {e}")))?;
-
-        if resp.status().as_u16() != 200 {
-            return Err(RuntimeError::Flow(format!(
-                "failed to download flow for {}: HTTP {}",
-                name,
-                resp.status().as_u16()
-            )));
-        }
-
-        let body = read_body_capped(resp, MAX_FLOW_BYTES, &format!("flow for {name}")).await?;
-
-        let body_str = std::str::from_utf8(&body).map_err(|e| {
-            RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}"))
-        })?;
-
-        let flow = wafer_flow::parse(body_str).map_err(|e| {
-            RuntimeError::Flow(format!("failed to parse flow JSON for {name}: {e}"))
-        })?;
-
-        tracing::info!(flow = %flow.id, url = %url, "downloaded remote flow definition");
-        Ok(flow)
-    }
-
-    /// Download a `.wasm` block from a direct URL.
-    async fn download_wasm_from_url(
+    /// Instantiate downloaded `.wasm` bytes as a block against the shared
+    /// engine.
+    ///
+    /// The shared engine's `consume_fuel` flag and the per-call limits
+    /// passed here are both derived from the runtime's configuration, so a
+    /// remote block honours the builder's `fuel_per_call` /
+    /// `max_wasm_memory_pages` selection.
+    fn load_wasm_block(
         &mut self,
-        client: &reqwest::Client,
-        url: &str,
+        bytes: &[u8],
         name: &str,
     ) -> Result<Arc<dyn Block>, RuntimeError> {
         use crate::wasm::{capabilities::BlockCapabilities, WasmiBlock};
 
-        let resp = client
-            .get(url)
-            .header("User-Agent", "wafer-run/0.1.0")
-            .send()
-            .await
-            .map_err(|e| RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}")))?;
-
-        let status = resp.status().as_u16();
-        if status != 200 {
-            return Err(RuntimeError::Wasm(format!(
-                "failed to download WASM for {name}: HTTP {status}"
-            )));
-        }
-
-        let body = read_body_capped(resp, MAX_WASM_BYTES, &format!("WASM for {name}")).await?;
-
-        if body.is_empty() {
-            return Err(RuntimeError::Wasm(format!(
-                "failed to download WASM for {name}: empty response body"
-            )));
-        }
-
-        // The shared engine's `consume_fuel` flag and the per-call limits
-        // passed here are both derived from the runtime's configuration, so a
-        // remote block honours the builder's `fuel_per_call` /
-        // `max_wasm_memory_pages` selection.
         let limits = self.wasm.resource_limits();
         let engine = self.wasm_engine()?.clone();
         let block = WasmiBlock::load_with_engine_and_limits(
             &engine,
-            &body,
+            bytes,
             BlockCapabilities::none(),
             limits,
         )
@@ -323,30 +310,150 @@ impl Wafer {
         client: &reqwest::Client,
         name: &str,
     ) -> Result<Option<Arc<dyn Block>>, RuntimeError> {
-        let Some(remote_ref) =
-            parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
-        else {
-            return Ok(None);
-        };
-
-        let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
-            return Ok(None);
-        };
-
-        if let Some(wasm_url) = &entry.wasm_url {
-            let block = self.download_wasm_from_url(client, wasm_url, name).await?;
-            Ok(Some(block))
-        } else if let Some(flow_url) = &entry.flow_url {
-            tracing::debug!(block = %name, flow_url = %flow_url, "block is a flow, not a WASM block");
-            Ok(None)
-        } else {
-            let crate_name = format!("wafer-block-{}", remote_ref.block);
-            Err(RuntimeError::Registry(format!(
-                "Block \"{name}\" is native-only and must be compiled in.\n\
-                 Add it with: cargo add {crate_name}"
-            )))
+        match fetch_dependency_wasm(client, name).await? {
+            Some(bytes) => Ok(Some(self.load_wasm_block(&bytes, name)?)),
+            None => Ok(None),
         }
     }
+}
+
+/// Network-fetched resolution outcome for one candidate name. Produced
+/// concurrently in `resolve_remote_entries` phase 1; applied to the runtime
+/// sequentially in phase 2.
+enum FetchedCandidate {
+    /// Not a registry-shaped name, not in the registry (404), or a manifest
+    /// entry with no artifact URLs — skipped.
+    Skipped,
+    /// Manifest pointed at a flow: downloaded and parsed. Boxed — the
+    /// parsed flow is far larger than the other variants.
+    Flow(Box<wafer_flow::WaferFlow>),
+    /// Manifest pointed at a wasm artifact: raw bytes, instantiated later.
+    Wasm(Vec<u8>),
+}
+
+/// Fetch one candidate's manifest entry and its artifact. Pure network —
+/// takes no runtime state, so candidates can be fetched concurrently.
+async fn fetch_candidate(
+    client: &reqwest::Client,
+    name: &str,
+) -> Result<FetchedCandidate, RuntimeError> {
+    let Some(remote_ref) = parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
+    else {
+        return Ok(FetchedCandidate::Skipped);
+    };
+
+    let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
+        // Not in the registry (404) — skip this candidate.
+        return Ok(FetchedCandidate::Skipped);
+    };
+
+    if let Some(flow_url) = &entry.flow_url {
+        let flow = download_flow_from_url(client, flow_url, name).await?;
+        Ok(FetchedCandidate::Flow(Box::new(flow)))
+    } else if let Some(wasm_url) = &entry.wasm_url {
+        let bytes = download_wasm_bytes(client, wasm_url, name).await?;
+        Ok(FetchedCandidate::Wasm(bytes))
+    } else {
+        Ok(FetchedCandidate::Skipped)
+    }
+}
+
+/// Fetch the `.wasm` bytes for a block via the registry. Pure network —
+/// no runtime state — so dependency fetches can run concurrently;
+/// instantiation happens afterwards via `Wafer::load_wasm_block`.
+///
+/// Returns `Ok(None)` when the name isn't registry-shaped, the registry has
+/// no manifest for it, or the manifest entry is a flow rather than a WASM
+/// block — callers defer those to step resolution.
+async fn fetch_dependency_wasm(
+    client: &reqwest::Client,
+    name: &str,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    let Some(remote_ref) = parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
+    else {
+        return Ok(None);
+    };
+
+    let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
+        return Ok(None);
+    };
+
+    if let Some(wasm_url) = &entry.wasm_url {
+        Ok(Some(download_wasm_bytes(client, wasm_url, name).await?))
+    } else if let Some(flow_url) = &entry.flow_url {
+        tracing::debug!(block = %name, flow_url = %flow_url, "block is a flow, not a WASM block");
+        Ok(None)
+    } else {
+        let crate_name = format!("wafer-block-{}", remote_ref.block);
+        Err(RuntimeError::Registry(format!(
+            "Block \"{name}\" is native-only and must be compiled in.\n\
+             Add it with: cargo add {crate_name}"
+        )))
+    }
+}
+
+/// Download a `.flow.json` from a direct URL and parse as WaferFlow.
+async fn download_flow_from_url(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+) -> Result<wafer_flow::WaferFlow, RuntimeError> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", "wafer-run/0.1.0")
+        .send()
+        .await
+        .map_err(|e| RuntimeError::Flow(format!("failed to download flow for {name}: {e}")))?;
+
+    if resp.status().as_u16() != 200 {
+        return Err(RuntimeError::Flow(format!(
+            "failed to download flow for {}: HTTP {}",
+            name,
+            resp.status().as_u16()
+        )));
+    }
+
+    let body = read_body_capped(resp, MAX_FLOW_BYTES, &format!("flow for {name}")).await?;
+
+    let body_str = std::str::from_utf8(&body)
+        .map_err(|e| RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}")))?;
+
+    let flow = wafer_flow::parse(body_str)
+        .map_err(|e| RuntimeError::Flow(format!("failed to parse flow JSON for {name}: {e}")))?;
+
+    tracing::info!(flow = %flow.id, url = %url, "downloaded remote flow definition");
+    Ok(flow)
+}
+
+/// Download a `.wasm` artifact from a direct URL, returning the raw bytes.
+async fn download_wasm_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+) -> Result<Vec<u8>, RuntimeError> {
+    let resp = client
+        .get(url)
+        .header("User-Agent", "wafer-run/0.1.0")
+        .send()
+        .await
+        .map_err(|e| RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}")))?;
+
+    let status = resp.status().as_u16();
+    if status != 200 {
+        return Err(RuntimeError::Wasm(format!(
+            "failed to download WASM for {name}: HTTP {status}"
+        )));
+    }
+
+    let body = read_body_capped(resp, MAX_WASM_BYTES, &format!("WASM for {name}")).await?;
+
+    if body.is_empty() {
+        return Err(RuntimeError::Wasm(format!(
+            "failed to download WASM for {name}: empty response body"
+        )));
+    }
+
+    Ok(body)
 }
 
 /// Fetch the registry manifest for `remote_ref`, select the requested version
