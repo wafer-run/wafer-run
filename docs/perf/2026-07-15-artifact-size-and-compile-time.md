@@ -135,7 +135,7 @@ size and are not version skew.
   crates compiled twice.
 - **cli-wafer's `mio`/`rustix`/`bitflags` skew.** Comes from `notify` 6
   (file watcher, old mio 0.8) vs tokio (mio 1); `notify` 8 would align mio.
-  These are small crates; measurable but minor (see recommendation 4).
+  These are small crates; measurable but minor (see skip item 5).
 - **`hashbrown`/`getrandom` multi-version.** Ubiquitous tiny crates dragged
   by unrelated majors (`sqlx`, `rusqlite`/`hashlink`, `lru`, `safetensors`,
   wasmi). Compile-time noise, negligible size; not worth chasing directly —
