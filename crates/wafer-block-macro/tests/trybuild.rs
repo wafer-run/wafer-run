@@ -19,12 +19,6 @@ fn fail_invalid_block_name() {
 }
 
 #[test]
-fn fail_caps_and_skill() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/fixtures/fail_caps_and_skill.rs");
-}
-
-#[test]
 fn fail_requires_not_array() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/fixtures/fail_requires_not_array.rs");

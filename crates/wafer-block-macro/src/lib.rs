@@ -380,9 +380,7 @@ fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
     };
 
     let mut caps: Option<CapabilitiesArgs> = None;
-    let mut caps_span: Option<proc_macro2::Span> = None;
     let mut skill: Option<SkillArgs> = None;
-    let mut skill_span: Option<proc_macro2::Span> = None;
     let mut flat_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for meta in &metas {
@@ -395,7 +393,6 @@ fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
                     ));
                 }
                 caps = Some(parse_capabilities(ml)?);
-                caps_span = Some(ml.span());
             }
             syn::Meta::List(ml) if ml.path.is_ident("skill") => {
                 if skill.is_some() {
@@ -405,7 +402,6 @@ fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
                     ));
                 }
                 skill = Some(parse_skill(ml)?);
-                skill_span = Some(ml.span());
             }
             other => {
                 flat_tokens.push(other.to_token_stream());
@@ -413,19 +409,16 @@ fn parse_attr(attr: TokenStream) -> syn::Result<ParsedAttr> {
         }
     }
 
-    // `capabilities(...)` and `skill(...)` are mutually exclusive. A skill block
-    // is an LLM-facing tool compiled for `wasm32-wasip1` with no `wafer-block`
-    // dependency in its graph, whereas `capabilities(...)` declares the runtime
-    // sandbox policy for a platform WASM block (and emits `::wafer_block::...`
-    // paths). Declaring both is a contradiction, so reject it rather than
-    // silently honoring both.
-    if let (Some(c_span), Some(_)) = (caps_span, skill_span) {
-        return Err(syn::Error::new(
-            c_span,
-            "#[wafer_block]: `capabilities(...)` and `skill(...)` are mutually exclusive; \
-             a skill block declares an LLM tool, not runtime sandbox capabilities",
-        ));
-    }
+    // `capabilities(...)` and `skill(...)` compose: skill declares the
+    // LLM-facing tool contract, capabilities declares the runtime sandbox
+    // policy, and a skill that calls services (e.g. `wafer-run/network` via
+    // `call_block`) legitimately needs both. The generated `block_info()`
+    // already emits `Option<wafer_block::BlockCapabilities>` (as `None`) into
+    // every skill crate, so the paths resolve in a skill block's minimal
+    // dep graph (`wafer-sdk` re-exports `wafer_block`) — locked by the
+    // `skill_block_without_wafer_run_dep` fixture, which declares both.
+    // Under SEC-02 fail-closed defaults an undeclared WASM skill gets
+    // `none()`, so this is the only way a skill can hold a service grant.
 
     let flat_ts: Ts2 = if flat_tokens.is_empty() {
         Ts2::new()
@@ -531,13 +524,19 @@ pub fn wafer_async_trait(
 /// - `instance_mode` — `"per-node"` (default), `"singleton"`, `"per-flow"`, `"per-execution"`
 /// - `requires` — list of block names this block may call (e.g. `["wafer-run/database"]`)
 /// - `capabilities(...)` — declare block capabilities (see below)
+/// - `skill(description = "...", parameters = <json-schema>)` — declare the
+///   LLM-facing tool contract (sets `BlockInfo::tool`). Composes with
+///   `capabilities(...)`: a skill that calls services (e.g.
+///   `wafer-run/network` via `call_block`) declares both.
 ///
 /// # Capabilities
 ///
 /// The `capabilities(...)` group controls what services the WASM block may
-/// access. Omitting it leaves `BlockInfo::capabilities` as `None` (runtime
-/// applies its default). Providing an empty group sets an explicit
-/// zero-capabilities declaration.
+/// access. Omitting it leaves `BlockInfo::capabilities` as `None` — under
+/// the runtime's fail-closed default an undeclared WASM block gets
+/// `BlockCapabilities::none()`, so a WASM block (skill or otherwise) that
+/// uses any service MUST declare it here. Providing an empty group sets an
+/// explicit zero-capabilities declaration.
 ///
 /// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `config`
 ///
