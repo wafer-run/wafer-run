@@ -20,6 +20,16 @@ pub(crate) struct DispatchObs<'a> {
     pub(crate) block_name: &'a str,
 }
 
+/// The resolved dispatch target for [`run_resolved`]: the canonical block
+/// name plus its once-success init slot.
+pub(crate) struct DispatchTarget<'a> {
+    /// Canonical (alias-resolved) block name — init identity and error
+    /// attribution.
+    pub(crate) resolved: &'a str,
+    /// The block's once-success init slot.
+    pub(crate) slot: &'a Arc<super::slot::BlockSlot>,
+}
+
 /// Lazy-init inputs for [`run_resolved`] — the resolved block plus the
 /// config source, context and cycle-detection stack the init pipeline needs.
 /// Built on demand (via the `make_init` closure) only when the block's init
@@ -53,8 +63,7 @@ pub(crate) struct DispatchInit<'a> {
 pub(crate) async fn run_resolved<'a, T, Fut>(
     hooks: &ObservabilityBus,
     obs: DispatchObs<'a>,
-    resolved: &'a str,
-    slot: &Arc<super::slot::BlockSlot>,
+    target: DispatchTarget<'a>,
     make_init: impl FnOnce() -> DispatchInit<'a>,
     msg: Message,
     input: InputStream,
@@ -69,19 +78,20 @@ where
     // (mutex held) — the slow path re-checks under the slot's lock, and its
     // stack push still detects init cycles (a block mid-init always holds
     // the slot mutex, so a cyclic dispatch can never take the fast path).
-    match slot.try_cached() {
+    match target.slot.try_cached() {
         Some(Ok(_)) => {}
         Some(Err(e)) => {
             return Err(OutputStream::error(super::init_error_to_wafer_error(
-                resolved, e,
+                target.resolved,
+                e,
             )));
         }
         None => {
             let init = make_init();
             if let Err(e) = super::run_init_pipeline(
-                resolved,
+                target.resolved,
                 init.block,
-                slot.clone(),
+                target.slot.clone(),
                 init.config_source,
                 init.init_ctx,
                 init.stack,
@@ -89,7 +99,8 @@ where
             .await
             {
                 return Err(OutputStream::error(super::init_error_to_wafer_error(
-                    resolved, e,
+                    target.resolved,
+                    e,
                 )));
             }
         }
@@ -216,8 +227,10 @@ impl Wafer {
                 node_path: resolved,
                 block_name,
             },
-            resolved,
-            &slot,
+            DispatchTarget {
+                resolved,
+                slot: &slot,
+            },
             || self.dispatch_init(resolved, &block, &init_stack),
             msg,
             input,

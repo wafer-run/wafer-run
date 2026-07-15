@@ -184,8 +184,10 @@ fn compile_step(wafer: &Wafer, step: &Step, index: &HashMap<&str, usize>) -> Com
                 // Precedence matches the uncompiled executor: `step` wins
                 // over `flow` when an entry (incorrectly) carries both.
                 target: match (&e.step, &e.flow) {
-                    (Some(s), _) => index
-                        .get(s.as_str()).map_or_else(|| NextTarget::MissingStep(s.clone()), |i| NextTarget::Step(*i)),
+                    (Some(s), _) => index.get(s.as_str()).map_or_else(
+                        || NextTarget::MissingStep(s.clone()),
+                        |i| NextTarget::Step(*i),
+                    ),
                     (None, Some(f)) => NextTarget::Flow(f.clone()),
                     (None, None) => NextTarget::None,
                 },

@@ -347,8 +347,10 @@ impl RuntimeContext {
                 node_path: resolved_block_name,
                 block_name,
             },
-            resolved_block_name,
-            &slot,
+            crate::runtime::runner::DispatchTarget {
+                resolved: resolved_block_name,
+                slot: &slot,
+            },
             move || crate::runtime::runner::DispatchInit {
                 block: init_block,
                 config_source: self.config_source.clone(),

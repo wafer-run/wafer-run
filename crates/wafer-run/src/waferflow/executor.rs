@@ -576,8 +576,10 @@ async fn run_invocation(
             node_path: &step.id,
             block_name: &step.block_label,
         },
-        &target.name,
-        &target.slot,
+        crate::runtime::runner::DispatchTarget {
+            resolved: &target.name,
+            slot: &target.slot,
+        },
         || {
             env.wafer
                 .dispatch_init(&target.name, &target.block, &step_init_stack)
