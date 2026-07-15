@@ -92,12 +92,56 @@ pub(crate) struct VersionEntry {
     pub(crate) flow_url: Option<String>,
 }
 
+/// SEC-09: per-response download caps for registry fetches. Bound the memory a
+/// single (possibly compromised) registry response can consume during `seal()`.
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_FLOW_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WASM_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read a response body into memory, refusing more than `max` bytes. The
+/// response must advertise a `Content-Length` (registry origins — GitHub raw,
+/// CDNs — always do); a missing length means an unbounded chunked stream, which
+/// is refused outright rather than buffered without limit. The advertised
+/// length is rejected if it exceeds `max`, and the buffered body is re-checked
+/// as defense-in-depth. Replaces the previous unbounded `.bytes()`.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    max: usize,
+    what: &str,
+) -> Result<Vec<u8>, RuntimeError> {
+    let len = resp.content_length().ok_or_else(|| {
+        RuntimeError::Registry(format!(
+            "{what}: response has no Content-Length; refusing unbounded download"
+        ))
+    })?;
+    if len > max as u64 {
+        return Err(RuntimeError::Registry(format!(
+            "{what} exceeds the {max}-byte limit (Content-Length {len})"
+        )));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| RuntimeError::Registry(format!("reading {what}: {e}")))?;
+    if body.len() > max {
+        return Err(RuntimeError::Registry(format!(
+            "{what} exceeds the {max}-byte limit"
+        )));
+    }
+    Ok(body.to_vec())
+}
+
 impl Wafer {
     /// Build the short-lived HTTP client used for registry/manifest fetches
     /// during one `seal()` pass.
     pub(crate) fn registry_http_client() -> Result<reqwest::Client, RuntimeError> {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            // SEC-09: do not follow redirects. Manifest-controlled `wasm_url` /
+            // `flow_url` values are otherwise free to bounce the fetch through a
+            // redirect chain to an unintended (e.g. internal) destination. A
+            // registry that needs a redirect must publish the final URL.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))
     }
@@ -210,10 +254,7 @@ impl Wafer {
             )));
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RuntimeError::Flow(format!("failed to read flow body for {name}: {e}")))?;
+        let body = read_body_capped(resp, MAX_FLOW_BYTES, &format!("flow for {name}")).await?;
 
         let body_str = std::str::from_utf8(&body).map_err(|e| {
             RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}"))
@@ -250,10 +291,7 @@ impl Wafer {
             )));
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RuntimeError::Wasm(format!("failed to read WASM body for {name}: {e}")))?;
+        let body = read_body_capped(resp, MAX_WASM_BYTES, &format!("WASM for {name}")).await?;
 
         if body.is_empty() {
             return Err(RuntimeError::Wasm(format!(
@@ -353,10 +391,8 @@ async fn fetch_manifest_entry(
         )));
     }
 
-    let manifest_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| RuntimeError::Registry(format!("failed to read manifest for {name}: {e}")))?;
+    let manifest_bytes =
+        read_body_capped(resp, MAX_MANIFEST_BYTES, &format!("manifest for {name}")).await?;
     let mut manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
         RuntimeError::Registry(format!("failed to parse registry manifest for {name}: {e}"))
     })?;
