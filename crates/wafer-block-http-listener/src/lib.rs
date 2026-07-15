@@ -11,17 +11,18 @@
 //! bypass the listener (e.g. running a WAFER flow inside an existing axum
 //! router).
 
-use std::sync::OnceLock;
+use std::{net::IpAddr, sync::OnceLock};
 
 use axum::{
     body::Body,
     extract::Request,
     http::{HeaderMap, Method, StatusCode},
 };
+use ipnet::IpNet;
 use parking_lot::Mutex;
 use wafer_block::{
-    http_codec, types::ConfigVar, Block, BlockInfo, InputStream, LifecycleEvent, LifecycleType,
-    Message, OutputStream, WaferError,
+    http_codec, types::ConfigVar, Block, BlockInfo, ErrorCode, InputStream, LifecycleEvent,
+    LifecycleType, Message, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -143,6 +144,82 @@ use wafer_block::config::DispatchTarget;
 /// value.
 const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
+/// SEC-07: parse the `trusted_proxies` config — comma-separated exact IPs
+/// (`10.0.0.1`, `::1`) and/or CIDR ranges (`10.0.0.0/8`, `2001:db8::/32`) —
+/// into a list of [`IpNet`]s. Exact IPs become full-length prefixes
+/// (`/32` for IPv4, `/128` for IPv6).
+///
+/// Blank entries (leading/trailing/double commas) are skipped; any other
+/// unparseable entry is a **configuration error** naming the entry. Absent
+/// config means "trust no proxies", but a present-and-invalid entry must fail
+/// loud at load — silently dropping it would run the listener with fewer
+/// trusted proxies than the operator configured, breaking client-IP
+/// attribution for rate limiting and audit without any signal.
+fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>, String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            e.parse::<IpAddr>()
+                .map(IpNet::from)
+                .or_else(|_| e.parse::<IpNet>())
+                .map_err(|_| {
+                    format!(
+                        "invalid trusted_proxies entry '{e}': expected an IP address \
+                         (e.g. 10.0.0.1, ::1) or CIDR range (e.g. 10.0.0.0/8, 2001:db8::/32)"
+                    )
+                })
+        })
+        .collect()
+}
+
+/// SEC-07: whether `ip` falls inside any configured trusted-proxy entry
+/// (exact IPs are full-length prefixes, so one containment check covers both).
+fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[IpNet]) -> bool {
+    trusted_proxies.iter().any(|net| net.contains(&ip))
+}
+
+/// SEC-07: determine the client IP recorded on the message.
+///
+/// Defaults to the peer socket address. Only when the direct peer is a
+/// configured trusted proxy is `X-Forwarded-For` consulted, using the
+/// rightmost-untrusted algorithm: walk the chain right to left, skipping
+/// entries that are themselves trusted proxies (each appended its upstream);
+/// the first non-trusted entry is the client. If every entry is a trusted
+/// proxy, the leftmost wins. A malformed entry terminates the walk with a
+/// fall-back to the peer address — everything to the left of garbage is
+/// attacker-suppliable (any hop controls what appears left of itself), so
+/// none of it may be trusted.
+///
+/// Net effect: a directly-connected client can never spoof its identity
+/// (used for IP rate limiting and audit) via the header, and a client behind
+/// trusted proxies cannot smuggle a fake hop past them.
+fn resolve_client_ip(peer: Option<IpAddr>, xff: Option<&str>, trusted_proxies: &[IpNet]) -> String {
+    let peer_str = || peer.map_or_else(|| "unknown".to_string(), |ip| ip.to_string());
+    // Fail-safe: peer unknown or not a trusted proxy → the peer identity
+    // stands and X-Forwarded-For is ignored entirely.
+    if !peer.is_some_and(|ip| is_trusted_proxy(ip, trusted_proxies)) {
+        return peer_str();
+    }
+    let Some(xff) = xff else {
+        return peer_str();
+    };
+    // Rightmost-untrusted walk. `leftmost_trusted` tracks the most recently
+    // seen (i.e. furthest-left) trusted hop so an all-trusted chain resolves
+    // to its leftmost entry; an empty header leaves it `None` → peer.
+    let mut leftmost_trusted: Option<IpAddr> = None;
+    for entry in xff.rsplit(',').map(str::trim) {
+        match entry.parse::<IpAddr>() {
+            Ok(ip) if is_trusted_proxy(ip, trusted_proxies) => leftmost_trusted = Some(ip),
+            Ok(ip) => return ip.to_string(),
+            // Malformed hop (including empty segments): stop peeling, trust
+            // nothing further left, attribute to the peer.
+            Err(_) => return peer_str(),
+        }
+    }
+    leftmost_trusted.map_or_else(peer_str, |ip| ip.to_string())
+}
+
 /// Block implementing the HTTP transport.
 ///
 /// Singleton infrastructure block (one listener per registration). On
@@ -155,45 +232,15 @@ const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// The `handle` method itself only returns `OutputStream::continue_with(msg)`;
 /// real request handling happens inside the spawned axum task, not in the
 /// block-message pipeline.
-/// SEC-07: parse the `trusted_proxies` config (comma-separated IPs) into a list
-/// of `IpAddr`, silently skipping blank/invalid entries.
-fn parse_trusted_proxies(s: &str) -> Vec<std::net::IpAddr> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .filter_map(|e| e.parse::<std::net::IpAddr>().ok())
-        .collect()
-}
-
-/// SEC-07: determine the client IP recorded on the message. Defaults to the
-/// peer socket address; the rightmost `X-Forwarded-For` value is used only when
-/// the direct peer is a configured trusted proxy — so a directly-connected
-/// client cannot spoof its identity (used for IP rate limiting and audit) via
-/// the header.
-fn resolve_client_ip(
-    peer: Option<std::net::IpAddr>,
-    xff: Option<&str>,
-    trusted_proxies: &[std::net::IpAddr],
-) -> String {
-    let peer_str = || peer.map_or_else(|| "unknown".to_string(), |ip| ip.to_string());
-    if peer.is_some_and(|ip| trusted_proxies.contains(&ip)) {
-        xff.and_then(|v| v.rsplit(',').next())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(peer_str)
-    } else {
-        peer_str()
-    }
-}
-
 pub(crate) struct HttpListenerBlock {
     target: OnceLock<DispatchTarget>,
     listen: OnceLock<String>,
     max_body_bytes: OnceLock<usize>,
-    /// SEC-07: IPs of trusted reverse proxies. `X-Forwarded-For` is honored
-    /// only when the immediate peer is one of these; otherwise the peer socket
-    /// address is used. Empty (default) = never trust the header.
-    trusted_proxies: OnceLock<Vec<std::net::IpAddr>>,
+    /// SEC-07: trusted reverse proxies as exact IPs and/or CIDR ranges.
+    /// `X-Forwarded-For` is honored only when the immediate peer matches one
+    /// of these; otherwise the peer socket address is used. Empty (default) =
+    /// never trust the header.
+    trusted_proxies: OnceLock<Vec<IpNet>>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -251,11 +298,14 @@ impl Block for HttpListenerBlock {
             .name("Max Body Bytes"),
             ConfigVar::new(
                 "trusted_proxies",
-                "Comma-separated IP addresses of trusted reverse proxies. \
+                "Comma-separated trusted reverse proxies: exact IPs (10.0.0.1, \
+                 ::1) and/or CIDR ranges (10.0.0.0/8, 2001:db8::/32). \
                  X-Forwarded-For is honored (for the client IP used in rate \
-                 limiting and audit) only when the direct peer is one of these; \
-                 otherwise the peer socket address is used. Empty = never trust \
-                 the header (safe default for a directly-exposed listener).",
+                 limiting and audit) only when the direct peer matches one of \
+                 these; the chain is then peeled right-to-left across trusted \
+                 hops. Otherwise the peer socket address is used. Empty = never \
+                 trust the header (safe default for a directly-exposed \
+                 listener). Invalid entries fail Init.",
                 "",
             )
             .name("Trusted Proxies"),
@@ -279,6 +329,15 @@ impl Block for HttpListenerBlock {
         if event.event_type == LifecycleType::Init && self.target.get().is_none() {
             let config = wafer_block::BlockConfig::from_event(&event);
 
+            // SEC-07: validate `trusted_proxies` BEFORE caching any other
+            // state. On error nothing is set — in particular `target` — so
+            // `bind()` refuses to start the server. An invalid security
+            // config must fail loud (absent = default, present-but-invalid =
+            // error), never silently degrade to "trust nothing".
+            let trusted = parse_trusted_proxies(config.str("trusted_proxies"))
+                .map_err(|msg| WaferError::new(ErrorCode::InvalidArgument, msg))?;
+            self.trusted_proxies.set(trusted).ok();
+
             if let Some(t) = config.dispatch_target() {
                 self.target.set(t).ok();
             }
@@ -288,9 +347,6 @@ impl Block for HttpListenerBlock {
                 .parse::<usize>()
                 .unwrap_or(DEFAULT_MAX_BODY_BYTES);
             self.max_body_bytes.set(max_body).ok();
-            self.trusted_proxies
-                .set(parse_trusted_proxies(config.str("trusted_proxies")))
-                .ok();
         }
 
         if event.event_type == LifecycleType::Stop {
@@ -478,21 +534,86 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    // SEC-07
-    use std::net::IpAddr;
+    // ── SEC-07: trusted_proxies parsing (exact IPs + CIDR) ────────────────
+
+    /// Test helper: parse a trusted-proxies config string that must be valid.
+    fn proxies(s: &str) -> Vec<IpNet> {
+        parse_trusted_proxies(s).expect("test trusted_proxies config must parse")
+    }
 
     #[test]
-    fn parse_trusted_proxies_skips_blank_and_invalid() {
-        let v = parse_trusted_proxies(" 10.0.0.1, , not-an-ip, ::1 ");
-        assert_eq!(
-            v,
-            vec![
-                "10.0.0.1".parse::<IpAddr>().unwrap(),
-                "::1".parse::<IpAddr>().unwrap()
-            ]
-        );
-        assert!(parse_trusted_proxies("").is_empty());
+    fn parse_accepts_exact_ips_and_skips_blanks() {
+        let v = proxies(" 10.0.0.1, , ::1 , ");
+        assert_eq!(v.len(), 2);
+        // Exact IPs become full-length prefixes.
+        assert_eq!(v[0], "10.0.0.1/32".parse::<IpNet>().unwrap());
+        assert_eq!(v[1], "::1/128".parse::<IpNet>().unwrap());
+        assert!(proxies("").is_empty());
+        assert!(proxies("   ").is_empty());
     }
+
+    #[test]
+    fn parse_accepts_v4_and_v6_cidr_ranges() {
+        let v = proxies("10.0.0.0/8, 2001:db8::/32, 192.168.1.1");
+        assert_eq!(v[0], "10.0.0.0/8".parse::<IpNet>().unwrap());
+        assert_eq!(v[1], "2001:db8::/32".parse::<IpNet>().unwrap());
+        assert_eq!(v[2], "192.168.1.1/32".parse::<IpNet>().unwrap());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_entries_naming_the_entry() {
+        // Present-but-invalid must fail loud (config rule), not be skipped.
+        for bad in [
+            "not-an-ip",
+            "10.0.0.0/33",    // v4 prefix out of range
+            "2001:db8::/129", // v6 prefix out of range
+            "10.0.0.256",     // invalid octet
+            "10.0.0.1:8080",  // socket address, not an IP
+            "example.com",    // hostname, not an IP
+            "10.0.0.0/8/8",   // double prefix
+        ] {
+            let err = parse_trusted_proxies(&format!("10.0.0.1, {bad}, ::1"))
+                .expect_err("invalid entry must be a config error");
+            assert!(
+                err.contains(bad),
+                "error must name the bad entry {bad:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cidr_matching_covers_boundaries_v4_and_v6() {
+        let v = proxies("10.0.0.0/8, 2001:db8::/32");
+        let contained = |s: &str| is_trusted_proxy(s.parse::<IpAddr>().unwrap(), &v);
+        // v4: first and last address of 10.0.0.0/8 are in; neighbors are out.
+        assert!(contained("10.0.0.0"));
+        assert!(contained("10.255.255.255"));
+        assert!(!contained("9.255.255.255"));
+        assert!(!contained("11.0.0.0"));
+        // v6: first and last address of 2001:db8::/32 are in; neighbors out.
+        assert!(contained("2001:db8::"));
+        assert!(contained("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"));
+        assert!(!contained("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff"));
+        assert!(!contained("2001:db9::"));
+        // A v4 client never matches a v6 range and vice versa.
+        assert!(!is_trusted_proxy(
+            "10.0.0.1".parse().unwrap(),
+            &proxies("2001:db8::/32")
+        ));
+        assert!(!is_trusted_proxy(
+            "2001:db8::1".parse().unwrap(),
+            &proxies("10.0.0.0/8")
+        ));
+    }
+
+    #[test]
+    fn exact_ip_entries_match_only_themselves() {
+        let v = proxies("10.0.0.1");
+        assert!(is_trusted_proxy("10.0.0.1".parse().unwrap(), &v));
+        assert!(!is_trusted_proxy("10.0.0.2".parse().unwrap(), &v));
+    }
+
+    // ── SEC-07: client-IP resolution (rightmost-untrusted XFF peeling) ────
 
     #[test]
     fn client_ip_defaults_to_peer_and_ignores_xff_from_untrusted() {
@@ -504,26 +625,208 @@ mod tests {
             "203.0.113.5"
         );
         // Peer not in the trusted set: XFF still ignored.
-        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(
-            resolve_client_ip(Some(peer), Some("1.2.3.4"), &[proxy]),
+            resolve_client_ip(Some(peer), Some("1.2.3.4"), &proxies("10.0.0.1")),
+            "203.0.113.5"
+        );
+        // Peer just outside a trusted CIDR: XFF still ignored.
+        assert_eq!(
+            resolve_client_ip(Some(peer), Some("1.2.3.4"), &proxies("203.0.113.6/31")),
             "203.0.113.5"
         );
     }
 
     #[test]
-    fn client_ip_uses_xff_only_from_trusted_proxy() {
+    fn client_ip_single_hop_from_trusted_proxy() {
         let proxy: IpAddr = "10.0.0.1".parse().unwrap();
-        // Peer IS the trusted proxy → the rightmost XFF entry (what the proxy
-        // saw) is the real client.
+        let trusted = proxies("10.0.0.1");
+        // Peer IS the trusted proxy → the single XFF entry is the client.
         assert_eq!(
-            resolve_client_ip(Some(proxy), Some("9.9.9.9, 8.8.8.8"), &[proxy]),
+            resolve_client_ip(Some(proxy), Some("9.9.9.9"), &trusted),
+            "9.9.9.9"
+        );
+        // Rightmost entry is not a trusted proxy → it is the client, even
+        // with more (attacker-suppliable) entries to its left.
+        assert_eq!(
+            resolve_client_ip(Some(proxy), Some("1.2.3.4, 8.8.8.8"), &trusted),
             "8.8.8.8"
         );
     }
 
     #[test]
+    fn client_ip_peels_multi_hop_chain_across_trusted_intermediates() {
+        // Chain: client 9.9.9.9 → proxy 10.0.0.3 → proxy 10.0.0.2 → peer
+        // 10.0.0.1. Each hop appended its upstream, so XFF is
+        // "9.9.9.9, 10.0.0.3, 10.0.0.2". Peeling right-to-left skips the
+        // trusted intermediates and lands on the client.
+        let trusted = proxies("10.0.0.0/24");
+        assert_eq!(
+            resolve_client_ip(
+                Some("10.0.0.1".parse().unwrap()),
+                Some("9.9.9.9, 10.0.0.3, 10.0.0.2"),
+                &trusted
+            ),
+            "9.9.9.9"
+        );
+        // The spoof attempt "1.2.3.4" left of the real client is ignored:
+        // peeling stops at the first (rightmost) untrusted entry.
+        assert_eq!(
+            resolve_client_ip(
+                Some("10.0.0.1".parse().unwrap()),
+                Some("1.2.3.4, 9.9.9.9, 10.0.0.2"),
+                &trusted
+            ),
+            "9.9.9.9"
+        );
+        // IPv6 client through IPv6 trusted proxies.
+        assert_eq!(
+            resolve_client_ip(
+                Some("2001:db8::1".parse().unwrap()),
+                Some("2001:4860::8888, 2001:db8::2"),
+                &proxies("2001:db8::/32")
+            ),
+            "2001:4860::8888"
+        );
+    }
+
+    #[test]
+    fn client_ip_all_trusted_chain_uses_leftmost() {
+        // Every XFF entry is a trusted proxy (e.g. health checks between
+        // proxies): the leftmost entry is the best client identity available.
+        let trusted = proxies("10.0.0.0/24");
+        assert_eq!(
+            resolve_client_ip(
+                Some("10.0.0.1".parse().unwrap()),
+                Some("10.0.0.4, 10.0.0.3, 10.0.0.2"),
+                &trusted
+            ),
+            "10.0.0.4"
+        );
+    }
+
+    #[test]
+    fn client_ip_malformed_entry_terminates_walk_at_peer() {
+        let trusted = proxies("10.0.0.0/24");
+        let peer: Option<IpAddr> = Some("10.0.0.1".parse().unwrap());
+        // Garbage mid-chain: the rightmost hop is trusted (skipped), then the
+        // malformed hop stops the walk — everything left of garbage
+        // (including the plausible-looking 9.9.9.9) is untrustworthy.
+        assert_eq!(
+            resolve_client_ip(peer, Some("9.9.9.9, garbage, 10.0.0.2"), &trusted),
+            "10.0.0.1"
+        );
+        // Rightmost entry malformed: nothing peels; fall back to peer.
+        assert_eq!(
+            resolve_client_ip(peer, Some("9.9.9.9, not-an-ip"), &trusted),
+            "10.0.0.1"
+        );
+        // Port-suffixed and empty segments are malformed, not lenient-parsed.
+        assert_eq!(
+            resolve_client_ip(peer, Some("9.9.9.9:1234"), &trusted),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            resolve_client_ip(peer, Some("9.9.9.9,, 10.0.0.2"), &trusted),
+            "10.0.0.1"
+        );
+    }
+
+    #[test]
+    fn client_ip_empty_or_missing_xff_falls_back_to_peer() {
+        let trusted = proxies("10.0.0.1");
+        let peer: Option<IpAddr> = Some("10.0.0.1".parse().unwrap());
+        assert_eq!(resolve_client_ip(peer, None, &trusted), "10.0.0.1");
+        assert_eq!(resolve_client_ip(peer, Some(""), &trusted), "10.0.0.1");
+        assert_eq!(resolve_client_ip(peer, Some("   "), &trusted), "10.0.0.1");
+    }
+
+    #[test]
     fn client_ip_unknown_without_peer() {
+        // No peer address at all: XFF is never consulted, even if proxies
+        // are configured.
         assert_eq!(resolve_client_ip(None, Some("8.8.8.8"), &[]), "unknown");
+        assert_eq!(
+            resolve_client_ip(None, Some("8.8.8.8"), &proxies("10.0.0.1")),
+            "unknown"
+        );
+    }
+
+    // ── SEC-07: Init fails loud on invalid trusted_proxies config ─────────
+
+    /// Minimal `Context` impl for driving `lifecycle()` directly; the
+    /// listener's Init path never touches the context.
+    struct NoopCtx;
+
+    #[wafer_async_trait]
+    impl wafer_block::context::Context for NoopCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            unimplemented!("listener Init does not call blocks")
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+
+        fn clone_arc(&self) -> std::sync::Arc<dyn wafer_block::context::Context> {
+            unimplemented!("listener Init does not clone the context")
+        }
+    }
+
+    fn init_event(config: &serde_json::Value) -> LifecycleEvent {
+        LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(config).expect("test config serializes"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_rejects_invalid_trusted_proxies_and_caches_nothing() {
+        let block = HttpListenerBlock::new();
+        let event = init_event(&serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "flow": "some-flow",
+            "trusted_proxies": "10.0.0.1, bogus/99",
+        }));
+        let err = block
+            .lifecycle(&NoopCtx, event)
+            .await
+            .expect_err("invalid trusted_proxies must fail Init");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(
+            err.message.contains("bogus/99"),
+            "error must name the bad entry, got: {}",
+            err.message
+        );
+        // Nothing was cached — `bind()` would refuse to start the server.
+        assert!(block.target.get().is_none());
+        assert!(block.listen.get().is_none());
+        assert!(block.trusted_proxies.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn init_accepts_valid_trusted_proxies() {
+        let block = HttpListenerBlock::new();
+        let event = init_event(&serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "flow": "some-flow",
+            "trusted_proxies": "10.0.0.0/8, ::1",
+        }));
+        block
+            .lifecycle(&NoopCtx, event)
+            .await
+            .expect("valid trusted_proxies must pass Init");
+        assert_eq!(
+            block.trusted_proxies.get().expect("set at Init"),
+            &proxies("10.0.0.0/8, ::1")
+        );
     }
 }
