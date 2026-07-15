@@ -155,10 +155,45 @@ const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// The `handle` method itself only returns `OutputStream::continue_with(msg)`;
 /// real request handling happens inside the spawned axum task, not in the
 /// block-message pipeline.
+/// SEC-07: parse the `trusted_proxies` config (comma-separated IPs) into a list
+/// of `IpAddr`, silently skipping blank/invalid entries.
+fn parse_trusted_proxies(s: &str) -> Vec<std::net::IpAddr> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .filter_map(|e| e.parse::<std::net::IpAddr>().ok())
+        .collect()
+}
+
+/// SEC-07: determine the client IP recorded on the message. Defaults to the
+/// peer socket address; the rightmost `X-Forwarded-For` value is used only when
+/// the direct peer is a configured trusted proxy — so a directly-connected
+/// client cannot spoof its identity (used for IP rate limiting and audit) via
+/// the header.
+fn resolve_client_ip(
+    peer: Option<std::net::IpAddr>,
+    xff: Option<&str>,
+    trusted_proxies: &[std::net::IpAddr],
+) -> String {
+    let peer_str = || peer.map_or_else(|| "unknown".to_string(), |ip| ip.to_string());
+    if peer.is_some_and(|ip| trusted_proxies.contains(&ip)) {
+        xff.and_then(|v| v.rsplit(',').next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(peer_str)
+    } else {
+        peer_str()
+    }
+}
+
 pub(crate) struct HttpListenerBlock {
     target: OnceLock<DispatchTarget>,
     listen: OnceLock<String>,
     max_body_bytes: OnceLock<usize>,
+    /// SEC-07: IPs of trusted reverse proxies. `X-Forwarded-For` is honored
+    /// only when the immediate peer is one of these; otherwise the peer socket
+    /// address is used. Empty (default) = never trust the header.
+    trusted_proxies: OnceLock<Vec<std::net::IpAddr>>,
     shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -177,6 +212,7 @@ impl HttpListenerBlock {
             target: OnceLock::new(),
             listen: OnceLock::new(),
             max_body_bytes: OnceLock::new(),
+            trusted_proxies: OnceLock::new(),
             shutdown_tx: Mutex::new(None),
         }
     }
@@ -213,6 +249,16 @@ impl Block for HttpListenerBlock {
                 &DEFAULT_MAX_BODY_BYTES.to_string(),
             )
             .name("Max Body Bytes"),
+            ConfigVar::new(
+                "trusted_proxies",
+                "Comma-separated IP addresses of trusted reverse proxies. \
+                 X-Forwarded-For is honored (for the client IP used in rate \
+                 limiting and audit) only when the direct peer is one of these; \
+                 otherwise the peer socket address is used. Empty = never trust \
+                 the header (safe default for a directly-exposed listener).",
+                "",
+            )
+            .name("Trusted Proxies"),
         ])
     }
 
@@ -242,6 +288,9 @@ impl Block for HttpListenerBlock {
                 .parse::<usize>()
                 .unwrap_or(DEFAULT_MAX_BODY_BYTES);
             self.max_body_bytes.set(max_body).ok();
+            self.trusted_proxies
+                .set(parse_trusted_proxies(config.str("trusted_proxies")))
+                .ok();
         }
 
         if event.event_type == LifecycleType::Stop {
@@ -269,6 +318,10 @@ impl Block for HttpListenerBlock {
             .get()
             .copied()
             .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+        // SEC-07: shared across requests; `Arc` so the per-request closure
+        // clones cheaply.
+        let trusted_proxies =
+            std::sync::Arc::new(self.trusted_proxies.get().cloned().unwrap_or_default());
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.lock() = Some(tx);
@@ -277,9 +330,11 @@ impl Block for HttpListenerBlock {
             let handler = {
                 let h = handle.clone();
                 let target = target.clone();
+                let trusted_proxies = trusted_proxies.clone();
                 axum::routing::any(move |req: Request| {
                     let h = h.clone();
                     let target = target.clone();
+                    let trusted_proxies = trusted_proxies.clone();
                     async move {
                         let (parts, body) = req.into_parts();
                         // Buffer the request body up to `max_body_bytes`. A read
@@ -296,20 +351,20 @@ impl Block for HttpListenerBlock {
                         let uri = &parts.uri;
                         let path = uri.path();
                         let query = uri.query().unwrap_or("");
-                        let remote_addr = parts
+                        // SEC-07: the peer address comes from axum's
+                        // `ConnectInfo` (wired via
+                        // `into_make_service_with_connect_info` below). Default
+                        // to it; trust `X-Forwarded-For` only from a configured
+                        // trusted proxy so a direct client cannot spoof its IP.
+                        let peer_ip = parts
+                            .extensions
+                            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                            .map(|ci| ci.0.ip());
+                        let xff = parts
                             .headers
                             .get("x-forwarded-for")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.rsplit(',').next())
-                            .map_or_else(
-                                || {
-                                    parts.extensions.get::<std::net::SocketAddr>().map_or_else(
-                                        || "unknown".to_string(),
-                                        |a| a.ip().to_string(),
-                                    )
-                                },
-                                |s| s.trim().to_string(),
-                            );
+                            .and_then(|v| v.to_str().ok());
+                        let remote_addr = resolve_client_ip(peer_ip, xff, &trusted_proxies);
 
                         let msg = http_to_message(
                             &parts.method,
@@ -353,7 +408,16 @@ impl Block for HttpListenerBlock {
                 "wafer-run/http-listener listening"
             );
 
-            let serve = axum::serve(listener, app).with_graceful_shutdown(async {
+            // SEC-07: `into_make_service_with_connect_info` injects the peer
+            // `SocketAddr` into each request's extensions as
+            // `ConnectInfo<SocketAddr>`, which the handler reads above. Without
+            // it the peer address is never available and the client IP would
+            // always fall back to whatever `X-Forwarded-For` claims.
+            let serve = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
                 let _ = rx.await;
             });
 
@@ -412,5 +476,54 @@ mod tests {
         assert!(!is_length_limit_error(&err));
         let resp = body_read_error_response(&err);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // SEC-07
+    use std::net::IpAddr;
+
+    #[test]
+    fn parse_trusted_proxies_skips_blank_and_invalid() {
+        let v = parse_trusted_proxies(" 10.0.0.1, , not-an-ip, ::1 ");
+        assert_eq!(
+            v,
+            vec![
+                "10.0.0.1".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap()
+            ]
+        );
+        assert!(parse_trusted_proxies("").is_empty());
+    }
+
+    #[test]
+    fn client_ip_defaults_to_peer_and_ignores_xff_from_untrusted() {
+        let peer: IpAddr = "203.0.113.5".parse().unwrap();
+        // No trusted proxies configured: a direct client's X-Forwarded-For is
+        // ignored; the peer address wins (no spoofing).
+        assert_eq!(
+            resolve_client_ip(Some(peer), Some("1.2.3.4"), &[]),
+            "203.0.113.5"
+        );
+        // Peer not in the trusted set: XFF still ignored.
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), Some("1.2.3.4"), &[proxy]),
+            "203.0.113.5"
+        );
+    }
+
+    #[test]
+    fn client_ip_uses_xff_only_from_trusted_proxy() {
+        let proxy: IpAddr = "10.0.0.1".parse().unwrap();
+        // Peer IS the trusted proxy → the rightmost XFF entry (what the proxy
+        // saw) is the real client.
+        assert_eq!(
+            resolve_client_ip(Some(proxy), Some("9.9.9.9, 8.8.8.8"), &[proxy]),
+            "8.8.8.8"
+        );
+    }
+
+    #[test]
+    fn client_ip_unknown_without_peer() {
+        assert_eq!(resolve_client_ip(None, Some("8.8.8.8"), &[]), "unknown");
     }
 }
