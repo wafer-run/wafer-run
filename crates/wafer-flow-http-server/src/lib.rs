@@ -64,6 +64,7 @@ pub const FLOW_JSON: &str = r#"{
     ],
     "config_map": {
         "listen": { "target": "wafer-run/http-listener", "key": "listen" },
+        "trusted_proxies": { "target": "wafer-run/http-listener", "key": "trusted_proxies" },
         "routes": { "target": "wafer-run/router", "key": "routes" }
     },
     "config_defaults": {
