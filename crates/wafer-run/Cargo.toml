@@ -63,6 +63,9 @@ reqwest = { workspace = true, optional = true }
 workspace = true
 
 [dev-dependencies]
+# Benchmarks only (never a regular dependency; dev-deps are not built for
+# wasm32 lib targets, so this stays out of the wasm32 build).
+criterion = { version = "0.8", features = ["async_tokio"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 tempfile = { workspace = true }
 tracing-test = "0.2"
@@ -86,3 +89,14 @@ wafer-block-sqlite = { path = "../wafer-block-sqlite" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"
+
+# Criterion benchmark suite (PERF-01..03 measurement prerequisite, 2026-07-14
+# deep-dive review). Fixture guests are built by scripts/build-fixtures.sh.
+[[bench]]
+name = "wasm_guest"
+harness = false
+required-features = ["wasm"]
+
+[[bench]]
+name = "flow_dispatch"
+harness = false
