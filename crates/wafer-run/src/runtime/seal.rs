@@ -1,7 +1,7 @@
 //! [`Wafer::seal`] — the once-per-boot finalization pipeline, decomposed
 //! into named phases: grant-rejection gate, remote resolution, config
-//! expansion, capability computation, block-reference resolution, and
-//! startup-snapshot finalization.
+//! expansion, capability computation, instance-mode advisory warnings,
+//! block-reference resolution, and startup-snapshot finalization.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -23,7 +23,9 @@ impl Wafer {
     ///    `config_defaults`, and `"uses"` contributions across all block
     ///    configs.
     /// 4. Compute effective capabilities per block (declared ∩ config ∩ host)
-    ///    and propagate them into each block.
+    ///    and propagate them into each block. Then warn about declared
+    ///    instance modes the runtime cannot honor (WASM + `Singleton`/
+    ///    `PerFlow` — instance modes are advisory, not enforced).
     /// 5. Resolve remote blocks referenced by flow steps and router routes.
     ///    Aggregates every missing reference into one
     ///    `RuntimeError::BlocksNotFound` so operators see the full punch
@@ -47,6 +49,8 @@ impl Wafer {
         self.gather_uses_configs();
 
         self.compute_effective_capabilities()?;
+
+        self.warn_unenforced_instance_modes();
 
         self.resolve_block_references().await?;
 
@@ -115,6 +119,35 @@ impl Wafer {
         }
         self.registration.wrap.effective_capabilities = Arc::new(eff);
         Ok(())
+    }
+
+    /// Warn about declared instance modes the runtime cannot honor.
+    ///
+    /// `BlockInfo.instance_mode` is advisory — no instance manager exists.
+    /// Native blocks are one shared `Arc` per registration; WASM blocks get
+    /// a fresh store + instance every call. A WASM block declaring a
+    /// state-retaining mode (`Singleton`, `PerFlow`) therefore never keeps
+    /// the state it was promising to share — surface that at boot instead
+    /// of letting the author discover it as silently-lost guest state.
+    /// Runs after `resolve_remote_entries` so downloaded WASM blocks are
+    /// covered too.
+    fn warn_unenforced_instance_modes(&self) {
+        for (name, block) in &self.registration.blocks {
+            let info = block.info();
+            if info.runtime == wafer_block::BlockRuntime::Wasm
+                && matches!(
+                    info.instance_mode,
+                    wafer_block::InstanceMode::Singleton | wafer_block::InstanceMode::PerFlow
+                )
+            {
+                tracing::warn!(
+                    block = %name,
+                    declared = %info.instance_mode,
+                    "declared instance_mode is not enforced: WASM blocks run as a fresh \
+                     instance per execution, so no guest state is retained across calls"
+                );
+            }
+        }
     }
 
     /// Resolve remote blocks referenced by flow steps and router routes.
@@ -388,5 +421,124 @@ fn collect_flow_step_refs(
                 collect_flow_step_refs(wafer, flow_id, &branch.steps, &nested, references);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod instance_mode_tests {
+    use std::sync::Arc;
+
+    use wafer_block::{
+        streams::{input::InputStream, output::OutputStream},
+        types::BlockRuntime,
+        Block, BlockInfo, Context, InstanceMode, LifecycleEvent, Message, WaferError,
+    };
+
+    use super::super::Wafer;
+
+    /// Minimal block whose `info()` is whatever the test says it is —
+    /// lets us fabricate `runtime = Wasm` without loading real wasm.
+    struct FakeInfoBlock {
+        info: BlockInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl Block for FakeInfoBlock {
+        fn info(&self) -> BlockInfo {
+            self.info.clone()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(Vec::new())
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    fn register(wafer: &mut Wafer, info: BlockInfo) {
+        let name = info.name.clone();
+        wafer
+            .register_block(name, Arc::new(FakeInfoBlock { info }))
+            .expect("register");
+    }
+
+    /// COR-02: a WASM block declaring a state-retaining mode (`Singleton`,
+    /// `PerFlow`) is a promise per-call instantiation cannot keep — the
+    /// advisory phase must warn instead of letting the author discover
+    /// silently-lost guest state.
+    #[test]
+    #[tracing_test::traced_test]
+    fn wasm_state_retaining_instance_mode_warns() {
+        let mut wafer = Wafer::empty();
+        register(
+            &mut wafer,
+            BlockInfo::new("test/wasm-singleton", "0.1.0", "middleware@v1", "wasm")
+                .runtime(BlockRuntime::Wasm)
+                .instance_mode(InstanceMode::Singleton),
+        );
+        register(
+            &mut wafer,
+            BlockInfo::new("test/wasm-per-flow", "0.1.0", "middleware@v1", "wasm")
+                .runtime(BlockRuntime::Wasm)
+                .instance_mode(InstanceMode::PerFlow),
+        );
+
+        wafer.warn_unenforced_instance_modes();
+
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| l.contains("instance_mode is not enforced"))
+                .count();
+            if n == 2 {
+                Ok(())
+            } else {
+                Err(format!("expected 2 advisory warnings, got {n}"))
+            }
+        });
+    }
+
+    /// The advisory warning must stay quiet when actual behavior is
+    /// compatible with the declaration: WASM + `PerExecution`/`PerNode`
+    /// match per-call instantiation-or-default, and a native block's shared
+    /// instance can honor `Singleton`. Guards against boot-log noise.
+    #[test]
+    #[tracing_test::traced_test]
+    fn compatible_instance_modes_do_not_warn() {
+        let mut wafer = Wafer::empty();
+        register(
+            &mut wafer,
+            BlockInfo::new("test/wasm-per-exec", "0.1.0", "middleware@v1", "wasm")
+                .runtime(BlockRuntime::Wasm)
+                .instance_mode(InstanceMode::PerExecution),
+        );
+        register(
+            &mut wafer,
+            BlockInfo::new("test/native-singleton", "0.1.0", "middleware@v1", "native")
+                .instance_mode(InstanceMode::Singleton),
+        );
+
+        wafer.warn_unenforced_instance_modes();
+
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| l.contains("instance_mode is not enforced"))
+                .count();
+            if n == 0 {
+                Ok(())
+            } else {
+                Err(format!("expected no advisory warnings, got {n}"))
+            }
+        });
     }
 }

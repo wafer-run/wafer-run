@@ -72,7 +72,10 @@ pub struct BlockInfo {
     pub interface: String,
     /// One-line human-readable summary of what the block does.
     pub summary: String,
-    /// How many instances are created and when (default: `PerNode`).
+    /// Declared instance lifecycle (default: `PerNode`). **Advisory —
+    /// not enforced.** Actual behavior is fixed by runtime type: native
+    /// blocks are one shared instance per runtime process, WASM blocks
+    /// are a fresh instance per call. See [`crate::InstanceMode`].
     #[serde(default = "default_instance_mode")]
     pub instance_mode: crate::InstanceMode,
     /// Names of other blocks this block depends on. Used by the runtime to
@@ -221,7 +224,8 @@ impl BlockInfo {
         Ok(())
     }
 
-    /// Set the [`crate::InstanceMode`] (default: `PerNode`).
+    /// Set the declared [`crate::InstanceMode`] (default: `PerNode`).
+    /// Advisory — the runtime does not enforce it; see the enum docs.
     pub fn instance_mode(mut self, mode: crate::InstanceMode) -> Self {
         self.instance_mode = mode;
         self

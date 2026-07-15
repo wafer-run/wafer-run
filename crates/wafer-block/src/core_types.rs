@@ -182,7 +182,22 @@ impl fmt::Display for WaferError {
     }
 }
 
-/// How many block instances are created and when.
+/// Declared block instance lifecycle — **advisory, not enforced**.
+///
+/// No runtime consumer reads this today. Actual instantiation behavior
+/// is fixed by runtime type, regardless of the declared mode:
+///
+/// - **Native** blocks: one shared `Arc<dyn Block>` per registration —
+///   effectively a per-runtime-process singleton serving concurrent
+///   calls (blocks are `Send + Sync` and must be thread-safe).
+/// - **WASM** blocks: a fresh store + instance for every call —
+///   effectively `PerExecution`; no guest state survives between calls.
+///
+/// A WASM block that declares one of the state-retaining modes
+/// (`Singleton`, `PerFlow`) draws a warning at `seal()`, since per-call
+/// instantiation cannot honor it. Enforcement (a real instance manager
+/// keyed on this declaration) is future work tied to instance pooling;
+/// until then the declaration only documents intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceMode {
     /// One instance per node (the runtime process).
