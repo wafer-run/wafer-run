@@ -126,6 +126,86 @@ fn instantiate(
 }
 
 // ---------------------------------------------------------------------------
+// Warm instance pooling (PERF-01 Part B)
+// ---------------------------------------------------------------------------
+
+/// Env var for the host-level wasm instance-pooling kill switch.
+///
+/// - **absent** (or empty, matching the `WAFER_LOCKFILE` convention) —
+///   pooling is enabled for blocks that declared a state-retaining
+///   [`InstanceMode`](wafer_block::InstanceMode) (`Singleton` / `PerFlow`).
+/// - **`on` / `off`** (ASCII case-insensitive) — explicitly enable/disable.
+///   `off` is the isolation escape hatch for hosts running third-party wasm
+///   that (wrongly) declared a state-retaining mode.
+/// - **anything else** — a hard error at `WasmiBlock` load and at
+///   [`Wafer::seal`](crate::Wafer::seal). A mistyped value must fail loud,
+///   never silently fall back to either behavior.
+pub const WASM_POOLING_ENV: &str = "WAFER_RUN_WASM_POOLING";
+
+/// Recycle a pooled instance after this many served calls, bounding unbounded
+/// guest-heap growth (the core ABI has no guest-side free for host-written
+/// buffers, so every reused call leaks its request/response allocations into
+/// the guest heap until the instance is recycled).
+const MAX_CALLS_PER_INSTANCE: u32 = 256;
+
+/// Maximum number of idle instances retained per block. Beyond this, extra
+/// instances are dropped on checkin rather than queued.
+const MAX_POOLED_INSTANCES: usize = 4;
+
+/// A warm store + instance pair retained across `handle` calls for blocks
+/// that opted into reuse via a state-retaining `InstanceMode`.
+struct PooledInstance {
+    store: Store<WasmiHostState>,
+    instance: wasmi::Instance,
+    /// Calls this instance has completed; drives the
+    /// [`MAX_CALLS_PER_INSTANCE`] recycle bound.
+    calls_served: u32,
+}
+
+/// Parse the raw [`WASM_POOLING_ENV`] value. `None`/empty means "not
+/// configured" → pooling permitted for declared blocks.
+fn parse_wasm_pooling(raw: Option<&str>) -> Result<bool, String> {
+    let Some(raw) = raw else {
+        return Ok(true);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // Same convention as WAFER_LOCKFILE: an empty env var is "unset".
+        return Ok(true);
+    }
+    if trimmed.eq_ignore_ascii_case("on") {
+        return Ok(true);
+    }
+    if trimmed.eq_ignore_ascii_case("off") {
+        return Ok(false);
+    }
+    Err(format!(
+        "invalid {WASM_POOLING_ENV} value {raw:?}: expected \"on\" or \"off\" \
+         (absent/empty defaults to \"on\")"
+    ))
+}
+
+/// Read + validate the host-level pooling kill switch from the process
+/// environment. Called at every `WasmiBlock` load and at `Wafer::seal` so an
+/// invalid value fails loud at startup on both the direct-embedder path
+/// (gizza-style `load_from_bytes`) and the runtime boot path.
+///
+/// On `wasm32` targets there is no process environment (same reasoning as
+/// the `WAFER_LOCKFILE` auto-discovery skip in `builder.rs`), so the switch
+/// is always "enabled for declared blocks".
+pub(crate) fn wasm_pooling_host_override() -> Result<bool, RuntimeError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(true)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let raw = std::env::var(WASM_POOLING_ENV).ok();
+        parse_wasm_pooling(raw.as_deref()).map_err(RuntimeError::Config)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core-ABI codec negotiation (PERF-01)
 // ---------------------------------------------------------------------------
 
@@ -275,10 +355,30 @@ pub struct WasmiBlock {
     /// `consume_fuel` flag of the block's [`Engine`] — the constructors keep
     /// the two in sync.
     limits: ResourceLimits,
+    /// Warm instance pool (PERF-01 Part B). Only the `handle` path checks
+    /// instances out/in, and only when [`is_poolable`](Self::is_poolable)
+    /// says the block opted into reuse; `info()`/`lifecycle()` always
+    /// instantiate fresh. Checkout grants exclusive ownership (a `Store` is
+    /// single-caller by construction), so concurrent calls get distinct
+    /// instances.
+    pool: parking_lot::Mutex<Vec<PooledInstance>>,
+    /// Host-level kill switch, resolved once at load from
+    /// [`WASM_POOLING_ENV`]. `false` forces every call cold regardless of
+    /// the block's declared `InstanceMode`.
+    pooling_enabled: bool,
+    /// Cached policy decision: does this block's declared
+    /// [`InstanceMode`](wafer_block::InstanceMode) opt into reuse
+    /// (`Singleton` / `PerFlow`)? Pinned on first use *after* `info()`
+    /// succeeds, so a transient `info()` failure cannot permanently pin the
+    /// block cold.
+    poolable: std::sync::OnceLock<bool>,
 }
 
-// Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44.
-// The Mutex guards the cache.
+// Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44. The Mutexes
+// guard the info cache and the instance pool; `Store<WasmiHostState>` is
+// compiler-verified `Send` elsewhere (per-call stores already cross await
+// points inside `Send` handle futures), so parking pooled stores behind the
+// Mutex is sound.
 unsafe impl Send for WasmiBlock {}
 unsafe impl Sync for WasmiBlock {}
 
@@ -395,6 +495,9 @@ impl WasmiBlock {
         let module = Module::new(engine, wasm_bytes)
             .map_err(|e| RuntimeError::Wasm(format!("compiling WASM module: {e}")))?;
         let linker = build_linker(engine)?;
+        // Fail loud at load on a mistyped kill-switch value — never silently
+        // fall back to pooled or cold (config rule; see WASM_POOLING_ENV).
+        let pooling_enabled = wasm_pooling_host_override()?;
         Ok(Self {
             engine: engine.clone(),
             module,
@@ -406,6 +509,9 @@ impl WasmiBlock {
             warned_forged_identity: std::sync::atomic::AtomicBool::new(false),
             asset_loader: parking_lot::RwLock::new(Arc::new(crate::asset_loader::NoopAssetLoader)),
             limits,
+            pool: parking_lot::Mutex::new(Vec::new()),
+            pooling_enabled,
+            poolable: std::sync::OnceLock::new(),
         })
     }
 
@@ -491,33 +597,17 @@ impl WasmiBlock {
             }
         };
 
-        let result_bytes = match self
-            .call_guest_resumable_with_attachments(
+        let (result_bytes, lease) = match self
+            .call_handle_guest(
                 ctx,
                 attachments,
                 inbound_protected.clone(),
-                |store, instance| {
-                    let alloc_fn = instance
-                        .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
-                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
-                    let handle_fn = instance
-                        .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
-                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
-                    let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
-                        RuntimeError::Wasm("guest has no exported memory".to_string())
-                    })?;
-
-                    if codec == AbiCodec::V2Rmp {
-                        verify_abi_version(store, instance)?;
-                    }
-                    let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
-                    let len = msg_bytes.len() as i32;
-                    Ok((handle_fn, ptr as i32, len))
-                },
+                codec,
+                &msg_bytes,
             )
             .await
         {
-            Ok(bytes) => bytes,
+            Ok(v) => v,
             Err(e) => {
                 return OutputStream::error(WaferError::new(
                     ErrorCode::Internal,
@@ -534,6 +624,24 @@ impl WasmiBlock {
             AbiCodec::V1Json => serde_json::from_slice(&result_bytes).map_err(|e| e.to_string()),
             AbiCodec::V2Rmp => wafer_block::codec::decode(&result_bytes).map_err(|e| e.to_string()),
         };
+
+        // Pool checkin — clean-exit path only. A trap / fuel exhaustion /
+        // resume error never reaches this point (the `Err` arm above returned
+        // early and dropped the instance). Here the remaining gate is the
+        // result decode: only a well-formed `GuestResult` with a known action
+        // proves the guest ran its ABI glue to completion, so anything else
+        // drops the instance too (failure replacement — the next call
+        // instantiates fresh). A well-formed `action == "Error"` is a clean
+        // exit: the guest handled an application error and returned normally.
+        if let Some(leased) = lease {
+            match &parsed {
+                Ok(r) if matches!(r.action.as_str(), "Respond" | "Error" | "Drop" | "Continue") => {
+                    self.checkin(leased);
+                }
+                _ => drop(leased),
+            }
+        }
+
         match parsed {
             Ok(result) => match result.action.as_str() {
                 "Respond" => {
@@ -601,36 +709,204 @@ impl WasmiBlock {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Is this block eligible for warm instance pooling?
+    ///
+    /// Policy: the host kill switch ([`WASM_POOLING_ENV`], resolved at load)
+    /// must permit pooling, AND the block's declared
+    /// [`InstanceMode`](wafer_block::InstanceMode) must be a state-retaining
+    /// one (`Singleton` / `PerFlow` — "my state may live across calls").
+    /// `PerNode` (the undeclared default) and `PerExecution` keep today's
+    /// fresh-instance-per-call behavior.
+    fn is_poolable(&self) -> bool {
+        if !self.pooling_enabled {
+            return false;
+        }
+        if let Some(decided) = self.poolable.get() {
+            return *decided;
+        }
+        let mode = self.info().instance_mode;
+        let poolable = matches!(
+            mode,
+            wafer_block::InstanceMode::Singleton | wafer_block::InstanceMode::PerFlow
+        );
+        // Pin the decision only once `info()` has actually succeeded (the
+        // cache is populated). A failed `info()` reports the placeholder
+        // BlockInfo (default `PerNode`), and that transient fault must not
+        // pin the block cold forever.
+        if self.info_cache.lock().is_ok_and(|guard| guard.is_some()) {
+            let _ = self.poolable.set(poolable);
+        }
+        poolable
+    }
+
+    /// Number of idle instances currently retained in the warm pool.
+    ///
+    /// Observability/test accessor — the pool is otherwise invisible from
+    /// the outside. Always `0` for blocks that did not opt into reuse.
+    pub fn pooled_instance_count(&self) -> usize {
+        self.pool.lock().len()
+    }
+
+    /// Check an instance out of the warm pool, or instantiate fresh when the
+    /// pool is empty. Checkout grants exclusive ownership; a pooled instance
+    /// gets its fuel refilled (same budget as a fresh instantiation) and its
+    /// capabilities snapshot refreshed so a set narrowed after the instance
+    /// was created (e.g. by `seal()`'s effective-capability propagation) can
+    /// never be widened back by reuse.
+    fn checkout(&self) -> Result<PooledInstance, RuntimeError> {
+        let popped = self.pool.lock().pop();
+        if let Some(mut leased) = popped {
+            apply_fuel(
+                &mut leased.store,
+                self.limits.fuel,
+                "refilling fuel at pool checkout",
+            )?;
+            leased.store.data_mut().capabilities = self.capabilities.read().clone();
+            return Ok(leased);
+        }
+        let caps_snapshot = self.capabilities.read().clone();
+        let (store, instance) = instantiate(
+            &self.engine,
+            &self.linker,
+            &self.module,
+            &caps_snapshot,
+            self.limits,
+        )?;
+        Ok(PooledInstance {
+            store,
+            instance,
+            calls_served: 0,
+        })
+    }
+
+    /// Return an instance to the warm pool after a clean exit.
+    ///
+    /// Recycles (drops) the instance instead when it has served
+    /// [`MAX_CALLS_PER_INSTANCE`] calls or its linear memory has grown to the
+    /// block's page cap — the core ABI has no guest-side free for
+    /// host-written buffers, so reused instances leak guest heap per call and
+    /// must be replaced periodically. Otherwise resets all per-call host
+    /// state: the context slot (already cleared by `ContextScope::drop`,
+    /// re-cleared here as hygiene), attachments, the SEC-01 protected-meta
+    /// snapshot, every `pending_*` resume slot, and the `StreamRegistry` —
+    /// replacing the registry drops any handle the guest leaked, which
+    /// cancels in-flight response streams via their paired
+    /// `CancellationToken`s exactly as a store drop would. Linear memory and
+    /// globals are deliberately NOT reset: that is the declared-reuse
+    /// semantics the block opted into.
+    fn checkin(&self, mut leased: PooledInstance) {
+        leased.calls_served = leased.calls_served.saturating_add(1);
+        if leased.calls_served >= MAX_CALLS_PER_INSTANCE {
+            return;
+        }
+        let Some(memory) = leased.instance.get_memory(&leased.store, "memory") else {
+            return;
+        };
+        let cap_bytes = (self.limits.memory_pages as usize).saturating_mul(65536);
+        if memory.data_size(&leased.store) >= cap_bytes {
+            return;
+        }
+
+        let data = leased.store.data_mut();
+        data.context = None;
+        data.current_attachments = None;
+        data.inbound_protected_meta.clear();
+        data.pending_stream_finish = None;
+        data.pending_stream_read = None;
+        data.pending_stream_take_error = None;
+        data.pending_load_asset = None;
+        data.streams =
+            StreamRegistry::with_limits(self.limits.max_host_bytes, self.limits.max_live_streams);
+
+        let mut pool = self.pool.lock();
+        if pool.len() < MAX_POOLED_INSTANCES {
+            pool.push(leased);
+        }
+        // Beyond the cap: drop on checkin (never queue).
+    }
+
+    /// Drive one `__wafer_handle` invocation, pool-aware.
+    ///
+    /// Pool-eligible blocks check an instance out (reusing a warm one when
+    /// available) and, on a clean transport-level exit, hand it back to the
+    /// caller as a lease — `handle_inner` checks it in only after the result
+    /// decodes as a well-formed `GuestResult`. Any error path drops the
+    /// instance. Cold blocks instantiate fresh and return no lease, exactly
+    /// today's behavior.
+    async fn call_handle_guest(
+        &self,
+        ctx: &dyn Context,
+        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+        inbound_protected: Vec<MetaEntry>,
+        codec: AbiCodec,
+        msg_bytes: &[u8],
+    ) -> Result<(Vec<u8>, Option<PooledInstance>), RuntimeError> {
+        let setup = |store: &mut Store<WasmiHostState>, instance: wasmi::Instance| {
+            let alloc_fn = instance
+                .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
+                .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
+            let handle_fn = instance
+                .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
+                .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+            let memory = instance
+                .get_memory(&*store, "memory")
+                .ok_or_else(|| RuntimeError::Wasm("guest has no exported memory".to_string()))?;
+
+            if codec == AbiCodec::V2Rmp {
+                verify_abi_version(store, instance)?;
+            }
+            let ptr = write_guest_bytes(store, alloc_fn, memory, msg_bytes)?;
+            let len = msg_bytes.len() as i32;
+            Ok((handle_fn, ptr as i32, len))
+        };
+
+        if self.is_poolable() {
+            let mut leased = self.checkout()?;
+            let instance = leased.instance;
+            let bytes = self
+                .run_guest_call(
+                    &mut leased.store,
+                    instance,
+                    ctx,
+                    attachments,
+                    inbound_protected,
+                    setup,
+                )
+                .await?;
+            Ok((bytes, Some(leased)))
+        } else {
+            let caps_snapshot = self.capabilities.read().clone();
+            let (mut store, instance) = instantiate(
+                &self.engine,
+                &self.linker,
+                &self.module,
+                &caps_snapshot,
+                self.limits,
+            )?;
+            let bytes = self
+                .run_guest_call(
+                    &mut store,
+                    instance,
+                    ctx,
+                    attachments,
+                    inbound_protected,
+                    setup,
+                )
+                .await?;
+            Ok((bytes, None))
+        }
+    }
+
     /// Call a guest function that returns a packed i64 (ptr << 32 | len),
-    /// handling the call_block trap+resume loop.
+    /// handling the call_block trap+resume loop, on a fresh (never pooled)
+    /// instance. Used by `lifecycle()` — `handle` goes through the
+    /// pool-aware [`call_handle_guest`](Self::call_handle_guest) instead.
     ///
     /// `setup` prepares the store/instance (writes args, returns the TypedFunc).
     /// When a `call_block` trap occurs the loop resolves it via `ctx` and resumes.
     async fn call_guest_resumable(
         &self,
         ctx: &dyn Context,
-        setup: impl FnOnce(
-            &mut Store<WasmiHostState>,
-            wasmi::Instance,
-        )
-            -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
-    ) -> Result<Vec<u8>, RuntimeError> {
-        // No inbound request identity for this path (e.g. `__wafer_info` /
-        // `__wafer_lifecycle`): pass an empty protected-meta snapshot.
-        self.call_guest_resumable_with_attachments(ctx, None, Vec::new(), setup)
-            .await
-    }
-
-    /// Variant of `call_guest_resumable` that seeds the wasmi store's
-    /// `current_attachments` slot before the guest call begins. Used by
-    /// `WasmiBlock::handle_with_attachments` so a wasmi callee's
-    /// `__wafer_host_lookup_attachment` host import can find the attachments
-    /// the caller provided via `Context::call_block_with_attachments`.
-    async fn call_guest_resumable_with_attachments(
-        &self,
-        ctx: &dyn Context,
-        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
-        inbound_protected: Vec<MetaEntry>,
         setup: impl FnOnce(
             &mut Store<WasmiHostState>,
             wasmi::Instance,
@@ -645,14 +921,39 @@ impl WasmiBlock {
             &caps_snapshot,
             self.limits,
         )?;
+        // No inbound request identity for this path (e.g. `__wafer_lifecycle`):
+        // pass an empty protected-meta snapshot and no attachments.
+        self.run_guest_call(&mut store, instance, ctx, None, Vec::new(), setup)
+            .await
+    }
 
+    /// Drive one guest invocation on the given store + instance: install the
+    /// per-call context scope, run `setup`, and pump the trap+resume loop to
+    /// completion. Shared by the cold path
+    /// ([`call_guest_resumable`](Self::call_guest_resumable)) and the
+    /// pool-aware handle path ([`call_handle_guest`](Self::call_handle_guest));
+    /// ownership of the store stays with the caller so the pooled path can
+    /// retain it after a clean exit.
+    async fn run_guest_call(
+        &self,
+        store: &mut Store<WasmiHostState>,
+        instance: wasmi::Instance,
+        ctx: &dyn Context,
+        attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+        inbound_protected: Vec<MetaEntry>,
+        setup: impl FnOnce(
+            &mut Store<WasmiHostState>,
+            wasmi::Instance,
+        )
+            -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
+    ) -> Result<Vec<u8>, RuntimeError> {
         // Install an owned clone of the context (and inbound attachments)
         // for the duration of this call. `ContextScope::drop` clears the
         // store's `context` slot on *every* exit path — `?`, early
         // `return Err`, the unhandled-trap branch, or success — so a stale
         // context never leaks into a later invocation. From here on the
         // store is reached through `scope`.
-        let mut scope = ContextScope::new(&mut store, ctx, attachments, inbound_protected);
+        let mut scope = ContextScope::new(store, ctx, attachments, inbound_protected);
 
         let (func, arg0, arg1) = setup(scope.store_mut(), instance)?;
 
@@ -1160,5 +1461,49 @@ mod capabilities_update_tests {
         info_fn
             .call(&mut store, ())
             .expect("calling a guest fn that uses sched_yield should succeed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the pooling kill-switch parser
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pooling_env_tests {
+    use super::*;
+
+    /// Config rule: absent (or empty, per the WAFER_LOCKFILE convention)
+    /// means "pooling enabled for declared blocks".
+    #[test]
+    fn absent_or_empty_defaults_to_enabled() {
+        assert_eq!(parse_wasm_pooling(None), Ok(true));
+        assert_eq!(parse_wasm_pooling(Some("")), Ok(true));
+        assert_eq!(parse_wasm_pooling(Some("   ")), Ok(true));
+    }
+
+    /// Explicit on/off values are honored, ASCII case-insensitively.
+    #[test]
+    fn explicit_on_off_values() {
+        assert_eq!(parse_wasm_pooling(Some("on")), Ok(true));
+        assert_eq!(parse_wasm_pooling(Some("ON")), Ok(true));
+        assert_eq!(parse_wasm_pooling(Some("off")), Ok(false));
+        assert_eq!(parse_wasm_pooling(Some("Off")), Ok(false));
+        assert_eq!(parse_wasm_pooling(Some(" off ")), Ok(false));
+    }
+
+    /// Config rule: present-but-invalid must fail loud, never silently fall
+    /// back to either behavior. The error names the env var so an operator
+    /// can find the mistyped setting.
+    #[test]
+    fn invalid_values_fail_loud_naming_the_var() {
+        for bad in ["0", "1", "true", "false", "cold", "sometimes"] {
+            let err = parse_wasm_pooling(Some(bad))
+                .expect_err("invalid value must be rejected, not defaulted");
+            assert!(
+                err.contains(WASM_POOLING_ENV),
+                "error must name the env var: {err}"
+            );
+            assert!(err.contains(bad), "error must echo the bad value: {err}");
+        }
     }
 }

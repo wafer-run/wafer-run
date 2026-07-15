@@ -6,4 +6,4 @@ pub(crate) mod stream;
 pub mod wasmi_loader;
 
 #[cfg(feature = "wasmi")]
-pub use wasmi_loader::WasmiBlock;
+pub use wasmi_loader::{WasmiBlock, WASM_POOLING_ENV};

@@ -1,6 +1,6 @@
 //! [`Wafer::seal`] — the once-per-boot finalization pipeline, decomposed
 //! into named phases: grant-rejection gate, remote resolution, config
-//! expansion, capability computation, instance-mode advisory warnings,
+//! expansion, capability computation, wasm instance-pooling policy,
 //! block-reference resolution, and startup-snapshot finalization.
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -23,9 +23,11 @@ impl Wafer {
     ///    `config_defaults`, and `"uses"` contributions across all block
     ///    configs.
     /// 4. Compute effective capabilities per block (declared ∩ config ∩ host)
-    ///    and propagate them into each block. Then warn about declared
-    ///    instance modes the runtime cannot honor (WASM + `Singleton`/
-    ///    `PerFlow` — instance modes are advisory, not enforced).
+    ///    and propagate them into each block. Then resolve the wasm
+    ///    instance-pooling policy: validate the host kill switch
+    ///    (`WAFER_RUN_WASM_POOLING` — invalid values refuse boot) and log
+    ///    each WASM block whose declared `Singleton`/`PerFlow` instance mode
+    ///    opts it into warm instance pooling (PERF-01).
     /// 5. Resolve remote blocks referenced by flow steps and router routes.
     ///    Aggregates every missing reference into one
     ///    `RuntimeError::BlocksNotFound` so operators see the full punch
@@ -50,7 +52,8 @@ impl Wafer {
 
         self.compute_effective_capabilities()?;
 
-        self.warn_unenforced_instance_modes();
+        #[cfg(feature = "wasmi")]
+        self.log_wasm_instance_pooling()?;
 
         self.resolve_block_references().await?;
 
@@ -121,17 +124,30 @@ impl Wafer {
         Ok(())
     }
 
-    /// Warn about declared instance modes the runtime cannot honor.
+    /// Resolve + log the wasm instance-pooling policy (PERF-01, COR-02).
     ///
-    /// `BlockInfo.instance_mode` is advisory — no instance manager exists.
-    /// Native blocks are one shared `Arc` per registration; WASM blocks get
-    /// a fresh store + instance every call. A WASM block declaring a
-    /// state-retaining mode (`Singleton`, `PerFlow`) therefore never keeps
-    /// the state it was promising to share — surface that at boot instead
-    /// of letting the author discover it as silently-lost guest state.
-    /// Runs after `resolve_remote_entries` so downloaded WASM blocks are
-    /// covered too.
-    fn warn_unenforced_instance_modes(&self) {
+    /// A WASM block declaring a state-retaining `InstanceMode` (`Singleton`,
+    /// `PerFlow`) opts into `WasmiBlock`'s warm instance pool: its store +
+    /// instance are reused across `handle` calls, so guest globals and heap
+    /// survive between calls. (This retired the pre-pooling seal warning
+    /// that such declarations were advisory and unhonorable on the wasm
+    /// path.) Validates the `WAFER_RUN_WASM_POOLING` kill switch here too so
+    /// a mistyped value refuses boot even before any wasm block loads, then
+    /// logs the effective decision per opted-in block. Runs after
+    /// `resolve_remote_entries` so downloaded WASM blocks are covered too.
+    #[cfg(feature = "wasmi")]
+    fn log_wasm_instance_pooling(&self) -> Result<(), RuntimeError> {
+        let pooling_enabled = crate::wasm::wasmi_loader::wasm_pooling_host_override()?;
+        self.log_pooling_decisions(pooling_enabled);
+        Ok(())
+    }
+
+    /// Log, per WASM block that declared a state-retaining instance mode,
+    /// whether the host lets it pool. Split from
+    /// [`log_wasm_instance_pooling`](Self::log_wasm_instance_pooling) so
+    /// tests can drive both branches without mutating process-global env.
+    #[cfg(feature = "wasmi")]
+    fn log_pooling_decisions(&self, pooling_enabled: bool) {
         for (name, block) in &self.registration.blocks {
             let info = block.info();
             if info.runtime == wafer_block::BlockRuntime::Wasm
@@ -140,12 +156,23 @@ impl Wafer {
                     wafer_block::InstanceMode::Singleton | wafer_block::InstanceMode::PerFlow
                 )
             {
-                tracing::warn!(
-                    block = %name,
-                    declared = %info.instance_mode,
-                    "declared instance_mode is not enforced: WASM blocks run as a fresh \
-                     instance per execution, so no guest state is retained across calls"
-                );
+                if pooling_enabled {
+                    tracing::info!(
+                        block = %name,
+                        declared = %info.instance_mode,
+                        "declared instance_mode opts this WASM block into warm instance \
+                         pooling: instances are reused across calls, so guest state may \
+                         survive between invocations"
+                    );
+                } else {
+                    tracing::warn!(
+                        block = %name,
+                        declared = %info.instance_mode,
+                        "declared instance_mode is not honored: wasm instance pooling is \
+                         disabled by WAFER_RUN_WASM_POOLING=off, so this block runs as a \
+                         fresh instance per call and retains no guest state"
+                    );
+                }
             }
         }
     }
@@ -429,7 +456,7 @@ fn collect_flow_step_refs(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasmi"))]
 mod instance_mode_tests {
     use std::sync::Arc;
 
@@ -476,13 +503,13 @@ mod instance_mode_tests {
             .expect("register");
     }
 
-    /// COR-02: a WASM block declaring a state-retaining mode (`Singleton`,
-    /// `PerFlow`) is a promise per-call instantiation cannot keep — the
-    /// advisory phase must warn instead of letting the author discover
-    /// silently-lost guest state.
+    /// COR-02 / PERF-01: a WASM block declaring a state-retaining mode
+    /// (`Singleton`, `PerFlow`) opts into warm instance pooling — the seal
+    /// phase logs that reuse is in effect (guest state may survive across
+    /// calls) instead of the retired "advisory, unhonorable" warning.
     #[test]
     #[tracing_test::traced_test]
-    fn wasm_state_retaining_instance_mode_warns() {
+    fn wasm_state_retaining_instance_mode_logs_pooling() {
         let mut wafer = Wafer::empty();
         register(
             &mut wafer,
@@ -497,28 +524,58 @@ mod instance_mode_tests {
                 .instance_mode(InstanceMode::PerFlow),
         );
 
-        wafer.warn_unenforced_instance_modes();
+        wafer.log_pooling_decisions(true);
 
         logs_assert(|lines: &[&str]| {
             let n = lines
                 .iter()
-                .filter(|l| l.contains("instance_mode is not enforced"))
+                .filter(|l| l.contains("warm instance pooling"))
                 .count();
             if n == 2 {
                 Ok(())
             } else {
-                Err(format!("expected 2 advisory warnings, got {n}"))
+                Err(format!("expected 2 pooling logs, got {n}"))
             }
         });
     }
 
-    /// The advisory warning must stay quiet when actual behavior is
-    /// compatible with the declaration: WASM + `PerExecution`/`PerNode`
-    /// match per-call instantiation-or-default, and a native block's shared
-    /// instance can honor `Singleton`. Guards against boot-log noise.
+    /// With the host kill switch off (`WAFER_RUN_WASM_POOLING=off`), a
+    /// declared state-retaining mode is back to unhonorable — the block runs
+    /// cold — and the seal phase must warn so the author doesn't discover it
+    /// as silently-lost guest state.
     #[test]
     #[tracing_test::traced_test]
-    fn compatible_instance_modes_do_not_warn() {
+    fn kill_switch_off_warns_declared_mode_not_honored() {
+        let mut wafer = Wafer::empty();
+        register(
+            &mut wafer,
+            BlockInfo::new("test/wasm-singleton", "0.1.0", "middleware@v1", "wasm")
+                .runtime(BlockRuntime::Wasm)
+                .instance_mode(InstanceMode::Singleton),
+        );
+
+        wafer.log_pooling_decisions(false);
+
+        logs_assert(|lines: &[&str]| {
+            let n = lines
+                .iter()
+                .filter(|l| l.contains("instance_mode is not honored"))
+                .count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("expected 1 not-honored warning, got {n}"))
+            }
+        });
+    }
+
+    /// The pooling phase must stay quiet for modes that don't opt in: WASM +
+    /// `PerExecution`/`PerNode` keep per-call instantiation, and a native
+    /// block's shared instance honors `Singleton` natively. Guards against
+    /// boot-log noise.
+    #[test]
+    #[tracing_test::traced_test]
+    fn non_opted_instance_modes_stay_quiet() {
         let mut wafer = Wafer::empty();
         register(
             &mut wafer,
@@ -532,17 +589,20 @@ mod instance_mode_tests {
                 .instance_mode(InstanceMode::Singleton),
         );
 
-        wafer.warn_unenforced_instance_modes();
+        wafer.log_pooling_decisions(true);
+        wafer.log_pooling_decisions(false);
 
         logs_assert(|lines: &[&str]| {
             let n = lines
                 .iter()
-                .filter(|l| l.contains("instance_mode is not enforced"))
+                .filter(|l| {
+                    l.contains("warm instance pooling") || l.contains("instance_mode is not")
+                })
                 .count();
             if n == 0 {
                 Ok(())
             } else {
-                Err(format!("expected no advisory warnings, got {n}"))
+                Err(format!("expected no pooling logs, got {n}"))
             }
         });
     }
