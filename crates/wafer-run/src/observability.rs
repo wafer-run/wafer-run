@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use parking_lot::RwLock;
 use wafer_block::{
@@ -81,6 +87,15 @@ pub struct ObservabilityBus {
     block_end_handlers: HandlerList<BlockEndHandler>,
     flow_start_handlers: HandlerList<FlowStartHandler>,
     flow_end_handlers: HandlerList<FlowEndHandler>,
+    /// Fast-path flag for [`Self::any_block_handlers`], set once a
+    /// block-level (start or end) handler is registered. The per-dispatch
+    /// check is a single atomic load instead of two `RwLock` reads —
+    /// observability is opt-in, so the common dispatch path pays only this.
+    /// `Relaxed` suffices: the flag is advisory (a registration racing a
+    /// dispatch may miss that dispatch, exactly as with the lock reads it
+    /// replaces), and the handler lists themselves are synchronized by
+    /// their own `RwLock`s.
+    has_block_handlers: AtomicBool,
 }
 
 /// An in-flight block observation opened by [`ObservabilityBus::block_span`].
@@ -109,6 +124,7 @@ impl ObservabilityBus {
             block_end_handlers: RwLock::new(Arc::new(Vec::new())),
             flow_start_handlers: RwLock::new(Arc::new(Vec::new())),
             flow_end_handlers: RwLock::new(Arc::new(Vec::new())),
+            has_block_handlers: AtomicBool::new(false),
         }
     }
 
@@ -118,6 +134,7 @@ impl ObservabilityBus {
         h: impl Fn(&ObservabilityContext) + MaybeSend + MaybeSync + 'static,
     ) {
         push(&self.block_start_handlers, Arc::new(h));
+        self.has_block_handlers.store(true, Ordering::Relaxed);
     }
 
     /// Register a callback fired immediately after each block runs, with its elapsed duration.
@@ -126,6 +143,7 @@ impl ObservabilityBus {
         h: impl Fn(&ObservabilityContext, Duration) + MaybeSend + MaybeSync + 'static,
     ) {
         push(&self.block_end_handlers, Arc::new(h));
+        self.has_block_handlers.store(true, Ordering::Relaxed);
     }
 
     /// Register a callback fired at the start of every flow execution.
@@ -142,9 +160,10 @@ impl ObservabilityBus {
     ///
     /// Callers use this to skip building a per-step [`ObservabilityContext`] —
     /// in particular cloning the [`Message`] into it — when no subscriber would
-    /// observe it. Observability is opt-in, so the common case is no handlers.
+    /// observe it. Observability is opt-in, so the common case is no handlers,
+    /// and this check is a single atomic load (see `has_block_handlers`).
     pub(crate) fn any_block_handlers(&self) -> bool {
-        !self.block_start_handlers.read().is_empty() || !self.block_end_handlers.read().is_empty()
+        self.has_block_handlers.load(Ordering::Relaxed)
     }
 
     /// Open an observability span around one block dispatch.
@@ -256,6 +275,29 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(30))
             .unwrap_or_else(|_| panic!("deadlock: {what} did not complete"));
         worker.join().expect("helper thread panicked");
+    }
+
+    /// The `any_block_handlers` fast-path flag flips on the first block-level
+    /// registration (either hook) and stays set.
+    #[test]
+    fn any_block_handlers_tracks_block_level_registrations() {
+        let bus = ObservabilityBus::new();
+        assert!(!bus.any_block_handlers(), "empty bus has no block handlers");
+        bus.on_flow_start(|_, _| {});
+        bus.on_flow_end(|_, _| {});
+        assert!(
+            !bus.any_block_handlers(),
+            "flow-level handlers must not trip the block-level flag"
+        );
+        bus.on_block_start(|_| {});
+        assert!(bus.any_block_handlers());
+
+        let bus = ObservabilityBus::new();
+        bus.on_block_end(|_, _| {});
+        assert!(
+            bus.any_block_handlers(),
+            "block_end alone must set the flag"
+        );
     }
 
     /// PERF-05 regression: a handler that registers another handler must not
