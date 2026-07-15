@@ -181,8 +181,7 @@ BlockInfo {
     version:       string          // e.g., "2.1.0" (semver)
     interface:     string          // e.g., "database@v1" (required)
     summary:       string          // Brief description of this implementation
-    instance_mode: InstanceMode    // Default instance lifecycle (default: PerNode)
-    allowed_modes: []InstanceMode  // Modes this block supports (default: all)
+    instance_mode: InstanceMode    // Declared instance lifecycle (default: PerNode; advisory)
     runtime:       BlockRuntime    // Native or Wasm (default: Native)
     requires:      []string        // Block names this block may call via call_block()
 }
@@ -190,7 +189,7 @@ BlockInfo {
 
 The `interface` field declares what contract the block implements. Every block MUST implement an interface. The `summary` describes this specific implementation (e.g., "SQLite database using local file storage").
 
-The `instance_mode` and `allowed_modes` fields control block instantiation. See [Instance Modes](#instance-modes) for details.
+The `instance_mode` field declares the block's intended instance lifecycle. It is advisory — see [Instance Modes](#instance-modes) for what the runtime actually does.
 
 The `runtime` field indicates whether a block requires native OS access (`Native`) or can run sandboxed as WebAssembly (`Wasm`). Blocks that make external calls (database drivers, filesystem, network sockets) are typically `Native`; blocks containing pure logic or that access services only via `call_block()` are typically `Wasm`.
 
@@ -318,7 +317,7 @@ Implementations MAY add additional capabilities (e.g., `dispatch`, `http.request
 
 ### Instance Modes
 
-Blocks can declare their instance lifecycle requirements. This controls how many instances are created and when.
+Blocks can declare their intended instance lifecycle. **The declaration is advisory: no runtime enforces it today.**
 
 ```
 InstanceMode enum {
@@ -329,14 +328,14 @@ InstanceMode enum {
 }
 ```
 
-| Mode | Use Case |
-|------|----------|
-| `PerNode` | Node-specific config, isolated state per usage |
-| `Singleton` | Connection pools, rate limiters, global caches |
-| `PerFlow` | Flow-level transaction context |
-| `PerExecution` | Complete isolation, stateless processing |
+Actual instantiation behavior is fixed by runtime type, regardless of the declared mode:
 
-Blocks declare their default mode and allowed modes. Flow configuration can override within allowed modes.
+| Runtime | Behavior |
+|---------|----------|
+| Native | One shared instance per runtime process, serving concurrent calls (blocks must be thread-safe) |
+| Wasm | A fresh store + instance for every call; no guest state survives between calls |
+
+A WASM block that declares a state-retaining mode (`Singleton`, `PerFlow`) draws a warning at seal, since per-call instantiation cannot honor it. Enforcement — a real instance manager keyed on the declaration — is future work tied to instance pooling; until then the field only documents intent.
 
 ---
 
@@ -649,7 +648,7 @@ If `Lifecycle(Init)` returns an error, the flow MUST NOT start.
 
 A WAFER-compliant runtime MUST:
 
-1. Load and instantiate blocks according to their `instance_mode`
+1. Load registered blocks and instantiate them per runtime type (native: one shared instance per process; WASM: fresh instance per execution). Declared `instance_mode` is advisory and need not be enforced; a runtime SHOULD warn when it cannot honor a declared mode.
 2. Parse flow configurations
 3. Execute flows by ID: `Execute(flowID, message) -> Result`
 4. Provide Context to blocks with at least `log` and `config.get` capabilities
@@ -666,7 +665,7 @@ A WAFER-compliant block MUST:
 1. Implement `Info()` returning valid BlockInfo
 2. Implement `Handle(ctx, msg)` returning valid Result
 3. Optionally implement `Lifecycle(ctx, event)`
-4. Be thread-safe if `allowed_modes` includes `Singleton` or `PerFlow`
+4. Be thread-safe if it can run natively (native blocks are one shared instance serving concurrent calls)
 
 ---
 

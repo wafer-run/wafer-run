@@ -234,18 +234,6 @@ impl std::fmt::Display for crate::InstanceMode {
     }
 }
 
-impl crate::InstanceMode {
-    /// Parse an instance mode from a string (e.g. from flow config).
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "singleton" => Self::Singleton,
-            "per-flow" => Self::PerFlow,
-            "per-execution" => Self::PerExecution,
-            _ => Self::PerNode,
-        }
-    }
-}
-
 #[cfg(test)]
 mod meta_access_tests {
     use super::*;
