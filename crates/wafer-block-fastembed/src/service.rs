@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::path::PathBuf;
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use wafer_core::interfaces::vector::{
@@ -9,16 +6,33 @@ use wafer_core::interfaces::vector::{
     DEFAULT_MODEL,
 };
 
+use crate::batcher::EmbedBatcher;
+
 /// Native ONNX-based [`EmbeddingService`] backed by fastembed-rs.
 ///
 /// Model weights are downloaded on first use and cached under the directory
 /// given by `WAFER_RUN__FASTEMBED__CACHE_DIR` (default: `data/models`).
+///
+/// The model is owned by a dedicated worker thread behind an
+/// [`EmbedBatcher`] (PERF-05): `TextEmbedding::embed` takes `&mut self`, so
+/// one instance runs one forward pass at a time — previously a shared
+/// `Mutex` fully serialized concurrent `embed` calls (N callers → N
+/// sequential passes). Requests arriving during a pass now coalesce into one
+/// batched pass. A model-instance pool was rejected as disproportionate:
+/// each `TextEmbedding` owns a full ONNX session (hundreds of MB per catalog
+/// model), while batching gets the concurrency win at zero extra model
+/// memory. Token counting uses a [`Tokenizer`](tokenizers::Tokenizer) clone
+/// taken at construction, so it never contends with inference.
 pub struct FastembedService {
     model_id: String,
     dimensions: u32,
-    /// `Arc` so the model can be moved into a `spawn_blocking` closure for the
-    /// CPU-heavy embedding forward pass without cloning the model itself.
-    inner: Arc<Mutex<TextEmbedding>>,
+    /// The model's BPE tokenizer, cloned out of the [`TextEmbedding`] before
+    /// the model moves to the worker thread. `Tokenizer::encode` takes
+    /// `&self`, so [`count_tokens`](EmbeddingService::count_tokens) is
+    /// lock-free and independent of in-flight forward passes.
+    tokenizer: tokenizers::Tokenizer,
+    /// Queue to the worker thread that owns the model (see [`EmbedBatcher`]).
+    batcher: EmbedBatcher,
 }
 
 impl FastembedService {
@@ -39,13 +53,23 @@ impl FastembedService {
         };
         let cache_dir = std::env::var("WAFER_RUN__FASTEMBED__CACHE_DIR")
             .map_or_else(|_| PathBuf::from("data/models"), PathBuf::from);
-        let embedding =
+        let mut embedding =
             TextEmbedding::try_new(TextInitOptions::new(fb_model).with_cache_dir(cache_dir))
                 .map_err(|e| VectorError::Internal(format!("fastembed init: {e}")))?;
+        let tokenizer = embedding.tokenizer.clone();
+        // The ONNX forward pass is synchronous and CPU-heavy (hundreds of
+        // ms), so it runs on the batcher's dedicated blocking thread — never
+        // on an async worker.
+        let batcher = EmbedBatcher::spawn(move |texts| {
+            embedding
+                .embed(texts, None)
+                .map_err(|e| format!("fastembed: {e}"))
+        });
         Ok(Self {
             model_id: model_id.to_string(),
             dimensions: dims,
-            inner: Arc::new(Mutex::new(embedding)),
+            tokenizer,
+            batcher,
         })
     }
 
@@ -69,33 +93,17 @@ impl EmbeddingService for FastembedService {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        // The ONNX forward pass is synchronous and CPU-heavy (hundreds of ms).
-        // Running it directly on the async worker would stall every other task
-        // on that thread, so offload it to the blocking pool. The model is
-        // shared via `Arc` and guarded by the same `Mutex` the tokenizer path
-        // uses, so concurrent embed calls still serialise on the model.
-        let model = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let mut guard = model
-                .lock()
-                .map_err(|e| VectorError::Internal(format!("fastembed mutex poisoned: {e}")))?;
-            guard
-                .embed(texts, None)
-                .map_err(|e| VectorError::Internal(format!("fastembed: {e}")))
-        })
-        .await
-        .map_err(|e| VectorError::Internal(format!("fastembed embed task failed: {e}")))?
+        self.batcher
+            .enqueue(texts)
+            .wait()
+            .await
+            .map_err(VectorError::Internal)
     }
 
     fn count_tokens(&self, text: &str) -> usize {
-        // The fastembed `TextEmbedding` owns the model's BPE tokenizer; we
-        // borrow it through the same `Mutex` the embed path uses. A failed
-        // lock or tokenize falls back to the whitespace proxy so the chunker
-        // can keep making progress on the rare malformed-input case.
-        let Ok(guard) = self.inner.lock() else {
-            return text.split_whitespace().count();
-        };
-        guard.tokenizer.encode(text, true).map_or_else(
+        // A failed tokenize falls back to the whitespace proxy so the
+        // chunker can keep making progress on the rare malformed-input case.
+        self.tokenizer.encode(text, true).map_or_else(
             |_| text.split_whitespace().count(),
             |enc| enc.get_ids().len(),
         )
@@ -124,6 +132,32 @@ mod tests {
             .unwrap();
         assert_eq!(vecs.len(), 2);
         assert_eq!(vecs[0].len(), 384);
+    }
+
+    /// Gated smoke test — real-model counterpart of the deterministic
+    /// batcher unit tests: concurrent embeds through the worker all complete
+    /// and return per-caller results. Enable with
+    /// `WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS=1 cargo test -- --ignored`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn concurrent_embeds_complete_smoke() {
+        if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
+            return;
+        }
+        let svc = std::sync::Arc::new(
+            FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap(),
+        );
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let svc = svc.clone();
+                tokio::spawn(async move { svc.embed(vec![format!("text number {i}")]).await })
+            })
+            .collect();
+        for task in tasks {
+            let vecs = task.await.unwrap().unwrap();
+            assert_eq!(vecs.len(), 1);
+            assert_eq!(vecs[0].len(), 384);
+        }
     }
 
     #[tokio::test]
