@@ -1,12 +1,12 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use futures::StreamExt;
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use wafer_block_macro::wafer_async_trait;
 // Re-export the trait and types from wafer-core.
 pub use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response,
 };
+use wafer_net_security::SsrfFilteringResolver;
 
 /// Config var key controlling the maximum response body size accepted by
 /// `HttpNetworkService`. Read from the process env **once** at service
@@ -22,74 +22,6 @@ pub const MAX_RESPONSE_BYTES_KEY: &str = "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES
 /// Default response body cap: 50 MiB. SEC-020 — prevents unbounded memory
 /// growth from hostile or runaway upstream servers.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
-
-// ---------------------------------------------------------------------------
-// SSRF-aware DNS resolver
-// ---------------------------------------------------------------------------
-
-/// `reqwest::dns::Resolve` impl that performs the system DNS lookup and then
-/// drops any resolved socket whose IP would be blocked by
-/// [`wafer_core::security::is_blocked_ip`]. Defends against DNS rebinding
-/// (SEC-019): a public-looking hostname that resolves to `127.0.0.1` (or
-/// any private/loopback/link-local IP) is rejected here, before the TCP
-/// connection is established.
-///
-/// When the `allow-private-network` Cargo feature is enabled, the filter is
-/// disabled (resolved IPs are passed through unchanged). The feature is off
-/// by default and intended only for local development / integration tests.
-struct SsrfFilteringResolver;
-
-impl Resolve for SsrfFilteringResolver {
-    // The intermediate `Vec` collect is intentional: we need the resolved
-    // addresses materialised so the cfg-gated filter below (which is
-    // compiled out under `allow-private-network`) can inspect them, and so
-    // reqwest gets an owned `Box<dyn Iterator + Send>` rather than the
-    // borrowing iterator returned by `tokio::net::lookup_host`.
-    #[expect(
-        clippy::needless_collect,
-        reason = "Vec is reused: SSRF filter inspects + reqwest takes owned Iterator+Send"
-    )]
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().to_string();
-        Box::pin(async move {
-            // Port `0` here — reqwest replaces it with the URL-derived port
-            // (see `reqwest::dns::resolve::DynResolver::http_resolve`).
-            //
-            // Collect into a `Vec` so we can both inspect the resolved
-            // addresses (for the SSRF filter below) and hand reqwest an
-            // owned `Iterator + Send` (the trait object cannot be backed
-            // by the borrowing iterator `lookup_host` returns).
-            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-                .collect();
-
-            #[cfg(feature = "allow-private-network")]
-            {
-                let iter: Addrs = Box::new(resolved.into_iter());
-                return Ok(iter);
-            }
-
-            #[cfg(not(feature = "allow-private-network"))]
-            {
-                let filtered: Vec<SocketAddr> = resolved
-                    .into_iter()
-                    .filter(|s| !wafer_core::security::is_blocked_ip(s.ip()))
-                    .collect();
-
-                if filtered.is_empty() {
-                    return Err(format!(
-                        "DNS resolution for {host} returned no public IPs (blocked: private/loopback/link-local)"
-                    )
-                    .into());
-                }
-
-                let iter: Addrs = Box::new(filtered.into_iter());
-                Ok(iter)
-            }
-        })
-    }
-}
 
 // ---------------------------------------------------------------------------
 // HTTP client concrete implementation (reqwest async)
@@ -261,24 +193,8 @@ mod tests {
 
     use super::*;
 
-    /// Test [`SsrfFilteringResolver`] in isolation: a hostname that resolves
-    /// to a loopback IP must produce an error. Uses `localhost` because the
-    /// OS resolver returns `127.0.0.1` / `::1` for it reliably.
-    ///
-    /// (When built with `--features allow-private-network` the resolver is
-    /// a passthrough, so this test only enforces the rejection in the
-    /// default build.)
-    #[cfg(not(feature = "allow-private-network"))]
-    #[tokio::test]
-    async fn dns_resolver_rejects_loopback_resolution() {
-        let resolver = SsrfFilteringResolver;
-        let name: Name = "localhost".parse().expect("parse name");
-        let result = resolver.resolve(name).await;
-        assert!(
-            result.is_err(),
-            "resolver must reject hostnames that resolve to loopback IPs"
-        );
-    }
+    // The resolver-in-isolation test (`dns_resolver_rejects_loopback_resolution`)
+    // moved to `wafer-net-security` with the resolver itself (SEC-09).
 
     /// End-to-end DNS rebinding case: the public-looking caller-supplied
     /// URL host resolves to `127.0.0.1`. The URL-level

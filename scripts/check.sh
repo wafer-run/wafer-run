@@ -37,6 +37,12 @@ run_clippy() {
 run_test() {
     echo "==> Tests"
     cargo test --workspace
+
+    # SEC-09: the registry-download SSRF e2e has an allow-private-network
+    # half (a local wiremock registry served end-to-end) that only compiles
+    # under the escape-hatch feature — no other job enables it.
+    echo "==> Registry SSRF escape-hatch e2e (allow-private-network)"
+    cargo test -p wafer-run --features allow-private-network --test registry_ssrf
 }
 
 run_wasm() {

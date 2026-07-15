@@ -20,6 +20,78 @@ pub const ABI_VERSION: u32 = 1;
 const REGISTRY_MANIFEST_BASE_URL: &str =
     "https://raw.githubusercontent.com/wafer-run/registry/main";
 
+/// Env var overriding [`REGISTRY_MANIFEST_BASE_URL`] (self-hosted or test
+/// registries). Absent or empty → the documented default above. Present but
+/// not an absolute `http(s)` URL → a loud seal error naming this var, never
+/// a silent fallback. Note the SSRF policy (SEC-09) still applies to the
+/// override in default builds: a registry on a private/loopback address
+/// additionally requires the `allow-private-network` build feature.
+pub const REGISTRY_BASE_URL_KEY: &str = "WAFER_RUN_REGISTRY_BASE_URL";
+
+/// Resolve the registry base URL from the environment (see
+/// [`REGISTRY_BASE_URL_KEY`]). Trailing slashes are trimmed so composed
+/// manifest paths stay canonical.
+fn registry_base_url() -> Result<String, RuntimeError> {
+    let raw = match std::env::var(REGISTRY_BASE_URL_KEY) {
+        Err(std::env::VarError::NotPresent) => {
+            return Ok(REGISTRY_MANIFEST_BASE_URL.to_string());
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(RuntimeError::Registry(format!(
+                "{REGISTRY_BASE_URL_KEY} is not valid UTF-8: expected an absolute http(s) URL"
+            )));
+        }
+        Ok(raw) => raw,
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // Empty = absent (the `WAFER_LOCKFILE` / `WAFER_RUN_WASM_POOLING`
+        // precedent), so `FOO=` in an env file doesn't change behavior.
+        return Ok(REGISTRY_MANIFEST_BASE_URL.to_string());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|e| {
+        RuntimeError::Registry(format!(
+            "{REGISTRY_BASE_URL_KEY}={trimmed:?} is invalid: {e} (expected an absolute \
+             http(s) URL; unset it to use the default registry)"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(RuntimeError::Registry(format!(
+            "{REGISTRY_BASE_URL_KEY}={trimmed:?} is invalid: scheme {:?} is not http(s) \
+             (unset it to use the default registry)",
+            parsed.scheme()
+        )));
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+/// SEC-09: URL-level SSRF pre-check applied to every registry-client fetch —
+/// the composed manifest URL plus the manifest-supplied `wasm_url` /
+/// `flow_url` (a hostile registry entry is otherwise free to point artifact
+/// downloads at internal addresses, e.g. `http://169.254.169.254/`). Catches
+/// non-http(s) schemes, `localhost`, and private/link-local IP literals;
+/// hostnames that *resolve* to private IPs are caught by the
+/// [`SsrfFilteringResolver`](wafer_net_security::SsrfFilteringResolver)
+/// installed on the registry client (DNS rebinding, SEC-019).
+#[cfg(not(feature = "allow-private-network"))]
+fn ensure_url_allowed(url: &str, what: &str, name: &str) -> Result<(), RuntimeError> {
+    if wafer_net_security::is_blocked_url(url) {
+        return Err(RuntimeError::Registry(format!(
+            "refusing to fetch {what} for {name}: {url} targets a private/internal address \
+             (SEC-09; build with the `allow-private-network` feature for local registries)"
+        )));
+    }
+    Ok(())
+}
+
+/// SSRF escape hatch: the `allow-private-network` build permits registries
+/// and artifacts on private addresses (local development / integration
+/// tests only — see the feature docs in Cargo.toml).
+#[cfg(feature = "allow-private-network")]
+fn ensure_url_allowed(_url: &str, _what: &str, _name: &str) -> Result<(), RuntimeError> {
+    Ok(())
+}
+
 /// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteBlockRef {
@@ -151,6 +223,11 @@ impl Wafer {
             // redirect chain to an unintended (e.g. internal) destination. A
             // registry that needs a redirect must publish the final URL.
             .redirect(reqwest::redirect::Policy::none())
+            // SEC-09: drop DNS results pointing at private/loopback/link-local
+            // IPs (DNS rebinding). URL-level checks happen per fetch in
+            // `ensure_url_allowed`; this is the resolved-IP layer. Passthrough
+            // under the `allow-private-network` build feature.
+            .dns_resolver(Arc::new(wafer_net_security::SsrfFilteringResolver))
             .build()
             .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))
     }
@@ -398,6 +475,7 @@ async fn download_flow_from_url(
     url: &str,
     name: &str,
 ) -> Result<wafer_flow::WaferFlow, RuntimeError> {
+    ensure_url_allowed(url, "flow", name)?;
     let resp = client
         .get(url)
         .header("User-Agent", "wafer-run/0.1.0")
@@ -431,6 +509,7 @@ async fn download_wasm_bytes(
     url: &str,
     name: &str,
 ) -> Result<Vec<u8>, RuntimeError> {
+    ensure_url_allowed(url, "WASM", name)?;
     let resp = client
         .get(url)
         .header("User-Agent", "wafer-run/0.1.0")
@@ -474,9 +553,12 @@ async fn fetch_manifest_entry(
     name: &str,
 ) -> Result<Option<VersionEntry>, RuntimeError> {
     let manifest_url = format!(
-        "{REGISTRY_MANIFEST_BASE_URL}/{}/{}/manifest.json",
-        remote_ref.org, remote_ref.block
+        "{}/{}/{}/manifest.json",
+        registry_base_url()?,
+        remote_ref.org,
+        remote_ref.block
     );
+    ensure_url_allowed(&manifest_url, "registry manifest", name)?;
 
     let resp = client
         .get(&manifest_url)
@@ -525,4 +607,78 @@ async fn fetch_manifest_entry(
     }
 
     Ok(Some(entry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hostile manifest can point `wasm_url`/`flow_url` anywhere; the
+    /// pre-check must stop internal targets before any connection (SEC-09).
+    #[cfg(not(feature = "allow-private-network"))]
+    #[test]
+    fn ensure_url_allowed_blocks_internal_targets() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://127.0.0.1:8080/block.wasm",
+            "http://localhost/block.wasm",
+            "http://10.0.0.7/block.wasm",
+            "file:///etc/passwd",
+        ] {
+            let err = ensure_url_allowed(url, "WASM", "acme/widget").expect_err("must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("SEC-09") && msg.contains(url),
+                "error must cite the policy and echo the URL: {msg}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "allow-private-network"))]
+    #[test]
+    fn ensure_url_allowed_passes_public_targets() {
+        for url in [
+            "https://raw.githubusercontent.com/wafer-run/registry/main/a/b/manifest.json",
+            "https://github.com/wafer-run/wafer-run/releases/download/v1/block.wasm",
+        ] {
+            ensure_url_allowed(url, "WASM", "acme/widget").expect("public URL must pass");
+        }
+    }
+
+    /// One test, sequential phases — `registry_base_url` reads process env.
+    #[test]
+    fn registry_base_url_env_override() {
+        // Absent → documented default.
+        std::env::remove_var(REGISTRY_BASE_URL_KEY);
+        assert_eq!(
+            registry_base_url().expect("default"),
+            REGISTRY_MANIFEST_BASE_URL
+        );
+
+        // Empty = absent (env-file `FOO=` must not change behavior).
+        std::env::set_var(REGISTRY_BASE_URL_KEY, "  ");
+        assert_eq!(
+            registry_base_url().expect("empty is absent"),
+            REGISTRY_MANIFEST_BASE_URL
+        );
+
+        // Trailing slash is trimmed so composed paths stay canonical.
+        std::env::set_var(REGISTRY_BASE_URL_KEY, "https://registry.example.com/base/");
+        assert_eq!(
+            registry_base_url().expect("valid override"),
+            "https://registry.example.com/base"
+        );
+
+        // Present-but-invalid → loud error naming the var.
+        for bad in ["not a url", "ftp://registry.example.com"] {
+            std::env::set_var(REGISTRY_BASE_URL_KEY, bad);
+            let err = registry_base_url().expect_err("invalid value must error");
+            assert!(
+                err.to_string().contains(REGISTRY_BASE_URL_KEY),
+                "error must name the env var: {err}"
+            );
+        }
+
+        std::env::remove_var(REGISTRY_BASE_URL_KEY);
+    }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "wafer-net-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared SSRF defenses: URL/IP blocklist predicates and the DNS-rebinding-filtering reqwest resolver"
+
+[dependencies]
+url = { workspace = true }
+
+# The resolver is native-only glue (reqwest's `dns::Resolve` + tokio's
+# `lookup_host`); the predicates above stay available on wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread"] }
+
+[features]
+default = []
+# SSRF escape hatch. When enabled at build time, requests to private,
+# loopback, and link-local addresses are permitted. Intended for local
+# development and integration tests; must NOT be enabled in production
+# builds. Replaces the prior `ALLOW_PRIVATE_NETWORK` env var (SEC-018) so
+# the bypass cannot be flipped on a live deploy.
+allow-private-network = []
+
+[lints]
+workspace = true
