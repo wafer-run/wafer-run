@@ -1,5 +1,0 @@
-error: #[wafer_block]: `capabilities(...)` and `skill(...)` are mutually exclusive; a skill block declares an LLM tool, not runtime sandbox capabilities
-  --> tests/fixtures/fail_caps_and_skill.rs:20:5
-   |
-20 |     capabilities(network),
-   |     ^^^^^^^^^^^^
