@@ -247,6 +247,10 @@ impl Wafer {
     /// consumers. (Lazy init reads from the runtime's `ConfigSource` — not
     /// from `self.registration.block_configs` — when dispatching
     /// `lifecycle(Init)` on first request; see `run_init_pipeline`.)
+    ///
+    /// Also compiles the [`SealedPlan`](crate::runtime::exec_plan::SealedPlan)
+    /// from the snapshot (PERF-03): parsed block configs, `requires`
+    /// allowlists, and compiled flows for the dispatch hot paths.
     fn finalize_snapshot(&mut self) {
         self.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
@@ -263,6 +267,7 @@ impl Wafer {
                 .cloned()
                 .collect(),
         });
+        self.plan = self.compile_plan();
     }
 }
 

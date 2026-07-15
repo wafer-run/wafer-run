@@ -1,6 +1,11 @@
-//! WaferFlow executor: walks a flow definition and dispatches each step to
-//! its block, including `each` (per-item fan-out) and `parallel`
+//! WaferFlow executor: walks a compiled flow plan and dispatches each step
+//! to its block, including `each` (per-item fan-out) and `parallel`
 //! (concurrent branches) composition.
+//!
+//! All per-step decisions — block resolution, config parsing, expression
+//! parsing, jump-target lookup — are precomputed at seal time into a
+//! [`CompiledFlow`] (see [`super::plan`], PERF-03); this module only
+//! evaluates them.
 //!
 //! # Step semantics
 //!
@@ -34,9 +39,18 @@
 //!
 //! `config.max_steps` is charged once per step visit plus once per fan-out
 //! item, shared across concurrent branches.
+//!
+//! # Body ownership
+//!
+//! The pipeline body is an `Arc<Vec<u8>>` (PERF-03): handing it to a block
+//! shares the buffer and clones the bytes lazily — only if the block
+//! actually reads its input — and a middleware (`Continue`) step restores
+//! the original body for the next step without ever having copied it.
+//! Parallel branches snapshot the body with an `Arc` clone. Mutations
+//! (pipeline outputs, `each` items) replace the `Arc` wholesale.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -44,15 +58,15 @@ use std::{
 };
 
 use wafer_block::{
-    config::parse_config_map,
     core_types::*,
     streams::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
 };
-use wafer_flow::{types::ParallelBranch, Accumulator, Step, WaferFlow};
+use wafer_flow::Accumulator;
 
+use super::plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget};
 use crate::{
     platform::{BoxFuture, Instant},
     runtime::Wafer,
@@ -61,12 +75,10 @@ use crate::{
 /// Immutable per-execution context shared by every step (and every parallel
 /// branch) of one flow run.
 struct StepEnv<'a> {
-    flow: &'a WaferFlow,
+    flow: &'a CompiledFlow,
     wafer: &'a Wafer,
     cancelled: &'a Arc<AtomicBool>,
     deadline: Option<Instant>,
-    on_error: &'a str,
-    max_steps: usize,
     /// Step-budget counter, shared across concurrent branches.
     steps_used: AtomicUsize,
 }
@@ -75,7 +87,7 @@ struct StepEnv<'a> {
 /// main step list, or one parallel branch).
 struct ExecState {
     acc: Accumulator,
-    body: Vec<u8>,
+    body: Arc<Vec<u8>>,
     msg: Message,
 }
 
@@ -89,7 +101,14 @@ enum InvocationOutcome {
     NoOutput,
 }
 
-/// Execute a WaferFlow definition.
+/// Take the body buffer out of its `Arc` for a consumer that needs owned
+/// bytes (flow transfer, terminal response). Zero-copy when the executor is
+/// the sole holder — the common case — and a clone otherwise.
+fn unwrap_body(body: Arc<Vec<u8>>) -> Vec<u8> {
+    Arc::try_unwrap(body).unwrap_or_else(|arc| (*arc).clone())
+}
+
+/// Execute a compiled WaferFlow plan.
 ///
 /// Each step receives the previous step's output as its input (data pipeline mode
 /// when the step has an `input` template) or passes the message through (middleware
@@ -98,33 +117,21 @@ enum InvocationOutcome {
 /// see the module docs for the precise semantics.
 ///
 /// Short-circuits on Error or Drop terminals from any step.
-pub async fn execute(
-    flow: &WaferFlow,
+pub(crate) async fn execute(
+    flow: &CompiledFlow,
     msg: Message,
     input: InputStream,
     wafer: &Wafer,
     cancelled: &Arc<AtomicBool>,
     deadline: Option<Instant>,
 ) -> OutputStream {
-    let max_steps = flow
-        .config
-        .as_ref()
-        .and_then(|c| c.max_steps)
-        .unwrap_or(1000) as usize;
-
-    let on_error = flow
-        .config
-        .as_ref()
-        .and_then(|c| c.on_error.as_deref())
-        .unwrap_or("stop");
-
     let mut acc = Accumulator::new();
 
-    // Collect initial input bytes for pipeline mode
-    let uses_accumulator = steps_use_accumulator(&flow.steps);
-    let body: Vec<u8> = if uses_accumulator {
-        let bytes = input.collect_to_bytes().await;
-        let input_val = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+    // Collect initial input bytes; in pipeline mode also parse them into
+    // the accumulator's `$.input` entry (flag precomputed at seal).
+    let body = input.collect_to_bytes().await;
+    if flow.uses_accumulator {
+        let input_val = match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "flow input is not valid JSON, defaulting to null");
@@ -132,22 +139,20 @@ pub async fn execute(
             }
         };
         acc.set("input", input_val);
-        bytes
-    } else {
-        // In middleware mode we still need to pass the input to the first step
-        input.collect_to_bytes().await
-    };
+    }
 
     let env = StepEnv {
         flow,
         wafer,
         cancelled,
         deadline,
-        on_error,
-        max_steps,
         steps_used: AtomicUsize::new(0),
     };
-    let mut state = ExecState { acc, body, msg };
+    let mut state = ExecState {
+        acc,
+        body: Arc::new(body),
+        msg,
+    };
 
     let steps = &flow.steps;
     let mut current = 0;
@@ -166,7 +171,7 @@ pub async fn execute(
             for entry in next_entries {
                 let should_take = match &entry.when {
                     None => true,
-                    Some(condition) => match state.acc.eval_condition(condition) {
+                    Some((condition, compiled)) => match compiled.eval(&state.acc) {
                         Ok(taken) => taken,
                         // COR-03: a condition that fails to evaluate at runtime
                         // (a missing/undefined reference or a type error) is an
@@ -190,29 +195,32 @@ pub async fn execute(
                     },
                 };
                 if should_take {
-                    if let Some(target_step) = &entry.step {
-                        match steps.iter().position(|s| s.id == *target_step) {
-                            Some(idx) => {
-                                current = idx;
-                                jumped = true;
-                                routed = true;
-                            }
-                            None => {
-                                return OutputStream::error(WaferError::new(
-                                    ErrorCode::NotFound,
-                                    format!("next target step '{target_step}' not found"),
-                                ));
-                            }
+                    match &entry.target {
+                        NextTarget::Step(idx) => {
+                            current = *idx;
+                            jumped = true;
+                            routed = true;
                         }
-                    } else if let Some(target_flow) = &entry.flow {
-                        // Flow transfer: execute the target flow (boxed to break recursion)
-                        let flow_result = Box::pin(wafer.run(
-                            target_flow,
-                            state.msg,
-                            InputStream::from_bytes(state.body),
-                        ))
-                        .await;
-                        return flow_result;
+                        NextTarget::MissingStep(target_step) => {
+                            return OutputStream::error(WaferError::new(
+                                ErrorCode::NotFound,
+                                format!("next target step '{target_step}' not found"),
+                            ));
+                        }
+                        NextTarget::Flow(target_flow) => {
+                            // Flow transfer: execute the target flow (boxed to
+                            // break recursion)
+                            let flow_result = Box::pin(wafer.run(
+                                target_flow,
+                                state.msg,
+                                InputStream::from_bytes(unwrap_body(state.body)),
+                            ))
+                            .await;
+                            return flow_result;
+                        }
+                        // Entry with neither `step` nor `flow`: taking it ends
+                        // routing without jumping (sequential advance below).
+                        NextTarget::None => {}
                     }
                     break;
                 }
@@ -238,30 +246,17 @@ pub async fn execute(
         .filter(|e| e.key.starts_with("resp."))
         .cloned()
         .collect();
-    OutputStream::respond_with_meta(state.body, resp_meta)
-}
-
-/// True if any step (recursively through parallel branches) reads from or
-/// writes to the accumulator, in which case the flow input must be parsed
-/// and stored under `$.input`.
-fn steps_use_accumulator(steps: &[Step]) -> bool {
-    steps.iter().any(|s| {
-        s.input.is_some()
-            || s.each.is_some()
-            || s.parallel
-                .as_ref()
-                .is_some_and(|branches| branches.iter().any(|b| steps_use_accumulator(&b.steps)))
-    })
+    OutputStream::respond_with_meta(unwrap_body(state.body), resp_meta)
 }
 
 /// Charge one unit of the shared step budget; error once it is exhausted.
 fn check_budget(env: &StepEnv<'_>) -> Result<(), OutputStream> {
-    if env.steps_used.fetch_add(1, Ordering::Relaxed) >= env.max_steps {
+    if env.steps_used.fetch_add(1, Ordering::Relaxed) >= env.flow.max_steps {
         return Err(OutputStream::error(WaferError::new(
             ErrorCode::ResourceExhausted,
             format!(
                 "max steps ({}) exceeded in flow '{}'",
-                env.max_steps, env.flow.id
+                env.flow.max_steps, env.flow.id
             ),
         )));
     }
@@ -296,7 +291,7 @@ fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), OutputStream> {
 /// step → parallel branch → step at the signature level.
 fn run_step<'a>(
     env: &'a StepEnv<'a>,
-    step: &'a Step,
+    step: &'a CompiledStep,
     state: &'a mut ExecState,
 ) -> BoxFuture<'a, Result<(), OutputStream>> {
     Box::pin(async move {
@@ -307,8 +302,8 @@ fn run_step<'a>(
             run_parallel(env, branches, state).await?;
         }
 
-        if let Some(each_path) = &step.each {
-            run_each(env, step, each_path, state).await
+        if let Some(each) = &step.each {
+            run_each(env, step, each, state).await
         } else {
             let is_pipeline = step.input.is_some();
             let outcome = run_invocation(env, step, state).await?;
@@ -326,23 +321,23 @@ fn run_step<'a>(
     })
 }
 
-/// Run a step's block once per item of the array `each_path` resolves to,
+/// Run a step's block once per item of the array `each` resolves to,
 /// sequentially in input order, with `$.each.item` / `$.each.index` bound.
 /// Records the ordered results array under the step id and as the body.
 async fn run_each(
     env: &StepEnv<'_>,
-    step: &Step,
-    each_path: &str,
+    step: &CompiledStep,
+    each: &CompiledEach,
     state: &mut ExecState,
 ) -> Result<(), OutputStream> {
-    let items = match state.acc.resolve(each_path) {
+    let items = match each.path.resolve(&state.acc) {
         Ok(serde_json::Value::Array(items)) => items,
         Ok(other) => {
             return Err(OutputStream::error(WaferError::new(
                 ErrorCode::InvalidArgument,
                 format!(
-                    "each expression '{each_path}' in step '{}' must resolve to an array, got {other}",
-                    step.id
+                    "each expression '{}' in step '{}' must resolve to an array, got {other}",
+                    each.raw, step.id
                 ),
             )));
         }
@@ -350,8 +345,8 @@ async fn run_each(
             return Err(OutputStream::error(WaferError::new(
                 ErrorCode::InvalidArgument,
                 format!(
-                    "each expression '{each_path}' in step '{}' failed to resolve: {e}",
-                    step.id
+                    "each expression '{}' in step '{}' failed to resolve: {e}",
+                    each.raw, step.id
                 ),
             )));
         }
@@ -365,7 +360,7 @@ async fn run_each(
         // Without an input template, the item itself is the block's input.
         if step.input.is_none() {
             match serde_json::to_vec(&item) {
-                Ok(bytes) => state.body = bytes,
+                Ok(bytes) => state.body = Arc::new(bytes),
                 Err(e) => {
                     return Err(OutputStream::error(WaferError::new(
                         ErrorCode::Internal,
@@ -393,7 +388,7 @@ async fn run_each(
 
     let results = serde_json::Value::Array(results);
     state.body = match serde_json::to_vec(&results) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => Arc::new(bytes),
         Err(e) => {
             return Err(OutputStream::error(WaferError::new(
                 ErrorCode::Internal,
@@ -409,16 +404,26 @@ async fn run_each(
 /// of the current state, then merge the entries the branches wrote back into
 /// the shared accumulator. All branches are awaited; on failure the first
 /// failing branch in declaration order determines the step's outcome.
+///
+/// PERF-03: forking a branch no longer deep-copies the accumulator — the
+/// pre-fork accumulator is frozen behind an `Arc` and every branch layers a
+/// copy-on-write delta over it ([`Accumulator::branch_from`]); the body
+/// snapshot is an `Arc` clone. The join merges exactly the branch deltas,
+/// still skipping keys that existed at fork time (only unvalidated flows can
+/// produce such collisions, and the deep-copy implementation discarded them
+/// too).
 async fn run_parallel(
     env: &StepEnv<'_>,
-    branches: &[ParallelBranch],
+    branches: &[CompiledBranch],
     state: &mut ExecState,
 ) -> Result<(), OutputStream> {
-    let snapshot_keys: HashSet<String> = state.acc.keys().map(str::to_string).collect();
+    // Freeze the pre-fork accumulator. `state.acc` is left empty while the
+    // branches run; it is restored from `parent` before any return below.
+    let parent = Arc::new(std::mem::take(&mut state.acc));
 
     let branch_runs = branches.iter().map(|branch| {
         let mut branch_state = ExecState {
-            acc: state.acc.clone(),
+            acc: Accumulator::branch_from(parent.clone()),
             body: state.body.clone(),
             msg: state.msg.clone(),
         };
@@ -430,16 +435,36 @@ async fn run_parallel(
     });
     let outcomes = futures::future::join_all(branch_runs).await;
 
-    let mut branch_accs = Vec::with_capacity(outcomes.len());
+    // Extract each successful branch's delta (dropping its reference to
+    // `parent`) and remember the first failure in declaration order.
+    let mut deltas: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(outcomes.len());
+    let mut first_failure = None;
     for outcome in outcomes {
-        // Declaration order: the first failed branch wins deterministically.
-        branch_accs.push(outcome?);
-    }
-    for acc in branch_accs {
-        for (key, value) in acc.into_data() {
-            if !snapshot_keys.contains(&key) {
-                state.acc.set(&key, value);
+        match outcome {
+            Ok(branch_acc) => deltas.push(branch_acc.into_data()),
+            Err(failure) => {
+                if first_failure.is_none() {
+                    first_failure = Some(failure);
+                }
             }
+        }
+    }
+
+    // Only keys that did not exist at fork time merge back.
+    for delta in &mut deltas {
+        delta.retain(|key, _| parent.get(key).is_none());
+    }
+
+    // All branch accumulators are gone, so the executor is the sole holder
+    // again; restore the pre-fork accumulator without copying.
+    state.acc = Arc::try_unwrap(parent).unwrap_or_else(|arc| (*arc).clone());
+
+    if let Some(failure) = first_failure {
+        return Err(failure);
+    }
+    for delta in deltas {
+        for (key, value) in delta {
+            state.acc.set(&key, value);
         }
     }
     Ok(())
@@ -450,7 +475,7 @@ async fn run_parallel(
 /// unconditionally), so it is rejected explicitly rather than ignored.
 async fn run_branch_steps(
     env: &StepEnv<'_>,
-    steps: &[Step],
+    steps: &[CompiledStep],
     state: &mut ExecState,
 ) -> Result<(), OutputStream> {
     for step in steps {
@@ -474,16 +499,16 @@ async fn run_branch_steps(
 /// Drop, Halt, or a malformed stream).
 async fn run_invocation(
     env: &StepEnv<'_>,
-    step: &Step,
+    step: &CompiledStep,
     state: &mut ExecState,
 ) -> Result<InvocationOutcome, OutputStream> {
     check_cancel_deadline(env)?;
 
-    // --- Resolve input (data pipeline mode) ---
-    if let Some(input_template) = &step.input {
-        match state.acc.resolve_input(input_template) {
+    // --- Resolve input (data pipeline mode; template compiled at seal) ---
+    if let Some(template) = &step.input {
+        match template.resolve(&state.acc) {
             Ok(val) => match serde_json::to_vec(&val) {
-                Ok(data) => state.body = data,
+                Ok(data) => state.body = Arc::new(data),
                 Err(e) => {
                     return Err(OutputStream::error(WaferError::new(
                         ErrorCode::Internal,
@@ -500,29 +525,23 @@ async fn run_invocation(
         }
     }
 
-    // --- Resolve the block (alias → target) first so the RuntimeContext
-    //     carries the *block* identity, not the flow's step id. WRAP keys
-    //     access decisions off `node_id` and the resource owner is
-    //     `{org}/{block}`; passing `step.id` here would attribute all WRAP
-    //     calls to the (arbitrary) step name and cause false denials.
-    //     `lookup_block` is the single canonicalize-then-fallback accessor
-    //     shared with the runner and `RuntimeContext` dispatch. ---
-    let (block_name, block) = match env.wafer.lookup_block(&step.block) {
-        Some((resolved, block)) => (resolved.to_string(), block),
-        None => {
-            return Err(OutputStream::error(WaferError::new(
-                ErrorCode::NotFound,
-                format!("block '{}' not found in step '{}'", step.block, step.id),
-            )));
-        }
+    // --- Dispatch target (alias → block + slot, resolved at seal). The
+    //     compiled target carries the *canonical* block identity, not the
+    //     flow's step id: WRAP keys access decisions off `node_id` and the
+    //     resource owner is `{org}/{block}`; passing `step.id` here would
+    //     attribute all WRAP calls to the (arbitrary) step name and cause
+    //     false denials. ---
+    let Some(target) = &step.target else {
+        return Err(OutputStream::error(WaferError::new(
+            ErrorCode::NotFound,
+            format!(
+                "block '{}' not found in step '{}'",
+                step.block_label, step.id
+            ),
+        )));
     };
 
-    // --- Build RuntimeContext with step config ---
-    let step_config = step
-        .config
-        .as_ref()
-        .map(parse_config_map)
-        .unwrap_or_default();
+    // --- Build RuntimeContext with the step's seal-parsed config ---
     // Each flow step gets its own init stack frame for cycle detection.
     let step_init_stack = crate::runtime::init_stack::InitStack::new();
     // SEC-04: build the step context through `make_block_context` so the
@@ -531,8 +550,8 @@ async fn run_invocation(
     // step unrestricted.
     let ctx = env.wafer.make_block_context(
         &env.flow.id,
-        &block_name,
-        step_config,
+        &target.name,
+        step.config.clone(),
         env.cancelled.clone(),
         env.deadline,
         step_init_stack.clone(),
@@ -543,25 +562,30 @@ async fn run_invocation(
     //     stream collection inside the observed window). Init failure
     //     surfaces as an error event so the flow short-circuits via the
     //     standard error path. ---
-    // Save body before handing it to the block — middleware (Continue)
-    // blocks don't produce a response body, so we need to restore the
-    // original input for the next step.
-    let saved_body = state.body.clone();
-    let step_input = InputStream::from_bytes(std::mem::take(&mut state.body));
+    // The block gets a lazily-cloned view of the shared body: the buffer is
+    // copied only if the block polls its input, and `state.body` keeps the
+    // original for middleware (Continue) blocks — which don't produce a
+    // response body — without an eager per-step clone.
+    let shared_body = state.body.clone();
+    let step_input =
+        InputStream::from_stream(futures::stream::once(async move { (*shared_body).clone() }));
     let scaffold_result = crate::runtime::runner::run_resolved(
         &env.wafer.hooks,
         crate::runtime::runner::DispatchObs {
             flow_id: &env.flow.id,
             node_path: &step.id,
-            block_name: &step.block,
+            block_name: &step.block_label,
         },
-        &block_name,
-        env.wafer
-            .dispatch_init(&block_name, &block, &step_init_stack),
+        &target.name,
+        &target.slot,
+        || {
+            env.wafer
+                .dispatch_init(&target.name, &target.block, &step_init_stack)
+        },
         state.msg.clone(),
         step_input,
         |msg, input| async {
-            crate::runtime::run_block_with_recovery(block.as_ref(), &ctx, msg, input)
+            crate::runtime::run_block_with_recovery(target.block.as_ref(), &ctx, msg, input)
                 .await
                 .collect_buffered()
                 .await
@@ -576,7 +600,7 @@ async fn run_invocation(
     // --- Process result ---
     match buf {
         Ok(response) => {
-            state.body = response.body;
+            state.body = Arc::new(response.body);
 
             // Apply trailing meta to the message
             for entry in response.meta {
@@ -585,11 +609,11 @@ async fn run_invocation(
             Ok(InvocationOutcome::Responded)
         }
         Err(TerminalNotResponse::Error(e)) => {
-            if env.on_error == "stop" {
+            if env.flow.on_error_stop {
                 return Err(OutputStream::error(e));
             }
             // on_error=continue: clear body, fall through
-            state.body = Vec::new();
+            state.body = Arc::new(Vec::new());
             Ok(InvocationOutcome::NoOutput)
         }
         Err(TerminalNotResponse::Drop) => {
@@ -603,18 +627,17 @@ async fn run_invocation(
             Err(OutputStream::from_buffered_response(buf))
         }
         Err(TerminalNotResponse::Continue(next_msg)) => {
-            // Middleware block — update message but restore the original
-            // body so the next step receives it (the block didn't consume
-            // the input, but InputStream::from_bytes took ownership).
+            // Middleware block — update the message. The body was never
+            // taken out of `state`, so the next step sees the original
+            // input with no restore copy.
             state.msg = next_msg;
-            state.body = saved_body;
             Ok(InvocationOutcome::NoOutput)
         }
         Err(TerminalNotResponse::Malformed) => Err(OutputStream::error(WaferError::new(
             ErrorCode::Internal,
             format!(
                 "block '{}' in step '{}' produced malformed output stream",
-                step.block, step.id
+                step.block_label, step.id
             ),
         ))),
     }

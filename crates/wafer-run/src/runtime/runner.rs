@@ -6,7 +6,7 @@ use wafer_block::{
     Block,
 };
 
-use super::{flow_policy::FlowConfigExt, Wafer};
+use super::Wafer;
 use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
 
 /// Identity fields for the observability bracket around one block dispatch.
@@ -20,13 +20,13 @@ pub(crate) struct DispatchObs<'a> {
     pub(crate) block_name: &'a str,
 }
 
-/// Lazy-init inputs for [`run_resolved`] — the resolved block plus the slot,
+/// Lazy-init inputs for [`run_resolved`] — the resolved block plus the
 /// config source, context and cycle-detection stack the init pipeline needs.
+/// Built on demand (via the `make_init` closure) only when the block's init
+/// outcome is not already cached, so the steady state pays none of it.
 pub(crate) struct DispatchInit<'a> {
     /// The resolved target block.
     pub(crate) block: Arc<dyn Block>,
-    /// The block's once-success init slot.
-    pub(crate) slot: Arc<super::slot::BlockSlot>,
     /// Per-block env-var config source consulted on first init.
     pub(crate) config_source: Arc<dyn super::config_source::ConfigSource>,
     /// Context passed to `lifecycle(Init)`.
@@ -39,8 +39,10 @@ pub(crate) struct DispatchInit<'a> {
 /// the flow executor's per-step dispatch, and
 /// [`RuntimeContext::dispatch_call`]):
 ///
-/// 1. Lazy init — run the init pipeline for `resolved`, converting failures
-///    into a terminal error stream (`Err`).
+/// 1. Lazy init — fast path on `slot`'s cached outcome; on the first
+///    dispatch (or while init is in flight) build the init inputs via
+///    `make_init` and run the init pipeline, converting failures into a
+///    terminal error stream (`Err`).
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -52,7 +54,8 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
     hooks: &ObservabilityBus,
     obs: DispatchObs<'a>,
     resolved: &'a str,
-    init: DispatchInit<'a>,
+    slot: &Arc<super::slot::BlockSlot>,
+    make_init: impl FnOnce() -> DispatchInit<'a>,
     msg: Message,
     input: InputStream,
     invoke: impl FnOnce(Message, InputStream) -> Fut,
@@ -60,19 +63,36 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
 where
     Fut: std::future::Future<Output = T>,
 {
-    if let Err(e) = super::run_init_pipeline(
-        resolved,
-        init.block,
-        init.slot,
-        init.config_source,
-        init.init_ctx,
-        init.stack,
-    )
-    .await
-    {
-        return Err(OutputStream::error(super::init_error_to_wafer_error(
-            resolved, e,
-        )));
+    // PERF-03: once a block's init outcome is cached, skip constructing the
+    // dedicated init context and init-stack frame per dispatch. `try_cached`
+    // returns `None` both for "never initialized" and "init in flight"
+    // (mutex held) — the slow path re-checks under the slot's lock, and its
+    // stack push still detects init cycles (a block mid-init always holds
+    // the slot mutex, so a cyclic dispatch can never take the fast path).
+    match slot.try_cached() {
+        Some(Ok(_)) => {}
+        Some(Err(e)) => {
+            return Err(OutputStream::error(super::init_error_to_wafer_error(
+                resolved, e,
+            )));
+        }
+        None => {
+            let init = make_init();
+            if let Err(e) = super::run_init_pipeline(
+                resolved,
+                init.block,
+                slot.clone(),
+                init.config_source,
+                init.init_ctx,
+                init.stack,
+            )
+            .await
+            {
+                return Err(OutputStream::error(super::init_error_to_wafer_error(
+                    resolved, e,
+                )));
+            }
+        }
     }
 
     let span = hooks.block_span(obs.flow_id, obs.node_path, obs.block_name, &msg);
@@ -86,27 +106,35 @@ where
 impl Wafer {
     /// Run a flow by ID with the given message.
     pub async fn run(&self, flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
-        let Some(flow) = self.flows.get(flow_id) else {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::NotFound,
-                format!("flow not found: {flow_id}"),
-            ));
-        };
+        // Seal-compiled plan (PERF-03). Flows added after `seal()` — or runs
+        // on a not-yet-sealed runtime — are not in the plan and are compiled
+        // ad hoc for this invocation, which is no more work than the
+        // per-step reparsing the executor previously did every run.
+        let ad_hoc;
+        let compiled: &crate::waferflow::plan::CompiledFlow =
+            if let Some(compiled) = self.plan.flows.get(flow_id) {
+                compiled
+            } else if let Some(flow) = self.flows.get(flow_id) {
+                ad_hoc = crate::waferflow::plan::compile_flow(self, flow);
+                &ad_hoc
+            } else {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::NotFound,
+                    format!("flow not found: {flow_id}"),
+                ));
+            };
 
         // Observability: flow start
         self.hooks.fire_flow_start(flow_id, &msg);
         let start = Instant::now();
 
-        // Set up flow-level timeout via deadline
+        // Set up flow-level timeout via deadline (parsed once at compile).
         let cancelled = Arc::new(AtomicBool::new(false));
-        let deadline = flow
-            .config
-            .as_ref()
-            .and_then(|c| c.resolve_timeout())
-            .map(|t| Instant::now() + t);
+        let deadline = compiled.timeout.map(|t| Instant::now() + t);
 
         let result =
-            crate::waferflow::execute_waferflow(flow, msg, input, self, &cancelled, deadline).await;
+            crate::waferflow::execute_waferflow(compiled, msg, input, self, &cancelled, deadline)
+                .await;
 
         // Observability: flow end
         self.hooks.fire_flow_end(flow_id, start.elapsed());
@@ -149,17 +177,13 @@ impl Wafer {
         };
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        // Look up block config and flatten to HashMap<String, String>. Like
-        // `lookup_with_alias`, try the alias-resolved name first then the
-        // original: `add_block_config` is keyed by registration name, which
-        // may be either the alias or the target.
-        let block_config = self
-            .snapshot
-            .block_configs
-            .get(resolved)
-            .or_else(|| self.snapshot.block_configs.get(block_name))
-            .map(wafer_block::config::parse_config_map)
-            .unwrap_or_default();
+        // Seal-compiled block config (PERF-03): the flattened
+        // `HashMap<String, String>` is parsed once at `seal()` and shared by
+        // `Arc` — previously re-parsed from the JSON snapshot on every call.
+        // The alias-resolved-then-raw key order matches `lookup_with_alias`:
+        // `add_block_config` is keyed by registration name, which may be
+        // either the alias or the target.
+        let block_config = self.plan.config_for(resolved, block_name);
 
         // `node_id` is what the runtime uses to attribute WRAP access on
         // anything this block does on its own behalf (config/db/etc reads).
@@ -184,6 +208,7 @@ impl Wafer {
         );
 
         // Lazy init + observability bracket via the shared dispatch scaffold.
+        let slot = self.slot_for(resolved);
         run_resolved(
             &self.hooks,
             DispatchObs {
@@ -192,7 +217,8 @@ impl Wafer {
                 block_name,
             },
             resolved,
-            self.dispatch_init(resolved, &block, &init_stack),
+            &slot,
+            || self.dispatch_init(resolved, &block, &init_stack),
             msg,
             input,
             |msg, input| block.handle(&ctx, msg, input),
@@ -201,15 +227,25 @@ impl Wafer {
         .unwrap_or_else(|init_failure| init_failure)
     }
 
-    /// Build the lazy-init inputs for [`run_resolved`] from runtime state:
-    /// the block's once-success slot, the config source, and a dedicated
-    /// `lifecycle(Init)` context that inherits `stack` so transitive
-    /// `init_block` calls participate in the same cycle-detection frame.
+    /// The once-success init slot paired with a registered block.
     ///
     /// Every registered block has a paired slot (`register_block_inner` /
     /// `register_remote_block`); a missing entry is a runtime invariant
     /// violation, so panic loudly rather than silently constructing a fresh
     /// slot (which would let concurrent callers each run `lifecycle(Init)`).
+    pub(crate) fn slot_for(&self, resolved: &str) -> Arc<super::slot::BlockSlot> {
+        self.registration
+            .slots
+            .get(resolved)
+            .cloned()
+            .expect("slot must exist for any registered block")
+    }
+
+    /// Build the lazy-init inputs for [`run_resolved`] from runtime state:
+    /// the config source and a dedicated `lifecycle(Init)` context that
+    /// inherits `stack` so transitive `init_block` calls participate in the
+    /// same cycle-detection frame. Only called (via the `make_init` closure)
+    /// when the block's init outcome is not already cached.
     pub(crate) fn dispatch_init<'a>(
         &self,
         resolved: &str,
@@ -218,17 +254,11 @@ impl Wafer {
     ) -> DispatchInit<'a> {
         DispatchInit {
             block: block.clone(),
-            slot: self
-                .registration
-                .slots
-                .get(resolved)
-                .cloned()
-                .expect("slot must exist for any registered block"),
             config_source: self.config.source.clone(),
             init_ctx: self.make_context(
                 "init",
                 resolved,
-                std::collections::HashMap::new(),
+                self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
                 None,
                 stack.clone(),

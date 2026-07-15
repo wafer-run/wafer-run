@@ -67,7 +67,9 @@ pub struct RuntimeContext {
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
     /// `None` means unrestricted. `Some(list)` enforces the allowlist.
-    pub caller_requires: Option<Vec<String>>,
+    /// `Arc` so per-dispatch context construction shares the seal-time list
+    /// instead of cloning it (PERF-03).
+    pub caller_requires: Option<Arc<Vec<String>>>,
     /// The block name of the caller that invoked this block via `call_block()`.
     /// `None` for top-level calls (e.g. from the router).
     pub caller_id: Option<String>,
@@ -256,7 +258,7 @@ impl RuntimeContext {
         let called_requires = if info.requires.is_empty() {
             None // unrestricted
         } else {
-            Some(info.requires)
+            Some(Arc::new(info.requires))
         };
 
         // Wrap attachments in an Arc once, consuming the BTreeMap — no deep clone.
@@ -319,17 +321,13 @@ impl RuntimeContext {
         // `self.slots` — a runtime invariant violation, so panic loudly
         // rather than silently constructing a fresh slot (which would let
         // concurrent callers each run `lifecycle(Init)` independently).
-        let init = crate::runtime::runner::DispatchInit {
-            block: block.clone(),
-            slot: self
-                .slots
-                .get(resolved_block_name)
-                .cloned()
-                .expect("slot must exist for any registered block"),
-            config_source: self.config_source.clone(),
-            init_ctx: sub_ctx.clone(),
-            stack: &self.init_breadcrumbs,
-        };
+        let slot = self
+            .slots
+            .get(resolved_block_name)
+            .cloned()
+            .expect("slot must exist for any registered block");
+        let init_block = block.clone();
+        let init_ctx = sub_ctx.clone();
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
@@ -350,7 +348,13 @@ impl RuntimeContext {
                 block_name,
             },
             resolved_block_name,
-            init,
+            &slot,
+            move || crate::runtime::runner::DispatchInit {
+                block: init_block,
+                config_source: self.config_source.clone(),
+                init_ctx,
+                stack: &self.init_breadcrumbs,
+            },
             msg,
             input,
             move |msg, input| async move {
@@ -705,7 +709,7 @@ mod tests {
         w.make_context(
             "test-flow",
             "test-node",
-            std::collections::HashMap::new(),
+            Arc::new(std::collections::HashMap::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
             crate::runtime::init_stack::InitStack::new(),

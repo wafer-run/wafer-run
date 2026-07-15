@@ -11,6 +11,9 @@ use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::
 /// declarative flow configs, `uses` contributions).
 pub(crate) mod config_expand;
 pub mod config_source;
+/// Seal-time compiled dispatch data: parsed block configs, `requires`
+/// allowlists, compiled flows (PERF-03).
+pub(crate) mod exec_plan;
 /// Flow-level execution policy (timeout resolution) for the dispatch path.
 pub(crate) mod flow_policy;
 /// Init-time call stack used to detect cycles when blocks `Init`-call each other.
@@ -141,6 +144,11 @@ pub struct Wafer {
     /// [`RuntimeContext`] [`make_context`](Self::make_context) produces.
     /// See [`ConfigState`](crate::runtime::config_source::ConfigState).
     pub(crate) config: crate::runtime::config_source::ConfigState,
+    /// Seal-time compiled dispatch data: parsed per-block configs,
+    /// `requires` allowlists, compiled flows. Empty until [`Wafer::seal`];
+    /// every consumer falls back to the uncompiled path on a miss.
+    /// See [`SealedPlan`](crate::runtime::exec_plan::SealedPlan).
+    pub(crate) plan: crate::runtime::exec_plan::SealedPlan,
 }
 
 impl Wafer {
@@ -182,6 +190,7 @@ impl Wafer {
             warned_unknown_interfaces: Arc::new(parking_lot::Mutex::new(Default::default())),
             wasm: crate::runtime::wasm_state::WasmState::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
+            plan: crate::runtime::exec_plan::SealedPlan::empty(),
         }
     }
 
@@ -390,7 +399,7 @@ impl Wafer {
         &self,
         flow_id: impl Into<String>,
         node_id: impl Into<String>,
-        config: HashMap<String, String>,
+        config: Arc<HashMap<String, String>>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
         init_breadcrumbs: crate::runtime::init_stack::InitStack,
@@ -398,7 +407,7 @@ impl Wafer {
         RuntimeContext {
             flow_id: flow_id.into(),
             node_id: node_id.into(),
-            config: Arc::new(config),
+            config,
             config_snapshot: self.config.snapshot.clone(),
             cancelled,
             deadline,
@@ -435,7 +444,7 @@ impl Wafer {
         &self,
         flow_id: impl Into<String>,
         block_name: &str,
-        config: HashMap<String, String>,
+        config: Arc<HashMap<String, String>>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
         init_breadcrumbs: crate::runtime::init_stack::InitStack,
@@ -453,12 +462,27 @@ impl Wafer {
     }
 
     /// Read a block's declared `requires` allowlist for context construction.
-    /// Prefers the immutable startup snapshot (avoids rebuilding `BlockInfo`
-    /// via `block.info()` on every dispatch); falls back to `block.info()`
-    /// for a block registered after `seal()`. An empty or absent list yields
-    /// `None` — an undeclared `requires` leaves the block's `call_block` set
-    /// unrestricted, matching [`RuntimeContext::caller_requires`] semantics.
-    fn resolve_block_requires(&self, resolved_block_name: &str) -> Option<Vec<String>> {
+    /// Served from the seal-time [`SealedPlan`](crate::runtime::exec_plan::SealedPlan)
+    /// (one map lookup + `Arc` clone per dispatch); falls back to the
+    /// uncompiled resolution for a block registered after `seal()` (or any
+    /// pre-seal context construction).
+    fn resolve_block_requires(&self, resolved_block_name: &str) -> Option<Arc<Vec<String>>> {
+        match self.plan.block_requires.get(resolved_block_name) {
+            Some(cached) => cached.clone(),
+            None => self.resolve_block_requires_uncached(resolved_block_name),
+        }
+    }
+
+    /// Uncompiled `requires` resolution: prefer the immutable startup
+    /// snapshot; fall back to `block.info()` for a block registered after
+    /// `seal()`. An empty or absent list yields `None` — an undeclared
+    /// `requires` leaves the block's `call_block` set unrestricted, matching
+    /// [`RuntimeContext::caller_requires`] semantics. Run once per block at
+    /// seal time to populate the plan, and directly only on plan misses.
+    pub(crate) fn resolve_block_requires_uncached(
+        &self,
+        resolved_block_name: &str,
+    ) -> Option<Arc<Vec<String>>> {
         self.snapshot
             .blocks
             .iter()
@@ -471,6 +495,7 @@ impl Wafer {
                     .map(|b| b.info().requires)
             })
             .filter(|r| !r.is_empty())
+            .map(Arc::new)
     }
 
     /// Lazily initialize the named block. Returns the cached `InitializedState`
@@ -536,7 +561,7 @@ impl Wafer {
         let init_ctx = self.make_block_context(
             "init",
             name,
-            std::collections::HashMap::new(),
+            self.plan.empty_config.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
             stack.clone(),
@@ -923,7 +948,7 @@ mod tests {
         w.make_context(
             "test-flow",
             "test-node",
-            overrides,
+            Arc::new(overrides),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
             crate::runtime::init_stack::InitStack::new(),
