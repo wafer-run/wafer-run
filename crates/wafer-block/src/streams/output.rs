@@ -461,6 +461,11 @@ impl OutputStream {
         let mut meta = Vec::new();
         while let Some(evt) = self.next().await {
             match evt {
+                // Move the first chunk instead of copying it — single-chunk
+                // responses (`OutputStream::respond`) are the common case on
+                // the dispatch hot path, and for them collection is
+                // copy-free (PERF-03).
+                StreamEvent::Chunk(bytes) if body.is_empty() => body = bytes,
                 StreamEvent::Chunk(bytes) => body.extend_from_slice(&bytes),
                 StreamEvent::Meta(entry) => meta.push(entry),
                 StreamEvent::Complete { meta: trailing } => {
