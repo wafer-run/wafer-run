@@ -4,8 +4,9 @@
 //!
 //! ## Status: native-only
 //!
-//! This block uses `parking_lot::Mutex<HashMap<…>>` + `std::time::Instant` and
-//! is therefore **only suitable for single-instance native deployments**.
+//! This block uses in-memory sharded `parking_lot::Mutex<HashMap<…>>` state +
+//! `std::time::Instant` and is therefore **only suitable for single-instance
+//! native deployments**.
 //! State is per-process and `Instant` semantics on `wasm32-unknown-unknown`
 //! (Cloudflare Workers) are non-monotonic, so cross-instance counts would not
 //! be coherent.
@@ -28,6 +29,7 @@
 
 use std::{
     collections::HashMap,
+    hash::{BuildHasher, RandomState},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -74,8 +76,8 @@ impl Clock for SystemClock {
 
 /// Per-IP fixed-window rate-limiter block.
 ///
-/// Maintains an in-memory `HashMap<client_ip, RateBucket>` guarded by a
-/// [`parking_lot::Mutex`]. Each bucket counts requests within a fixed window.
+/// Maintains an in-memory sharded `HashMap<client_ip, RateBucket>` (see
+/// [`ShardedBuckets`]). Each bucket counts requests within a fixed window.
 /// The limit and window are read exclusively from the `max_requests` /
 /// `window_seconds` flow config (defaulting to [`DEFAULT_MAX_REQUESTS`]
 /// requests per [`DEFAULT_WINDOW_SECONDS`]-second window when unset) — the
@@ -84,7 +86,7 @@ impl Clock for SystemClock {
 /// `X-RateLimit-*` response-header meta; on allow it forwards the message with
 /// `X-RateLimit-Remaining` set. Single-process / native-only — see crate docs.
 pub(crate) struct RateLimitBlock {
-    buckets: Mutex<HashMap<String, RateBucket>>,
+    buckets: ShardedBuckets,
     clock: Arc<dyn Clock>,
 }
 
@@ -93,13 +95,93 @@ struct RateBucket {
     window_start: Instant,
 }
 
+/// Number of independent bucket shards. Power of two, sized so that at
+/// realistic server concurrency (tens of in-flight requests) two requests for
+/// *different* client IPs rarely contend on the same [`Mutex`] (PERF-05 —
+/// previously one global mutex serialized every request through the block).
+const SHARD_COUNT: usize = 16;
+
+/// Global soft threshold above which expired buckets are swept before
+/// inserting. Enforced per shard as `EXPIRY_SWEEP_THRESHOLD / SHARD_COUNT`.
+const EXPIRY_SWEEP_THRESHOLD: usize = 1_000;
+
+/// Global hard cap on tracked client buckets. Enforced per shard as
+/// `HARD_CAP / SHARD_COUNT`, so the aggregate cap holds exactly when keys
+/// hash uniformly and approximately otherwise (the seeded [`RandomState`]
+/// keeps an attacker from steering keys into one shard).
+const HARD_CAP: usize = 100_000;
+
+/// The client-IP bucket map, split into [`SHARD_COUNT`] independently locked
+/// shards so concurrent requests for different IPs don't serialize on one
+/// global mutex (PERF-05). A key's shard is chosen by a per-process
+/// randomly-seeded hash ([`RandomState`]), which also prevents shard-skew
+/// attacks via chosen client IPs. Memory bounds (expiry sweep + hard cap,
+/// SEC-10 oldest-first eviction) are enforced per shard with per-shard shares
+/// of the global thresholds.
+pub(crate) struct ShardedBuckets {
+    hasher: RandomState,
+    shards: Vec<Mutex<HashMap<String, RateBucket>>>,
+}
+
+impl ShardedBuckets {
+    fn new() -> Self {
+        Self {
+            hasher: RandomState::new(),
+            shards: (0..SHARD_COUNT)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
+        }
+    }
+
+    fn shard_index(&self, key: &str) -> usize {
+        (self.hasher.hash_one(key) as usize) % SHARD_COUNT
+    }
+
+    /// Record one request for `key` at `now` under a fixed `window`,
+    /// returning the post-increment count and the bucket's window start.
+    ///
+    /// Locks only `key`'s shard: eviction, window reset, and the increment
+    /// all happen under that one shard lock, and the lock is released before
+    /// the caller builds its response.
+    fn record(&self, key: String, now: Instant, window: Duration) -> (u32, Instant) {
+        let mut buckets = self.shards[self.shard_index(&key)].lock();
+
+        // Evict expired entries proactively to prevent unbounded memory growth.
+        if buckets.len() > EXPIRY_SWEEP_THRESHOLD / SHARD_COUNT {
+            buckets.retain(|_, b| now.duration_since(b.window_start) <= window);
+        }
+        // Hard cap: if still too large after expiry eviction, drop the oldest
+        // ~10% of entries — NOT the whole map (SEC-10). A global clear would
+        // reset every active client's counter.
+        const SHARD_HARD_CAP: usize = HARD_CAP / SHARD_COUNT;
+        if buckets.len() > SHARD_HARD_CAP {
+            evict_oldest(&mut buckets, SHARD_HARD_CAP - SHARD_HARD_CAP / 10);
+        }
+
+        let bucket = buckets.entry(key).or_insert(RateBucket {
+            count: 0,
+            window_start: now,
+        });
+
+        // Reset window if expired
+        if now.duration_since(bucket.window_start) > window {
+            bucket.count = 0;
+            bucket.window_start = now;
+        }
+
+        bucket.count += 1;
+        (bucket.count, bucket.window_start)
+    }
+}
+
 /// SEC-10: evict the oldest buckets (by `window_start`) until at most `target`
 /// remain. Replaces a global `clear()` that reset *every* active client's
 /// counter — a high-cardinality attacker (aided by IP spoofing) could
 /// otherwise trip the hard cap repeatedly and wipe all in-flight limits. Here
 /// only the least-recently-active buckets are dropped; active clients keep
 /// their counts. Work is bounded (one sort) and runs only when the cap is
-/// exceeded.
+/// exceeded. Operates on one shard's map (PERF-05 sharding), so the sort cost
+/// is also per-shard.
 fn evict_oldest(buckets: &mut HashMap<String, RateBucket>, target: usize) {
     if buckets.len() <= target {
         return;
@@ -132,7 +214,7 @@ impl RateLimitBlock {
     /// window-reset behaviour deterministically.
     pub(crate) fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
-            buckets: Mutex::new(HashMap::new()),
+            buckets: ShardedBuckets::new(),
             clock,
         }
     }
@@ -211,41 +293,10 @@ impl Block for RateLimitBlock {
             });
         }
 
-        let mut buckets = self.buckets.lock();
+        // record() locks only this IP's shard and releases it before
+        // returning, so the response is built lock-free below.
         let now = self.clock.now();
-
-        // Evict expired entries proactively to prevent unbounded memory growth.
-        if buckets.len() > 1_000 {
-            buckets.retain(|_, b| now.duration_since(b.window_start) <= window);
-        }
-        // Hard cap: if still too large after expiry eviction, drop the oldest
-        // ~10% of entries — NOT the whole map (SEC-10). A global clear would
-        // reset every active client's counter.
-        const HARD_CAP: usize = 100_000;
-        if buckets.len() > HARD_CAP {
-            evict_oldest(&mut buckets, HARD_CAP - HARD_CAP / 10);
-        }
-
-        let bucket = buckets.entry(client_ip).or_insert(RateBucket {
-            count: 0,
-            window_start: now,
-        });
-
-        // Reset window if expired
-        if now.duration_since(bucket.window_start) > window {
-            bucket.count = 0;
-            bucket.window_start = now;
-        }
-
-        bucket.count += 1;
-
-        // Snapshot the post-increment count and the bucket's window start, then
-        // release the map lock before building the response. Nothing below this
-        // point touches the shared bucket map, so holding the guard across the
-        // message construction would only widen lock contention needlessly.
-        let count = bucket.count;
-        let window_start = bucket.window_start;
-        drop(buckets);
+        let (count, window_start) = self.buckets.record(client_ip, now, window);
 
         if count > max {
             let remaining = window
@@ -328,6 +379,92 @@ mod clock_seam_tests {
             5,
             "a surviving client's counter is NOT reset"
         );
+    }
+
+    /// PERF-05: a request must only contend on its own key's shard. With the
+    /// pre-shard single global mutex, ANY stalled request blocked EVERY other
+    /// request; here a request on a different shard completes even while
+    /// another shard's lock is held. Structured as completes-at-all under a
+    /// generous timeout — no wall-clock timing asserts.
+    #[test]
+    fn record_on_a_different_shard_completes_while_another_shard_is_locked() {
+        let sb = ShardedBuckets::new();
+        let k1 = "10.0.0.1".to_string();
+        let s1 = sb.shard_index(&k1);
+        // The shard hash is randomly seeded per process, so search for a key
+        // on a different shard (256 candidates make a miss astronomically
+        // unlikely: P = 16^-256 with 16 uniform shards).
+        let k2 = (0..=255u16)
+            .map(|i| format!("10.0.1.{i}"))
+            .find(|k| sb.shard_index(k) != s1)
+            .expect("no candidate key hashed to a different shard");
+
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        std::thread::scope(|scope| {
+            // Simulate a request stalled while holding k1's shard lock.
+            let stalled_guard = sb.shards[s1].lock();
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (sb_ref, k2_clone) = (&sb, k2.clone());
+            scope.spawn(move || {
+                let (count, _) = sb_ref.record(k2_clone, now, window);
+                // The main thread only drops `rx` on timeout failure, after
+                // which this send result is irrelevant.
+                let _ = tx.send(count);
+            });
+
+            let count = rx.recv_timeout(Duration::from_secs(10)).expect(
+                "record() for a key on a different shard blocked behind an \
+                 unrelated shard's lock — sharding regressed to a global mutex",
+            );
+            assert_eq!(count, 1);
+            drop(stalled_guard);
+            // scope joins the spawned thread here.
+        });
+    }
+
+    /// Concurrent records on distinct keys all complete and stay per-key
+    /// isolated (each key's first record counts 1) across every shard.
+    #[test]
+    fn concurrent_records_on_distinct_keys_all_complete_with_isolated_counts() {
+        let sb = ShardedBuckets::new();
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..32u16)
+                .map(|i| {
+                    let sb_ref = &sb;
+                    scope.spawn(move || sb_ref.record(format!("10.1.0.{i}"), now, window))
+                })
+                .collect();
+            for h in handles {
+                let (count, _) = h.join().expect("record thread panicked");
+                assert_eq!(count, 1, "each distinct key gets its own bucket");
+            }
+        });
+    }
+
+    /// Repeat records on the SAME key hit the same shard bucket regardless of
+    /// which thread records them.
+    #[test]
+    fn same_key_accumulates_across_threads() {
+        let sb = Arc::new(ShardedBuckets::new());
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let sb = sb.clone();
+            handles.push(std::thread::spawn(move || {
+                sb.record("9.9.9.9".to_string(), now, window).0
+            }));
+        }
+        let mut counts: Vec<u32> = handles
+            .into_iter()
+            .map(|h| h.join().expect("record thread panicked"))
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(counts, (1..=8).collect::<Vec<u32>>());
     }
 
     #[test]
