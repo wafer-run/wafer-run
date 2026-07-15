@@ -61,7 +61,11 @@ pub enum ValidationError {
 
 /// A failure raised while parsing or evaluating a `$.`-prefixed reference
 /// or `when` expression.
-#[derive(Debug, Error)]
+///
+/// `Clone` so seal-time compiled forms ([`crate::compiled`]) can store a
+/// parse failure once and reproduce it on every evaluation, matching
+/// parse-at-use behavior.
+#[derive(Debug, Clone, Error)]
 pub enum ExprError {
     /// A `$.path` string was malformed (missing prefix, empty segment, etc.).
     #[error("invalid path expression: {0}")]

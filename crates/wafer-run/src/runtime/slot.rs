@@ -90,6 +90,23 @@ impl BlockSlot {
         Self::default()
     }
 
+    /// Lock-free-ish fast path: return the cached outcome if the mutex is
+    /// uncontended and an outcome is stored; `None` means "unknown — take
+    /// the [`get_or_init`](Self::get_or_init) slow path".
+    ///
+    /// A held mutex means an init attempt is in flight, and an empty slot
+    /// means init has not succeeded yet — both correctly route the caller
+    /// to `get_or_init`, which re-checks under the lock. This lets dispatch
+    /// paths skip building the init context (and the init-stack frame)
+    /// entirely once a block's init outcome is cached (PERF-03).
+    pub fn try_cached(&self) -> Option<Result<InitializedState, InitError>> {
+        let guard = self.state.try_lock().ok()?;
+        guard.as_ref().map(|cached| match cached {
+            CachedOutcome::Ok(state) => Ok(state.clone()),
+            CachedOutcome::Permanent(msg) => Err(InitError::Permanent(msg.clone())),
+        })
+    }
+
     /// Run `init` if no cached outcome exists, otherwise return the cached result.
     ///
     /// - `Ok(_)` → cached; all future callers see the same `InitializedState`.

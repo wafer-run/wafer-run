@@ -247,6 +247,29 @@ async fn test_single_block_flow() {
     assert_eq!(String::from_utf8_lossy(result.body()), "HELLO WORLD");
 }
 
+/// Flows registered after `seal()` are not in the seal-compiled plan;
+/// `Wafer::run` compiles them ad hoc per invocation (PERF-03). Guards the
+/// fallback so post-seal `add_flow` behaves exactly like pre-seal
+/// registration.
+#[tokio::test]
+async fn flow_added_after_seal_still_runs() {
+    let mut w = empty_wafer();
+    w.register_block("test/upper", Arc::new(UpperBlock))
+        .unwrap();
+    w.seal().await.expect("seal failed");
+    w.add_flow(single_step_flow("late-to-upper", "test/upper"));
+
+    let result = run_flow(
+        &w,
+        "late-to-upper",
+        Message::new("text"),
+        b"added late".to_vec(),
+    )
+    .await;
+    assert!(result.is_respond(), "expected respond, got: {result:?}");
+    assert_eq!(String::from_utf8_lossy(result.body()), "ADDED LATE");
+}
+
 // ===========================================================================
 // 3. Multi-block sequential flow (a -> b -> c) — middleware mode
 // ===========================================================================

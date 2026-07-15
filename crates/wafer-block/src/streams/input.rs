@@ -65,8 +65,15 @@ impl InputStream {
     }
 
     /// Consume the stream, concatenating all chunks into a single `Vec<u8>`.
+    ///
+    /// The first chunk is moved rather than copied — single-chunk streams
+    /// ([`from_bytes`](Self::from_bytes), the flow executor's shared-body
+    /// view) are the common case on the dispatch hot path, and for them
+    /// collection is copy-free (PERF-03).
     pub async fn collect_to_bytes(mut self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let Some(mut out) = self.inner.next().await else {
+            return Vec::new();
+        };
         while let Some(chunk) = self.inner.next().await {
             out.extend_from_slice(&chunk);
         }

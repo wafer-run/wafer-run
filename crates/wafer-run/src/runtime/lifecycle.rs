@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use wafer_block::{core_types::*, error::RuntimeError, types::*};
 
@@ -314,7 +311,7 @@ impl Wafer {
             let ctx = self.make_block_context(
                 "startup",
                 name.as_str(),
-                HashMap::new(),
+                self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
                 None,
                 crate::runtime::init_stack::InitStack::new(),
@@ -369,7 +366,7 @@ impl Wafer {
             let ctx = self.make_block_context(
                 "shutdown",
                 name.as_str(),
-                HashMap::new(),
+                self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
                 None,
                 crate::runtime::init_stack::InitStack::new(),

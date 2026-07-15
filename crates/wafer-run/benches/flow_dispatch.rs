@@ -19,6 +19,9 @@
 //! - `flow_dispatch/middleware_8_steps` — eight middleware steps (Continue)
 //!   followed by a terminal pipeline step (exercises the per-step body
 //!   clone/restore).
+//! - `flow_dispatch/parallel_4_branches` — a pipeline step, then a step with
+//!   four parallel branches of one pipeline step each (exercises the
+//!   per-branch accumulator/body/message snapshot).
 //!
 //! All flows run over the same ~1 KiB JSON input so per-step overhead — not
 //! payload size — dominates.
@@ -27,7 +30,7 @@ use std::{hint::black_box, sync::Arc, time::Duration};
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::{json, Value};
-use wafer_flow::{Step, WaferFlow};
+use wafer_flow::{types::ParallelBranch, Step, WaferFlow};
 use wafer_run::{
     Block, BlockInfo, Context, InputStream, InstanceMode, Message, OutputStream, Wafer,
 };
@@ -160,6 +163,34 @@ fn middleware_flow(middleware_steps: usize) -> WaferFlow {
     make_flow("bench-middleware", flow_steps)
 }
 
+/// One pipeline step feeding a step with `branches` parallel branches (each a
+/// single pipeline step reading the pre-fork output) — every branch snapshots
+/// the accumulator, body, and message, which is what this bench captures. The
+/// host step's own invocation joins on one branch output so the final
+/// response equals the flow input.
+fn parallel_flow(branches: usize) -> WaferFlow {
+    let branch_defs = (0..branches)
+        .map(|i| ParallelBranch {
+            steps: vec![pipeline_step(
+                &format!("b{i}"),
+                "bench/native-echo",
+                json!({ "v": "$.pre.v" }),
+            )],
+        })
+        .collect();
+    let join = Step {
+        parallel: Some(branch_defs),
+        ..pipeline_step("join", "bench/native-echo", json!({ "v": "$.b0.v" }))
+    };
+    make_flow(
+        "bench-parallel",
+        vec![
+            pipeline_step("pre", "bench/native-echo", json!({ "v": "$.input.v" })),
+            join,
+        ],
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -252,6 +283,7 @@ fn bench_flow_dispatch(c: &mut Criterion) {
         single_step_flow(),
         chain_flow(8),
         middleware_flow(8),
+        parallel_flow(4),
     ]));
     let body = flow_input();
 
@@ -259,7 +291,12 @@ fn bench_flow_dispatch(c: &mut Criterion) {
     // echo step resolving `$.input.v` (or the previous step's `v`), so the
     // response is the original `{"v": …}` object.
     let expected: Value = serde_json::from_slice(&body).expect("input parses");
-    for flow_id in ["bench-single-step", "bench-chain", "bench-middleware"] {
+    for flow_id in [
+        "bench-single-step",
+        "bench-chain",
+        "bench-middleware",
+        "bench-parallel",
+    ] {
         let out = rt.block_on(run_flow_once(&wafer, flow_id, &body));
         let got: Value = serde_json::from_slice(&out)
             .unwrap_or_else(|e| panic!("flow {flow_id} output is not JSON: {e}"));
@@ -280,6 +317,10 @@ fn bench_flow_dispatch(c: &mut Criterion) {
     group.bench_function("middleware_8_steps", |b| {
         b.to_async(&rt)
             .iter(|| async { black_box(run_flow_once(&wafer, "bench-middleware", &body).await) })
+    });
+    group.bench_function("parallel_4_branches", |b| {
+        b.to_async(&rt)
+            .iter(|| async { black_box(run_flow_once(&wafer, "bench-parallel", &body).await) })
     });
 
     group.finish();

@@ -15,10 +15,13 @@
 //!   `next` targets, default branch present, well-formed expressions).
 //! - [`Accumulator`] — runtime state for resolving `$.` references and
 //!   evaluating `when`/`each` expressions.
+//! - [`compiled`] — compile-once forms of `when`/`each`/`input` expressions
+//!   for executors that parse at seal time and evaluate per step.
 
 #![warn(missing_docs)]
 
 pub mod accumulator;
+pub mod compiled;
 pub mod error;
 pub(crate) mod expr;
 pub mod parser;
@@ -26,6 +29,7 @@ pub mod types;
 pub mod validate;
 
 pub use accumulator::Accumulator;
+pub use compiled::{CompiledCondition, CompiledPath, CompiledTemplate};
 pub use error::{ExprError, ParseError, ValidationError};
 pub use parser::parse;
 pub use types::{ConfigMapEntry, FlowConfig, FlowInfo, NextEntry, PortSchema, Step, WaferFlow};
