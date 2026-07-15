@@ -1,0 +1,13 @@
+# Single source of truth for the Rust toolchain, local and CI.
+#
+# Pinned so rustc diagnostic wording is reproducible (the trybuild
+# snapshots in wafer-block-macro red on any stable bump that rewords a
+# diagnostic) and so local clippy/fmt match CI exactly.
+#
+# To bump: update `channel`, run the full suite locally
+# (scripts/check.sh), and regenerate trybuild snapshots if they drift
+# (TRYBUILD=overwrite cargo test -p wafer-block-macro).
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-wasip1", "wasm32-unknown-unknown"]
