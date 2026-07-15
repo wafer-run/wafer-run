@@ -93,6 +93,29 @@ struct RateBucket {
     window_start: Instant,
 }
 
+/// SEC-10: evict the oldest buckets (by `window_start`) until at most `target`
+/// remain. Replaces a global `clear()` that reset *every* active client's
+/// counter — a high-cardinality attacker (aided by IP spoofing) could
+/// otherwise trip the hard cap repeatedly and wipe all in-flight limits. Here
+/// only the least-recently-active buckets are dropped; active clients keep
+/// their counts. Work is bounded (one sort) and runs only when the cap is
+/// exceeded.
+fn evict_oldest(buckets: &mut HashMap<String, RateBucket>, target: usize) {
+    if buckets.len() <= target {
+        return;
+    }
+    let remove_count = buckets.len() - target;
+    let mut by_age: Vec<(Instant, String)> = buckets
+        .iter()
+        .map(|(k, b)| (b.window_start, k.clone()))
+        .collect();
+    // Ascending by window_start: oldest (earliest start) first.
+    by_age.sort_unstable_by_key(|(t, _)| *t);
+    for (_, k) in by_age.into_iter().take(remove_count) {
+        buckets.remove(&k);
+    }
+}
+
 impl Default for RateLimitBlock {
     fn default() -> Self {
         Self::new()
@@ -195,10 +218,12 @@ impl Block for RateLimitBlock {
         if buckets.len() > 1_000 {
             buckets.retain(|_, b| now.duration_since(b.window_start) <= window);
         }
-        // Hard cap: if still too large after eviction, drop oldest entries
+        // Hard cap: if still too large after expiry eviction, drop the oldest
+        // ~10% of entries — NOT the whole map (SEC-10). A global clear would
+        // reset every active client's counter.
         const HARD_CAP: usize = 100_000;
         if buckets.len() > HARD_CAP {
-            buckets.clear();
+            evict_oldest(&mut buckets, HARD_CAP - HARD_CAP / 10);
         }
 
         let bucket = buckets.entry(client_ip).or_insert(RateBucket {
@@ -274,6 +299,35 @@ mod clock_seam_tests {
         fn now(&self) -> Instant {
             self.base + Duration::from_millis(self.advance_ms.load(Ordering::Relaxed))
         }
+    }
+
+    // SEC-10: eviction drops the oldest buckets, not the whole map — active
+    // clients keep their counters.
+    #[test]
+    fn evict_oldest_drops_oldest_and_preserves_recent_counts() {
+        let base = Instant::now();
+        let mut buckets: std::collections::HashMap<String, RateBucket> =
+            std::collections::HashMap::new();
+        for i in 0..5u32 {
+            buckets.insert(
+                format!("ip{i}"),
+                RateBucket {
+                    count: i + 1,
+                    window_start: base + Duration::from_secs(i as u64),
+                },
+            );
+        }
+        // Keep only the 2 newest.
+        evict_oldest(&mut buckets, 2);
+        assert_eq!(buckets.len(), 2);
+        assert!(buckets.contains_key("ip4"), "newest survives");
+        assert!(buckets.contains_key("ip3"));
+        assert!(!buckets.contains_key("ip0"), "oldest dropped");
+        assert_eq!(
+            buckets.get("ip4").unwrap().count,
+            5,
+            "a surviving client's counter is NOT reset"
+        );
     }
 
     #[test]
