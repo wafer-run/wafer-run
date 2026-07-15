@@ -264,7 +264,7 @@ impl BlockCapabilities {
     /// this behavior.
     pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
         let h = o.headers.as_ref();
-        Self {
+        let mut effective = Self {
             collections: narrow(&self.collections, o.collections.as_ref(), |a, b| {
                 intersect_wildcard_set(a, b)
             }),
@@ -305,7 +305,24 @@ impl BlockCapabilities {
                     |a, b| union_vec(a, b),
                 ),
             },
+        };
+
+        // SEC-06: `network_allow` and `config_keys` are the two allowlists whose
+        // *empty* set means "unrestricted" to the enforcer (`allows_network_url`
+        // / `allows_config_key` return true on an empty allowlist). So an
+        // operator who writes `network_allow: []` / `config_keys: []` to DENY
+        // ALL would otherwise invert to ALLOW ALL. Honor the documented deny-all
+        // intent: an explicit empty override disables the parent capability
+        // entirely. (`None` — field omitted — still preserves the declared
+        // value; only an explicitly-provided empty list triggers this.)
+        if matches!(o.network_allow.as_ref(), Some(v) if v.is_empty()) {
+            effective.network = false;
         }
+        if matches!(o.config_keys.as_ref(), Some(s) if s.is_empty()) {
+            effective.config = false;
+        }
+
+        effective
     }
 }
 
@@ -664,6 +681,50 @@ mod tests {
         assert!(eff.network);
         assert!(eff.collections.contains("users"));
         assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+    }
+
+    // SEC-06: `network_allow` / `config_keys` treat an empty allowlist as
+    // "unrestricted" in the enforcer, so an explicit empty override (operator
+    // deny-all) must disable the parent capability — otherwise it inverts to
+    // allow-all. Assert the *enforcement* outcome, not just set contents.
+    #[test]
+    fn empty_network_allow_override_denies_all_urls_at_enforcement() {
+        let declared = BlockCapabilities {
+            network: true,
+            network_allow: vec!["https://a.com/".into()],
+            ..BlockCapabilities::none()
+        };
+        let over = ConfigCapabilityOverrides {
+            network_allow: Some(Vec::new()),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&over);
+        assert!(
+            !eff.network,
+            "an explicit empty network_allow override disables network entirely"
+        );
+        assert!(!eff.allows_network_url("https://a.com/"));
+        assert!(!eff.allows_network_url("https://anything.example/"));
+    }
+
+    #[test]
+    fn empty_config_keys_override_denies_all_keys_at_enforcement() {
+        let declared = BlockCapabilities {
+            config: true,
+            config_keys: ["ACME__WIDGET__KEY".to_string()].into_iter().collect(),
+            ..BlockCapabilities::none()
+        };
+        let over = ConfigCapabilityOverrides {
+            config_keys: Some(HashSet::new()),
+            ..Default::default()
+        };
+        let eff = declared.apply_config_overrides(&over);
+        // Config access is gated by `config && allows_config_key(k)`; disabling
+        // `config` denies all keys regardless of the (empty) allowlist.
+        assert!(
+            !eff.config,
+            "an explicit empty config_keys override disables config entirely"
+        );
     }
 
     #[test]
