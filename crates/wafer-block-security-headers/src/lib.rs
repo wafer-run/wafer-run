@@ -130,6 +130,41 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
+/// SEC-08: whether a CSP source is "broad" — one that would widen a
+/// script/default policy to essentially any origin. Rejected for `script-src`
+/// and `default-src`:
+/// - the literal wildcard `*`,
+/// - a scheme-only source (`https:`, `http:`, `data:`, `blob:`, …) — matches
+///   every origin on that scheme,
+/// - a bare-wildcard host (`https://*`).
+///
+/// Specific host sources (`https://cdn.example.com`), subdomain wildcards
+/// (`https://*.example.com`, `*.example.com`), nonces (`'nonce-…'`), hashes
+/// (`'sha256-…'`) and keywords (`'self'`, `'unsafe-inline'`) are NOT broad and
+/// pass through.
+pub(crate) fn is_broad_source(src: &str) -> bool {
+    let s = src.trim();
+    if s == "*" {
+        return true;
+    }
+    if let Some(idx) = s.find(':') {
+        let scheme = &s[..idx];
+        let rest = &s[idx + 1..];
+        let scheme_ok = !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if scheme_ok {
+            // "https:" (scheme-only) or "https://*" (bare-wildcard host).
+            let host = rest.trim_start_matches("//");
+            if rest.is_empty() || host == "*" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Merge `custom` into `baseline` directive-by-directive.
 ///
 /// Both inputs are standard `directive value...; directive value...` CSP
@@ -137,9 +172,10 @@ impl Block for SecurityHeadersBlock {
 /// cannot remove `frame-ancestors 'none'` or similar) and then applies the
 /// custom values per directive subject to **non-weakening rules**:
 ///
-/// * `default-src` — sources `*`, `http:`, `https:` are dropped; `'self'`
-///   is always re-added if missing.
-/// * `script-src` — `'unsafe-eval'` is always stripped; `*` is dropped.
+/// * `default-src` and `script-src` — [broad sources](is_broad_source)
+///   (`*`, scheme-only, bare-wildcard host) are dropped; `default-src`
+///   always re-adds `'self'` if missing.
+/// * `script-src` — `'unsafe-eval'` is always stripped.
 /// * Any directive present only in `custom` is appended verbatim.
 ///
 /// All other directives merge as the union of (baseline ∪ custom) sources
@@ -178,13 +214,13 @@ pub fn merge_csp(baseline: &str, custom: &str) -> String {
             let is_default_src = directive.eq_ignore_ascii_case("default-src");
             let is_script_src = directive.eq_ignore_ascii_case("script-src");
             let lower = src.to_lowercase();
-            if is_default_src && matches!(lower.as_str(), "*" | "http:" | "https:") {
+            // SEC-08: reject broad sources (wildcard, scheme-only, bare-wildcard
+            // host) that would widen script/default policy to any origin.
+            // Specific hosts, subdomain wildcards, nonces and hashes still pass.
+            if (is_default_src || is_script_src) && is_broad_source(&lower) {
                 continue;
             }
             if is_script_src && lower == "'unsafe-eval'" {
-                continue;
-            }
-            if is_script_src && src == "*" {
                 continue;
             }
             if !entry.iter().any(|s| s == &src) {
@@ -199,13 +235,10 @@ pub fn merge_csp(baseline: &str, custom: &str) -> String {
         if !sources.iter().any(|s| s == "'self'") {
             sources.insert(0, "'self'".to_string());
         }
-        sources.retain(|s| {
-            let l = s.to_lowercase();
-            l != "*" && l != "http:" && l != "https:"
-        });
+        sources.retain(|s| !is_broad_source(s));
     }
     if let Some(sources) = merged.get_mut("script-src") {
-        sources.retain(|s| s.to_lowercase() != "'unsafe-eval'" && s != "*");
+        sources.retain(|s| s.to_lowercase() != "'unsafe-eval'" && !is_broad_source(s));
     }
 
     // Re-serialize in a stable directive order (BTreeMap iterates sorted).
@@ -247,6 +280,54 @@ mod tests {
         assert!(!merged.contains("'unsafe-eval'"));
         assert!(merged.contains("https://cdn.example.com"));
         assert!(merged.contains("'unsafe-inline'")); // from baseline
+    }
+
+    // SEC-08: scheme-only and bare-wildcard-host sources are "broad" and must
+    // be rejected from script/default policy; specific hosts, subdomain
+    // wildcards, nonces and hashes are not.
+    #[test]
+    fn is_broad_source_classification() {
+        for broad in ["*", "https:", "http:", "data:", "blob:", "ws:", "https://*"] {
+            assert!(is_broad_source(broad), "{broad} should be broad");
+        }
+        for ok in [
+            "'self'",
+            "'unsafe-inline'",
+            "'nonce-abc123'",
+            "'sha256-xyz'",
+            "https://cdn.example.com",
+            "*.example.com",
+            "https://*.example.com",
+        ] {
+            assert!(!is_broad_source(ok), "{ok} should NOT be broad");
+        }
+    }
+
+    // SEC-08: `script-src https:` (etc.) previously passed, authorizing scripts
+    // from every origin on that scheme. Broad sources are now stripped while
+    // specific hosts and nonces survive.
+    #[test]
+    fn merge_csp_strips_broad_script_sources_keeps_specific_host() {
+        let merged = merge_csp(
+            DEFAULT_CSP,
+            "script-src https: data: https://cdn.example.com 'nonce-abc'",
+        );
+        let script = merged
+            .split(';')
+            .map(|d| d.trim())
+            .find(|d| d.starts_with("script-src"))
+            .expect("script-src present");
+        let sources: Vec<&str> = script.split_whitespace().skip(1).collect();
+        assert!(
+            !sources.contains(&"https:"),
+            "scheme-only https: stripped: {script}"
+        );
+        assert!(!sources.contains(&"data:"), "data: stripped: {script}");
+        assert!(
+            sources.contains(&"https://cdn.example.com"),
+            "specific host kept: {script}"
+        );
+        assert!(sources.contains(&"'nonce-abc'"), "nonce kept: {script}");
     }
 
     #[test]
