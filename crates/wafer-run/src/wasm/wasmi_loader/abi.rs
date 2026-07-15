@@ -63,6 +63,13 @@ pub(super) struct WasmiHostState {
     /// Capabilities (resource limits) for this block.
     /// Used by host function enforcement (e.g. `allows_call_block`).
     pub(super) capabilities: BlockCapabilities,
+    /// SEC-01: the host-owned protected metadata entries (`auth.*`) from the
+    /// message this guest was invoked with — the identity established upstream
+    /// by the trusted host / auth middleware. Seeded per call; used to restore
+    /// host ownership of the namespace on any nested `call_block` the guest
+    /// initiates via the streaming ABI, so the guest cannot forge identity for
+    /// a callee.
+    pub(super) inbound_protected_meta: Vec<MetaEntry>,
     /// Per-instance stream registry. Drops with the Store, cancelling any
     /// in-flight response streams via their paired `CancellationToken`s.
     pub(super) streams: StreamRegistry,
@@ -350,6 +357,7 @@ mod tests {
             max_memory_pages: 256,
             max_table_elements,
             capabilities: BlockCapabilities::none(),
+            inbound_protected_meta: Vec::new(),
             streams: StreamRegistry::new(),
             pending_stream_finish: None,
             pending_stream_read: None,

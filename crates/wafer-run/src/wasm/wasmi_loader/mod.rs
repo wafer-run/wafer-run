@@ -76,6 +76,7 @@ fn instantiate(
         max_memory_pages: limits.memory_pages,
         max_table_elements: limits.max_table_elements,
         capabilities: caps.clone(),
+        inbound_protected_meta: Vec::new(),
         streams: StreamRegistry::with_limits(limits.max_host_bytes, limits.max_live_streams),
         pending_stream_finish: None,
         pending_stream_read: None,
@@ -158,10 +159,14 @@ impl<'s> ContextScope<'s> {
         store: &'s mut Store<WasmiHostState>,
         ctx: &dyn Context,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+        inbound_protected: Vec<MetaEntry>,
     ) -> Self {
         let guard = ContextGuard::new(ctx);
         store.data_mut().context = Some(guard.as_arc());
         store.data_mut().current_attachments = attachments;
+        // SEC-01: seed the host-owned identity for this frame so nested
+        // `call_block`s the guest makes inherit it and cannot forge their own.
+        store.data_mut().inbound_protected_meta = inbound_protected;
         Self {
             store,
             _guard: guard,
@@ -206,6 +211,9 @@ pub struct WasmiBlock {
     warned_outbound: std::sync::atomic::AtomicBool,
     /// Warn-once flag for inbound stripped headers.
     warned_inbound: std::sync::atomic::AtomicBool,
+    /// Warn-once flag for a guest attempting to set host-owned identity
+    /// (`auth.*`) — SEC-01.
+    warned_forged_identity: std::sync::atomic::AtomicBool,
     /// Host-side asset loader for external WASM/JS assets referenced by the
     /// block's `external_assets` manifest field. Defaults to `NoopAssetLoader`.
     /// Hosts inject a real loader via `set_asset_loader`.
@@ -345,6 +353,7 @@ impl WasmiBlock {
             capabilities: parking_lot::RwLock::new(caps),
             warned_outbound: std::sync::atomic::AtomicBool::new(false),
             warned_inbound: std::sync::atomic::AtomicBool::new(false),
+            warned_forged_identity: std::sync::atomic::AtomicBool::new(false),
             asset_loader: parking_lot::RwLock::new(Arc::new(crate::asset_loader::NoopAssetLoader)),
             limits,
         })
@@ -407,6 +416,13 @@ impl WasmiBlock {
             }
         };
 
+        // SEC-01: snapshot the host-owned identity (`auth.*`) established
+        // upstream for this frame. The guest sees it (so a block can read the
+        // authenticated user) but cannot alter it: it is restored on every
+        // guest egress — Respond, Continue, and nested `call_block` (seeded
+        // into the store below for the streaming-ABI path).
+        let inbound_protected = protected_meta_entries(&msg.meta);
+
         let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
             Ok(b) => b,
             Err(e) => {
@@ -418,21 +434,26 @@ impl WasmiBlock {
         };
 
         let result_bytes = match self
-            .call_guest_resumable_with_attachments(ctx, attachments, |store, instance| {
-                let alloc_fn = instance
-                    .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
-                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
-                let handle_fn = instance
-                    .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
-                    .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
-                let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
-                    RuntimeError::Wasm("guest has no exported memory".to_string())
-                })?;
+            .call_guest_resumable_with_attachments(
+                ctx,
+                attachments,
+                inbound_protected.clone(),
+                |store, instance| {
+                    let alloc_fn = instance
+                        .get_typed_func::<i32, i32>(&*store, "__wafer_alloc")
+                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_alloc: {e}")))?;
+                    let handle_fn = instance
+                        .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
+                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+                    let memory = instance.get_memory(&*store, "memory").ok_or_else(|| {
+                        RuntimeError::Wasm("guest has no exported memory".to_string())
+                    })?;
 
-                let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
-                let len = msg_bytes.len() as i32;
-                Ok((handle_fn, ptr as i32, len))
-            })
+                    let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
+                    let len = msg_bytes.len() as i32;
+                    Ok((handle_fn, ptr as i32, len))
+                },
+            )
             .await
         {
             Ok(bytes) => bytes,
@@ -473,6 +494,13 @@ impl WasmiBlock {
                             if !stripped.is_empty() {
                                 self.warn_once_stripped_outbound(&stripped);
                             }
+                            // SEC-01: the host owns `auth.*` — drop any the
+                            // guest set and restore this frame's identity.
+                            let (sanitized, forged) =
+                                restore_protected_meta(sanitized, &inbound_protected);
+                            if !forged.is_empty() {
+                                self.warn_once_forged_identity(&forged);
+                            }
                             (r.data, sanitized)
                         })
                         .unwrap_or_default();
@@ -493,7 +521,14 @@ impl WasmiBlock {
                 }
                 "Drop" => OutputStream::drop_request(),
                 "Continue" => {
-                    let msg = result.message.unwrap_or_else(|| Message::new("continue"));
+                    let mut msg = result.message.unwrap_or_else(|| Message::new("continue"));
+                    // SEC-01: the guest cannot forge/alter identity on the
+                    // message it hands to the next flow step.
+                    let (meta, forged) = restore_protected_meta(msg.meta, &inbound_protected);
+                    msg.meta = meta;
+                    if !forged.is_empty() {
+                        self.warn_once_forged_identity(&forged);
+                    }
                     OutputStream::continue_with(msg)
                 }
                 _ => OutputStream::error(WaferError::new(
@@ -526,7 +561,9 @@ impl WasmiBlock {
         )
             -> Result<(wasmi::TypedFunc<(i32, i32), i64>, i32, i32), RuntimeError>,
     ) -> Result<Vec<u8>, RuntimeError> {
-        self.call_guest_resumable_with_attachments(ctx, None, setup)
+        // No inbound request identity for this path (e.g. `__wafer_info` /
+        // `__wafer_lifecycle`): pass an empty protected-meta snapshot.
+        self.call_guest_resumable_with_attachments(ctx, None, Vec::new(), setup)
             .await
     }
 
@@ -539,6 +576,7 @@ impl WasmiBlock {
         &self,
         ctx: &dyn Context,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+        inbound_protected: Vec<MetaEntry>,
         setup: impl FnOnce(
             &mut Store<WasmiHostState>,
             wasmi::Instance,
@@ -560,7 +598,7 @@ impl WasmiBlock {
         // unhandled-trap branch, or success — so the strong-count assertion in
         // `ContextGuard::drop` always holds. From here on the store is reached
         // through `scope`.
-        let mut scope = ContextScope::new(&mut store, ctx, attachments);
+        let mut scope = ContextScope::new(&mut store, ctx, attachments, inbound_protected);
 
         let (func, arg0, arg1) = setup(scope.store_mut(), instance)?;
 
@@ -601,15 +639,28 @@ impl WasmiBlock {
                 // borrowed across an await).
                 let take_result = {
                     let data = scope.store_mut().data_mut();
+                    // SEC-01: snapshot host-owned identity before the mutable
+                    // borrow of `streams`, then restore it on the guest's
+                    // nested-call message so the guest cannot forge identity
+                    // for the callee.
+                    let inbound_protected = data.inbound_protected_meta.clone();
                     let state = data.streams.get_mut(handle);
                     state.map(|s| {
-                        let req = s.take_finish_request();
+                        let req = s.take_finish_request().map(|(target, mut msg, body)| {
+                            let (meta, forged) =
+                                restore_protected_meta(msg.meta, &inbound_protected);
+                            msg.meta = meta;
+                            (target, msg, body, forged)
+                        });
                         let atts = s.take_attachments();
                         (req, atts)
                     })
                 };
                 let resume_code: i32 = match take_result {
-                    Some((Ok((target, msg, body)), attachments)) => {
+                    Some((Ok((target, msg, body, forged)), attachments)) => {
+                        if !forged.is_empty() {
+                            self.warn_once_forged_identity(&forged);
+                        }
                         debug!(
                             block = target,
                             body_len = body.len(),
@@ -759,6 +810,19 @@ impl WasmiBlock {
             direction = "outbound",
             stripped = ?names,
             "headers outside writable allowlist — stripped"
+        );
+    }
+
+    fn warn_once_forged_identity(&self, keys: &[String]) {
+        use std::sync::atomic::Ordering;
+        if self.warned_forged_identity.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            block = %self.info().name,
+            keys = ?keys,
+            "guest attempted to set host-owned identity metadata (auth.*) — \
+             ignored; host-provided identity preserved"
         );
     }
 

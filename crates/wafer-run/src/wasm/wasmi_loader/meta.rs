@@ -124,6 +124,61 @@ pub(crate) fn sanitize_inbound_meta(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Host-owned protected metadata namespace (SEC-01)
+// ---------------------------------------------------------------------------
+
+/// Whether `key` is in the host-owned protected metadata namespace.
+///
+/// Keys in this namespace carry authenticated identity / attribution that the
+/// trusted host — or a trusted native block such as an auth middleware —
+/// establishes. An untrusted WASM guest must never be able to forge, modify,
+/// or remove them, because downstream authorization (e.g. the inspector block)
+/// trusts them as identity. Currently the `auth.*` prefix, matched
+/// case-insensitively (`auth.user_id`, `auth.user_roles`, …).
+pub(crate) fn is_protected_meta_key(key: &str) -> bool {
+    key.get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("auth."))
+}
+
+/// Snapshot the protected-namespace entries from `meta` (cloned) — the
+/// host-provided identity for a request frame, captured before a guest runs
+/// so it can be restored on the guest's outputs.
+pub(crate) fn protected_meta_entries(meta: &[MetaEntry]) -> Vec<MetaEntry> {
+    meta.iter()
+        .filter(|e| is_protected_meta_key(&e.key))
+        .cloned()
+        .collect()
+}
+
+/// Enforce host ownership of the protected namespace on a value a guest
+/// produced. Drops every protected key the guest set, then re-inserts the
+/// inbound host-provided entries — so a guest can neither forge new identity
+/// nor alter or strip the identity established upstream. Returns the
+/// reconciled meta plus the distinct protected keys the guest attempted to set
+/// (for warn-once logging).
+pub(crate) fn restore_protected_meta(
+    guest_meta: Vec<MetaEntry>,
+    inbound_protected: &[MetaEntry],
+) -> (Vec<MetaEntry>, Vec<String>) {
+    let mut forged: Vec<String> = Vec::new();
+    let mut out: Vec<MetaEntry> = guest_meta
+        .into_iter()
+        .filter(|e| {
+            if is_protected_meta_key(&e.key) {
+                if !forged.iter().any(|k| k == &e.key) {
+                    forged.push(e.key.clone());
+                }
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    out.extend(inbound_protected.iter().cloned());
+    (out, forged)
+}
+
 #[cfg(test)]
 mod header_name_tests {
     use super::header_name_from_meta_key;
@@ -295,5 +350,61 @@ mod sanitize_tests {
         let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
         assert!(keys.contains(&"auth.user_id"));
         assert!(keys.contains(&"trace_id"));
+    }
+
+    // SEC-01: the host owns the `auth.*` namespace.
+    use super::{is_protected_meta_key, restore_protected_meta};
+
+    #[test]
+    fn protected_key_matches_auth_prefix_case_insensitively() {
+        assert!(is_protected_meta_key("auth.user_id"));
+        assert!(is_protected_meta_key("auth.user_roles"));
+        assert!(is_protected_meta_key("AUTH.User_Id"));
+        assert!(!is_protected_meta_key("authorization"));
+        assert!(!is_protected_meta_key("trace_id"));
+        assert!(!is_protected_meta_key("au"));
+    }
+
+    #[test]
+    fn restore_strips_guest_auth_and_restores_inbound_identity() {
+        let inbound = vec![
+            meta("auth.user_id", "alice"),
+            meta("auth.user_roles", "user"),
+        ];
+        let guest = vec![
+            meta("auth.user_id", "admin"),    // forged
+            meta("auth.user_roles", "admin"), // forged
+            meta("trace_id", "t1"),           // legitimate non-protected
+        ];
+        let (out, forged) = restore_protected_meta(guest, &inbound);
+        let get = |k: &str| out.iter().find(|e| e.key == k).map(|e| e.value.as_str());
+        assert_eq!(
+            get("auth.user_id"),
+            Some("alice"),
+            "forged id replaced by inbound"
+        );
+        assert_eq!(
+            get("auth.user_roles"),
+            Some("user"),
+            "forged roles replaced"
+        );
+        assert_eq!(get("trace_id"), Some("t1"), "non-protected meta preserved");
+        assert_eq!(forged.len(), 2, "both forged keys reported");
+    }
+
+    #[test]
+    fn restore_drops_guest_auth_when_no_inbound_identity() {
+        // With no upstream identity, a guest cannot establish one.
+        let guest = vec![meta("auth.user_roles", "admin"), meta("x", "y")];
+        let (out, forged) = restore_protected_meta(guest, &[]);
+        assert!(
+            out.iter().all(|e| !is_protected_meta_key(&e.key)),
+            "no auth.* survives from the guest"
+        );
+        assert!(
+            out.iter().any(|e| e.key == "x"),
+            "non-protected meta survives"
+        );
+        assert_eq!(forged, vec!["auth.user_roles".to_string()]);
     }
 }

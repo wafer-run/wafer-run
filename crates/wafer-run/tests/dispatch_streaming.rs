@@ -213,6 +213,53 @@ async fn buffered_network_request_round_trips() {
     );
 }
 
+// SEC-01: a WASM guest cannot forge host-owned identity metadata (`auth.*`).
+// The guest returns a Respond whose meta claims `auth.user_roles=admin`; the
+// host must strip every `auth.*` key on egress (there is no upstream identity
+// to restore here), while preserving the guest's non-protected meta.
+#[tokio::test]
+async fn guest_cannot_forge_host_owned_identity_metadata() {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    let wasm = dispatch_guest_wasm();
+    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    wafer
+        .register_block("test/dispatch-guest", Arc::new(block))
+        .expect("register dispatch-guest");
+    let wafer = wafer.start().await.expect("start runtime");
+
+    let out = wafer
+        .run_block(
+            "test/dispatch-guest",
+            Message::new("test.forge_respond"),
+            InputStream::empty(),
+        )
+        .await;
+
+    let buf = out
+        .collect_buffered()
+        .await
+        .expect("forge_respond should produce a buffered Respond");
+    assert_eq!(buf.body, b"forged");
+    for e in &buf.meta {
+        assert!(
+            !e.key.to_ascii_lowercase().starts_with("auth."),
+            "forged host-owned identity leaked through the boundary: {}={}",
+            e.key,
+            e.value
+        );
+    }
+    assert!(
+        buf.meta
+            .iter()
+            .any(|e| e.key == "trace_id" && e.value == "t1"),
+        "the guest's non-protected meta must be preserved"
+    );
+}
+
 #[tokio::test]
 async fn streaming_network_request_yields_chunks_in_order() {
     let body = dispatch("test.streaming", "https://example.test/streaming")
