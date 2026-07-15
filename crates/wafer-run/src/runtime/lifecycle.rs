@@ -309,7 +309,9 @@ impl Wafer {
         for (name, block) in &self.registration.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
             // when the block accesses its own resources during startup.
-            let ctx = self.make_context(
+            // SEC-04: `make_block_context` installs the block's `requires` so
+            // any `call_block` during Start is gated by the same allowlist.
+            let ctx = self.make_block_context(
                 "startup",
                 name.as_str(),
                 HashMap::new(),
@@ -362,7 +364,9 @@ impl Wafer {
     /// every access to a literal name no grants match and falsely deny.
     pub async fn shutdown(&self) {
         for (name, block) in &self.registration.blocks {
-            let ctx = self.make_context(
+            // SEC-04: `make_block_context` installs the block's `requires` so
+            // any `call_block` during Stop is gated by the same allowlist.
+            let ctx = self.make_block_context(
                 "shutdown",
                 name.as_str(),
                 HashMap::new(),

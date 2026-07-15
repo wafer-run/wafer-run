@@ -412,6 +412,150 @@ async fn run_block_enforces_requires_read_from_snapshot() {
     }
 }
 
+// SEC-04: `requires` enforcement must not depend on the invocation path.
+// The same block that is denied a disallowed `call_block` under top-level
+// dispatch must also be denied when it runs as a flow step. Before the fix
+// the flow executor built its context with `caller_requires: None`
+// (unrestricted), so the disallowed call silently succeeded.
+#[tokio::test]
+async fn flow_step_enforces_requires() {
+    let mut w = empty_wafer();
+    w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
+        .unwrap();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
+    w.add_flow(single_step_flow("requires-flow", "test/requires-caller"));
+    w.seal().await.expect("seal");
+
+    match run_flow(&w, "requires-flow", Message::new("test.req"), Vec::new()).await {
+        TestResult::Error(e) => assert_eq!(
+            e.code,
+            ErrorCode::PermissionDenied,
+            "call_block outside the declared requires list must be denied on the flow-step path too"
+        ),
+        other => panic!("expected PERMISSION_DENIED from flow step, got {other:?}"),
+    }
+}
+
+// ===========================================================================
+// 6c. COR-01 — call depth is per-frame recursion depth, not in-flight count
+// ===========================================================================
+
+// A leaf that yields once (guaranteeing concurrent siblings overlap in the
+// executor) then responds. Its interface name is deliberately unregistered
+// so `call_block` action validation is skipped (UnknownInterface).
+struct DepthLeafBlock;
+
+#[async_trait::async_trait]
+impl Block for DepthLeafBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/leaf", "0.0.1", "test/depth-leaf@v1", "Leaf")
+            .instance_mode(InstanceMode::Singleton)
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        tokio::task::yield_now().await;
+        OutputStream::respond(Vec::new())
+    }
+}
+
+// Fans out N concurrent sibling `call_block`s on the SAME context and
+// reports how many succeeded. These siblings are all at logical depth 1 —
+// there is no recursive chain — so none should trip the recursion limit.
+struct FanoutBlock;
+
+#[async_trait::async_trait]
+impl Block for FanoutBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/fanout", "0.0.1", "test/fanout@v1", "Fanout")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["test/leaf".to_string()])
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        let calls = (0..64usize).map(|_| async {
+            let out = ctx
+                .call_block("test/leaf", Message::new("go"), InputStream::empty())
+                .await;
+            out.collect_buffered().await.is_ok()
+        });
+        let ok = futures::future::join_all(calls)
+            .await
+            .into_iter()
+            .filter(|b| *b)
+            .count();
+        OutputStream::respond(ok.to_string().into_bytes())
+    }
+}
+
+// COR-01: `call_depth` guarded against *recursion*, but was implemented as a
+// single `Arc<AtomicU32>` shared across the whole call tree — so N concurrent
+// sibling calls at depth 1 inflated it to N and tripped a false
+// "depth exceeded" past the limit. A per-frame depth (copied `+1` into each
+// child) makes width irrelevant: only true nesting counts.
+#[tokio::test]
+async fn concurrent_sibling_calls_do_not_exhaust_depth() {
+    let mut w = empty_wafer();
+    w.register_block("test/fanout", Arc::new(FanoutBlock))
+        .unwrap();
+    w.register_block("test/leaf", Arc::new(DepthLeafBlock))
+        .unwrap();
+    w.seal().await.expect("seal");
+
+    let out = Arc::new(w)
+        .run_block("test/fanout", Message::new("go"), InputStream::empty())
+        .await;
+
+    match out.collect_buffered().await {
+        Ok(buf) => {
+            let n: usize = String::from_utf8(buf.body).unwrap().parse().unwrap();
+            assert_eq!(
+                n, 64,
+                "all 64 concurrent sibling calls at depth 1 must succeed — a shared \
+                 in-flight counter falsely trips the recursion limit at width > max_depth"
+            );
+        }
+        other => panic!("expected fanout success count, got {other:?}"),
+    }
+}
+
+// A block that calls itself unboundedly — the depth guard must stop it.
+struct RecursiveBlock;
+
+#[async_trait::async_trait]
+impl Block for RecursiveBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/recursive", "0.0.1", "test/recursive@v1", "Recurses")
+            .instance_mode(InstanceMode::Singleton)
+            .requires(vec!["test/recursive".to_string()])
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        ctx.call_block("test/recursive", Message::new("go"), InputStream::empty())
+            .await
+    }
+}
+
+// COR-01 counterpart: the per-frame depth change must NOT weaken the actual
+// infinite-recursion guard. Unbounded self-recursion must still trip
+// ResourceExhausted (at max_call_depth levels of true nesting).
+#[tokio::test]
+async fn unbounded_recursion_trips_depth_limit() {
+    let mut w = empty_wafer();
+    w.register_block("test/recursive", Arc::new(RecursiveBlock))
+        .unwrap();
+    w.seal().await.expect("seal");
+
+    let out = Arc::new(w)
+        .run_block("test/recursive", Message::new("go"), InputStream::empty())
+        .await;
+
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(
+            e.code,
+            ErrorCode::ResourceExhausted,
+            "unbounded self-recursion must still be stopped by the depth guard"
+        ),
+        other => panic!("expected ResourceExhausted from unbounded recursion, got {other:?}"),
+    }
+}
+
 // ===========================================================================
 // 7. Observability hooks
 // ===========================================================================

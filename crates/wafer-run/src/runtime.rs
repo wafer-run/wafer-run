@@ -403,7 +403,7 @@ impl Wafer {
             cancelled,
             deadline,
             all_blocks: self.all_blocks_arc(),
-            call_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
@@ -418,6 +418,59 @@ impl Wafer {
             config_source: self.config.source.clone(),
             hooks: self.hooks.clone(),
         }
+    }
+
+    /// Build a context for executing `block_name`'s **own** code with its
+    /// declared `requires` allowlist installed, so `call_block` is gated
+    /// identically on every invocation path — top-level dispatch, flow step,
+    /// nested call, and lifecycle (Init/Start/Stop).
+    ///
+    /// SEC-04: the bare [`Wafer::make_context`] leaves `caller_requires:
+    /// None` (unrestricted) and must be reserved for true host/root
+    /// operations, not block execution. Building a block's context through
+    /// `make_context` alone let its permitted `call_block` set silently widen
+    /// to "anything" whenever it ran as a flow step or during a lifecycle
+    /// event, defeating the macro's documented security gate.
+    pub(crate) fn make_block_context(
+        &self,
+        flow_id: impl Into<String>,
+        block_name: &str,
+        config: HashMap<String, String>,
+        cancelled: Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        init_breadcrumbs: crate::runtime::init_stack::InitStack,
+    ) -> RuntimeContext {
+        let mut ctx = self.make_context(
+            flow_id,
+            block_name,
+            config,
+            cancelled,
+            deadline,
+            init_breadcrumbs,
+        );
+        ctx.caller_requires = self.resolve_block_requires(block_name);
+        ctx
+    }
+
+    /// Read a block's declared `requires` allowlist for context construction.
+    /// Prefers the immutable startup snapshot (avoids rebuilding `BlockInfo`
+    /// via `block.info()` on every dispatch); falls back to `block.info()`
+    /// for a block registered after `seal()`. An empty or absent list yields
+    /// `None` — an undeclared `requires` leaves the block's `call_block` set
+    /// unrestricted, matching [`RuntimeContext::caller_requires`] semantics.
+    fn resolve_block_requires(&self, resolved_block_name: &str) -> Option<Vec<String>> {
+        self.snapshot
+            .blocks
+            .iter()
+            .find(|b| b.name == resolved_block_name)
+            .map(|b| b.requires.clone())
+            .or_else(|| {
+                self.registration
+                    .blocks
+                    .get(resolved_block_name)
+                    .map(|b| b.info().requires)
+            })
+            .filter(|r| !r.is_empty())
     }
 
     /// Lazily initialize the named block. Returns the cached `InitializedState`
@@ -477,7 +530,10 @@ impl Wafer {
         // Build the lifecycle(Init) context. The stack we were just handed is
         // inherited into the context so any `init_block` call made transitively
         // by this block participates in the same cycle-detection frame.
-        let init_ctx = self.make_context(
+        // SEC-04: `make_block_context` installs the block's `requires` so any
+        // `call_block` made during Init is gated by the same allowlist as its
+        // request-time calls.
+        let init_ctx = self.make_block_context(
             "init",
             name,
             std::collections::HashMap::new(),

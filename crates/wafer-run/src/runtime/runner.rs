@@ -149,21 +149,6 @@ impl Wafer {
         };
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        // Read the target's `requires` list from the immutable startup snapshot
-        // rather than rebuilding the entire `BlockInfo` via `block.info()` on
-        // every dispatch — `info()` re-allocates all of the block's endpoint,
-        // collection and config-key fields just to read one (usually empty)
-        // Vec. Fall back to `block.info()` only if the block is somehow absent
-        // from the snapshot (e.g. registered after seal).
-        let caller_requires = self
-            .snapshot
-            .blocks
-            .iter()
-            .find(|b| b.name == resolved)
-            .map(|b| b.requires.clone())
-            .or_else(|| Some(block.info().requires))
-            .filter(|r| !r.is_empty());
-
         // Look up block config and flatten to HashMap<String, String>. Like
         // `lookup_with_alias`, try the alias-resolved name first then the
         // original: `add_block_config` is keyed by registration name, which
@@ -186,7 +171,10 @@ impl Wafer {
         // Top-level dispatch starts a fresh init-stack; any transitive
         // `init_block` calls inherit it through `RuntimeContext`.
         let init_stack = crate::runtime::init_stack::InitStack::new();
-        let mut ctx = self.make_context(
+        // SEC-04: `make_block_context` installs the target's declared
+        // `requires` allowlist so `call_block` is gated the same on every
+        // invocation path (direct, flow step, nested, lifecycle).
+        let ctx = self.make_block_context(
             "",
             resolved,
             block_config,
@@ -194,7 +182,6 @@ impl Wafer {
             None,
             init_stack.clone(),
         );
-        ctx.caller_requires = caller_requires;
 
         // Lazy init + observability bracket via the shared dispatch scaffold.
         run_resolved(

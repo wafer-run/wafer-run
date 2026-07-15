@@ -504,7 +504,11 @@ async fn run_invocation(
         .unwrap_or_default();
     // Each flow step gets its own init stack frame for cycle detection.
     let step_init_stack = crate::runtime::init_stack::InitStack::new();
-    let ctx = env.wafer.make_context(
+    // SEC-04: build the step context through `make_block_context` so the
+    // step block's declared `requires` allowlist is enforced on `call_block`,
+    // identically to top-level dispatch. `make_context` alone would leave the
+    // step unrestricted.
+    let ctx = env.wafer.make_block_context(
         &env.flow.id,
         &block_name,
         step_config,

@@ -51,8 +51,11 @@ pub struct RuntimeContext {
     pub deadline: Option<Instant>,
     /// All registered blocks.
     pub all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
-    /// Current call depth to prevent infinite recursion.
-    pub call_depth: Arc<std::sync::atomic::AtomicU32>,
+    /// This frame's recursion depth. COR-01: a per-frame value copied
+    /// `depth + 1` into each child context — NOT a counter shared across the
+    /// call tree. Sibling calls at the same logical depth therefore all see
+    /// the same value; only true nesting increases it. `0` at the top level.
+    pub call_depth: u32,
     /// Maximum call depth (default: 16).
     pub max_call_depth: u32,
     /// Immutable bundle of post-startup metadata: registered blocks,
@@ -104,15 +107,6 @@ fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
     OutputStream::error(WaferError::new(code, message))
 }
 
-/// RAII guard that decrements `call_depth` on drop, even if the block panics.
-struct CallDepthGuard(Arc<std::sync::atomic::AtomicU32>);
-
-impl Drop for CallDepthGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
 impl RuntimeContext {
     /// Resolve `name` through the alias map, single-hop. Mirrors
     /// [`crate::Wafer::canonicalize`]. Single-hop is sufficient because
@@ -138,14 +132,12 @@ impl RuntimeContext {
         input: InputStream,
         attachments: Option<BTreeMap<String, Attachment>>,
     ) -> OutputStream {
-        // Recursion depth check — the RAII guard ensures the counter is
-        // decremented even if the block panics.
-        let depth = self
-            .call_depth
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _depth_guard = CallDepthGuard(self.call_depth.clone());
-
-        if depth >= self.max_call_depth {
+        // Recursion depth check. COR-01: `call_depth` is this frame's depth,
+        // not a shared in-flight counter — a block at the maximum nesting
+        // depth cannot call further. The callee's sub-context below is given
+        // `self.call_depth + 1`, so concurrent sibling calls (all made from
+        // this same frame) never accumulate.
+        if self.call_depth >= self.max_call_depth {
             return err_output(
                 ErrorCode::ResourceExhausted,
                 format!(
@@ -304,11 +296,13 @@ impl RuntimeContext {
         //   - caller_requires: the callee's own `requires` allowlist.
         //   - caller_id: this frame's node becomes the callee's caller.
         //   - current_attachments: the per-call inbound attachment map.
+        //   - call_depth: one level deeper than this frame (COR-01).
         let sub_ctx = RuntimeContext {
             node_id: resolved_block_name.to_string(),
             caller_requires: called_requires,
             caller_id: Some(self.node_id.clone()),
             current_attachments: sub_attachments,
+            call_depth: self.call_depth + 1,
             ..self.clone()
         };
 
