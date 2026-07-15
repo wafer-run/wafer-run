@@ -824,6 +824,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             }
         }
 
+        /// Core-ABI version this guest speaks (v2 = MessagePack frames; see
+        /// `wafer_block::abi`). The host probes this export; guests built
+        /// before it existed are decoded as v1 (JSON).
+        #[cfg(all(not(test), target_arch = "wasm32"))]
+        #[no_mangle]
+        pub extern "C" fn __wafer_abi_version() -> i32 {
+            wafer_block::abi::ABI_VERSION
+        }
+
         #[cfg(all(not(test), target_arch = "wasm32"))]
         #[no_mangle]
         pub extern "C" fn __wafer_info() -> i64 {
@@ -832,7 +841,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             // a zero (ptr, len) packet. The host decodes that as "no info
             // available" rather than receiving a wasm trap.
             let info = <#struct_ty>::block_info();
-            let bytes = match serde_json::to_vec(&info) {
+            let bytes = match wafer_block::codec::encode(&info) {
                 Ok(b) => b,
                 Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
             };
@@ -854,14 +863,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             let msg_bytes = unsafe {
                 ::std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize)
             };
-            // The host sends a 2-element JSON tuple: [Message, Vec<u8>]
-            let (msg, body): (wafer_block::Message, ::std::vec::Vec<u8>) =
-                match serde_json::from_slice(msg_bytes) {
+            // ABI v2 frame: MessagePack [Message, bin body] (see wafer_block::abi).
+            let frame: wafer_block::abi::CallFrame =
+                match wafer_block::codec::decode(msg_bytes) {
                     Ok(parsed) => parsed,
                     Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
                 };
+            let (msg, body) = (frame.0, frame.1.into_vec());
             let result: wafer_sdk::core_abi::GuestResult = <#struct_ty>::handle(msg, body);
-            let result_bytes = match serde_json::to_vec(&result) {
+            let result_bytes = match wafer_block::codec::encode(&result) {
                 Ok(b) => b,
                 Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
             };
@@ -883,12 +893,13 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             let evt_bytes = unsafe {
                 ::std::slice::from_raw_parts(evt_ptr as *const u8, evt_len as usize)
             };
-            let event: wafer_block::LifecycleEvent = match serde_json::from_slice(evt_bytes) {
-                Ok(e) => e,
-                Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
-            };
+            let event: wafer_block::LifecycleEvent =
+                match wafer_block::codec::decode(evt_bytes) {
+                    Ok(e) => e,
+                    Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+                };
             let result = <#struct_ty>::lifecycle(event);
-            let result_bytes = match serde_json::to_vec(&result) {
+            let result_bytes = match wafer_block::codec::encode(&result) {
                 Ok(b) => b,
                 Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
             };

@@ -126,6 +126,66 @@ fn instantiate(
 }
 
 // ---------------------------------------------------------------------------
+// Core-ABI codec negotiation (PERF-01)
+// ---------------------------------------------------------------------------
+
+/// Wire codec for the core (non-streaming) guest ABI, negotiated per module
+/// via the `__wafer_abi_version` export (see `wafer_block::abi`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AbiCodec {
+    /// Legacy JSON frames — guests built before the version export existed.
+    /// Supported indefinitely so already-shipped wasm artifacts keep working.
+    V1Json,
+    /// MessagePack frames with bin-encoded bodies (ABI v2).
+    V2Rmp,
+}
+
+/// Decide the codec from the module's static export list — no instantiation
+/// needed. A guest exporting [`wafer_block::abi::ABI_VERSION_EXPORT`] speaks
+/// the versioned (v2+) ABI; [`verify_abi_version`] then pins the exact value
+/// at instantiation time so a future v3 guest fails loud instead of being
+/// mis-decoded as v2.
+fn abi_codec_of(module: &Module) -> AbiCodec {
+    let versioned = module
+        .exports()
+        .any(|e| e.name() == wafer_block::abi::ABI_VERSION_EXPORT && e.ty().func().is_some());
+    if versioned {
+        AbiCodec::V2Rmp
+    } else {
+        AbiCodec::V1Json
+    }
+}
+
+/// Call the guest's `__wafer_abi_version` and reject any version this host
+/// does not speak. Only meaningful for [`AbiCodec::V2Rmp`] modules.
+fn verify_abi_version(
+    store: &mut Store<WasmiHostState>,
+    instance: wasmi::Instance,
+) -> Result<(), RuntimeError> {
+    let version_fn = instance
+        .get_typed_func::<(), i32>(&*store, wafer_block::abi::ABI_VERSION_EXPORT)
+        .map_err(|e| {
+            RuntimeError::Wasm(format!(
+                "getting {}: {e}",
+                wafer_block::abi::ABI_VERSION_EXPORT
+            ))
+        })?;
+    let version = version_fn.call(&mut *store, ()).map_err(|e| {
+        RuntimeError::Wasm(format!(
+            "calling {}: {e}",
+            wafer_block::abi::ABI_VERSION_EXPORT
+        ))
+    })?;
+    if version != wafer_block::abi::ABI_VERSION {
+        return Err(RuntimeError::Wasm(format!(
+            "guest declares core ABI v{version}; this host supports v1 (implicit) and v{}",
+            wafer_block::abi::ABI_VERSION
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ContextScope — RAII install/clear of the borrowed Context in the store
 // ---------------------------------------------------------------------------
 
@@ -413,13 +473,21 @@ impl WasmiBlock {
         // into the store below for the streaming-ABI path).
         let inbound_protected = protected_meta_entries(&msg.meta);
 
-        let msg_bytes = match serde_json::to_vec(&(&msg, &body)) {
-            Ok(b) => b,
-            Err(e) => {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("serializing message: {e}"),
-                ));
+        let codec = abi_codec_of(&self.module);
+        let msg_bytes = {
+            let frame = wafer_block::abi::CallFrameRef(&msg, &body);
+            let encoded = match codec {
+                AbiCodec::V1Json => serde_json::to_vec(&frame).map_err(|e| e.to_string()),
+                AbiCodec::V2Rmp => wafer_block::codec::encode(&frame).map_err(|e| e.to_string()),
+            };
+            match encoded {
+                Ok(b) => b,
+                Err(e) => {
+                    return OutputStream::error(WaferError::new(
+                        ErrorCode::Internal,
+                        format!("serializing message: {e}"),
+                    ));
+                }
             }
         };
 
@@ -439,6 +507,9 @@ impl WasmiBlock {
                         RuntimeError::Wasm("guest has no exported memory".to_string())
                     })?;
 
+                    if codec == AbiCodec::V2Rmp {
+                        verify_abi_version(store, instance)?;
+                    }
                     let ptr = write_guest_bytes(store, alloc_fn, memory, &msg_bytes)?;
                     let len = msg_bytes.len() as i32;
                     Ok((handle_fn, ptr as i32, len))
@@ -455,22 +526,15 @@ impl WasmiBlock {
             }
         };
 
-        // The guest returns a guest ABI format JSON. Map it back to OutputStream.
-        #[derive(serde::Deserialize)]
-        struct GuestAbiResult {
-            action: String,
-            response: Option<GuestAbiResponse>,
-            error: Option<WaferError>,
-            message: Option<Message>,
-        }
-        #[derive(serde::Deserialize)]
-        struct GuestAbiResponse {
-            data: Vec<u8>,
-            #[serde(default)]
-            meta: Vec<MetaEntry>,
-        }
-
-        match serde_json::from_slice::<GuestAbiResult>(&result_bytes) {
+        // Decode the guest's result with the negotiated codec (the shared
+        // `wafer_block::abi::GuestResult` type — same one the SDK glue
+        // serializes, so the two sides cannot drift) and map it back to an
+        // OutputStream.
+        let parsed: Result<wafer_block::abi::GuestResult, String> = match codec {
+            AbiCodec::V1Json => serde_json::from_slice(&result_bytes).map_err(|e| e.to_string()),
+            AbiCodec::V2Rmp => wafer_block::codec::decode(&result_bytes).map_err(|e| e.to_string()),
+        };
+        match parsed {
             Ok(result) => match result.action.as_str() {
                 "Respond" => {
                     let (data, meta) = result
@@ -851,6 +915,11 @@ impl Block for WasmiBlock {
                 self.limits,
             )?;
 
+            let codec = abi_codec_of(&self.module);
+            if codec == AbiCodec::V2Rmp {
+                verify_abi_version(&mut store, instance)?;
+            }
+
             let info_fn = instance
                 .get_typed_func::<(), i64>(&store, "__wafer_info")
                 .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_info: {e}")))?;
@@ -865,8 +934,12 @@ impl Block for WasmiBlock {
 
             let (ptr, len) = unpack_ptr_len(packed)?;
             let bytes = read_guest_bytes(&store, memory, ptr, len)?;
-            let info: BlockInfo = serde_json::from_slice(&bytes)
-                .map_err(|e| RuntimeError::Wasm(format!("deserializing BlockInfo: {e}")))?;
+            let info: BlockInfo = match codec {
+                AbiCodec::V1Json => serde_json::from_slice(&bytes)
+                    .map_err(|e| RuntimeError::Wasm(format!("deserializing BlockInfo: {e}")))?,
+                AbiCodec::V2Rmp => wafer_block::codec::decode(&bytes)
+                    .map_err(|e| RuntimeError::Wasm(format!("deserializing BlockInfo: {e}")))?,
+            };
             Ok(info)
         })();
 
@@ -908,7 +981,12 @@ impl Block for WasmiBlock {
         ctx: &dyn Context,
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
-        let event_bytes = serde_json::to_vec(&event).map_err(|e| {
+        let codec = abi_codec_of(&self.module);
+        let event_bytes = match codec {
+            AbiCodec::V1Json => serde_json::to_vec(&event).map_err(|e| e.to_string()),
+            AbiCodec::V2Rmp => wafer_block::codec::encode(&event).map_err(|e| e.to_string()),
+        }
+        .map_err(|e| {
             WaferError::new(
                 ErrorCode::Internal,
                 format!("serializing lifecycle event: {e}"),
@@ -927,6 +1005,9 @@ impl Block for WasmiBlock {
                     RuntimeError::Wasm("guest has no exported memory".to_string())
                 })?;
 
+                if codec == AbiCodec::V2Rmp {
+                    verify_abi_version(store, instance)?;
+                }
                 let ptr = write_guest_bytes(store, alloc_fn, memory, &event_bytes)?;
                 let len = event_bytes.len() as i32;
                 Ok((lifecycle_fn, ptr as i32, len))
@@ -936,14 +1017,17 @@ impl Block for WasmiBlock {
                 WaferError::new(ErrorCode::Internal, format!("WASM lifecycle error: {e}"))
             })?;
 
-        // The guest returns a JSON-encoded Result<(), WaferError>.
-        let result: std::result::Result<(), WaferError> = serde_json::from_slice(&result_bytes)
-            .map_err(|e| {
-                WaferError::new(
-                    ErrorCode::Internal,
-                    format!("deserializing WASM lifecycle result: {e}"),
-                )
-            })?;
+        // The guest returns a codec-encoded Result<(), WaferError>.
+        let result: std::result::Result<(), WaferError> = match codec {
+            AbiCodec::V1Json => serde_json::from_slice(&result_bytes).map_err(|e| e.to_string()),
+            AbiCodec::V2Rmp => wafer_block::codec::decode(&result_bytes).map_err(|e| e.to_string()),
+        }
+        .map_err(|e| {
+            WaferError::new(
+                ErrorCode::Internal,
+                format!("deserializing WASM lifecycle result: {e}"),
+            )
+        })?;
         result
     }
 
