@@ -44,18 +44,22 @@ fn skill_block_without_wafer_run_dep_compiles_for_wasm32() {
         .current_dir(&fixture_dir)
         .args(["build", "--release", "--target", "wasm32-wasip1"])
         .env("CARGO_TARGET_DIR", &target_dir)
-        // Ensure we don't leak the parent build's RUSTFLAGS into the wasm32
-        // fixture build. Two sources matter:
-        //   - RUSTFLAGS: host-arch-specific link args that break wasm32.
-        //   - CARGO_ENCODED_RUSTFLAGS: how `cargo llvm-cov` injects
-        //     `-C instrument-coverage` into every child cargo. Coverage
-        //     instrumentation is unsupported on wasm32-wasip1, so inheriting
-        //     it makes this fixture fail to compile — which previously turned
-        //     the whole Coverage CI job red (the PR `ci.yml` has no coverage
-        //     job, so it only showed up post-merge on `ci-main.yml`).
-        // The fixture never needs coverage data, so clearing both is correct.
+        // Don't leak the parent build's instrumentation into the wasm32
+        // fixture build. `cargo llvm-cov` injects `-C instrument-coverage
+        // --cfg=coverage` through a `RUSTC_WRAPPER` (with the flags carried in
+        // `__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS`), NOT through RUSTFLAGS —
+        // so clearing the wrapper vars is what actually stops the injection.
+        // Coverage instrumentation needs `profiler_builtins`, which has no
+        // wasm32-wasip1 build (E0463), so an inherited wrapper makes this
+        // fixture fail to compile and turns the whole Coverage CI job red.
+        // (The PR `ci.yml` has no coverage job, so it only showed up
+        // post-merge on `ci-main.yml`.) RUSTFLAGS is cleared too for its own
+        // reason: host-arch link args that break wasm32. The fixture never
+        // needs coverage data, so clearing all of these is correct.
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .output()
         .expect("failed to spawn cargo");
 
