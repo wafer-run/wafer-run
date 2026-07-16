@@ -72,7 +72,7 @@ pub extern "C" fn __wafer_info() -> i64 {
     // SEC-02: WASM guests fail closed by default, so declare the native
     // gate block the `pool.gate` / `pool.leak_stream` arms target.
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: ["test/pool-gate"].into_iter().map(String::from).collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only(["test/pool-gate"].into_iter().map(String::from).collect()),
         ..wafer_sdk::BlockCapabilities::none()
     });
     let bytes = wafer_sdk::codec::encode(&info).expect("BlockInfo is codec-serialisable");

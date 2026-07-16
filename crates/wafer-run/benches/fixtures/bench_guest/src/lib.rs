@@ -35,10 +35,7 @@ pub extern "C" fn __wafer_info() -> i64 {
     // declare the blocks it calls — the native echo block and itself
     // (for the guest→guest nested arm).
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: ["bench/native-echo", "bench/guest"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only(["bench/native-echo", "bench/guest"] .into_iter() .map(String::from) .collect()),
         ..wafer_sdk::BlockCapabilities::none()
     });
     // Pooled-arm variant (PERF-01 Part B): declare a state-retaining

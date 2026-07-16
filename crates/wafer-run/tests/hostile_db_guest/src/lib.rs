@@ -84,8 +84,8 @@ pub extern "C" fn __wafer_info() -> i64 {
     // meaning, while the InvalidArgument tests (own-collection aggregates)
     // now reach the query validator instead of being capability-denied.
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: [DATABASE_BLOCK].into_iter().map(String::from).collect(),
-        collections: [OWN_COLLECTION].into_iter().map(String::from).collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only([DATABASE_BLOCK].into_iter().map(String::from).collect()),
+        collections: wafer_sdk::Allowlist::Only([OWN_COLLECTION].into_iter().map(String::from).collect()),
         ..wafer_sdk::BlockCapabilities::none()
     });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");

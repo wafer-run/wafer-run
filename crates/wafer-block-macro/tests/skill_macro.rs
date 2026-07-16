@@ -300,7 +300,7 @@ fn skill_and_capabilities_compose() {
         "network flag must be honored"
     );
     assert!(
-        caps.callable_blocks.contains("wafer-run/network"),
+        caps.callable_blocks.allows("wafer-run/network"),
         "callable_blocks must be honored"
     );
     assert!(!caps.crypto, "undeclared fields stay denied");

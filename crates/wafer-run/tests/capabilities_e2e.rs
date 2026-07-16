@@ -48,7 +48,9 @@ fn make_declaring(name: &str, caps: BlockCapabilities) -> Arc<DeclaringNative> {
 #[tokio::test]
 async fn declared_caps_applied_when_no_config() {
     let declared = BlockCapabilities {
-        collections: ["users"].iter().map(|s| s.to_string()).collect(),
+        collections: wafer_block::capabilities::Allowlist::Only(
+            ["users"].iter().map(|s| s.to_string()).collect(),
+        ),
         crypto: true,
         ..Default::default()
     };
@@ -63,7 +65,7 @@ async fn declared_caps_applied_when_no_config() {
         .effective_capabilities("test/declaring-a")
         .expect("effective caps stored");
     assert!(eff.crypto);
-    assert!(eff.collections.contains("users"));
+    assert!(eff.collections.allows("users"));
 }
 
 /// SEC-02: a WASM block that declares no capabilities must fail closed —
@@ -98,11 +100,20 @@ async fn wasm_block_without_capabilities_defaults_to_none() {
         wafer_block::capabilities::Allowlist::None,
         "config must be denied"
     );
-    assert!(eff.collections.is_empty(), "no collection wildcard");
-    assert!(eff.storage_folders.is_empty(), "no storage wildcard");
-    assert!(eff.vector_indexes.is_empty(), "no vector wildcard");
     assert!(
-        eff.callable_blocks.is_empty(),
+        eff.collections == wafer_block::capabilities::Allowlist::None,
+        "no collection wildcard"
+    );
+    assert!(
+        eff.storage_folders == wafer_block::capabilities::Allowlist::None,
+        "no storage wildcard"
+    );
+    assert!(
+        eff.vector_indexes == wafer_block::capabilities::Allowlist::None,
+        "no vector wildcard"
+    );
+    assert!(
+        eff.callable_blocks == wafer_block::capabilities::Allowlist::None,
         "no callable-block wildcard — an undeclared WASM guest cannot call arbitrary blocks"
     );
 }
@@ -137,7 +148,7 @@ async fn native_block_without_capabilities_defaults_to_unrestricted() {
         "native retains unrestricted network"
     );
     assert!(
-        eff.callable_blocks.contains("*"),
+        eff.callable_blocks == wafer_block::capabilities::Allowlist::Any,
         "native retains unrestricted call_block"
     );
 }
@@ -209,7 +220,9 @@ async fn operator_config_cannot_widen_declared() {
 #[tokio::test]
 async fn native_block_declares_but_not_enforced() {
     let declared = BlockCapabilities {
-        collections: ["users"].iter().map(|s| s.to_string()).collect(),
+        collections: wafer_block::capabilities::Allowlist::Only(
+            ["users"].iter().map(|s| s.to_string()).collect(),
+        ),
         ..Default::default()
     };
     let block = make_declaring("test/native-declared", declared);
@@ -223,7 +236,7 @@ async fn native_block_declares_but_not_enforced() {
     let eff = wafer
         .effective_capabilities("test/native-declared")
         .expect("stored");
-    assert!(eff.collections.contains("users"));
+    assert!(eff.collections.allows("users"));
 
     // Dispatch succeeds regardless of declared collection restrictions (native is trusted).
     let msg = Message::new("http.request");

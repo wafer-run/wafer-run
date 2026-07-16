@@ -34,10 +34,7 @@ pub extern "C" fn __wafer_info() -> i64 {
     // SEC-02: declare the config service block this guest calls and the
     // config capability its reads exercise.
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: ["wafer-run/config"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only(["wafer-run/config"] .into_iter() .map(String::from) .collect()),
         config: wafer_sdk::Allowlist::Any,
         ..wafer_sdk::BlockCapabilities::none()
     });

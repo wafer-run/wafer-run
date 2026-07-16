@@ -343,19 +343,13 @@ fn log_widening_attempts(
         }
     }
 
-    // Allowlist capabilities (SEC-06): an override widens when it permits
-    // something the effective (declared ∩ override) does not.
+    // Allowlist capabilities: an override widens when it permits something the
+    // effective (declared ∩ override) does not. All six allowlist fields share
+    // one loop now (collections/storage_folders/vector_indexes/callable_blocks
+    // joined network/config here when they became `Allowlist` — this also
+    // closes the pre-existing gap where `vector_indexes` widening was never
+    // logged).
     for (label, over_opt, eff) in [
-        ("network", overrides.network.as_ref(), &effective.network),
-        ("config", overrides.config.as_ref(), &effective.config),
-    ] {
-        if let Some(over) = over_opt {
-            log_allowlist_widening(name, label, over, eff);
-        }
-    }
-
-    // HashSet allowlists: items in the override that did NOT survive intersection.
-    let hash_fields = [
         (
             "collections",
             overrides.collections.as_ref(),
@@ -366,24 +360,21 @@ fn log_widening_attempts(
             overrides.storage_folders.as_ref(),
             &effective.storage_folders,
         ),
+        ("network", overrides.network.as_ref(), &effective.network),
+        ("config", overrides.config.as_ref(), &effective.config),
+        (
+            "vector_indexes",
+            overrides.vector_indexes.as_ref(),
+            &effective.vector_indexes,
+        ),
         (
             "callable_blocks",
             overrides.callable_blocks.as_ref(),
             &effective.callable_blocks,
         ),
-    ];
-    for (label, over_opt, eff_set) in hash_fields {
-        if let Some(over_set) = over_opt {
-            for item in over_set.iter() {
-                if !eff_set.contains(item) {
-                    tracing::warn!(
-                        block = %name,
-                        field = %label,
-                        item = %item,
-                        "config widened capability beyond declared — narrower declaration wins"
-                    );
-                }
-            }
+    ] {
+        if let Some(over) = over_opt {
+            log_allowlist_widening(name, label, over, eff);
         }
     }
 

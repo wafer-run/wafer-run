@@ -8,7 +8,7 @@
 //! - The runtime intersects declared ∩ config and enforces on WASM blocks.
 //! - Native blocks' declarations are documentation-only.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,19 @@ impl Allowlist {
     /// Whether the capability is enabled at all (`Any` or `Only`, not `None`).
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Allowlist::None)
+    }
+
+    /// Whether `value` is permitted by exact membership: `None` → false,
+    /// `Any` → true, `Only(set)` → `set.contains(value)`. Used by every
+    /// capability whose allowlist matches values exactly (collections,
+    /// storage folders, vector indexes, callable blocks, config keys). Network
+    /// does NOT use this — it matches URL prefixes, not exact strings.
+    pub fn allows(&self, value: &str) -> bool {
+        match self {
+            Allowlist::None => false,
+            Allowlist::Any => true,
+            Allowlist::Only(set) => set.contains(value),
+        }
     }
 
     /// Narrowing intersection (declared ∩ operator-override): the result
@@ -102,9 +115,11 @@ pub struct HeaderPolicy {
 /// BlockCapabilities declares what platform services a WASM block may access.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockCapabilities {
-    /// Allowed database collections. "*" = all, empty = none.
+    /// Allowed database collections: `None` = none, `Any` = all, `Only([...])`
+    /// = exactly these (empty `Only` = none). Replaces the old `HashSet` where
+    /// `"*"` meant all — see [`Allowlist`].
     #[serde(default)]
-    pub collections: HashSet<String>,
+    pub collections: Allowlist,
     /// Can use query_raw/exec_raw.
     #[serde(default)]
     pub raw_sql: bool,
@@ -115,9 +130,9 @@ pub struct BlockCapabilities {
     /// `true` via `unrestricted()`.
     #[serde(default)]
     pub ddl: bool,
-    /// Allowed storage folders. "*" = all, empty = none.
+    /// Allowed storage folders: `None`/`Any`/`Only([...])` (see [`Allowlist`]).
     #[serde(default)]
-    pub storage_folders: HashSet<String>,
+    pub storage_folders: Allowlist,
     /// Can use crypto service.
     #[serde(default)]
     pub crypto: bool,
@@ -132,13 +147,14 @@ pub struct BlockCapabilities {
     /// `config_keys: HashSet` whose empty set ambiguously meant "any".
     #[serde(default)]
     pub config: Allowlist,
-    /// Allowed vector indexes (by storage name). "*" = all, empty = none.
+    /// Allowed vector indexes (by storage name): `None`/`Any`/`Only([...])`
+    /// (see [`Allowlist`]).
     #[serde(default)]
-    pub vector_indexes: HashSet<String>,
-    /// Blocks that may be called via `call_block()`. "*" = all, empty = none
-    /// (i.e. no calls — `allows_call_block` denies on an empty set).
+    pub vector_indexes: Allowlist,
+    /// Blocks that may be called via `call_block()`: `None` = no calls,
+    /// `Any` = any block, `Only([...])` = only these (see [`Allowlist`]).
     #[serde(default)]
-    pub callable_blocks: HashSet<String>,
+    pub callable_blocks: Allowlist,
     /// Per-header read/write/mask policy.
     #[serde(default)]
     pub headers: HeaderPolicy,
@@ -149,31 +165,15 @@ impl BlockCapabilities {
     /// allowed, all wildcards set, no allowlists enforced.
     pub fn unrestricted() -> Self {
         Self {
-            collections: {
-                let mut s = HashSet::new();
-                s.insert("*".to_string());
-                s
-            },
+            collections: Allowlist::Any,
             raw_sql: true,
             ddl: true,
-            storage_folders: {
-                let mut s = HashSet::new();
-                s.insert("*".to_string());
-                s
-            },
+            storage_folders: Allowlist::Any,
             crypto: true,
             network: Allowlist::Any,
             config: Allowlist::Any,
-            vector_indexes: {
-                let mut s = HashSet::new();
-                s.insert("*".to_string());
-                s
-            },
-            callable_blocks: {
-                let mut s = HashSet::new();
-                s.insert("*".to_string());
-                s
-            },
+            vector_indexes: Allowlist::Any,
+            callable_blocks: Allowlist::Any,
             headers: HeaderPolicy::default(),
         }
     }
@@ -181,15 +181,15 @@ impl BlockCapabilities {
     /// No capabilities — completely sandboxed default for untrusted WASM blocks.
     pub fn none() -> Self {
         Self {
-            collections: HashSet::new(),
+            collections: Allowlist::None,
             raw_sql: false,
             ddl: false,
-            storage_folders: HashSet::new(),
+            storage_folders: Allowlist::None,
             crypto: false,
             network: Allowlist::None,
             config: Allowlist::None,
-            vector_indexes: HashSet::new(),
-            callable_blocks: HashSet::new(), // empty = no calls allowed
+            vector_indexes: Allowlist::None,
+            callable_blocks: Allowlist::None, // None = no calls allowed
             headers: HeaderPolicy::default(),
         }
     }
@@ -197,13 +197,13 @@ impl BlockCapabilities {
     /// Whether this capability set permits operations against `collection`
     /// (matches `"*"` wildcard or an exact entry).
     pub fn allows_collection(&self, collection: &str) -> bool {
-        self.collections.contains("*") || self.collections.contains(collection)
+        self.collections.allows(collection)
     }
 
     /// Whether this capability set permits operations on `folder` in the
     /// storage service (matches `"*"` wildcard or an exact entry).
     pub fn allows_storage_folder(&self, folder: &str) -> bool {
-        self.storage_folders.contains("*") || self.storage_folders.contains(folder)
+        self.storage_folders.allows(folder)
     }
 
     /// Whether outbound HTTP to `url` is permitted (SEC-06):
@@ -242,47 +242,42 @@ impl BlockCapabilities {
     /// `allows_collection`: a db-collection grant must not confer vector
     /// access, per the no-magic-mapping rule.
     pub fn allows_vector_index(&self, name: &str) -> bool {
-        self.vector_indexes.contains("*") || self.vector_indexes.contains(name)
+        self.vector_indexes.allows(name)
     }
 
     /// Whether the block may read/write config key `key` (SEC-06):
     /// `None` → denied, `Any` → allowed, `Only(keys)` → allowed iff `key` is
     /// in the set (empty set denies everything).
     pub fn allows_config_key(&self, key: &str) -> bool {
-        match &self.config {
-            Allowlist::None => false,
-            Allowlist::Any => true,
-            Allowlist::Only(keys) => keys.contains(key),
-        }
+        self.config.allows(key)
     }
 
     /// Check whether a call_block invocation to `target` is allowed.
     ///
     /// `"*"` = unrestricted. Empty set = no calls allowed.
     pub fn allows_call_block(&self, target: &str) -> bool {
-        self.callable_blocks.contains("*") || self.callable_blocks.contains(target)
+        self.callable_blocks.allows(target)
     }
 
     /// Intersect two capability sets.
     ///
     /// Rules:
-    /// - Booleans: logical AND (both must allow).
-    /// - HashSet allowlists (collections, storage_folders, config_keys, callable_blocks):
-    ///   set intersection. Wildcard sentinel `"*"` on one side yields the other side.
-    /// - Vec allowlist (network_allow): set intersection, preserves self's order.
+    /// - Booleans (`raw_sql`, `ddl`, `crypto`): logical AND (both must allow).
+    /// - [`Allowlist`] fields (collections, storage_folders, network, config,
+    ///   vector_indexes, callable_blocks): [`Allowlist::intersect`].
     /// - HeaderPolicy readable / writable: intersection.
     /// - HeaderPolicy masked: UNION (denylists strengthen).
     pub fn intersect(&self, other: &Self) -> Self {
         Self {
-            collections: intersect_wildcard_set(&self.collections, &other.collections),
+            collections: self.collections.intersect(&other.collections),
             raw_sql: self.raw_sql && other.raw_sql,
             ddl: self.ddl && other.ddl,
-            storage_folders: intersect_wildcard_set(&self.storage_folders, &other.storage_folders),
+            storage_folders: self.storage_folders.intersect(&other.storage_folders),
             crypto: self.crypto && other.crypto,
             network: self.network.intersect(&other.network),
             config: self.config.intersect(&other.config),
-            vector_indexes: intersect_wildcard_set(&self.vector_indexes, &other.vector_indexes),
-            callable_blocks: intersect_wildcard_set(&self.callable_blocks, &other.callable_blocks),
+            vector_indexes: self.vector_indexes.intersect(&other.vector_indexes),
+            callable_blocks: self.callable_blocks.intersect(&other.callable_blocks),
             headers: HeaderPolicy {
                 readable: intersect_vec(&self.headers.readable, &other.headers.readable),
                 writable: intersect_vec(&self.headers.writable, &other.headers.writable),
@@ -298,8 +293,8 @@ impl BlockCapabilities {
     /// with declared using the intersection rules:
     ///
     /// - Booleans: logical AND (operator can only disable, not enable).
-    /// - HashSet allowlists: set intersection (with `"*"` wildcard).
-    /// - Vec allowlists: set intersection.
+    /// - [`Allowlist`] fields: [`Allowlist::intersect`].
+    /// - Vec allowlists (`network_allow` is gone; header vecs remain): intersection.
     /// - HeaderPolicy `readable`/`writable`: intersection.
     /// - HeaderPolicy `masked`: UNION (operator can add masking).
     ///
@@ -323,21 +318,21 @@ impl BlockCapabilities {
         let h = o.headers.as_ref();
         let effective = Self {
             collections: narrow(&self.collections, o.collections.as_ref(), |a, b| {
-                intersect_wildcard_set(a, b)
+                a.intersect(b)
             }),
             raw_sql: narrow(&self.raw_sql, o.raw_sql.as_ref(), |a, b| *a && *b),
             ddl: narrow(&self.ddl, o.ddl.as_ref(), |a, b| *a && *b),
             storage_folders: narrow(&self.storage_folders, o.storage_folders.as_ref(), |a, b| {
-                intersect_wildcard_set(a, b)
+                a.intersect(b)
             }),
             crypto: narrow(&self.crypto, o.crypto.as_ref(), |a, b| *a && *b),
             network: narrow(&self.network, o.network.as_ref(), |a, b| a.intersect(b)),
             config: narrow(&self.config, o.config.as_ref(), |a, b| a.intersect(b)),
             vector_indexes: narrow(&self.vector_indexes, o.vector_indexes.as_ref(), |a, b| {
-                intersect_wildcard_set(a, b)
+                a.intersect(b)
             }),
             callable_blocks: narrow(&self.callable_blocks, o.callable_blocks.as_ref(), |a, b| {
-                intersect_wildcard_set(a, b)
+                a.intersect(b)
             }),
             headers: HeaderPolicy {
                 readable: narrow(
@@ -368,7 +363,7 @@ impl BlockCapabilities {
 /// `Some(o)` combines via the same rule function [`BlockCapabilities::intersect`]
 /// uses for that field — so each field's combination rule is named once here
 /// and once in `intersect`, with the rule body living in a single function
-/// (`intersect_wildcard_set` / `intersect_vec` / `union_vec` / bool AND).
+/// ([`Allowlist::intersect`] / `intersect_vec` / `union_vec` / bool AND).
 fn narrow<T: Clone, U>(declared: &T, ov: Option<&U>, combine: impl FnOnce(&T, &U) -> T) -> T {
     match ov {
         Some(o) => combine(declared, o),
@@ -394,7 +389,7 @@ fn narrow<T: Clone, U>(declared: &T, ov: Option<&U>, combine: impl FnOnce(&T, &U
 pub struct ConfigCapabilityOverrides {
     /// Override for [`BlockCapabilities::collections`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collections: Option<HashSet<String>>,
+    pub collections: Option<Allowlist>,
     /// Override for [`BlockCapabilities::raw_sql`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_sql: Option<bool>,
@@ -403,7 +398,7 @@ pub struct ConfigCapabilityOverrides {
     pub ddl: Option<bool>,
     /// Override for [`BlockCapabilities::storage_folders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_folders: Option<HashSet<String>>,
+    pub storage_folders: Option<Allowlist>,
     /// Override for [`BlockCapabilities::crypto`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crypto: Option<bool>,
@@ -418,10 +413,10 @@ pub struct ConfigCapabilityOverrides {
     pub config: Option<Allowlist>,
     /// Override for [`BlockCapabilities::vector_indexes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vector_indexes: Option<HashSet<String>>,
+    pub vector_indexes: Option<Allowlist>,
     /// Override for [`BlockCapabilities::callable_blocks`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub callable_blocks: Option<HashSet<String>>,
+    pub callable_blocks: Option<Allowlist>,
     /// Override for [`BlockCapabilities::headers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<HeaderPolicyOverrides>,
@@ -439,21 +434,6 @@ pub struct HeaderPolicyOverrides {
     /// Override for [`HeaderPolicy::masked`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masked: Option<Vec<String>>,
-}
-
-fn intersect_wildcard_set(a: &HashSet<String>, b: &HashSet<String>) -> HashSet<String> {
-    let a_any = a.contains("*");
-    let b_any = b.contains("*");
-    match (a_any, b_any) {
-        (true, true) => {
-            let mut r = HashSet::new();
-            r.insert("*".to_string());
-            r
-        }
-        (true, false) => b.clone(),
-        (false, true) => a.clone(),
-        (false, false) => a.intersection(b).cloned().collect(),
-    }
 }
 
 fn intersect_vec(a: &[String], b: &[String]) -> Vec<String> {
@@ -507,11 +487,14 @@ mod tests {
         assert_eq!(back.masked, p.masked);
     }
 
-    use std::collections::HashSet;
+    /// Build an `Allowlist::Only` from a slice.
+    fn only(items: &[&str]) -> Allowlist {
+        Allowlist::Only(items.iter().map(|s| s.to_string()).collect())
+    }
 
     fn caps_with_collections(items: &[&str]) -> BlockCapabilities {
         BlockCapabilities {
-            collections: items.iter().map(|s| s.to_string()).collect(),
+            collections: only(items),
             ..Default::default()
         }
     }
@@ -646,26 +629,33 @@ mod tests {
         let a = caps_with_collections(&["a", "b", "c"]);
         let b = caps_with_collections(&["b", "c", "d"]);
         let r = a.intersect(&b);
-        let expected: HashSet<String> = ["b", "c"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(r.collections, expected);
+        assert_eq!(r.collections, only(&["b", "c"]));
     }
 
     #[test]
-    fn intersect_wildcard_sentinel_left_yields_right() {
-        let a = caps_with_collections(&["*"]);
+    fn intersect_any_yields_other_side() {
+        // `Any` (was the "*" sentinel) ∩ a specific set → that set.
+        let a = BlockCapabilities {
+            collections: Allowlist::Any,
+            ..Default::default()
+        };
         let b = caps_with_collections(&["users"]);
         let r = a.intersect(&b);
-        let expected: HashSet<String> = ["users"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(r.collections, expected);
+        assert_eq!(r.collections, only(&["users"]));
     }
 
     #[test]
-    fn intersect_wildcard_sentinel_both_yields_wildcard() {
-        let a = caps_with_collections(&["*"]);
-        let b = caps_with_collections(&["*"]);
+    fn intersect_any_both_yields_any() {
+        let a = BlockCapabilities {
+            collections: Allowlist::Any,
+            ..Default::default()
+        };
+        let b = BlockCapabilities {
+            collections: Allowlist::Any,
+            ..Default::default()
+        };
         let r = a.intersect(&b);
-        let expected: HashSet<String> = ["*"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(r.collections, expected);
+        assert_eq!(r.collections, Allowlist::Any);
     }
 
     #[test]
@@ -742,8 +732,8 @@ mod tests {
         let declared = BlockCapabilities {
             crypto: true,
             network: Allowlist::Any,
-            collections: ["users"].iter().map(|s| s.to_string()).collect(),
-            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            collections: only(&["users"]),
+            callable_blocks: only(&["wafer-run/crypto"]),
             ..Default::default()
         };
         let overrides = ConfigCapabilityOverrides::default();
@@ -752,8 +742,8 @@ mod tests {
         // All declared fields preserved — nothing silently wiped.
         assert!(eff.crypto);
         assert_eq!(eff.network, Allowlist::Any);
-        assert!(eff.collections.contains("users"));
-        assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+        assert!(eff.collections.allows("users"));
+        assert!(eff.callable_blocks.allows("wafer-run/crypto"));
     }
 
     // SEC-06: with `network`/`config` as `Allowlist`, an operator override of
@@ -806,13 +796,10 @@ mod tests {
         // preserved. Here the operator supplies explicit *empty* allowlists,
         // which is a non-wildcard allowlist that intersects to deny-all.
         let declared = BlockCapabilities {
-            collections: ["users", "sessions"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            storage_folders: ["uploads"].iter().map(|s| s.to_string()).collect(),
+            collections: only(&["users", "sessions"]),
+            storage_folders: only(&["uploads"]),
             network: Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect()),
-            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            callable_blocks: only(&["wafer-run/crypto"]),
             config: Allowlist::Only(
                 ["ACME__WIDGET__KEY"]
                     .iter()
@@ -822,10 +809,10 @@ mod tests {
             ..Default::default()
         };
         let overrides = ConfigCapabilityOverrides {
-            collections: Some(HashSet::new()),
-            storage_folders: Some(HashSet::new()),
+            collections: Some(Allowlist::Only(BTreeSet::new())),
+            storage_folders: Some(Allowlist::Only(BTreeSet::new())),
             network: Some(Allowlist::Only(BTreeSet::new())),
-            callable_blocks: Some(HashSet::new()),
+            callable_blocks: Some(Allowlist::Only(BTreeSet::new())),
             config: Some(Allowlist::Only(BTreeSet::new())),
             ..Default::default()
         };
@@ -833,11 +820,11 @@ mod tests {
 
         // Every explicitly-emptied allowlist narrows to deny-all (∅).
         assert!(
-            eff.collections.is_empty(),
+            eff.collections == Allowlist::Only(BTreeSet::new()),
             "empty override → no collections"
         );
         assert!(
-            eff.storage_folders.is_empty(),
+            eff.storage_folders == Allowlist::Only(BTreeSet::new()),
             "empty override → no storage folders"
         );
         assert_eq!(
@@ -846,7 +833,7 @@ mod tests {
             "empty Only override → deny-all network"
         );
         assert!(
-            eff.callable_blocks.is_empty(),
+            eff.callable_blocks == Allowlist::Only(BTreeSet::new()),
             "empty override → no callable blocks"
         );
         assert_eq!(
@@ -866,11 +853,8 @@ mod tests {
                     .map(|s| s.to_string())
                     .collect(),
             ),
-            collections: ["users", "sessions"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
+            collections: only(&["users", "sessions"]),
+            callable_blocks: only(&["wafer-run/crypto"]),
             ..Default::default()
         };
         // Operator narrows ONLY network.
@@ -889,9 +873,9 @@ mod tests {
         );
         // Everything else preserved.
         assert!(eff.crypto);
-        assert!(eff.collections.contains("users"));
-        assert!(eff.collections.contains("sessions"));
-        assert!(eff.callable_blocks.contains("wafer-run/crypto"));
+        assert!(eff.collections.allows("users"));
+        assert!(eff.collections.allows("sessions"));
+        assert!(eff.callable_blocks.allows("wafer-run/crypto"));
     }
 
     #[test]
@@ -959,14 +943,14 @@ mod tests {
         let declared = BlockCapabilities {
             crypto: true,
             network: Allowlist::Any,
-            collections: ["users"].iter().map(|s| s.to_string()).collect(),
+            collections: only(&["users"]),
             ..Default::default()
         };
         let json = serde_json::json!({ "network": { "Only": ["https://a.com/"] } });
         let overrides: ConfigCapabilityOverrides = serde_json::from_value(json).unwrap();
         let eff = declared.apply_config_overrides(&overrides);
         assert!(eff.crypto);
-        assert!(eff.collections.contains("users")); // absent override → preserved
+        assert!(eff.collections.allows("users")); // absent override → preserved
         assert_eq!(
             eff.network,
             Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect())
@@ -982,10 +966,7 @@ mod tests {
         assert!(!none.allows_vector_index("my_org__vector__docs"));
 
         let scoped = BlockCapabilities {
-            vector_indexes: ["my_org__vector__docs"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            vector_indexes: only(&["my_org__vector__docs"]),
             ..Default::default()
         };
         assert!(scoped.allows_vector_index("my_org__vector__docs"));
@@ -995,15 +976,14 @@ mod tests {
     #[test]
     fn intersect_vector_indexes_set_intersection() {
         let a = BlockCapabilities {
-            vector_indexes: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            vector_indexes: only(&["a", "b"]),
             ..Default::default()
         };
         let b = BlockCapabilities {
-            vector_indexes: ["b", "c"].iter().map(|s| s.to_string()).collect(),
+            vector_indexes: only(&["b", "c"]),
             ..Default::default()
         };
         let r = a.intersect(&b);
-        let expected: HashSet<String> = ["b"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(r.vector_indexes, expected);
+        assert_eq!(r.vector_indexes, only(&["b"]));
     }
 }

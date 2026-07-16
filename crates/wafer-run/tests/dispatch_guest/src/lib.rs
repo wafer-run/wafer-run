@@ -43,10 +43,7 @@ pub extern "C" fn __wafer_info() -> i64 {
     .capabilities(wafer_sdk::BlockCapabilities {
         // `test/recorder` is the SEC-01 nested-call e2e callee (a native
         // meta-echo block registered by dispatch_streaming.rs).
-        callable_blocks: ["wafer-run/network", "test/recorder"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only(["wafer-run/network", "test/recorder"] .into_iter() .map(String::from) .collect()),
         network: wafer_sdk::Allowlist::Any,
         ..wafer_sdk::BlockCapabilities::none()
     });

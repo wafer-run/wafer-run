@@ -32,10 +32,12 @@ impl Block for DeclaringNative {
 #[tokio::test]
 async fn config_capabilities_subkey_parsed_and_intersected() {
     let declared = BlockCapabilities {
-        collections: ["users", "sessions"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        collections: wafer_block::capabilities::Allowlist::Only(
+            ["users", "sessions"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
         network: wafer_block::capabilities::Allowlist::Any,
         headers: HeaderPolicy {
             readable: vec!["authorization".into()],
@@ -59,7 +61,7 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
         "test/declaring",
         json!({
             "capabilities": {
-                "collections": ["users"],
+                "collections": { "Only": ["users"] },
                 "network": "None",
                 "headers": {
                     "writable": []
@@ -73,9 +75,12 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
     let eff = wafer
         .effective_capabilities("test/declaring")
         .expect("effective caps stored for registered block");
-    let expected_collections: std::collections::HashSet<String> =
-        ["users"].iter().map(|s| s.to_string()).collect();
-    assert_eq!(eff.collections, expected_collections);
+    assert_eq!(
+        eff.collections,
+        wafer_block::capabilities::Allowlist::Only(
+            ["users"].iter().map(|s| s.to_string()).collect()
+        )
+    );
     assert_eq!(eff.network, wafer_block::capabilities::Allowlist::None);
     assert!(eff.headers.writable.is_empty());
 }
