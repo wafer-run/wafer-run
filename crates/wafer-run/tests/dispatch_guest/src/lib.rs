@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use wafer_sdk::{
     clients::network,
-    core_abi::{pack_ptr_len, GuestResult},
+    core_abi::{pack_ptr_len, GuestAction, GuestResult},
     stream::CallStream,
     BlockInfo, ErrorCode, Message, MetaEntry, WaferError,
 };
@@ -154,7 +154,7 @@ fn dispatch(msg: &Message, body: &[u8]) -> GuestResult {
             next.set_meta("auth.user_roles", "admin");
             next.set_meta("trace_id", "t1");
             GuestResult {
-                action: "Continue".to_string(),
+                action: GuestAction::Continue,
                 response: None,
                 error: None,
                 message: Some(next),
