@@ -66,7 +66,7 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        DatabaseError, DatabaseService, Record, RecordList,
+        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -219,6 +219,18 @@ mod db_fakes {
         ) -> Result<i64, DatabaseError> {
             self.record("increment_field_where");
             Ok(0)
+        }
+        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+            self.record("upsert");
+            Ok(0)
+        }
+        async fn aggregate(
+            &self,
+            _collection: &str,
+            _spec: AggregateSpec,
+        ) -> Result<Vec<Record>, DatabaseError> {
+            self.record("aggregate");
+            Ok(vec![])
         }
         async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
             Ok(())

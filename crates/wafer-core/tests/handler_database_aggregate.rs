@@ -103,7 +103,7 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList,
+        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -195,6 +195,9 @@ mod db_fakes {
             _args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
             Ok(0)
+        }
+        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+            Err(DatabaseError::Internal("fixture: upsert not needed".into()))
         }
         async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
             Ok(())
