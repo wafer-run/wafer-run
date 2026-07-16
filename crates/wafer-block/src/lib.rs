@@ -60,7 +60,7 @@ pub mod validation;
 pub mod wrap;
 
 pub use block::Block;
-pub use capabilities::BlockCapabilities;
+pub use capabilities::{Allowlist, BlockCapabilities};
 pub use common::{ServiceName, ServiceOp};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};

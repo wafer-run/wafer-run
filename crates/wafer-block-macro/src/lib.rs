@@ -161,6 +161,25 @@ fn parse_headers_nested(inner: &syn::MetaList, out: &mut CapabilitiesArgs) -> sy
     Ok(())
 }
 
+/// Emit an `Allowlist` token from the DSL's `(flag, allow_list)` pair (SEC-06),
+/// preserving the pre-enum semantics: flag off → `None`, flag on + empty list →
+/// `Any`, flag on + list → `Only`.
+fn allowlist_tokens(flag: bool, allow: &[String]) -> proc_macro2::TokenStream {
+    if !flag {
+        quote::quote! { wafer_block::capabilities::Allowlist::None }
+    } else if allow.is_empty() {
+        quote::quote! { wafer_block::capabilities::Allowlist::Any }
+    } else {
+        quote::quote! {
+            wafer_block::capabilities::Allowlist::Only({
+                let mut s = ::std::collections::BTreeSet::new();
+                #(s.insert(#allow.to_string());)*
+                s
+            })
+        }
+    }
+}
+
 fn parse_string_list(expr: &syn::Expr) -> syn::Result<Vec<String>> {
     let arr = match expr {
         syn::Expr::Array(arr) => arr,
@@ -707,26 +726,31 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
     // Build the capabilities expression for `__wafer_info`.
     let capabilities_expr = if let Some(c) = &capabilities_args {
         let crypto = c.crypto;
-        let network = c.network;
         let raw_sql = c.raw_sql;
         let ddl = c.ddl;
-        let config_cap = c.config;
         let collections = &c.collections;
         let storage_folders = &c.storage_folders;
-        let network_allow = &c.network_allow;
-        let config_keys = &c.config_keys;
         let vector_indexes = &c.vector_indexes;
         let callable_blocks = &c.callable_blocks;
         let readable = &c.headers_readable;
         let writable = &c.headers_writable;
         let masked = &c.headers_masked;
+        // SEC-06: map the (flag, allow-list) DSL pair onto the `Allowlist`
+        // enum, preserving the pre-enum semantics exactly:
+        //   flag absent            → None  (disabled — deny all)
+        //   flag present, no list  → Any   (enabled — allow all)
+        //   flag present, w/ list  → Only  (enabled — restricted)
+        // The `capabilities(network, network_allow(...))` DSL is unchanged;
+        // only the emitted representation moves to the enum.
+        let network_expr = allowlist_tokens(c.network, &c.network_allow);
+        let config_expr = allowlist_tokens(c.config, &c.config_keys);
         quote! {
             Some(wafer_block::BlockCapabilities {
                 crypto: #crypto,
-                network: #network,
+                network: #network_expr,
                 raw_sql: #raw_sql,
                 ddl: #ddl,
-                config: #config_cap,
+                config: #config_expr,
                 collections: {
                     let mut s = ::std::collections::HashSet::new();
                     #(s.insert(#collections.to_string());)*
@@ -735,11 +759,6 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 storage_folders: {
                     let mut s = ::std::collections::HashSet::new();
                     #(s.insert(#storage_folders.to_string());)*
-                    s
-                },
-                config_keys: {
-                    let mut s = ::std::collections::HashSet::new();
-                    #(s.insert(#config_keys.to_string());)*
                     s
                 },
                 vector_indexes: {
@@ -752,7 +771,6 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     #(s.insert(#callable_blocks.to_string());)*
                     s
                 },
-                network_allow: vec![#(#network_allow.to_string()),*],
                 headers: wafer_block::capabilities::HeaderPolicy {
                     readable: vec![#(#readable.to_string()),*],
                     writable: vec![#(#writable.to_string()),*],

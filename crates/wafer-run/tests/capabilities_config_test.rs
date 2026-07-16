@@ -36,7 +36,7 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-        network: true,
+        network: wafer_block::capabilities::Allowlist::Any,
         headers: HeaderPolicy {
             readable: vec!["authorization".into()],
             writable: vec!["set-cookie".into()],
@@ -60,7 +60,7 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
         json!({
             "capabilities": {
                 "collections": ["users"],
-                "network": false,
+                "network": "None",
                 "headers": {
                     "writable": []
                 }
@@ -76,7 +76,7 @@ async fn config_capabilities_subkey_parsed_and_intersected() {
     let expected_collections: std::collections::HashSet<String> =
         ["users"].iter().map(|s| s.to_string()).collect();
     assert_eq!(eff.collections, expected_collections);
-    assert!(!eff.network);
+    assert_eq!(eff.network, wafer_block::capabilities::Allowlist::None);
     assert!(eff.headers.writable.is_empty());
 }
 
@@ -96,7 +96,7 @@ async fn config_capabilities_subkey_stripped_from_regular_config() {
     w.add_block_config(
         "test/echo-config",
         json!({
-            "capabilities": { "network": false },
+            "capabilities": { "network": "None" },
             "KEEP_THIS": "yes"
         }),
     );

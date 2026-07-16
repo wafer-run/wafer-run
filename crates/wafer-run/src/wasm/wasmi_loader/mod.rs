@@ -1393,7 +1393,10 @@ mod capabilities_update_tests {
         let before = block
             .block_capabilities()
             .expect("WasmiBlock must return Some(caps)");
-        assert!(before.network, "initial caps should have network=true");
+        assert!(
+            before.network.is_enabled(),
+            "initial caps should have network enabled"
+        );
 
         // Apply a narrower capability set via the Block trait method.
         let narrowed = BlockCapabilities::none();
@@ -1405,8 +1408,8 @@ mod capabilities_update_tests {
             .block_capabilities()
             .expect("WasmiBlock must return Some(caps) after update");
         assert!(
-            !after.network,
-            "after runtime_capabilities_mut, network should be false"
+            !after.network.is_enabled(),
+            "after runtime_capabilities_mut, network should be disabled"
         );
         assert!(
             !after.crypto,

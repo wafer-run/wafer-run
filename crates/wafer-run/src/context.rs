@@ -521,7 +521,7 @@ impl Context for RuntimeContext {
                         }
                     }
                     ResourceType::Storage => caps.allows_storage_folder(resource),
-                    ResourceType::Config => caps.config && caps.allows_config_key(resource),
+                    ResourceType::Config => caps.allows_config_key(resource),
                     ResourceType::Crypto => caps.crypto,
                     ResourceType::Network => caps.allows_network_url(resource),
                     ResourceType::Vector => caps.allows_vector_index(resource),

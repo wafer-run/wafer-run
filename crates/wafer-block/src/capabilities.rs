@@ -8,9 +8,66 @@
 //! - The runtime intersects declared ∩ config and enforces on WASM blocks.
 //! - Native blocks' declarations are documentation-only.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
+
+/// A capability allowlist with an explicit three-state shape (SEC-06).
+///
+/// Replaces the old `bool` gate + companion `Vec`/`HashSet` where an **empty**
+/// container ambiguously meant "any". There is deliberately no "empty means
+/// any" here:
+///
+/// - [`Allowlist::None`] — capability disabled; denies everything.
+/// - [`Allowlist::Any`] — capability enabled with no value restriction; allows
+///   everything.
+/// - [`Allowlist::Only`] — capability enabled, restricted to exactly this set;
+///   an empty `Only` denies everything (not "any").
+///
+/// The value-matching rule is per-capability (network uses URL-prefix matching,
+/// config uses exact key match), so matching lives in the enforcement methods
+/// on [`BlockCapabilities`]; this type only models the tri-state and its
+/// narrowing intersection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Allowlist {
+    /// Capability disabled — deny everything.
+    None,
+    /// Capability enabled, no value restriction — allow everything.
+    Any,
+    /// Capability enabled, restricted to exactly these values (empty = deny).
+    Only(BTreeSet<String>),
+}
+
+impl Default for Allowlist {
+    /// Fail-closed: an unspecified allowlist denies everything.
+    fn default() -> Self {
+        Allowlist::None
+    }
+}
+
+impl Allowlist {
+    /// Whether the capability is enabled at all (`Any` or `Only`, not `None`).
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Allowlist::None)
+    }
+
+    /// Narrowing intersection (declared ∩ operator-override): the result
+    /// permits a value only if BOTH sides do. Symmetric.
+    ///
+    /// - `None` on either side → `None` (disabled wins).
+    /// - `Any` ∩ x → x (the more specific side).
+    /// - `Only(a)` ∩ `Only(b)` → `Only(a ∩ b)` (may be empty = deny-all, which
+    ///   is unambiguous here — no "empty means any" to invert).
+    pub fn intersect(&self, other: &Allowlist) -> Allowlist {
+        match (self, other) {
+            (Allowlist::None, _) | (_, Allowlist::None) => Allowlist::None,
+            (Allowlist::Any, x) | (x, Allowlist::Any) => x.clone(),
+            (Allowlist::Only(a), Allowlist::Only(b)) => {
+                Allowlist::Only(a.intersection(b).cloned().collect())
+            }
+        }
+    }
+}
 
 /// Policy for which headers a block may read, write, or which should be masked.
 ///
@@ -64,22 +121,22 @@ pub struct BlockCapabilities {
     /// Can use crypto service.
     #[serde(default)]
     pub crypto: bool,
-    /// Can use network service.
+    /// Network access (SEC-06): `None` = no network, `Any` = any URL,
+    /// `Only([prefixes])` = only URLs matching an allow-prefix. Replaces the
+    /// old `network: bool` + `network_allow: Vec` whose empty list ambiguously
+    /// meant "any".
     #[serde(default)]
-    pub network: bool,
-    /// URL prefix allowlist for network requests. Empty = any (if network=true).
+    pub network: Allowlist,
+    /// Config access (SEC-06): `None` = no config, `Any` = any key,
+    /// `Only([keys])` = only these keys. Replaces the old `config: bool` +
+    /// `config_keys: HashSet` whose empty set ambiguously meant "any".
     #[serde(default)]
-    pub network_allow: Vec<String>,
-    /// Can use config service.
-    #[serde(default)]
-    pub config: bool,
-    /// Allowed config key patterns.
-    #[serde(default)]
-    pub config_keys: HashSet<String>,
+    pub config: Allowlist,
     /// Allowed vector indexes (by storage name). "*" = all, empty = none.
     #[serde(default)]
     pub vector_indexes: HashSet<String>,
-    /// Blocks that may be called via `call_block()`. Empty = unrestricted.
+    /// Blocks that may be called via `call_block()`. "*" = all, empty = none
+    /// (i.e. no calls — `allows_call_block` denies on an empty set).
     #[serde(default)]
     pub callable_blocks: HashSet<String>,
     /// Per-header read/write/mask policy.
@@ -105,10 +162,8 @@ impl BlockCapabilities {
                 s
             },
             crypto: true,
-            network: true,
-            network_allow: Vec::new(),
-            config: true,
-            config_keys: HashSet::new(),
+            network: Allowlist::Any,
+            config: Allowlist::Any,
             vector_indexes: {
                 let mut s = HashSet::new();
                 s.insert("*".to_string());
@@ -131,10 +186,8 @@ impl BlockCapabilities {
             ddl: false,
             storage_folders: HashSet::new(),
             crypto: false,
-            network: false,
-            network_allow: Vec::new(),
-            config: false,
-            config_keys: HashSet::new(),
+            network: Allowlist::None,
+            config: Allowlist::None,
             vector_indexes: HashSet::new(),
             callable_blocks: HashSet::new(), // empty = no calls allowed
             headers: HeaderPolicy::default(),
@@ -153,16 +206,17 @@ impl BlockCapabilities {
         self.storage_folders.contains("*") || self.storage_folders.contains(folder)
     }
 
-    /// Whether outbound HTTP to `url` is permitted: network enabled, and
-    /// (empty `network_allow`, or `url` matches an allow entry by exact
-    /// scheme + host + port with a path prefix).
+    /// Whether outbound HTTP to `url` is permitted (SEC-06):
+    /// - [`Allowlist::None`] → denied (network disabled).
+    /// - [`Allowlist::Any`] → allowed.
+    /// - [`Allowlist::Only`] → allowed iff `url` matches an allow entry by
+    ///   exact scheme + host + port with a path prefix.
     pub fn allows_network_url(&self, url: &str) -> bool {
-        if !self.network {
-            return false;
-        }
-        if self.network_allow.is_empty() {
-            return true;
-        }
+        let allow = match &self.network {
+            Allowlist::None => return false,
+            Allowlist::Any => return true,
+            Allowlist::Only(set) => set,
+        };
         // A raw `starts_with` prefix test does not bound the hostname, so
         // `https://a.com` would match `https://a.com.evil.net/...`. Parse both
         // and require an exact scheme + host + effective port, then a path
@@ -172,7 +226,7 @@ impl BlockCapabilities {
         let Ok(target) = ::url::Url::parse(url) else {
             return false;
         };
-        self.network_allow.iter().any(|allowed| {
+        allow.iter().any(|allowed| {
             let Ok(pat) = ::url::Url::parse(allowed) else {
                 return false;
             };
@@ -191,13 +245,15 @@ impl BlockCapabilities {
         self.vector_indexes.contains("*") || self.vector_indexes.contains(name)
     }
 
-    /// Whether the block may read/write config key `key` (empty allowlist
-    /// means no restriction).
+    /// Whether the block may read/write config key `key` (SEC-06):
+    /// `None` → denied, `Any` → allowed, `Only(keys)` → allowed iff `key` is
+    /// in the set (empty set denies everything).
     pub fn allows_config_key(&self, key: &str) -> bool {
-        if self.config_keys.is_empty() {
-            return true;
+        match &self.config {
+            Allowlist::None => false,
+            Allowlist::Any => true,
+            Allowlist::Only(keys) => keys.contains(key),
         }
-        self.config_keys.contains(key)
     }
 
     /// Check whether a call_block invocation to `target` is allowed.
@@ -223,10 +279,8 @@ impl BlockCapabilities {
             ddl: self.ddl && other.ddl,
             storage_folders: intersect_wildcard_set(&self.storage_folders, &other.storage_folders),
             crypto: self.crypto && other.crypto,
-            network: self.network && other.network,
-            network_allow: intersect_vec(&self.network_allow, &other.network_allow),
-            config: self.config && other.config,
-            config_keys: intersect_wildcard_set(&self.config_keys, &other.config_keys),
+            network: self.network.intersect(&other.network),
+            config: self.config.intersect(&other.config),
             vector_indexes: intersect_wildcard_set(&self.vector_indexes, &other.vector_indexes),
             callable_blocks: intersect_wildcard_set(&self.callable_blocks, &other.callable_blocks),
             headers: HeaderPolicy {
@@ -261,10 +315,13 @@ impl BlockCapabilities {
     ///   *no* collections, not leaving it untouched.
     ///
     /// The `apply_overrides_empty_set_narrows_to_deny_all` unit test locks in
-    /// this behavior.
+    /// this behavior. For `network`/`config` the ambiguity that SEC-06's #285
+    /// compatibility patch guarded against is gone entirely: they are
+    /// [`Allowlist`]s, so an override of `Only([])` intersects to `Only([])`
+    /// (deny-all) with no "empty means any" to invert — no special-casing.
     pub fn apply_config_overrides(&self, o: &ConfigCapabilityOverrides) -> Self {
         let h = o.headers.as_ref();
-        let mut effective = Self {
+        let effective = Self {
             collections: narrow(&self.collections, o.collections.as_ref(), |a, b| {
                 intersect_wildcard_set(a, b)
             }),
@@ -274,14 +331,8 @@ impl BlockCapabilities {
                 intersect_wildcard_set(a, b)
             }),
             crypto: narrow(&self.crypto, o.crypto.as_ref(), |a, b| *a && *b),
-            network: narrow(&self.network, o.network.as_ref(), |a, b| *a && *b),
-            network_allow: narrow(&self.network_allow, o.network_allow.as_ref(), |a, b| {
-                intersect_vec(a, b)
-            }),
-            config: narrow(&self.config, o.config.as_ref(), |a, b| *a && *b),
-            config_keys: narrow(&self.config_keys, o.config_keys.as_ref(), |a, b| {
-                intersect_wildcard_set(a, b)
-            }),
+            network: narrow(&self.network, o.network.as_ref(), |a, b| a.intersect(b)),
+            config: narrow(&self.config, o.config.as_ref(), |a, b| a.intersect(b)),
             vector_indexes: narrow(&self.vector_indexes, o.vector_indexes.as_ref(), |a, b| {
                 intersect_wildcard_set(a, b)
             }),
@@ -306,21 +357,6 @@ impl BlockCapabilities {
                 ),
             },
         };
-
-        // SEC-06: `network_allow` and `config_keys` are the two allowlists whose
-        // *empty* set means "unrestricted" to the enforcer (`allows_network_url`
-        // / `allows_config_key` return true on an empty allowlist). So an
-        // operator who writes `network_allow: []` / `config_keys: []` to DENY
-        // ALL would otherwise invert to ALLOW ALL. Honor the documented deny-all
-        // intent: an explicit empty override disables the parent capability
-        // entirely. (`None` — field omitted — still preserves the declared
-        // value; only an explicitly-provided empty list triggers this.)
-        if matches!(o.network_allow.as_ref(), Some(v) if v.is_empty()) {
-            effective.network = false;
-        }
-        if matches!(o.config_keys.as_ref(), Some(s) if s.is_empty()) {
-            effective.config = false;
-        }
 
         effective
     }
@@ -371,18 +407,15 @@ pub struct ConfigCapabilityOverrides {
     /// Override for [`BlockCapabilities::crypto`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crypto: Option<bool>,
-    /// Override for [`BlockCapabilities::network`].
+    /// Override for [`BlockCapabilities::network`] (SEC-06). An operator writes
+    /// `"None"` to deny, `"Any"` to allow all, or `{ "Only": ["https://x/"] }`
+    /// to restrict — replacing the old `network` bool + `network_allow` list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network: Option<bool>,
-    /// Override for [`BlockCapabilities::network_allow`].
+    pub network: Option<Allowlist>,
+    /// Override for [`BlockCapabilities::config`] (SEC-06). `"None"` / `"Any"` /
+    /// `{ "Only": ["KEY"] }` — replacing the old `config` bool + `config_keys`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_allow: Option<Vec<String>>,
-    /// Override for [`BlockCapabilities::config`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<bool>,
-    /// Override for [`BlockCapabilities::config_keys`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_keys: Option<HashSet<String>>,
+    pub config: Option<Allowlist>,
     /// Override for [`BlockCapabilities::vector_indexes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_indexes: Option<HashSet<String>>,
@@ -485,8 +518,7 @@ mod tests {
 
     fn caps_allowing(hosts: &[&str]) -> BlockCapabilities {
         BlockCapabilities {
-            network: true,
-            network_allow: hosts.iter().map(|s| s.to_string()).collect(),
+            network: Allowlist::Only(hosts.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         }
     }
@@ -522,16 +554,23 @@ mod tests {
     }
 
     #[test]
-    fn network_allow_empty_means_unrestricted_and_off_means_denied() {
+    fn network_any_is_unrestricted_none_is_denied() {
         let open = BlockCapabilities {
-            network: true, // empty allow list → unrestricted
+            network: Allowlist::Any,
             ..Default::default()
         };
         assert!(open.allows_network_url("https://anything.example/"));
-        // network flag off → always denied even if url matches.
+        // Allowlist::None → always denied even if url would otherwise match.
         let mut off = caps_allowing(&["https://a.com/"]);
-        off.network = false;
+        off.network = Allowlist::None;
         assert!(!off.allows_network_url("https://a.com/"));
+        // SEC-06: an empty `Only` is deny-all, NOT "any" — the old empty-Vec
+        // sentinel is gone.
+        let empty = BlockCapabilities {
+            network: Allowlist::Only(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(!empty.allows_network_url("https://anything.example/"));
     }
 
     #[test]
@@ -565,20 +604,41 @@ mod tests {
     fn intersect_booleans_and() {
         let a = BlockCapabilities {
             crypto: true,
-            network: true,
+            network: Allowlist::Any,
             raw_sql: false,
             ..Default::default()
         };
         let b = BlockCapabilities {
             crypto: true,
-            network: false,
+            network: Allowlist::None,
             raw_sql: true,
             ..Default::default()
         };
         let r = a.intersect(&b);
         assert!(r.crypto);
-        assert!(!r.network);
+        assert_eq!(r.network, Allowlist::None); // Any ∩ None = None
         assert!(!r.raw_sql);
+    }
+
+    #[test]
+    fn allowlist_intersect_rules() {
+        use Allowlist::*;
+        let only_ab = Only(["a", "b"].iter().map(|s| s.to_string()).collect());
+        let only_bc = Only(["b", "c"].iter().map(|s| s.to_string()).collect());
+        // None dominates.
+        assert_eq!(None.intersect(&Any), None);
+        assert_eq!(Any.intersect(&None), None);
+        // Any yields the other side.
+        assert_eq!(Any.intersect(&only_ab), only_ab);
+        assert_eq!(only_ab.intersect(&Any), only_ab);
+        // Only ∩ Only = set intersection.
+        assert_eq!(
+            only_ab.intersect(&only_bc),
+            Only(["b"].iter().map(|s| s.to_string()).collect())
+        );
+        // Disjoint Only ∩ Only = empty Only = deny-all (unambiguous).
+        let only_x = Only(["x"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(only_ab.intersect(&only_x), Only(BTreeSet::new()));
     }
 
     #[test]
@@ -609,17 +669,30 @@ mod tests {
     }
 
     #[test]
-    fn intersect_network_allow_vec_intersection() {
+    fn intersect_network_only_set_intersection() {
         let a = BlockCapabilities {
-            network_allow: vec!["https://a.com/".into(), "https://b.com/".into()],
+            network: Allowlist::Only(
+                ["https://a.com/", "https://b.com/"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             ..Default::default()
         };
         let b = BlockCapabilities {
-            network_allow: vec!["https://b.com/".into(), "https://c.com/".into()],
+            network: Allowlist::Only(
+                ["https://b.com/", "https://c.com/"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             ..Default::default()
         };
         let r = a.intersect(&b);
-        assert_eq!(r.network_allow, vec!["https://b.com/".to_string()]);
+        assert_eq!(
+            r.network,
+            Allowlist::Only(["https://b.com/"].iter().map(|s| s.to_string()).collect())
+        );
     }
 
     #[test]
@@ -668,7 +741,7 @@ mod tests {
     fn apply_overrides_empty_keeps_declared() {
         let declared = BlockCapabilities {
             crypto: true,
-            network: true,
+            network: Allowlist::Any,
             collections: ["users"].iter().map(|s| s.to_string()).collect(),
             callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
             ..Default::default()
@@ -678,53 +751,52 @@ mod tests {
 
         // All declared fields preserved — nothing silently wiped.
         assert!(eff.crypto);
-        assert!(eff.network);
+        assert_eq!(eff.network, Allowlist::Any);
         assert!(eff.collections.contains("users"));
         assert!(eff.callable_blocks.contains("wafer-run/crypto"));
     }
 
-    // SEC-06: `network_allow` / `config_keys` treat an empty allowlist as
-    // "unrestricted" in the enforcer, so an explicit empty override (operator
-    // deny-all) must disable the parent capability — otherwise it inverts to
-    // allow-all. Assert the *enforcement* outcome, not just set contents.
+    // SEC-06: with `network`/`config` as `Allowlist`, an operator override of
+    // `Only([])` (or `None`) is unambiguous deny-all — no empty-container
+    // sentinel to invert. Assert the *enforcement* outcome, not just the value.
     #[test]
-    fn empty_network_allow_override_denies_all_urls_at_enforcement() {
+    fn empty_network_only_override_denies_all_urls_at_enforcement() {
         let declared = BlockCapabilities {
-            network: true,
-            network_allow: vec!["https://a.com/".into()],
+            network: Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect()),
             ..BlockCapabilities::none()
         };
         let over = ConfigCapabilityOverrides {
-            network_allow: Some(Vec::new()),
+            network: Some(Allowlist::Only(BTreeSet::new())),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&over);
-        assert!(
-            !eff.network,
-            "an explicit empty network_allow override disables network entirely"
+        assert_eq!(
+            eff.network,
+            Allowlist::Only(BTreeSet::new()),
+            "an explicit empty Only override intersects to deny-all"
         );
         assert!(!eff.allows_network_url("https://a.com/"));
         assert!(!eff.allows_network_url("https://anything.example/"));
     }
 
     #[test]
-    fn empty_config_keys_override_denies_all_keys_at_enforcement() {
+    fn none_config_override_denies_all_keys_at_enforcement() {
         let declared = BlockCapabilities {
-            config: true,
-            config_keys: ["ACME__WIDGET__KEY".to_string()].into_iter().collect(),
+            config: Allowlist::Only(
+                ["ACME__WIDGET__KEY"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             ..BlockCapabilities::none()
         };
         let over = ConfigCapabilityOverrides {
-            config_keys: Some(HashSet::new()),
+            config: Some(Allowlist::None),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&over);
-        // Config access is gated by `config && allows_config_key(k)`; disabling
-        // `config` denies all keys regardless of the (empty) allowlist.
-        assert!(
-            !eff.config,
-            "an explicit empty config_keys override disables config entirely"
-        );
+        assert_eq!(eff.config, Allowlist::None);
+        assert!(!eff.allows_config_key("ACME__WIDGET__KEY"));
     }
 
     #[test]
@@ -739,20 +811,22 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect(),
             storage_folders: ["uploads"].iter().map(|s| s.to_string()).collect(),
-            network_allow: vec!["https://a.com/".into()],
+            network: Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect()),
             callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
-            config_keys: ["ACME__WIDGET__KEY"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            config: Allowlist::Only(
+                ["ACME__WIDGET__KEY"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             ..Default::default()
         };
         let overrides = ConfigCapabilityOverrides {
             collections: Some(HashSet::new()),
             storage_folders: Some(HashSet::new()),
-            network_allow: Some(Vec::new()),
+            network: Some(Allowlist::Only(BTreeSet::new())),
             callable_blocks: Some(HashSet::new()),
-            config_keys: Some(HashSet::new()),
+            config: Some(Allowlist::Only(BTreeSet::new())),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&overrides);
@@ -766,17 +840,19 @@ mod tests {
             eff.storage_folders.is_empty(),
             "empty override → no storage folders"
         );
-        assert!(
-            eff.network_allow.is_empty(),
-            "empty override → no network allowlist entries"
+        assert_eq!(
+            eff.network,
+            Allowlist::Only(BTreeSet::new()),
+            "empty Only override → deny-all network"
         );
         assert!(
             eff.callable_blocks.is_empty(),
             "empty override → no callable blocks"
         );
-        assert!(
-            eff.config_keys.is_empty(),
-            "empty override → no config keys"
+        assert_eq!(
+            eff.config,
+            Allowlist::Only(BTreeSet::new()),
+            "empty Only override → deny-all config"
         );
     }
 
@@ -784,8 +860,12 @@ mod tests {
     fn apply_overrides_partial_preserves_untouched_fields() {
         let declared = BlockCapabilities {
             crypto: true,
-            network: true,
-            network_allow: vec!["https://a.com/".into(), "https://b.com/".into()],
+            network: Allowlist::Only(
+                ["https://a.com/", "https://b.com/"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             collections: ["users", "sessions"]
                 .iter()
                 .map(|s| s.to_string())
@@ -793,52 +873,56 @@ mod tests {
             callable_blocks: ["wafer-run/crypto"].iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        // Operator narrows ONLY network_allow.
+        // Operator narrows ONLY network.
         let overrides = ConfigCapabilityOverrides {
-            network_allow: Some(vec!["https://a.com/".into()]),
+            network: Some(Allowlist::Only(
+                ["https://a.com/"].iter().map(|s| s.to_string()).collect(),
+            )),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&overrides);
 
-        // Explicit narrowing applied.
-        assert_eq!(eff.network_allow, vec!["https://a.com/".to_string()]);
+        // Explicit narrowing applied (Only(a,b) ∩ Only(a) = Only(a)).
+        assert_eq!(
+            eff.network,
+            Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect())
+        );
         // Everything else preserved.
         assert!(eff.crypto);
-        assert!(eff.network);
         assert!(eff.collections.contains("users"));
         assert!(eff.collections.contains("sessions"));
         assert!(eff.callable_blocks.contains("wafer-run/crypto"));
     }
 
     #[test]
-    fn apply_overrides_bool_narrowing() {
+    fn apply_overrides_narrowing() {
         let declared = BlockCapabilities {
             crypto: true,
-            network: true,
+            network: Allowlist::Any,
             ..Default::default()
         };
         let overrides = ConfigCapabilityOverrides {
-            network: Some(false),
+            network: Some(Allowlist::None),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&overrides);
         assert!(eff.crypto, "crypto untouched");
-        assert!(!eff.network, "network narrowed to false");
+        assert_eq!(eff.network, Allowlist::None, "network narrowed to None");
     }
 
     #[test]
-    fn apply_overrides_bool_cannot_widen() {
+    fn apply_overrides_cannot_widen() {
         let declared = BlockCapabilities {
-            network: false,
+            network: Allowlist::None,
             ..Default::default()
         };
         let overrides = ConfigCapabilityOverrides {
-            network: Some(true),
+            network: Some(Allowlist::Any),
             ..Default::default()
         };
         let eff = declared.apply_config_overrides(&overrides);
-        // Declared denied; config attempts to widen; declared wins.
-        assert!(!eff.network);
+        // Declared denied; config attempts to widen; declared wins (None ∩ Any = None).
+        assert_eq!(eff.network, Allowlist::None);
     }
 
     #[test]
@@ -868,18 +952,25 @@ mod tests {
 
     #[test]
     fn apply_overrides_partial_json_roundtrip() {
-        // Verify the JSON wire format: absent fields → None → preserved.
+        // Verify the JSON wire format: absent fields → None → preserved; a
+        // present `network` override deserializes into an `Allowlist` and
+        // narrows. (SEC-06: the override wire shape is the enum, e.g.
+        // `{"Only": [...]}`, not the old `network` bool + `network_allow` list.)
         let declared = BlockCapabilities {
             crypto: true,
+            network: Allowlist::Any,
             collections: ["users"].iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        let json = serde_json::json!({ "network_allow": ["https://a.com/"] });
+        let json = serde_json::json!({ "network": { "Only": ["https://a.com/"] } });
         let overrides: ConfigCapabilityOverrides = serde_json::from_value(json).unwrap();
         let eff = declared.apply_config_overrides(&overrides);
         assert!(eff.crypto);
-        assert!(eff.collections.contains("users"));
-        assert_eq!(eff.network_allow, Vec::<String>::new()); // declared was empty; override narrowed to empty
+        assert!(eff.collections.contains("users")); // absent override → preserved
+        assert_eq!(
+            eff.network,
+            Allowlist::Only(["https://a.com/"].iter().map(|s| s.to_string()).collect())
+        );
     }
 
     #[test]

@@ -294,7 +294,11 @@ fn skill_and_capabilities_compose() {
     let caps = info
         .capabilities
         .expect("capabilities(...) alongside skill(...) must set capabilities");
-    assert!(caps.network, "network flag must be honored");
+    assert_eq!(
+        caps.network,
+        wafer_block::Allowlist::Any,
+        "network flag must be honored"
+    );
     assert!(
         caps.callable_blocks.contains("wafer-run/network"),
         "callable_blocks must be honored"
