@@ -44,6 +44,71 @@ pub struct CallFrameRef<'a>(pub &'a Message, #[serde(with = "serde_bytes")] pub 
 #[derive(Deserialize)]
 pub struct CallFrame(pub Message, pub serde_bytes::ByteBuf);
 
+/// Which arm of a [`GuestResult`] the host should take.
+///
+/// # Wire format
+///
+/// This is (de)serialized as the exact discriminator **string** —
+/// `"Respond"`, `"Error"`, `"Drop"`, `"Continue"` — on BOTH the v1 (JSON) and
+/// v2 (MessagePack) codecs, byte-for-byte identical to the old `action:
+/// String` field it replaced. The serde impls are hand-written for this
+/// reason: a derived enum would serialize as a variant *index* under
+/// `rmp-serde`, silently breaking the v2 wire. Do not switch to a derive.
+///
+/// An unrecognized discriminator is a decode error (the host previously
+/// surfaced it as an `Internal` "unknown action" error one step later; the
+/// message is preserved on the deserialize side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestAction {
+    /// Return a response body (and optional trailing meta / continuation).
+    Respond,
+    /// Return a structured error.
+    Error,
+    /// Drop the request with no response.
+    Drop,
+    /// Forward an updated message to the next flow step.
+    Continue,
+}
+
+impl GuestAction {
+    /// The exact wire discriminator string.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            GuestAction::Respond => "Respond",
+            GuestAction::Error => "Error",
+            GuestAction::Drop => "Drop",
+            GuestAction::Continue => "Continue",
+        }
+    }
+
+    /// Parse a wire discriminator, or `None` if unrecognized.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "Respond" => Some(GuestAction::Respond),
+            "Error" => Some(GuestAction::Error),
+            "Drop" => Some(GuestAction::Drop),
+            "Continue" => Some(GuestAction::Continue),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for GuestAction {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Emit a plain string on every codec — identical bytes to the former
+        // `action: String` field (a derived enum would be an index in rmp).
+        s.serialize_str(self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for GuestAction {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        GuestAction::from_wire(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown guest action {s:?}")))
+    }
+}
+
 /// The result returned by a WASM block's `handle` function.
 ///
 /// Serialized back to the host with the negotiated codec; the host maps it
@@ -51,11 +116,12 @@ pub struct CallFrame(pub Message, pub serde_bytes::ByteBuf);
 /// or [`GuestResult::drop_request`] to construct values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuestResult {
-    /// Discriminator (`"Respond"`, `"Error"`, or `"Drop"`) telling the host which arm to take.
-    pub action: String,
-    /// Response body and trailing meta when `action == "Respond"`.
+    /// Which arm the host should take. Serialized as its wire string
+    /// (`"Respond"`/`"Error"`/`"Drop"`/`"Continue"`) — see [`GuestAction`].
+    pub action: GuestAction,
+    /// Response body and trailing meta when `action == Respond`.
     pub response: Option<GuestResponse>,
-    /// Structured error when `action == "Error"`.
+    /// Structured error when `action == Error`.
     pub error: Option<WaferError>,
     /// Optional updated `Message` to forward downstream alongside the response.
     pub message: Option<Message>,
@@ -77,7 +143,7 @@ impl GuestResult {
     /// Respond with a body (and no trailing meta).
     pub fn respond(data: Vec<u8>) -> Self {
         Self {
-            action: "Respond".to_string(),
+            action: GuestAction::Respond,
             response: Some(GuestResponse { data, meta: vec![] }),
             error: None,
             message: None,
@@ -87,7 +153,7 @@ impl GuestResult {
     /// Respond with body and meta entries.
     pub fn respond_with_meta(data: Vec<u8>, meta: Vec<MetaEntry>) -> Self {
         Self {
-            action: "Respond".to_string(),
+            action: GuestAction::Respond,
             response: Some(GuestResponse { data, meta }),
             error: None,
             message: None,
@@ -97,7 +163,7 @@ impl GuestResult {
     /// Return an error to the caller.
     pub fn error(err: WaferError) -> Self {
         Self {
-            action: "Error".to_string(),
+            action: GuestAction::Error,
             response: None,
             error: Some(err),
             message: None,
@@ -107,7 +173,7 @@ impl GuestResult {
     /// Drop the request (no response, no error).
     pub fn drop_request() -> Self {
         Self {
-            action: "Drop".to_string(),
+            action: GuestAction::Drop,
             response: None,
             error: None,
             message: None,
@@ -159,7 +225,7 @@ mod tests {
             encoded.len()
         );
         let decoded: GuestResult = crate::codec::decode(&encoded).unwrap();
-        assert_eq!(decoded.action, "Respond");
+        assert_eq!(decoded.action, GuestAction::Respond);
         let resp = decoded.response.unwrap();
         assert_eq!(resp.data, vec![7u8; 4096]);
         assert_eq!(resp.meta.len(), 1);
@@ -184,5 +250,58 @@ mod tests {
         });
         let decoded: GuestResult = serde_json::from_value(v1_result).unwrap();
         assert_eq!(decoded.response.unwrap().data, vec![1, 2, 3]);
+    }
+
+    /// The load-bearing invariant for the `action: String` → [`GuestAction`]
+    /// change: the discriminator must stay a **string** on BOTH codecs, so the
+    /// wire is byte-identical to the old field and no wasm artifact needs a
+    /// rebuild. A derived enum would encode as a variant index under
+    /// `rmp-serde` and silently break v2 — this test would fail if the custom
+    /// serde impls were ever replaced with a derive.
+    #[test]
+    fn guest_action_wire_stays_a_string_on_both_codecs() {
+        #[derive(serde::Deserialize)]
+        struct StringActionView {
+            action: String,
+        }
+        for action in [
+            GuestAction::Respond,
+            GuestAction::Error,
+            GuestAction::Drop,
+            GuestAction::Continue,
+        ] {
+            let result = GuestResult {
+                action,
+                response: None,
+                error: None,
+                message: None,
+            };
+            // v2 (rmp): decoding `action` as a String only succeeds if it was
+            // serialized as a msgpack str, not an int index.
+            let rmp = crate::codec::encode(&result).unwrap();
+            let via_rmp: StringActionView = crate::codec::decode(&rmp).unwrap();
+            assert_eq!(via_rmp.action, action.as_wire(), "rmp action must be a str");
+            // v1 (JSON): the action field is the plain string.
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                json["action"],
+                action.as_wire(),
+                "json action must be a str"
+            );
+        }
+    }
+
+    /// An unrecognized discriminator is a decode error (naming the bad value),
+    /// not a silently-accepted variant.
+    #[test]
+    fn unknown_guest_action_is_a_decode_error() {
+        let bad = serde_json::json!({
+            "action": "Bogus", "response": null, "error": null, "message": null,
+        });
+        let err = serde_json::from_value::<GuestResult>(bad).unwrap_err();
+        assert!(
+            err.to_string().contains("Bogus"),
+            "error must name it: {err}"
+        );
     }
 }

@@ -36,6 +36,7 @@ pub(crate) use pool::wasm_pooling_host_override;
 // (and, through it, external embedders).
 pub use pool::WASM_POOLING_ENV;
 use pool::{PooledInstance, MAX_CALLS_PER_INSTANCE, MAX_POOLED_INSTANCES};
+use wafer_block::abi::GuestAction;
 
 // ---------------------------------------------------------------------------
 // WasmiBlock
@@ -350,16 +351,18 @@ impl WasmiBlock {
         // exit: the guest handled an application error and returned normally.
         if let Some(leased) = lease {
             match &parsed {
-                Ok(r) if matches!(r.action.as_str(), "Respond" | "Error" | "Drop" | "Continue") => {
-                    self.checkin(leased);
-                }
-                _ => drop(leased),
+                // A successful decode is, by construction, a well-formed
+                // `GuestResult` with a known action (`GuestAction` rejects any
+                // other discriminator at decode time) — proof the guest ran
+                // its ABI glue to completion, so check the instance back in.
+                Ok(_) => self.checkin(leased),
+                Err(_) => drop(leased),
             }
         }
 
         match parsed {
-            Ok(result) => match result.action.as_str() {
-                "Respond" => {
+            Ok(result) => match result.action {
+                GuestAction::Respond => {
                     let (data, meta) = result
                         .response
                         .map(|r| {
@@ -387,7 +390,7 @@ impl WasmiBlock {
                         OutputStream::respond_with_meta(data, meta)
                     }
                 }
-                "Error" => {
+                GuestAction::Error => {
                     let e = result.error.unwrap_or_else(|| {
                         WaferError::new(
                             ErrorCode::Internal,
@@ -396,8 +399,8 @@ impl WasmiBlock {
                     });
                     OutputStream::error(e)
                 }
-                "Drop" => OutputStream::drop_request(),
-                "Continue" => {
+                GuestAction::Drop => OutputStream::drop_request(),
+                GuestAction::Continue => {
                     let mut msg = result.message.unwrap_or_else(|| Message::new("continue"));
                     // SEC-01: the guest cannot forge/alter identity on the
                     // message it hands to the next flow step.
@@ -408,10 +411,6 @@ impl WasmiBlock {
                     }
                     OutputStream::continue_with(msg)
                 }
-                _ => OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("unknown action from WASM guest: {}", result.action),
-                )),
             },
             Err(e) => OutputStream::error(WaferError::new(
                 ErrorCode::Internal,

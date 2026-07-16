@@ -32,5 +32,5 @@ pub mod stream;
 // Re-export everything from wafer-block (types, traits, helpers, macros).
 // Re-export runtime functions and guest result types for block authors.
 pub use attachment::lookup_attachment;
-pub use core_abi::{is_cancelled, log, GuestResponse, GuestResult};
+pub use core_abi::{is_cancelled, log, GuestAction, GuestResponse, GuestResult};
 pub use wafer_block::*;

@@ -22,7 +22,7 @@
 // verbatim with the host runtime so the two sides cannot drift) and
 // re-exported here so existing `wafer_sdk::core_abi::GuestResult` /
 // `wafer_sdk::GuestResult` imports keep working.
-pub use wafer_block::abi::{GuestResponse, GuestResult};
+pub use wafer_block::abi::{GuestAction, GuestResponse, GuestResult};
 
 // ---------------------------------------------------------------------------
 // Pack / unpack helpers (target-independent)
