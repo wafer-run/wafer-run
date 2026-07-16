@@ -190,7 +190,7 @@ async fn argumentless_install_prunes_orphan_lockfile_entries() {
     );
     fs::write(
         cwd.join("wafer.lock"),
-        "version = 1\n\n[[package]]\nname = \"old/removed\"\nversion = \"0.1.0\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
+        "version = 2\n\n[[package]]\nname = \"old/removed\"\nversion = \"0.1.0\"\nsha256 = \"aa\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://x\"\n",
     )
     .unwrap();
 
@@ -246,7 +246,7 @@ async fn frozen_errors_on_drift_with_hint() {
     );
     fs::write(
         cwd.join("wafer.lock"),
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.2.0\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.2.0\"\nsha256 = \"aa\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://x\"\n",
     )
     .unwrap();
     let out = std::process::Command::new(bin())
@@ -288,7 +288,7 @@ async fn frozen_happy_path_uses_cached_package_and_leaves_lockfile_unchanged() {
 
     // Seed the matching lockfile.
     let lock_body = format!(
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nsource = \"registry+http://127.0.0.1:1\"\n",
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{sha}\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://127.0.0.1:1\"\n",
     );
     fs::write(cwd.join("wafer.lock"), &lock_body).unwrap();
 
@@ -339,7 +339,7 @@ async fn frozen_bails_when_registry_sha_doesnt_match_lockfile() {
     fs::write(
         cwd.join("wafer.lock"),
         format!(
-            "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{wrong_sha}\"\nsource = \"registry+{uri}\"\n",
+            "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{wrong_sha}\"\nwasm_sha256 = \"bb\"\nsource = \"registry+{uri}\"\n",
             uri = server.uri(),
         ),
     )

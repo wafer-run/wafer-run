@@ -16,13 +16,12 @@
 use std::{
     fs::{self, File},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
-use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType};
 
 use crate::{
@@ -138,13 +137,40 @@ pub(crate) fn lockfile_entry(
     block: &str,
     version: &str,
     sha256: &str,
+    wasm_sha256: &str,
 ) -> LockfilePackage {
     LockfilePackage {
         name: format!("{org}/{block}"),
         version: version.into(),
         sha256: sha256.into(),
+        wasm_sha256: wasm_sha256.into(),
         source: format!("registry+{registry}"),
     }
+}
+
+/// Digest the single `.wasm` artifact in an extracted cache dir (SEC-05):
+/// the installer records this in the lockfile so the runtime loader can
+/// verify the cached file before compiling it. Requires exactly one `.wasm`
+/// — the same structural invariant the runtime's cache validation enforces
+/// (a package dir holds one block artifact).
+fn wasm_artifact_digest(dir: &Path) -> Result<String> {
+    let mut wasm: Option<PathBuf> = None;
+    for entry in fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "wasm") {
+            if wasm.is_some() {
+                bail!(
+                    "package dir {} contains more than one .wasm artifact",
+                    dir.display()
+                );
+            }
+            wasm = Some(path);
+        }
+    }
+    let wasm =
+        wasm.ok_or_else(|| anyhow::anyhow!("no .wasm artifact in package dir {}", dir.display()))?;
+    let bytes = fs::read(&wasm).with_context(|| format!("read {}", wasm.display()))?;
+    Ok(sha256_hex(&bytes))
 }
 
 /// Check whether the cache+lockfile pair already satisfies this version.
@@ -222,9 +248,12 @@ pub(crate) fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<usize> {
     Ok(count)
 }
 
-/// Compute sha256 of `bytes`, hex-encoded.
+/// Compute sha256 of `bytes`, hex-encoded. Delegates to the shared
+/// implementation in `wafer-block` so the installer's digests (tarball +
+/// `wasm_sha256`) use exactly the encoding the runtime loader verifies
+/// against — one format, no drift (SEC-05).
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    wafer_block::lockfile::sha256_hex(bytes)
 }
 
 /// Full cache-only install orchestration.
@@ -360,6 +389,12 @@ pub async fn install_cache_only(
         "integrity check failed: tarball sha256 did not match registry metadata — re-run, and report if it persists".to_string()
     })?;
 
+    // SEC-05: record the digest of the extracted `.wasm` so the runtime
+    // loader can verify the cached artifact before compiling it. Computed
+    // from the freshly-promoted file (whose bytes came from the tarball we
+    // just sha256-verified), so the chain is registry sha → tarball → wasm.
+    let wasm_sha256 = wasm_artifact_digest(&final_dir)?;
+
     // Step 5: update lockfile. This must happen while we still hold the
     // flock, otherwise another installer could acquire the lock, write its
     // own entry, and our write below would silently overwrite it.
@@ -369,6 +404,7 @@ pub async fn install_cache_only(
         block,
         &resolved_version,
         &expected_sha,
+        &wasm_sha256,
     ));
     lf.write_atomic(lockfile_path)?;
 
@@ -579,9 +615,11 @@ mod tests {
             "widget",
             "0.3.1",
             "abc",
+            "def",
         );
         assert_eq!(e.name, "acme/widget");
         assert_eq!(e.source, "registry+https://wafer.run");
+        assert_eq!(e.wasm_sha256, "def");
     }
 
     #[test]
@@ -714,6 +752,7 @@ mod tests {
             name: "a/b".into(),
             version: "1.0.0".into(),
             sha256: "zzz".into(),
+            wasm_sha256: "www".into(),
             source: "registry+https://x".into(),
         });
         assert_eq!(

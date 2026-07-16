@@ -26,7 +26,7 @@ fn build_drift_errors_with_hint() {
     seed(
         &cwd,
         "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.2.0\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.2.0\"\nsha256 = \"aa\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://x\"\n",
     );
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)
@@ -47,7 +47,7 @@ fn build_in_sync_proceeds_past_sync_check() {
     seed(
         &cwd,
         "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
-        "version = 1\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"aa\"\nsource = \"registry+http://x\"\n",
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"aa\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://x\"\n",
     );
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)
@@ -69,7 +69,7 @@ fn build_without_wafer_toml_skips_sync_check() {
     // No wafer.toml — sync check must be silent even if a stray wafer.lock exists.
     fs::write(
         cwd.join("wafer.lock"),
-        "version = 1\n\n[[package]]\nname = \"a/b\"\nversion = \"1.0.0\"\nsha256 = \"a\"\nsource = \"registry+http://x\"\n",
+        "version = 2\n\n[[package]]\nname = \"a/b\"\nversion = \"1.0.0\"\nsha256 = \"a\"\nwasm_sha256 = \"bb\"\nsource = \"registry+http://x\"\n",
     ).unwrap();
     let out = std::process::Command::new(bin())
         .current_dir(&cwd)

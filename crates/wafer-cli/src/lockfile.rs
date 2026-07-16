@@ -109,6 +109,7 @@ mod tests {
             name: name.into(),
             version: version.into(),
             sha256: "a".repeat(64),
+            wasm_sha256: "b".repeat(64),
             source: "registry+https://wafer.run".into(),
         }
     }
@@ -121,13 +122,14 @@ mod tests {
     }
 
     #[test]
-    fn load_parses_valid_v1() {
-        let body = r#"version = 1
+    fn load_parses_valid_v2() {
+        let body = r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.3.1"
 sha256 = "abc"
+wasm_sha256 = "def"
 source = "registry+https://wafer.run"
 "#;
         let tmp = tempdir().unwrap();
@@ -194,7 +196,7 @@ source = "registry+https://wafer.run"
     #[test]
     fn load_rejects_missing_version_field() {
         let body =
-            "[[package]]\nname = \"a/b\"\nversion = \"0.1.0\"\nsha256 = \"abc\"\nsource = \"x\"\n";
+            "[[package]]\nname = \"a/b\"\nversion = \"0.1.0\"\nsha256 = \"abc\"\nwasm_sha256 = \"def\"\nsource = \"x\"\n";
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("wafer.lock");
         fs::write(&path, body).unwrap();
@@ -221,31 +223,36 @@ source = "registry+https://wafer.run"
             name: "acme/widget".into(),
             version: "0.3.1".into(),
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+            wasm_sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into(),
             source: "registry+https://wafer.run".into(),
         });
         lf.insert_or_replace(LockfilePackage {
             name: "my-org/auth".into(),
             version: "1.2.0".into(),
             sha256: "a".repeat(64),
+            wasm_sha256: "c".repeat(64),
             source: "path+./local".into(),
         });
 
         let expected = format!(
-            r#"version = 1
+            r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.3.1"
 sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+wasm_sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 source = "registry+https://wafer.run"
 
 [[package]]
 name = "my-org/auth"
 version = "1.2.0"
 sha256 = "{}"
+wasm_sha256 = "{}"
 source = "path+./local"
 "#,
-            "a".repeat(64)
+            "a".repeat(64),
+            "c".repeat(64)
         );
         let serialized = lf.to_toml_string().unwrap();
         assert_eq!(serialized, expected, "on-disk contract drifted");

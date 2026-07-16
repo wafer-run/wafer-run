@@ -68,6 +68,24 @@ pub(crate) enum LockLoaderError {
         source: RuntimeError,
     },
 
+    // SEC-05: the cached .wasm bytes don't match the lockfile's wasm_sha256.
+    // Dead without the wasmi feature (the verify+load path is compiled out),
+    // same as WasmLoadFailed above.
+    #[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
+    #[error(
+        "{name}@{version}: cached artifact at {} failed integrity check — \
+         wafer.lock pins wasm_sha256 {expected}, cached file hashes to {actual}. \
+         The cache may be corrupt or tampered; run 'wafer install' to re-fetch.",
+        path.display()
+    )]
+    IntegrityMismatch {
+        name: String,
+        version: String,
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+
     #[error("{name}@{version}: unsupported source '{source_value}'")]
     UnsupportedSource {
         name: String,
@@ -384,6 +402,23 @@ impl Wafer {
                         reason: format!("read wasm bytes: {e}"),
                     })
                 })?;
+                // SEC-05: verify the cached artifact against the lockfile's
+                // recorded digest BEFORE compiling it. The cache dir is
+                // mutable on-disk state; the lockfile is the reviewed source
+                // of truth. A mismatch (corruption, tampering, or a lockfile
+                // steered at an unintended-but-existing dir) is refused, not
+                // loaded. An empty pin can never match a real digest, so a
+                // hand-blanked wasm_sha256 fails closed here too.
+                let actual = wafer_block::lockfile::sha256_hex(&wasm_bytes);
+                if actual != pkg.wasm_sha256 {
+                    return Err(RuntimeError::from(LockLoaderError::IntegrityMismatch {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        path: wasm_path,
+                        expected: pkg.wasm_sha256.clone(),
+                        actual,
+                    }));
+                }
                 // Honour the builder's `fuel_per_call` / `max_wasm_memory_pages`
                 // selection for blocks auto-loaded from the lockfile.
                 let block = WasmiBlock::load_from_bytes_with_limits(
@@ -445,6 +480,10 @@ mod tests {
             name: name.into(),
             version: version.into(),
             sha256: "a".repeat(64),
+            // Default to the digest of the wasm `seed_cache` writes, so any
+            // test that seeds the cache and loads passes the SEC-05 integrity
+            // check; tests exercising a mismatch override this field.
+            wasm_sha256: wafer_block::lockfile::sha256_hex(MINIMAL_WASM),
             source: source.into(),
         }
     }
@@ -490,30 +529,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_lockfile_valid_v1() {
+    fn parse_lockfile_valid_v2() {
+        let body = r#"version = 2
+
+[[package]]
+name = "acme/widget"
+version = "0.3.1"
+sha256 = "abc"
+wasm_sha256 = "def"
+source = "registry+https://wafer.run"
+"#;
+        let (p, _tmp) = mk_lockfile(body);
+        let lf = parse_lockfile(&p).unwrap().unwrap();
+        assert_eq!(lf.version, 2);
+        assert_eq!(lf.packages.len(), 1);
+        assert_eq!(lf.packages[0].name, "acme/widget");
+        assert_eq!(lf.packages[0].wasm_sha256, "def");
+    }
+
+    #[test]
+    fn parse_lockfile_rejects_wrong_version() {
+        // v1 is the now-superseded schema; the loader must refuse it (the
+        // package is otherwise well-formed so the version check — not a
+        // missing-field error — is what fires).
         let body = r#"version = 1
 
 [[package]]
 name = "acme/widget"
 version = "0.3.1"
 sha256 = "abc"
+wasm_sha256 = "def"
 source = "registry+https://wafer.run"
 "#;
-        let (p, _tmp) = mk_lockfile(body);
-        let lf = parse_lockfile(&p).unwrap().unwrap();
-        assert_eq!(lf.version, 1);
-        assert_eq!(lf.packages.len(), 1);
-        assert_eq!(lf.packages[0].name, "acme/widget");
-    }
-
-    #[test]
-    fn parse_lockfile_rejects_v2() {
-        let body = "version = 2\n";
         let (p, _tmp) = mk_lockfile(body);
         let err = parse_lockfile(&p).unwrap_err();
         assert!(matches!(
             err,
-            LockLoaderError::UnsupportedVersion { version: 2, .. }
+            LockLoaderError::UnsupportedVersion { version: 1, .. }
         ));
     }
 
@@ -600,14 +652,18 @@ source = "registry+https://wafer.run"
     #[test]
     fn load_lockfile_happy_path_registers_block() {
         let tmp = tempdir().unwrap();
-        let lock_body = r#"version = 1
+        let wasm_sha = wafer_block::lockfile::sha256_hex(MINIMAL_WASM);
+        let lock_body = format!(
+            r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 sha256 = "abc"
+wasm_sha256 = "{wasm_sha}"
 source = "registry+https://wafer.run"
-"#;
+"#
+        );
         let lock_path = tmp.path().join("wafer.lock");
         fs::write(&lock_path, lock_body).unwrap();
         seed_cache(tmp.path(), "acme", "widget", "0.1.0");
@@ -623,22 +679,94 @@ source = "registry+https://wafer.run"
 
     #[cfg(feature = "wasmi")]
     #[test]
-    fn load_lockfile_duplicate_name_errors() {
+    fn load_lockfile_rejects_tampered_wasm() {
+        // SEC-05: the cache holds a .wasm whose bytes don't match the
+        // lockfile's wasm_sha256 (corruption / tampering / a lockfile steered
+        // at an unintended dir). The loader must refuse it, not compile it.
         let tmp = tempdir().unwrap();
-        let lock_body = r#"version = 1
+        // Pin a digest of DIFFERENT bytes than seed_cache writes.
+        let wrong_sha = wafer_block::lockfile::sha256_hex(b"not the real artifact");
+        let lock_body = format!(
+            r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 sha256 = "abc"
+wasm_sha256 = "{wrong_sha}"
+source = "registry+https://wafer.run"
+"#
+        );
+        let lock_path = tmp.path().join("wafer.lock");
+        fs::write(&lock_path, lock_body).unwrap();
+        seed_cache(tmp.path(), "acme", "widget", "0.1.0");
+
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+        let err = w
+            .load_lockfile_with_cache(&lock_path, tmp.path())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("integrity check"), "{msg}");
+        assert!(msg.contains("acme/widget"), "{msg}");
+    }
+
+    #[cfg(feature = "wasmi")]
+    #[test]
+    fn load_lockfile_rejects_empty_wasm_digest() {
+        // A hand-blanked wasm_sha256 must fail closed — an empty pin can
+        // never equal a real digest, so the artifact is refused.
+        let tmp = tempdir().unwrap();
+        let lock_body = r#"version = 2
+
+[[package]]
+name = "acme/widget"
+version = "0.1.0"
+sha256 = "abc"
+wasm_sha256 = ""
+source = "registry+https://wafer.run"
+"#;
+        let lock_path = tmp.path().join("wafer.lock");
+        fs::write(&lock_path, lock_body).unwrap();
+        seed_cache(tmp.path(), "acme", "widget", "0.1.0");
+
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+        let err = w
+            .load_lockfile_with_cache(&lock_path, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("integrity check"), "{err}");
+    }
+
+    #[cfg(feature = "wasmi")]
+    #[test]
+    fn load_lockfile_duplicate_name_errors() {
+        let tmp = tempdir().unwrap();
+        let wasm_sha = wafer_block::lockfile::sha256_hex(MINIMAL_WASM);
+        let lock_body = format!(
+            r#"version = 2
+
+[[package]]
+name = "acme/widget"
+version = "0.1.0"
+sha256 = "abc"
+wasm_sha256 = "{wasm_sha}"
 source = "registry+https://wafer.run"
 
 [[package]]
 name = "acme/widget"
 version = "0.2.0"
 sha256 = "def"
+wasm_sha256 = "{wasm_sha}"
 source = "registry+https://wafer.run"
-"#;
+"#
+        );
         let lock_path = tmp.path().join("wafer.lock");
         fs::write(&lock_path, lock_body).unwrap();
         seed_cache(tmp.path(), "acme", "widget", "0.1.0");
@@ -659,12 +787,13 @@ source = "registry+https://wafer.run"
     #[test]
     fn load_lockfile_cache_missing_surfaces_cache_miss() {
         let tmp = tempdir().unwrap();
-        let lock_body = r#"version = 1
+        let lock_body = r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 sha256 = "abc"
+wasm_sha256 = "def"
 source = "registry+https://wafer.run"
 "#;
         let lock_path = tmp.path().join("wafer.lock");
