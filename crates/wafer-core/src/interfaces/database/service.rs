@@ -443,41 +443,18 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         ))
     }
 
-    /// Insert `spec.data` into `collection`, resolving a conflict on
-    /// `spec.conflict_columns` via `spec.on_conflict`. Returns rows affected.
-    ///
-    /// Implementations must perform this as a single `INSERT … ON CONFLICT …`
-    /// round-trip — the whole point of this op is the absence of a
-    /// read-modify-write race. The default here returns an `Internal` error so
-    /// SQL backends are forced to override it (via
-    /// [`DbExec::upsert`](super::exec::DbExec::upsert)); a backend that cannot
-    /// express `ON CONFLICT` inherits the failure rather than silently doing
-    /// the wrong thing.
-    async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
-        Err(DatabaseError::Internal(
-            "upsert is not implemented by this database backend".into(),
-        ))
-    }
+    /// Upsert `spec` into `collection`. SQL backends implement this via
+    /// `DbExec::upsert`; a backend that cannot express `ON CONFLICT` must
+    /// return an explicit error. No default — every backend states its choice.
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError>;
 
-    /// Run the grouped aggregate query described by `spec` against
-    /// `collection`, returning one [`Record`] per group. Each record carries
-    /// the aggregate aliases and any plain group-by columns / date buckets.
-    ///
-    /// SQL backends render `spec` server-side via
-    /// [`DbExec::aggregate`](super::exec::DbExec::aggregate) — the SQL is built
-    /// from the validated structured request, never from caller-supplied text.
-    /// The default here returns an `Internal` error so a backend that cannot
-    /// render a grouped query inherits the failure rather than silently
-    /// returning no rows.
+    /// Grouped aggregate query. SQL backends implement this via
+    /// `DbExec::aggregate`. No default — every backend states its choice.
     async fn aggregate(
         &self,
-        _collection: &str,
-        _spec: AggregateSpec,
-    ) -> Result<Vec<Record>, DatabaseError> {
-        Err(DatabaseError::Internal(
-            "aggregate is not implemented by this database backend".into(),
-        ))
-    }
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError>;
 
     // --- Schema management methods ---
 
