@@ -1,10 +1,11 @@
 //! Path B: load native WASM blocks from `wafer.lock` + the local cache
 //! populated by `wafer install`.
 //!
-//! PR β ships the primitives and their unit tests. `Wafer::new()` does
-//! NOT call into this module yet — that wiring lands in PR γ via
-//! `WaferBuilder`. The `impl Wafer` methods here are `pub(crate)` so
-//! WaferBuilder can reach them without exposing them to downstream users.
+//! `WaferBuilder` drives this at build time: an explicit `.lockfile(path)`
+//! calls [`Wafer::load_lockfile`], and the `Auto` lockfile source falls back
+//! to [`Wafer::try_load_lockfile_cwd`] (`./wafer.lock`). The `impl Wafer`
+//! methods here are `pub(crate)` so WaferBuilder can reach them without
+//! exposing them to downstream users.
 //!
 //! Cache layout (per the `2026-04-24-wafer-search-info-install-design`
 //! spec):
@@ -325,7 +326,8 @@ pub(crate) fn default_cache_root() -> Option<PathBuf> {
 
 impl Wafer {
     /// Attempt to load blocks from the default lockfile path (`./wafer.lock`).
-    /// No-op if missing. `pub(crate)` — wired into WaferBuilder in PR γ.
+    /// No-op if missing. `pub(crate)`, invoked by `WaferBuilder` for the
+    /// `Auto` lockfile source.
     pub(crate) fn try_load_lockfile_cwd(&mut self) -> Result<usize, RuntimeError> {
         let path = PathBuf::from("wafer.lock");
         match parse_lockfile(&path).map_err(RuntimeError::from)? {
@@ -335,7 +337,7 @@ impl Wafer {
     }
 
     /// Load blocks from an explicit lockfile path. Errors if missing.
-    /// `pub(crate)` — wired into WaferBuilder in PR γ.
+    /// `pub(crate)`, invoked by `WaferBuilder` for an explicit `.lockfile(path)`.
     pub(crate) fn load_lockfile(&mut self, path: &Path) -> Result<usize, RuntimeError> {
         let lf = parse_lockfile(path)
             .map_err(RuntimeError::from)?
