@@ -31,10 +31,7 @@ pub extern "C" fn __wafer_info() -> i64 {
     // declare the one block it calls — itself (it opens a streaming call
     // back into its own block under "test.echo_attachment").
     .capabilities(wafer_sdk::BlockCapabilities {
-        callable_blocks: ["test/attachment-dispatch-guest"]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        callable_blocks: wafer_sdk::Allowlist::Only(["test/attachment-dispatch-guest"] .into_iter() .map(String::from) .collect()),
         ..wafer_sdk::BlockCapabilities::none()
     });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");

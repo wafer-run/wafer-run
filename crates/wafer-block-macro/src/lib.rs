@@ -180,6 +180,26 @@ fn allowlist_tokens(flag: bool, allow: &[String]) -> proc_macro2::TokenStream {
     }
 }
 
+/// Emit an `Allowlist` token for the wildcard-list capability fields
+/// (`collections`, `storage_folders`, `vector_indexes`, `callable_blocks`),
+/// preserving the pre-enum DSL sentinels: the list `["*"]` → `Any`, an absent
+/// (empty) list → `None`, anything else → `Only`.
+fn wildcard_list_tokens(allow: &[String]) -> proc_macro2::TokenStream {
+    if allow.iter().any(|s| s == "*") {
+        quote::quote! { wafer_block::capabilities::Allowlist::Any }
+    } else if allow.is_empty() {
+        quote::quote! { wafer_block::capabilities::Allowlist::None }
+    } else {
+        quote::quote! {
+            wafer_block::capabilities::Allowlist::Only({
+                let mut s = ::std::collections::BTreeSet::new();
+                #(s.insert(#allow.to_string());)*
+                s
+            })
+        }
+    }
+}
+
 fn parse_string_list(expr: &syn::Expr) -> syn::Result<Vec<String>> {
     let arr = match expr {
         syn::Expr::Array(arr) => arr,
@@ -728,10 +748,10 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let crypto = c.crypto;
         let raw_sql = c.raw_sql;
         let ddl = c.ddl;
-        let collections = &c.collections;
-        let storage_folders = &c.storage_folders;
-        let vector_indexes = &c.vector_indexes;
-        let callable_blocks = &c.callable_blocks;
+        let collections_expr = wildcard_list_tokens(&c.collections);
+        let storage_folders_expr = wildcard_list_tokens(&c.storage_folders);
+        let vector_indexes_expr = wildcard_list_tokens(&c.vector_indexes);
+        let callable_blocks_expr = wildcard_list_tokens(&c.callable_blocks);
         let readable = &c.headers_readable;
         let writable = &c.headers_writable;
         let masked = &c.headers_masked;
@@ -751,26 +771,10 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 raw_sql: #raw_sql,
                 ddl: #ddl,
                 config: #config_expr,
-                collections: {
-                    let mut s = ::std::collections::HashSet::new();
-                    #(s.insert(#collections.to_string());)*
-                    s
-                },
-                storage_folders: {
-                    let mut s = ::std::collections::HashSet::new();
-                    #(s.insert(#storage_folders.to_string());)*
-                    s
-                },
-                vector_indexes: {
-                    let mut s = ::std::collections::HashSet::new();
-                    #(s.insert(#vector_indexes.to_string());)*
-                    s
-                },
-                callable_blocks: {
-                    let mut s = ::std::collections::HashSet::new();
-                    #(s.insert(#callable_blocks.to_string());)*
-                    s
-                },
+                collections: #collections_expr,
+                storage_folders: #storage_folders_expr,
+                vector_indexes: #vector_indexes_expr,
+                callable_blocks: #callable_blocks_expr,
                 headers: wafer_block::capabilities::HeaderPolicy {
                     readable: vec![#(#readable.to_string()),*],
                     writable: vec![#(#writable.to_string()),*],
