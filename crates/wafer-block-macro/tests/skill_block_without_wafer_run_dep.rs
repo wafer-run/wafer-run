@@ -44,9 +44,18 @@ fn skill_block_without_wafer_run_dep_compiles_for_wasm32() {
         .current_dir(&fixture_dir)
         .args(["build", "--release", "--target", "wasm32-wasip1"])
         .env("CARGO_TARGET_DIR", &target_dir)
-        // Ensure we don't leak the parent workspace's RUSTFLAGS, which can
-        // include host-arch-specific link args that break wasm32 builds.
+        // Ensure we don't leak the parent build's RUSTFLAGS into the wasm32
+        // fixture build. Two sources matter:
+        //   - RUSTFLAGS: host-arch-specific link args that break wasm32.
+        //   - CARGO_ENCODED_RUSTFLAGS: how `cargo llvm-cov` injects
+        //     `-C instrument-coverage` into every child cargo. Coverage
+        //     instrumentation is unsupported on wasm32-wasip1, so inheriting
+        //     it makes this fixture fail to compile — which previously turned
+        //     the whole Coverage CI job red (the PR `ci.yml` has no coverage
+        //     job, so it only showed up post-merge on `ci-main.yml`).
+        // The fixture never needs coverage data, so clearing both is correct.
         .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
         .expect("failed to spawn cargo");
 
