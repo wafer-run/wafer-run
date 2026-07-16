@@ -86,10 +86,18 @@ async fn wasm_block_without_capabilities_defaults_to_none() {
         .effective_capabilities("test/wasm-undeclared")
         .expect("effective caps stored");
     assert!(!eff.crypto, "crypto must be denied");
-    assert!(!eff.network, "network must be denied");
+    assert_eq!(
+        eff.network,
+        wafer_block::capabilities::Allowlist::None,
+        "network must be denied"
+    );
     assert!(!eff.raw_sql, "raw_sql must be denied");
     assert!(!eff.ddl, "ddl must be denied");
-    assert!(!eff.config, "config must be denied");
+    assert_eq!(
+        eff.config,
+        wafer_block::capabilities::Allowlist::None,
+        "config must be denied"
+    );
     assert!(eff.collections.is_empty(), "no collection wildcard");
     assert!(eff.storage_folders.is_empty(), "no storage wildcard");
     assert!(eff.vector_indexes.is_empty(), "no vector wildcard");
@@ -123,7 +131,11 @@ async fn native_block_without_capabilities_defaults_to_unrestricted() {
         .effective_capabilities("test/native-undeclared")
         .expect("effective caps stored");
     assert!(eff.crypto, "native retains unrestricted crypto");
-    assert!(eff.network, "native retains unrestricted network");
+    assert_eq!(
+        eff.network,
+        wafer_block::capabilities::Allowlist::Any,
+        "native retains unrestricted network"
+    );
     assert!(
         eff.callable_blocks.contains("*"),
         "native retains unrestricted call_block"
@@ -133,8 +145,12 @@ async fn native_block_without_capabilities_defaults_to_unrestricted() {
 #[tokio::test]
 async fn operator_config_narrows_declared() {
     let declared = BlockCapabilities {
-        network: true,
-        network_allow: vec!["https://a.com/".into(), "https://b.com/".into()],
+        network: wafer_block::capabilities::Allowlist::Only(
+            ["https://a.com/", "https://b.com/"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
         ..Default::default()
     };
     let block = make_declaring("test/declaring-b", declared);
@@ -144,8 +160,7 @@ async fn operator_config_narrows_declared() {
             "test/declaring-b",
             json!({
                 "capabilities": {
-                    "network": true,
-                    "network_allow": ["https://a.com/"]
+                    "network": { "Only": ["https://a.com/"] }
                 }
             }),
         )
@@ -154,14 +169,18 @@ async fn operator_config_narrows_declared() {
         .expect("build");
 
     let eff = wafer.effective_capabilities("test/declaring-b").unwrap();
-    assert!(eff.network);
-    assert_eq!(eff.network_allow, vec!["https://a.com/".to_string()]);
+    assert_eq!(
+        eff.network,
+        wafer_block::capabilities::Allowlist::Only(
+            ["https://a.com/"].iter().map(|s| s.to_string()).collect()
+        )
+    );
 }
 
 #[tokio::test]
 async fn operator_config_cannot_widen_declared() {
     let declared = BlockCapabilities {
-        network: false, // Explicitly denied.
+        network: wafer_block::capabilities::Allowlist::None, // Explicitly denied.
         ..Default::default()
     };
     let block = make_declaring("test/declaring-c", declared);
@@ -171,7 +190,7 @@ async fn operator_config_cannot_widen_declared() {
             "test/declaring-c",
             json!({
                 "capabilities": {
-                    "network": true   // Widening attempt.
+                    "network": "Any"   // Widening attempt.
                 }
             }),
         )
@@ -180,7 +199,11 @@ async fn operator_config_cannot_widen_declared() {
         .expect("build");
 
     let eff = wafer.effective_capabilities("test/declaring-c").unwrap();
-    assert!(!eff.network, "narrower declaration wins");
+    assert_eq!(
+        eff.network,
+        wafer_block::capabilities::Allowlist::None,
+        "narrower declaration wins"
+    );
 }
 
 #[tokio::test]
@@ -257,7 +280,7 @@ async fn config_capabilities_subkey_hidden_from_block_config_get() {
         .with_config(
             "test/inspector",
             json!({
-                "capabilities": {"network": false},
+                "capabilities": {"network": "None"},
                 "KEEP_THIS": "yes"
             }),
         )

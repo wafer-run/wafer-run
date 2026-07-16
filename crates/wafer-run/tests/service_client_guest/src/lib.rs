@@ -38,7 +38,7 @@ pub extern "C" fn __wafer_info() -> i64 {
             .into_iter()
             .map(String::from)
             .collect(),
-        config: true,
+        config: wafer_sdk::Allowlist::Any,
         ..wafer_sdk::BlockCapabilities::none()
     });
     let bytes = serde_json::to_vec(&info).expect("BlockInfo is JSON-serialisable");

@@ -76,10 +76,10 @@ fn fully_declared_caps_present() {
     let info = FullyDeclared::block_info();
     let caps = info.capabilities.expect("caps should be present");
     assert!(caps.crypto);
-    assert!(caps.network);
+    assert_eq!(caps.network, wafer_block::Allowlist::Any);
     assert!(!caps.raw_sql);
     assert!(caps.ddl);
-    assert!(!caps.config);
+    assert_eq!(caps.config, wafer_block::Allowlist::None);
     assert!(caps.collections.contains("users"));
     assert!(caps.collections.contains("sessions"));
     assert!(caps.callable_blocks.contains("wafer-run/crypto"));

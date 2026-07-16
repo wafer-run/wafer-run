@@ -331,8 +331,6 @@ fn log_widening_attempts(
         ("raw_sql", overrides.raw_sql, effective.raw_sql),
         ("ddl", overrides.ddl, effective.ddl),
         ("crypto", overrides.crypto, effective.crypto),
-        ("network", overrides.network, effective.network),
-        ("config", overrides.config, effective.config),
     ] {
         if let Some(true) = over {
             if !eff {
@@ -342,6 +340,17 @@ fn log_widening_attempts(
                     "config widened capability beyond declared — narrower declaration wins"
                 );
             }
+        }
+    }
+
+    // Allowlist capabilities (SEC-06): an override widens when it permits
+    // something the effective (declared ∩ override) does not.
+    for (label, over_opt, eff) in [
+        ("network", overrides.network.as_ref(), &effective.network),
+        ("config", overrides.config.as_ref(), &effective.config),
+    ] {
+        if let Some(over) = over_opt {
+            log_allowlist_widening(name, label, over, eff);
         }
     }
 
@@ -356,11 +365,6 @@ fn log_widening_attempts(
             "storage_folders",
             overrides.storage_folders.as_ref(),
             &effective.storage_folders,
-        ),
-        (
-            "config_keys",
-            overrides.config_keys.as_ref(),
-            &effective.config_keys,
         ),
         (
             "callable_blocks",
@@ -386,11 +390,6 @@ fn log_widening_attempts(
     // Vec allowlists: same shape.
     let vec_fields = [
         (
-            "network_allow",
-            overrides.network_allow.as_ref(),
-            &effective.network_allow,
-        ),
-        (
             "headers.readable",
             overrides.headers.as_ref().and_then(|h| h.readable.as_ref()),
             &effective.headers.readable,
@@ -414,6 +413,45 @@ fn log_widening_attempts(
                 }
             }
         }
+    }
+}
+
+/// Warn when an [`Allowlist`](wafer_block::capabilities::Allowlist) override
+/// (SEC-06) permits more than the effective (declared ∩ override) allows —
+/// the declaration is narrower and wins, so the operator's extra grant is
+/// inert. `None` overrides never widen (deny cannot widen).
+fn log_allowlist_widening(
+    name: &str,
+    label: &str,
+    over: &wafer_block::capabilities::Allowlist,
+    eff: &wafer_block::capabilities::Allowlist,
+) {
+    use wafer_block::capabilities::Allowlist::{Any, None, Only};
+    let warn = |item: &str| {
+        tracing::warn!(
+            block = %name,
+            field = %label,
+            item = %item,
+            "config widened capability beyond declared — narrower declaration wins"
+        );
+    };
+    match (over, eff) {
+        // Override asked for everything but the declaration is narrower.
+        (Any, Any) => {}
+        (Any, _) => warn("*"),
+        // Override listed specifics; any not surviving the intersection widened.
+        (Only(over_set), Only(eff_set)) => {
+            for item in over_set.difference(eff_set) {
+                warn(item);
+            }
+        }
+        (Only(over_set), None) => {
+            for item in over_set {
+                warn(item);
+            }
+        }
+        // Effective is Any (≥ override), or override is None → no widening.
+        (Only(_), Any) | (None, _) => {}
     }
 }
 
