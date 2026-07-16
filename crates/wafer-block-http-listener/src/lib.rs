@@ -140,8 +140,8 @@ use wafer_block::config::DispatchTarget;
 /// Default cap on request-body bytes buffered before dispatch — 10 MiB.
 ///
 /// Single source of truth for the `max_body_bytes` default: rendered into the
-/// `max_body_bytes` [`ConfigVar`] and used as the fallback when Init parses no
-/// value.
+/// `max_body_bytes` [`ConfigVar`] and used when Init finds no value. An
+/// invalid value is a hard Init error, not a silent fall-back to this default.
 const DEFAULT_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// SEC-07: parse the `trusted_proxies` config — comma-separated exact IPs
@@ -292,7 +292,7 @@ impl Block for HttpListenerBlock {
             ConfigVar::new(
                 "max_body_bytes",
                 "Maximum request-body size in bytes buffered before dispatch. \
-                 Larger bodies are truncated to empty.",
+                 Larger bodies are rejected with 413 Payload Too Large.",
                 &DEFAULT_MAX_BODY_BYTES.to_string(),
             )
             .name("Max Body Bytes"),
@@ -342,10 +342,21 @@ impl Block for HttpListenerBlock {
                 self.target.set(t).ok();
             }
             self.listen.set(config.str("listen").to_string()).ok();
-            let max_body = config
-                .str("max_body_bytes")
-                .parse::<usize>()
-                .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+            // Config rule (same as `trusted_proxies` above): absent = the
+            // documented default; present-but-invalid = a loud Init error, not
+            // a silent fall-back to the default.
+            let max_body = match config.str("max_body_bytes") {
+                "" => DEFAULT_MAX_BODY_BYTES,
+                raw => raw.parse::<usize>().map_err(|_| {
+                    WaferError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "max_body_bytes={raw:?} is not a valid byte count \
+                             (unset it for the default {DEFAULT_MAX_BODY_BYTES})"
+                        ),
+                    )
+                })?,
+            };
             self.max_body_bytes.set(max_body).ok();
         }
 
@@ -827,6 +838,47 @@ mod tests {
         assert_eq!(
             block.trusted_proxies.get().expect("set at Init"),
             &proxies("10.0.0.0/8, ::1")
+        );
+    }
+
+    /// Config rule: a present-but-invalid `max_body_bytes` fails Init loudly,
+    /// naming the bad value, rather than silently falling back to the default.
+    #[tokio::test]
+    async fn init_rejects_invalid_max_body_bytes() {
+        let block = HttpListenerBlock::new();
+        let event = init_event(&serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "flow": "some-flow",
+            "max_body_bytes": "ten-megs",
+        }));
+        let err = block
+            .lifecycle(&NoopCtx, event)
+            .await
+            .expect_err("invalid max_body_bytes must fail Init");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(
+            err.message.contains("ten-megs"),
+            "error must name the bad value, got: {}",
+            err.message
+        );
+        assert!(block.max_body_bytes.get().is_none());
+    }
+
+    /// Absent `max_body_bytes` uses the documented default (no error).
+    #[tokio::test]
+    async fn init_absent_max_body_bytes_uses_default() {
+        let block = HttpListenerBlock::new();
+        let event = init_event(&serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "flow": "some-flow",
+        }));
+        block
+            .lifecycle(&NoopCtx, event)
+            .await
+            .expect("absent max_body_bytes must pass Init");
+        assert_eq!(
+            block.max_body_bytes.get().copied(),
+            Some(DEFAULT_MAX_BODY_BYTES)
         );
     }
 }
