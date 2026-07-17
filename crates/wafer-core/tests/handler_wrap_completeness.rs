@@ -934,12 +934,32 @@ async fn storage_ops_all_deny_under_deny_ctx() {
     for op in ServiceOp::STORAGE_OPS {
         let calls = new_calls();
         let svc = storage_fakes::RecordingStorage::new(calls.clone());
-        let body = storage_op_body(op);
         let msg = msg_without_wrap_meta(op);
 
-        let out =
+        let out = if *op == ServiceOp::STORAGE_PUT_STREAMING {
+            // Streaming-ingress op: the request is a stream (a
+            // `PutStreamingHeader` frame followed by body frames), so it
+            // dispatches through `handle_put_streaming` with the raw
+            // InputStream, NOT the buffered `handle_message`. It must still
+            // deny before the header is authorized (and before any body frame
+            // is consumed) — keeping every op in STORAGE_OPS inside the deny
+            // loop regardless of its ingress shape.
+            let header = codec::encode(&wafer_block::wire::storage::PutStreamingHeader {
+                folder: "uploads".into(),
+                key: "k".into(),
+                content_type: "application/octet-stream".into(),
+            })
+            .expect("encode PutStreamingHeader");
+            let input = InputStream::from_bytes(header);
+            wafer_core::interfaces::storage::handler::handle_put_streaming(
+                &svc, &DenyCtx, &msg, input,
+            )
+            .await
+        } else {
+            let body = storage_op_body(op);
             wafer_core::interfaces::storage::handler::handle_message(&svc, &DenyCtx, &msg, &body)
-                .await;
+                .await
+        };
         expect_permission_denied(out, op).await;
 
         assert!(
