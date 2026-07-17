@@ -75,6 +75,14 @@ impl ServiceOp {
     pub const DATABASE_UPSERT: &str = "database.upsert";
     /// Write an object to storage.
     pub const STORAGE_PUT: &str = "storage.put";
+    /// Write an object to storage, streaming its body in as chunks rather than
+    /// buffering the whole object first (the upload half of the streaming wire
+    /// path). The request is framed as a [`PutStreamingHeader`] chunk followed
+    /// by zero-or-more body chunks. Requires the SAME WRAP authorization as
+    /// [`STORAGE_PUT`](Self::STORAGE_PUT) — a WRITE of `{folder}/{key}`.
+    ///
+    /// [`PutStreamingHeader`]: crate::wire::storage::PutStreamingHeader
+    pub const STORAGE_PUT_STREAMING: &str = "storage.put_streaming";
     /// Read an object from storage.
     pub const STORAGE_GET: &str = "storage.get";
     /// Read an object from storage, streaming its body out as chunks rather
@@ -227,6 +235,7 @@ impl ServiceOp {
     /// [`crate::interfaces::storage_v1`].
     pub const STORAGE_OPS: &[&str] = &[
         Self::STORAGE_PUT,
+        Self::STORAGE_PUT_STREAMING,
         Self::STORAGE_GET,
         Self::STORAGE_GET_STREAMING,
         Self::STORAGE_DELETE,

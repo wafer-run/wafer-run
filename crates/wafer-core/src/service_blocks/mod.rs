@@ -134,6 +134,10 @@ macro_rules! service_block {
         $(extra_fields: { $($efield:ident : $efty:ty),+ $(,)? },)?
         $(info_extras: |$ithis:ident, $info:ident| $iexpr:expr,)?
         handle: |$hthis:ident, $hctx:ident, $hmsg:ident, $hbody:ident| $hexpr:expr,
+        $(stream_ingress: {
+            op: $sop:expr,
+            handle: |$sthis:ident, $sctx:ident, $smsg:ident, $sinput:ident| $sexpr:expr $(,)?
+        },)?
         $(lifecycle: |$lthis:ident, $lctx:ident, $levent:ident| $lexpr:expr,)?
     ) => {
         $(#[$attr])*
@@ -170,6 +174,24 @@ macro_rules! service_block {
                 msg: $crate::service_blocks::__private::Message,
                 input: $crate::service_blocks::__private::InputStream,
             ) -> $crate::service_blocks::__private::OutputStream {
+                $(
+                    // Streaming-ingress op: hand the raw `InputStream` to the
+                    // streaming handler WITHOUT `collect_to_bytes`, so a large
+                    // request body (e.g. a file upload) streams into the
+                    // backend instead of being buffered whole in isolate
+                    // memory. Additive — every other op falls through to the
+                    // buffered path below byte-for-byte unchanged. The bool
+                    // binding drops the transient `&str` borrow of `msg`
+                    // before the diverging branch moves `msg`/`input`.
+                    let __wafer_stream_ingress = msg.kind.as_str() == $sop;
+                    if __wafer_stream_ingress {
+                        let $sthis = self;
+                        let $sctx = ctx;
+                        let $smsg = msg;
+                        let $sinput = input;
+                        return $sexpr;
+                    }
+                )?
                 let $hbody = input.collect_to_bytes().await;
                 let $hthis = self;
                 let $hctx = ctx;
@@ -219,6 +241,10 @@ macro_rules! service_block {
         $(extra_fields: { $($efield:ident : $efty:ty),+ $(,)? },)?
         $(info_extras: |$ithis:ident, $info:ident| $iexpr:expr,)?
         handle: |$hsvc:ident, $hthis:ident, $hctx:ident, $hmsg:ident, $hbody:ident| $hexpr:expr,
+        $(stream_ingress: {
+            op: $sop:expr,
+            handle: |$ssvc:ident, $sthis:ident, $sctx:ident, $smsg:ident, $sinput:ident| $sexpr:expr $(,)?
+        },)?
         lifecycle: |$lthis:ident, $lctx:ident, $levent:ident| $lexpr:expr,
     ) => {
         $(#[$attr])*
@@ -267,7 +293,7 @@ macro_rules! service_block {
                 // lifecycle(Init) completes — programmer error in the host,
                 // but surface a typed error rather than panicking so the
                 // requester gets a clean 500.
-                let ::core::option::Option::Some($hsvc) = self.service.get() else {
+                let ::core::option::Option::Some(__wafer_svc) = self.service.get() else {
                     return $crate::service_blocks::__private::OutputStream::error(
                         $crate::service_blocks::__private::WaferError::new(
                             $crate::service_blocks::__private::ErrorCode::Internal,
@@ -275,7 +301,24 @@ macro_rules! service_block {
                         ),
                     );
                 };
+                $(
+                    // Streaming-ingress op: hand the raw `InputStream` to the
+                    // streaming handler WITHOUT `collect_to_bytes` (see the
+                    // wrapper form for the full rationale). The resolved
+                    // service is a shared reference (`Copy`), so both branches
+                    // may bind it.
+                    let __wafer_stream_ingress = msg.kind.as_str() == $sop;
+                    if __wafer_stream_ingress {
+                        let $ssvc = __wafer_svc;
+                        let $sthis = self;
+                        let $sctx = ctx;
+                        let $smsg = msg;
+                        let $sinput = input;
+                        return $sexpr;
+                    }
+                )?
                 let $hbody = input.collect_to_bytes().await;
+                let $hsvc = __wafer_svc;
                 let $hthis = self;
                 let $hctx = ctx;
                 let $hmsg = msg;

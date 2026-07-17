@@ -66,6 +66,18 @@ wafer_core::service_block! {
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
+    // Upload streaming: route `storage.put_streaming` to the streaming handler
+    // with the raw `InputStream` intact (no `collect_to_bytes`) so storage@v1
+    // stays complete for the S3 backend. `S3StorageService::put_streaming`
+    // currently keeps the buffered default — a true streaming S3 upload needs a
+    // multipart flow (initiate / upload-part / complete), deferred to a
+    // follow-up — but the dispatch reaches it either way.
+    stream_ingress: {
+        op: wafer_block::common::ServiceOp::STORAGE_PUT_STREAMING,
+        handle: |service, _this, ctx, msg, input| {
+            handler::handle_put_streaming(service.as_ref(), ctx, &msg, input).await
+        },
+    },
     lifecycle: |this, _ctx, event| {
         if event.event_type == LifecycleType::Init && this.service.get().is_none() {
             let config = BlockConfig::from_event(&event);

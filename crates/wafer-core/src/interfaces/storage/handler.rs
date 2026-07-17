@@ -271,3 +271,68 @@ pub async fn handle_message(
         )),
     }
 }
+
+/// Streaming-ingress handler for [`ServiceOp::STORAGE_PUT_STREAMING`].
+///
+/// Unlike the buffered ops routed through [`handle_message`], the streaming
+/// PUT request arrives as a stream of frames: a [`wire::PutStreamingHeader`]
+/// header frame (folder / key / content_type) followed by zero-or-more raw
+/// body-chunk frames. The `service_block!` ingress macro routes this op here
+/// with the request `InputStream` intact — WITHOUT `collect_to_bytes` — so a
+/// large object streams into the backend via [`StorageService::put_streaming`]
+/// instead of being buffered whole in isolate memory.
+///
+/// WRAP authorization parity (security-critical): the caller is authorized for
+/// the IDENTICAL `(resource, ResourceType::Storage, is_write = true)` tuple as
+/// the buffered [`ServiceOp::STORAGE_PUT`] — a WRITE of `{folder}/{key}` —
+/// decoded from the header frame and checked BEFORE any body frame is consumed
+/// or written. So the streaming upload can never be reached with a weaker (or
+/// read-only) grant than the buffered upload.
+pub async fn handle_put_streaming(
+    service: &dyn StorageService,
+    ctx: &dyn Context,
+    _msg: &Message,
+    input: InputStream,
+) -> OutputStream {
+    use futures::StreamExt;
+
+    let mut input = input;
+    // Frame 1 is the header. An empty stream (no header frame at all) is a
+    // malformed request — reject before touching the service.
+    let Some(header_bytes) = input.next().await else {
+        return OutputStream::error(WaferError::new(
+            ErrorCode::InvalidArgument,
+            "storage.put_streaming: request stream ended before the header frame",
+        ));
+    };
+
+    // Decode + authorize the header BEFORE consuming any body frame. Same
+    // resource tuple as the buffered `storage.put` write, so the check can't
+    // be forgotten and can't be weaker than the buffered path.
+    let header = match decode_and_authorize::<wire::PutStreamingHeader>(
+        ctx,
+        &header_bytes,
+        "storage.put_streaming",
+        |h| {
+            (
+                format!("{}/{}", h.folder, h.key),
+                ResourceType::Storage,
+                true,
+            )
+        },
+    ) {
+        Ok(h) => h,
+        Err(out) => return out,
+    };
+
+    // The remaining frames are the object body. `input` is now positioned at
+    // the first body chunk (its cancellation token is preserved), so
+    // `put_streaming` receives a live body stream — never a buffered blob.
+    match service
+        .put_streaming(&header.folder, &header.key, input, &header.content_type)
+        .await
+    {
+        Ok(()) => OutputStream::respond(vec![]),
+        Err(e) => OutputStream::error(storage_error_to_wafer(e)),
+    }
+}
