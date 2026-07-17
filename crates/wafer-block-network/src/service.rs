@@ -323,6 +323,33 @@ mod tests {
         }
     }
 
+    /// The streaming entry point shares `send_request` with `do_request`, so
+    /// the SSRF gate must fire on it too — a private/internal address is
+    /// rejected before any stream is produced.
+    #[cfg(not(feature = "allow-private-network"))]
+    #[tokio::test]
+    async fn streaming_request_rejected_for_private_address() {
+        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
+        let req = Request {
+            method: "GET".into(),
+            url: "http://localhost/".into(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let err = svc
+            .do_request_streaming(&req)
+            .await
+            .err()
+            .expect("streaming path must apply the same SSRF gate as do_request");
+        match err {
+            NetworkError::RequestError(msg) => assert!(
+                msg.contains("private/internal"),
+                "expected SSRF rejection, got: {msg}"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     /// `client()` caches the built client across calls — two requests on
     /// the same service must observe the same `&reqwest::Client`. This
     /// is the contract that lets the OnceLock-of-Result pattern keep

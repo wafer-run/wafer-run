@@ -687,6 +687,42 @@ mod tests {
         assert_eq!(page2.num_calls(), 1);
     }
 
+    /// `get_streaming` streams the `GetObject` `ByteStream` body through the
+    /// returned `OutputStream` and resolves `ObjectInfo` from the response
+    /// head — the collected stream body must equal the object bytes.
+    #[tokio::test]
+    async fn get_streaming_streams_object_body() {
+        use aws_sdk_s3::{operation::get_object::GetObjectOutput, primitives::ByteStream};
+
+        let get = mock!(aws_sdk_s3::Client::get_object)
+            .match_requests(|req| req.key() == Some("folder/obj.bin"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .content_type("application/octet-stream")
+                    .content_length(5)
+                    .body(ByteStream::from(b"hello".to_vec()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&get]);
+        let svc = service(client);
+
+        let (stream, info) = svc
+            .get_streaming("folder", "obj.bin")
+            .await
+            .expect("get_streaming succeeds");
+        assert_eq!(info.key, "obj.bin");
+        assert_eq!(info.size, 5);
+        assert_eq!(info.content_type, "application/octet-stream");
+
+        let body = stream
+            .collect_buffered()
+            .await
+            .expect("stream ends with a Complete terminal")
+            .body;
+        assert_eq!(body, b"hello");
+        assert_eq!(get.num_calls(), 1);
+    }
+
     /// `delete_folder` streams listing pages and issues one DeleteObjects
     /// batch per page instead of buffering the whole listing first.
     #[tokio::test]

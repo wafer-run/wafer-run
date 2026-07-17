@@ -641,6 +641,45 @@ mod tests {
         }
     }
 
+    /// The real streaming overrides must round-trip: `put_streaming` writes a
+    /// multi-chunk `InputStream` to disk chunk-by-chunk, and `get_streaming`
+    /// reads it back across its own chunk stream. Both must agree with the
+    /// buffered `get` on bytes and size.
+    #[tokio::test]
+    async fn put_streaming_then_get_streaming_round_trips_chunks() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        const EXPECTED: &[u8] = b"hello streamed world";
+
+        // Multi-chunk input — exercises the incremental write path.
+        let input = InputStream::from_stream(futures::stream::iter(vec![
+            b"hello ".to_vec(),
+            b"streamed ".to_vec(),
+            b"world".to_vec(),
+        ]));
+        svc.put_streaming("f", "greeting.txt", input, "text/plain")
+            .await
+            .expect("put_streaming");
+
+        // Buffered get sees the fully-written object.
+        let (buffered, info) = svc.get("f", "greeting.txt").await.expect("get");
+        assert_eq!(buffered, EXPECTED);
+        assert_eq!(info.size, EXPECTED.len() as i64);
+
+        // Streaming get yields the same bytes across its chunk stream.
+        let (stream, sinfo) = svc
+            .get_streaming("f", "greeting.txt")
+            .await
+            .expect("get_streaming");
+        assert_eq!(sinfo.size, EXPECTED.len() as i64);
+        let body = stream
+            .collect_buffered()
+            .await
+            .expect("stream ends with a Complete terminal")
+            .body;
+        assert_eq!(body, EXPECTED);
+    }
+
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
     fn tempdir() -> PathBuf {
         let base = std::env::temp_dir();
