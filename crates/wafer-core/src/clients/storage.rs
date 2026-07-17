@@ -10,9 +10,11 @@ use wafer_block::context::Context;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::stream::StreamEvent;
 #[cfg(not(feature = "wasm-component"))]
+use wafer_block::streams::input::InputStream;
+#[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
 #[cfg(not(feature = "wasm-component"))]
-use wafer_block::wire::storage::GetRequest;
+use wafer_block::wire::storage::{GetRequest, PutStreamingHeader};
 // Re-export wire types for callers — byte-identical to the legacy
 // `interfaces::storage::service::*` types.
 pub use wafer_block::wire::storage::{FolderInfo, ObjectInfo, ObjectList};
@@ -200,6 +202,61 @@ pub async fn get_stream(
         info,
         finished: false,
     })
+}
+
+/// Streaming: upload an object whose body arrives as an [`InputStream`] of
+/// byte chunks, streamed into `folder/key` frame-by-frame instead of buffered
+/// whole in memory (the counterpart to [`get_stream`], and the streaming form
+/// of the buffered [`put`]).
+///
+/// The request is framed as a [`PutStreamingHeader`] chunk (folder / key /
+/// content_type) followed by the body chunks from `body`, dispatched to the
+/// dedicated `storage.put_streaming` op. Authorization is IDENTICAL to the
+/// buffered [`put`] — a WRITE of `{folder}/{key}` — so a caller that may PUT
+/// may stream-PUT, and no other. `body`'s cancellation token is preserved on
+/// the combined request stream, so a dropped/aborted upload cancels the
+/// upstream body producer.
+///
+/// Use this when the object body is large (e.g. a media upload on the
+/// Cloudflare request path) and the caller wants to forward chunks as they
+/// arrive rather than hold the whole object in isolate memory.
+#[cfg(not(feature = "wasm-component"))]
+pub async fn put_stream(
+    ctx: &dyn Context,
+    folder: &str,
+    key: &str,
+    content_type: &str,
+    body: InputStream,
+) -> Result<(), WaferError> {
+    use futures::StreamExt;
+
+    let header = PutStreamingHeader {
+        folder: folder.to_string(),
+        key: key.to_string(),
+        content_type: content_type.to_string(),
+    };
+    let header_bytes = wafer_block::codec::encode(&header)?;
+    let resource = format!("{folder}/{key}");
+
+    // Frame the request: the header chunk first, then the body chunks
+    // verbatim. Preserve the body's cancellation token on the combined stream.
+    let cancel = body.cancel_token().clone();
+    let combined = futures::stream::once(async move { header_bytes }).chain(body);
+    let input = InputStream::from_stream_with_cancel(combined, cancel);
+
+    // Streaming upload: the dedicated `storage.put_streaming` op — a WRITE of
+    // `{folder}/{key}`, the SAME grant tuple as the buffered `put`. The backend
+    // streams the body in via `StorageService::put_streaming`; the response is
+    // a small empty ack, so buffering it is fine.
+    let msg = super::build_service_message(
+        ServiceOp::STORAGE_PUT_STREAMING,
+        Some(resource.as_str()),
+        true,
+        Some("storage"),
+    );
+    let out = ctx.call_block(BLOCK, msg, input).await;
+    super::collect_response_body(out).await?;
+    Ok(())
 }
 
 /// Streaming response wrapper for [`get_stream`].
