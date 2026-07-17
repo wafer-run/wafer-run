@@ -170,13 +170,19 @@ impl Context for RecordingCtx {
 // (or a fall-through to the buffered `put`) is observable.
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct StreamingStorageState {
     calls: Vec<&'static str>,
     folder: String,
     key: String,
     content_type: String,
     body_chunks: Vec<Vec<u8>>,
+}
+
+/// Snapshot the recorded state into an owned copy — releases the lock
+/// immediately so assertions never hold the guard.
+fn snapshot(state: &Arc<Mutex<StreamingStorageState>>) -> StreamingStorageState {
+    state.lock().unwrap().clone()
 }
 
 struct RecordingStreamingStorage {
@@ -207,14 +213,16 @@ impl StorageService for RecordingStreamingStorage {
         data: &[u8],
         content_type: &str,
     ) -> Result<(), StorageError> {
-        let mut s = self.state.lock().unwrap();
-        s.calls.push("put");
-        s.folder = folder.to_string();
-        s.key = key.to_string();
-        s.content_type = content_type.to_string();
-        // One buffered blob — deliberately recorded as a single chunk so a
-        // buffered path is visibly distinct from the multi-chunk stream.
-        s.body_chunks = vec![data.to_vec()];
+        {
+            let mut s = self.state.lock().unwrap();
+            s.calls.push("put");
+            s.folder = folder.to_string();
+            s.key = key.to_string();
+            s.content_type = content_type.to_string();
+            // One buffered blob — deliberately recorded as a single chunk so a
+            // buffered path is visibly distinct from the multi-chunk stream.
+            s.body_chunks = vec![data.to_vec()];
+        }
         Ok(())
     }
 
@@ -304,7 +312,7 @@ async fn put_streaming_dispatch_streams_body_chunks_verbatim_to_put_streaming() 
         .expect("streaming put must succeed with an ack");
     assert!(buf.body.is_empty(), "put ack body must be empty");
 
-    let s = state.lock().unwrap();
+    let s = snapshot(&state);
     // The STREAMING method ran — never the buffered `put`.
     assert_eq!(
         s.calls,
@@ -349,7 +357,7 @@ async fn buffered_put_dispatch_still_routes_to_buffered_put() {
         .await
         .expect("buffered put must still succeed");
 
-    let s = state.lock().unwrap();
+    let s = snapshot(&state);
     assert_eq!(
         s.calls,
         vec!["put"],
@@ -515,7 +523,7 @@ async fn client_put_stream_round_trips_header_and_body_into_put_streaming() {
         .await
         .expect("client put_stream must succeed");
 
-    let s = state.lock().unwrap();
+    let s = snapshot(&state);
     assert_eq!(s.calls, vec!["put_streaming"]);
     assert_eq!(s.folder, "uploads");
     assert_eq!(s.key, "media.bin");

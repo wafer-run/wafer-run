@@ -299,14 +299,11 @@ pub async fn handle_put_streaming(
     let mut input = input;
     // Frame 1 is the header. An empty stream (no header frame at all) is a
     // malformed request — reject before touching the service.
-    let header_bytes = match input.next().await {
-        Some(bytes) => bytes,
-        None => {
-            return OutputStream::error(WaferError::new(
-                ErrorCode::InvalidArgument,
-                "storage.put_streaming: request stream ended before the header frame",
-            ));
-        }
+    let Some(header_bytes) = input.next().await else {
+        return OutputStream::error(WaferError::new(
+            ErrorCode::InvalidArgument,
+            "storage.put_streaming: request stream ended before the header frame",
+        ));
     };
 
     // Decode + authorize the header BEFORE consuming any body frame. Same
