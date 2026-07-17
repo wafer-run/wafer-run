@@ -18,7 +18,7 @@ use std::{
 };
 
 use service::PostgresDatabaseService;
-use wafer_block::{BlockConfig, ConfigVar, ErrorCode, LifecycleType, WaferError};
+use wafer_block::{BlockConfig, ConfigVar, ErrorCode, InputType, LifecycleType, WaferError};
 use wafer_core::interfaces::database::{handler, service::DatabaseService};
 use wafer_schema::{
     manifest::{collections_to_tables, CollectionDef},
@@ -41,17 +41,30 @@ wafer_core::service_block! {
     category: Infrastructure,
     service: dyn DatabaseService,
     extra_fields: { tables: OnceLock<Vec<Table>> },
-    info_extras: |_this, info| info.config_keys(vec![ConfigVar::new(
-        DATABASE_URL_ENV,
-        "PostgreSQL connection URL (postgres://user:pass@host:port/db). \
-         Required.",
-        "",
-    )
-    .name("Database URL")]),
+    info_extras: |_this, info| info.config_keys(vec![
+        ConfigVar::new(
+            DATABASE_URL_ENV,
+            "PostgreSQL connection URL (postgres://user:pass@host:port/db). \
+             Required.",
+            "",
+        )
+        .name("Database URL"),
+        ConfigVar::new(
+            handler::STRICT_SCHEMA_CONFIG_KEY,
+            "When \"true\", the database service trusts its migrated schema: \
+             it skips the per-operation table-exists probe and the lazy \
+             ADD COLUMN path, removing schema-introspection round-trips from \
+             the hot path. Leave \"false\" (the default) to keep the \
+             self-healing lazy-schema behavior. Applied once at Init.",
+            "false",
+        )
+        .name("Strict Schema")
+        .input_type(InputType::Toggle),
+    ]),
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
-    lifecycle: |this, _ctx, event| {
+    lifecycle: |this, ctx, event| {
         if event.event_type == LifecycleType::Init && this.service.get().is_none() {
             let config = BlockConfig::from_event(&event);
 
@@ -95,7 +108,7 @@ wafer_core::service_block! {
         if event.event_type == LifecycleType::Init {
             let tables = this.tables.get().map_or(&[][..], |t| t.as_slice());
             if let Some(service) = this.service.get() {
-                handler::handle_lifecycle(service.as_ref(), tables, &event).await?;
+                handler::handle_lifecycle(service.as_ref(), tables, ctx, &event).await?;
             }
         }
 

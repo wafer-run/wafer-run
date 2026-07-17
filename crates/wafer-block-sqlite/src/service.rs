@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use base64ct::{Base64, Encoding};
@@ -11,6 +11,7 @@ use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::service::{pk, DataType};
 use wafer_core::interfaces::database::{
     exec::DbExec,
+    schema_cache::SchemaCache,
     service::{
         AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
         UpsertSpec,
@@ -40,6 +41,13 @@ pub struct SQLiteDatabaseService {
     write: ConnWorker,
     readers: Vec<ConnWorker>,
     next_reader: AtomicUsize,
+    /// Memoized table-exists / column-list facts (see [`SchemaCache`]).
+    /// Invalidated on every schema mutation this service performs.
+    schema_cache: SchemaCache,
+    /// STRICT_SCHEMA flag; applied once at lifecycle `Init` via
+    /// [`DatabaseService::set_strict_schema`]. When set, the shared executor
+    /// skips schema introspection entirely.
+    strict_schema: AtomicBool,
 }
 
 /// Apply the standard connection PRAGMAs: WAL journaling, foreign-key
@@ -66,6 +74,8 @@ impl SQLiteDatabaseService {
             write: ConnWorker::spawn(db, "sqlite-write"),
             readers: Vec::new(),
             next_reader: AtomicUsize::new(0),
+            schema_cache: SchemaCache::new(),
+            strict_schema: AtomicBool::new(false),
         }
     }
 
@@ -111,6 +121,8 @@ impl SQLiteDatabaseService {
             write: ConnWorker::spawn(conn, "sqlite-write"),
             readers,
             next_reader: AtomicUsize::new(0),
+            schema_cache: SchemaCache::new(),
+            strict_schema: AtomicBool::new(false),
         })
     }
 
@@ -285,6 +297,14 @@ fn as_params(sql_params: &[SqlValue]) -> Vec<&dyn rusqlite::types::ToSql> {
 #[wafer_async_trait]
 impl DbExec for SQLiteDatabaseService {
     const BACKEND: Backend = Backend::Sqlite;
+
+    fn schema_cache(&self) -> Option<&SchemaCache> {
+        Some(&self.schema_cache)
+    }
+
+    fn strict_schema(&self) -> bool {
+        self.strict_schema.load(Ordering::Relaxed)
+    }
 
     async fn run_fetch(
         &self,
@@ -574,10 +594,11 @@ impl DatabaseService for SQLiteDatabaseService {
             .map(|stmt| stmt.sql)
             .collect();
 
-        self.on_write(move |db| {
-            db.execute_batch(&create_sql).map_err(|e| {
-                DatabaseError::Internal(format!("create table {table_name}: {e}"))
-            })?;
+        let result = self
+            .on_write(move |db| {
+                db.execute_batch(&create_sql).map_err(|e| {
+                    DatabaseError::Internal(format!("create table {table_name}: {e}"))
+                })?;
 
             // Add any missing columns. The table was just created above, so a
             // failure to read its columns is a real error, not "no columns" —
@@ -605,7 +626,12 @@ impl DatabaseService for SQLiteDatabaseService {
             }
             Ok(())
         })
-        .await?
+        .await?;
+        // The migration created the table and/or added columns (or failed
+        // partway) — drop any cached facts so the next introspection reads the
+        // true schema. Invalidate before propagating the inner result.
+        self.schema_cache.invalidate(&table.name);
+        result
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
@@ -615,13 +641,19 @@ impl DatabaseService for SQLiteDatabaseService {
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
         let stmt = ddl::build_drop_table(name, Backend::Sqlite);
         self.run_execute(&stmt.sql, &[]).await?;
+        self.schema_cache.invalidate(name);
         Ok(())
     }
 
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
         let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
         self.run_execute(&stmt.sql, &[]).await?;
+        self.schema_cache.invalidate(table);
         Ok(())
+    }
+
+    fn set_strict_schema(&self, enabled: bool) {
+        self.strict_schema.store(enabled, Ordering::Relaxed);
     }
 }
 

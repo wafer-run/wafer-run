@@ -19,6 +19,20 @@ use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
 
+/// Node-config key for STRICT_SCHEMA mode. When enabled, SQL backends trust
+/// their migrated schema and skip per-operation schema introspection (see
+/// [`DbExec::strict_schema`](super::exec::DbExec::strict_schema)). Declared as a
+/// `ConfigVar` on the database service block(s) and read here at `Init`.
+pub const STRICT_SCHEMA_CONFIG_KEY: &str = "WAFER_RUN__DATABASE__STRICT_SCHEMA";
+
+/// Interpret a node-config string as a boolean flag: `"true"`/`"1"`
+/// (case-insensitive, trimmed) enable it; anything else — including an unset
+/// key — is `false`. Matches the convention used by other toggle config vars.
+fn config_flag_enabled(value: &str) -> bool {
+    let v = value.trim();
+    v.eq_ignore_ascii_case("true") || v == "1"
+}
+
 /// Maximum nesting depth of a `FilterNode` tree accepted from the wire.
 pub(crate) const MAX_FILTER_DEPTH: usize = 16;
 /// Maximum total node count of a `FilterNode` tree accepted from the wire.
@@ -799,13 +813,29 @@ pub async fn handle_message(
     }
 }
 
-/// Handle database lifecycle events (schema migration on Init).
+/// Handle database lifecycle events (config application + schema migration on
+/// Init).
+///
+/// `ctx` is the node-config surface: the STRICT_SCHEMA flag arrives here, at
+/// the same `Init` lifecycle where migrations run, so the backend can store it
+/// before serving any query. Reading it via `ctx.config_get` keeps the value
+/// out of a global and off the per-call hot path.
 pub async fn handle_lifecycle(
     service: &dyn DatabaseService,
     tables: &[Table],
+    ctx: &dyn Context,
     event: &LifecycleEvent,
 ) -> std::result::Result<(), WaferError> {
     if event.event_type == LifecycleType::Init {
+        // Apply STRICT_SCHEMA (default false) before any migration or query.
+        let strict = ctx
+            .config_get(STRICT_SCHEMA_CONFIG_KEY)
+            .is_some_and(config_flag_enabled);
+        service.set_strict_schema(strict);
+        if strict {
+            tracing::info!("database STRICT_SCHEMA enabled — schema introspection disabled");
+        }
+
         if tables.is_empty() {
             tracing::debug!("no schema tables configured — skipping migration");
         } else {

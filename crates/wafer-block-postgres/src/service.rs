@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use base64ct::{Base64, Encoding};
 use sqlx::{postgres::PgRow, PgPool, Row};
@@ -8,6 +11,7 @@ use wafer_block::db::{FilterOp, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::database::{
     exec::DbExec,
+    schema_cache::SchemaCache,
     service::{
         AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
         UpsertSpec,
@@ -22,6 +26,13 @@ use wafer_sql_utils::{ident::sanitize_ident, value::sea_values_to_json};
 /// Uses `sqlx` with connection pooling.
 pub struct PostgresDatabaseService {
     pool: PgPool,
+    /// Memoized table-exists / column-list facts (see [`SchemaCache`]).
+    /// Invalidated on every schema mutation this service performs.
+    schema_cache: SchemaCache,
+    /// STRICT_SCHEMA flag; applied once at lifecycle `Init` via
+    /// [`DatabaseService::set_strict_schema`]. When set, the shared executor
+    /// skips schema introspection entirely.
+    strict_schema: AtomicBool,
 }
 
 impl PostgresDatabaseService {
@@ -30,12 +41,16 @@ impl PostgresDatabaseService {
         let pool = PgPool::connect(url)
             .await
             .map_err(|e| DatabaseError::Internal(format!("connect: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     /// Create a service from an existing connection pool.
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            schema_cache: SchemaCache::new(),
+            strict_schema: AtomicBool::new(false),
+        }
     }
 
     // -----------------------------------------------------------------
@@ -106,6 +121,14 @@ impl PostgresDatabaseService {
 #[wafer_async_trait]
 impl DbExec for PostgresDatabaseService {
     const BACKEND: Backend = Backend::Postgres;
+
+    fn schema_cache(&self) -> Option<&SchemaCache> {
+        Some(&self.schema_cache)
+    }
+
+    fn strict_schema(&self) -> bool {
+        self.strict_schema.load(Ordering::Relaxed)
+    }
 
     async fn run_fetch(
         &self,
@@ -266,7 +289,11 @@ impl DatabaseService for PostgresDatabaseService {
     // --- Schema management ---
 
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        self.schema_ensure_table_async(table).await
+        let result = self.schema_ensure_table_async(table).await;
+        // Migration created the table and/or added columns (or failed
+        // partway) — drop cached facts so the next introspection is fresh.
+        self.schema_cache.invalidate(&table.name);
+        result
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
@@ -274,11 +301,19 @@ impl DatabaseService for PostgresDatabaseService {
     }
 
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        self.schema_drop_table_async(name).await
+        let result = self.schema_drop_table_async(name).await;
+        self.schema_cache.invalidate(name);
+        result
     }
 
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        self.schema_add_column_async(table, column).await
+        let result = self.schema_add_column_async(table, column).await;
+        self.schema_cache.invalidate(table);
+        result
+    }
+
+    fn set_strict_schema(&self, enabled: bool) {
+        self.strict_schema.store(enabled, Ordering::Relaxed);
     }
 
     async fn delete_where(
