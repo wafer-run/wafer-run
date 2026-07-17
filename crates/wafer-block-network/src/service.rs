@@ -7,7 +7,7 @@ use wafer_block_macro::wafer_async_trait;
 pub use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response, ResponseHead,
 };
-use wafer_net_security::SsrfFilteringResolver;
+use wafer_net_security::{ssrf_redirect_policy, SsrfFilteringResolver};
 
 /// Config var key controlling the maximum response body size accepted by
 /// `HttpNetworkService`. Read from the process env **once** at service
@@ -88,12 +88,38 @@ impl HttpNetworkService {
     /// Borrow the shared reqwest client, building it on first call. A
     /// build failure is cached so subsequent requests fail fast with
     /// the same error instead of retrying the broken configuration.
+    ///
+    /// SSRF deployment assumption: the [`SsrfFilteringResolver`] DNS-rebind
+    /// layer runs only on **direct** connections. When an
+    /// `HTTP(S)_PROXY` / `ALL_PROXY` env var is set, reqwest forwards the
+    /// hostname to the proxy and the resolver never runs — only the
+    /// literal-URL gate (`is_blocked_url`, applied per request) still fires.
+    /// Behind an egress proxy, that proxy MUST enforce SSRF filtering. We
+    /// deliberately do not call `.no_proxy()`: forcing direct egress would
+    /// break legitimate proxied deployments. A configured proxy is logged
+    /// once (below) so the bypass is visible in the deploy's logs.
     fn client(&self) -> Result<&reqwest::Client, NetworkError> {
         self.client
             .get_or_init(|| {
+                if let Some(var) = detected_proxy_env() {
+                    tracing::warn!(
+                        proxy_env = var,
+                        "outbound HTTP proxy configured ({var}); proxied requests bypass the \
+                         SSRF DNS-rebind resolver — the egress proxy must enforce SSRF filtering"
+                    );
+                }
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
-                    .redirect(reqwest::redirect::Policy::none())
+                    // SSRF: every redirect hop is revalidated (URL-level by
+                    // `ssrf_redirect_policy`, resolved-IP-level by the DNS
+                    // resolver below), with a bounded hop count. This follows
+                    // legitimate public redirects while blocking a public first
+                    // hop that bounces to an internal address (SEC-019).
+                    .redirect(ssrf_redirect_policy())
+                    // DNS rebinding: drop resolved IPs pointing at
+                    // private/loopback/link-local/multicast addresses. reqwest
+                    // dials exactly the addresses returned here, so the checked
+                    // IP is the dialed IP (no re-resolve TOCTOU).
                     .dns_resolver(Arc::new(SsrfFilteringResolver))
                     .build()
                     .map_err(|e| e.to_string())
@@ -147,6 +173,25 @@ impl HttpNetworkService {
             .await
             .map_err(|e| NetworkError::RequestError(e.to_string()))
     }
+}
+
+/// Proxy environment variables reqwest honours by default. If any is set,
+/// proxied requests bypass the [`SsrfFilteringResolver`] DNS-rebind layer (see
+/// the deployment note on [`HttpNetworkService::client`]). Returns the first
+/// one found so it can be named in a one-time warning at client construction.
+fn detected_proxy_env() -> Option<&'static str> {
+    const PROXY_VARS: &[&str] = &[
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    PROXY_VARS
+        .iter()
+        .copied()
+        .find(|v| std::env::var_os(v).is_some())
 }
 
 /// Flatten reqwest response headers into the wire-facing
@@ -307,6 +352,9 @@ impl NetworkService for HttpNetworkService {
 
 #[cfg(test)]
 mod tests {
+    // Used only by the SSRF-gate tests, which are compiled out under
+    // `allow-private-network` (the gate they assert is itself disabled there).
+    #[cfg(not(feature = "allow-private-network"))]
     use wafer_core::interfaces::network::service::{NetworkService, Request};
 
     use super::*;

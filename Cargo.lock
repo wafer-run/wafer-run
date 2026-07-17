@@ -6282,6 +6282,7 @@ dependencies = [
  "wafer-block-macro",
  "wafer-core",
  "wafer-net-security",
+ "wiremock",
 ]
 
 [[package]]
