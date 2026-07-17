@@ -13,11 +13,11 @@ use wafer_block::stream::StreamEvent;
 use wafer_block::streams::input::InputStream;
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::streams::output::OutputStream;
-#[cfg(not(feature = "wasm-component"))]
-use wafer_block::wire::storage::{GetRequest, PutStreamingHeader};
 // Re-export wire types for callers — byte-identical to the legacy
 // `interfaces::storage::service::*` types.
 pub use wafer_block::wire::storage::{FolderInfo, ObjectInfo, ObjectList};
+#[cfg(not(feature = "wasm-component"))]
+use wafer_block::wire::storage::{GetRequest, PutStreamingHeader};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::storage::{
