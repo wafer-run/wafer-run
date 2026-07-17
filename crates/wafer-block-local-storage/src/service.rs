@@ -179,6 +179,44 @@ fn join_err(e: &tokio::task::JoinError) -> StorageError {
     StorageError::Internal(format!("storage walk task failed: {e}"))
 }
 
+/// Encode an object key as this backend's opaque list cursor.
+///
+/// URL-safe unpadded base64 keeps the token opaque to callers (they must
+/// never parse it) and safe to round-trip through the wire / URLs. Decoded
+/// back to the key by [`decode_cursor`].
+fn encode_cursor(key: &str) -> String {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    Base64UrlUnpadded::encode_string(key.as_bytes())
+}
+
+/// Decode an opaque list cursor back to the object key it was minted from.
+/// A cursor that isn't valid base64 / UTF-8 is a client error, surfaced as
+/// [`StorageError::Internal`].
+fn decode_cursor(cursor: &str) -> Result<String, StorageError> {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let bytes = Base64UrlUnpadded::decode_vec(cursor)
+        .map_err(|e| StorageError::Internal(format!("invalid storage list cursor: {e}")))?;
+    String::from_utf8(bytes).map_err(|e| {
+        StorageError::Internal(format!("invalid storage list cursor (not utf-8): {e}"))
+    })
+}
+
+/// Resolve a cursor to the start index into the sorted `objects` slice.
+///
+/// An empty cursor means "before the first object" → index 0. Otherwise the
+/// scan resumes strictly AFTER the key the cursor encodes: with `objects`
+/// sorted ascending by key, that is the first index whose key is greater than
+/// the cursor key. A cursor key that no longer exists (its object was deleted
+/// between pages) still resolves correctly — the resume point is the next
+/// surviving key, so no object is skipped or repeated.
+fn cursor_start_index(objects: &[ObjectInfo], cursor: &str) -> Result<usize, StorageError> {
+    if cursor.is_empty() {
+        return Ok(0);
+    }
+    let last_key = decode_cursor(cursor)?;
+    Ok(objects.partition_point(|o| o.key <= last_key))
+}
+
 /// Map a metadata probe to the existence semantics the sync code had:
 /// missing file → `NotFound`, any other error → `Internal`.
 fn metadata_or_not_found(
@@ -408,36 +446,65 @@ impl StorageService for LocalStorageService {
 
     /// The recursive walk is one `spawn_blocking` hop (many small syscalls —
     /// cheaper as a single blocking task than as per-entry async calls).
+    ///
+    /// Supports both offset pagination (`opts.offset`/`opts.limit`) and
+    /// cursor pagination (`opts.cursor`). The full key list is sorted so both
+    /// are stable — `read_dir` yields entries in an unspecified order, which a
+    /// resumable cursor cannot rely on. Cursor takes precedence over offset
+    /// (documented on [`ListOptions`]); the opaque cursor is the base64-encoded
+    /// key of the last object returned on the previous page, and the scan
+    /// resumes strictly after it. `total_count` is always the exact match
+    /// count (the walk sees every object regardless of paging mode).
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
         let dir = self.validate_path(&self.folder_path(folder))?;
         let prefix = opts.prefix.clone();
         let offset = opts.offset as usize;
         let limit = opts.limit;
+        let cursor = opts.cursor.clone();
 
         tokio::task::spawn_blocking(move || {
             if !dir.exists() {
-                return Ok(ObjectList {
-                    objects: Vec::new(),
-                    total_count: 0,
-                });
+                return Ok(ObjectList::default());
             }
 
             let mut objects = Vec::new();
             Self::list_recursive(&dir, &dir, &prefix, &mut objects)?;
 
+            // Sort by key so offset and cursor pagination are both stable and
+            // deterministic across runs and filesystems.
+            objects.sort_by(|a, b| a.key.cmp(&b.key));
+
             let total_count = objects.len() as i64;
 
-            // Apply pagination
-            let limit = if limit > 0 {
+            let page_limit = if limit > 0 {
                 limit as usize
             } else {
                 objects.len()
             };
-            let objects: Vec<ObjectInfo> = objects.into_iter().skip(offset).take(limit).collect();
+
+            // Cursor mode takes precedence over offset. An empty cursor starts
+            // at the first object; a non-empty one resumes strictly after the
+            // key it encodes.
+            let start = match &cursor {
+                Some(token) => cursor_start_index(&objects, token)?,
+                None => offset.min(objects.len()),
+            };
+            let end = start.saturating_add(page_limit).min(objects.len());
+            let window: Vec<ObjectInfo> = objects[start..end].to_vec();
+
+            // Emit a next_cursor only in cursor mode, and only when more
+            // objects follow this page. Offset callers always get `None`, so
+            // their behavior is unchanged.
+            let next_cursor = if cursor.is_some() && end < objects.len() {
+                window.last().map(|o| encode_cursor(&o.key))
+            } else {
+                None
+            };
 
             Ok(ObjectList {
-                objects,
+                objects: window,
                 total_count,
+                next_cursor,
             })
         })
         .await
@@ -720,6 +787,7 @@ mod tests {
             prefix: String::new(),
             offset: 0,
             limit: 0,
+            cursor: None,
         };
         let err = svc
             .list("../../wafer-local-storage-nonexistent-list-wr10", &opts)
@@ -806,6 +874,138 @@ mod tests {
         let listing = svc.list("f", &ListOptions::default()).await.expect("list");
         let keys: Vec<&str> = listing.objects.iter().map(|o| o.key.as_str()).collect();
         assert_eq!(keys, vec!["k.bin"], "no temp-file residue after overwrite");
+    }
+
+    /// Cursor mode: an empty cursor returns the first page plus a `next_cursor`;
+    /// feeding that token back returns the next objects with no overlap and no
+    /// gap; the final page reports `next_cursor: None`. `offset` is ignored in
+    /// cursor mode, and `total_count` stays the exact match count throughout.
+    #[tokio::test]
+    async fn list_by_cursor_pages_forward_without_overlap_or_gap() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        // Five objects; written out of order to prove the sort makes paging
+        // deterministic regardless of `read_dir` order.
+        for k in ["d.txt", "b.txt", "e.txt", "a.txt", "c.txt"] {
+            svc.put("f", k, b"x", "text/plain").await.expect("put");
+        }
+
+        // Page 1 — bootstrap with an empty cursor; `offset` is set large to
+        // prove cursor mode ignores it.
+        let p1 = svc
+            .list(
+                "f",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 99,
+                    cursor: Some(String::new()),
+                },
+            )
+            .await
+            .expect("cursor page 1");
+        let p1_keys: Vec<&str> = p1.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(p1_keys, vec!["a.txt", "b.txt"], "sorted first page");
+        assert_eq!(p1.total_count, 5, "total_count is the exact match count");
+        let c1 = p1.next_cursor.clone().expect("more pages remain");
+
+        // Page 2 — resume from page 1's cursor.
+        let p2 = svc
+            .list(
+                "f",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 0,
+                    cursor: Some(c1),
+                },
+            )
+            .await
+            .expect("cursor page 2");
+        let p2_keys: Vec<&str> = p2.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(p2_keys, vec!["c.txt", "d.txt"], "no overlap, no gap");
+        let c2 = p2.next_cursor.clone().expect("one more page remains");
+
+        // Page 3 — the final page: one object left, no further cursor.
+        let p3 = svc
+            .list(
+                "f",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 0,
+                    cursor: Some(c2),
+                },
+            )
+            .await
+            .expect("cursor page 3");
+        let p3_keys: Vec<&str> = p3.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(p3_keys, vec!["e.txt"]);
+        assert_eq!(p3.next_cursor, None, "final page has no continuation token");
+    }
+
+    /// Offset pagination is unchanged by the cursor addition: `skip(offset)`
+    /// / `take(limit)` over the sorted keys, exact `total_count`, and no
+    /// `next_cursor` is ever emitted in offset mode.
+    #[tokio::test]
+    async fn list_offset_pagination_unchanged_and_emits_no_cursor() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        for k in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            svc.put("f", k, b"x", "text/plain").await.expect("put");
+        }
+
+        let page = svc
+            .list(
+                "f",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 1,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("offset list");
+        let keys: Vec<&str> = page.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["b.txt", "c.txt"], "objects offset..offset+limit");
+        assert_eq!(page.total_count, 4);
+        assert_eq!(
+            page.next_cursor, None,
+            "offset mode never emits a cursor (unchanged behavior)"
+        );
+    }
+
+    /// A malformed cursor (not valid base64) is a client error, not a panic.
+    #[tokio::test]
+    async fn list_rejects_malformed_cursor() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        svc.put("f", "a.txt", b"x", "text/plain")
+            .await
+            .expect("put");
+
+        let err = svc
+            .list(
+                "f",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 0,
+                    cursor: Some("not valid base64!!!".into()),
+                },
+            )
+            .await
+            .expect_err("malformed cursor must be rejected");
+        match err {
+            StorageError::Internal(msg) => {
+                assert!(
+                    msg.contains("cursor"),
+                    "expected a cursor error, got: {msg}"
+                )
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.

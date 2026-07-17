@@ -45,6 +45,7 @@ fn service_object_list_to_wire(list: super::service::ObjectList) -> wire::Object
             .map(service_object_info_to_wire)
             .collect(),
         total_count: list.total_count,
+        next_cursor: list.next_cursor,
     }
 }
 
@@ -208,6 +209,7 @@ pub async fn handle_message(
                 prefix: req.prefix,
                 limit: req.limit,
                 offset: req.offset,
+                cursor: req.cursor,
             };
             match service.list(&req.folder, &opts).await {
                 Ok(list) => to_output(service_object_list_to_wire(list)),

@@ -151,6 +151,7 @@ mod storage_fakes {
             Ok(ObjectList {
                 objects: vec![],
                 total_count: 0,
+                next_cursor: None,
             })
         }
         async fn create_folder(&self, _name: &str, _public: bool) -> Result<(), StorageError> {
@@ -254,6 +255,7 @@ async fn storage_list_rejects_mismatched_folder() {
         prefix: String::new(),
         limit: 0,
         offset: 0,
+        cursor: None,
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::STORAGE_LIST, "decoy", "read", "storage");

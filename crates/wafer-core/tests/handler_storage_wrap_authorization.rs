@@ -93,6 +93,7 @@ mod storage_fakes {
             Ok(ObjectList {
                 objects: vec![],
                 total_count: 0,
+                next_cursor: None,
             })
         }
         async fn create_folder(&self, _name: &str, _public: bool) -> Result<(), StorageError> {
@@ -284,6 +285,7 @@ async fn foreign_folder_list_denied_never_reaches_service() {
         prefix: String::new(),
         limit: 10,
         offset: 0,
+        cursor: None,
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_without_wrap_meta(ServiceOp::STORAGE_LIST);
@@ -393,6 +395,7 @@ async fn granted_ctx_allows_put_get_and_list() {
         prefix: String::new(),
         limit: 10,
         offset: 0,
+        cursor: None,
     })
     .unwrap();
     expect_success(

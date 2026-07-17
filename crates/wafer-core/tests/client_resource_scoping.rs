@@ -164,6 +164,7 @@ async fn storage_list_passes_folder_as_resource() {
     let list = wafer_block::wire::storage::ObjectList {
         objects: vec![],
         total_count: 0,
+        next_cursor: None,
     };
     let resp = wafer_block::codec::encode(&list).unwrap();
     let ctx = RecordingContext::new(resp);
