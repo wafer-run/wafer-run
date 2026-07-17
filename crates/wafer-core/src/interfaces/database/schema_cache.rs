@@ -90,6 +90,12 @@ impl SchemaCache {
     /// also proves the table exists, so the exists fact is set alongside it;
     /// an empty list (a missing table's introspection result) leaves the
     /// exists fact untouched — the authoritative existence probe owns it.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the write guard covers the whole critical section — the \
+                  conditional exists-set and the columns-set mutate the same \
+                  entry and are the entire body; there is nothing to tighten"
+    )]
     pub fn set_columns(&self, table: &str, columns: Vec<String>) {
         let mut guard = self.tables.write();
         let entry = guard.entry(table.to_string()).or_default();

@@ -1971,4 +1971,131 @@ mod tests {
         assert_eq!(count, 1, "the smuggled INSERT must not have executed");
         let _ = std::fs::remove_file(&path);
     }
+
+    // -----------------------------------------------------------------------
+    // STRICT_SCHEMA mode + schema-cache invalidation
+    // -----------------------------------------------------------------------
+
+    /// STRICT_SCHEMA skips the per-op table-exists guard: a query against a
+    /// missing table errors (the SELECT runs) instead of returning empty.
+    #[tokio::test]
+    async fn strict_schema_skips_table_exists_guard() {
+        let svc = make_test_svc();
+
+        // Non-strict: the exists guard fires, so a missing table lists empty.
+        let empty = DatabaseService::list(&svc, "ghost", &ListOptions::default())
+            .await
+            .expect("non-strict list on a missing table is empty, not an error");
+        assert!(empty.records.is_empty());
+
+        // Strict: the guard is skipped, so the SELECT hits the missing table
+        // and errors — proving the (now-cached exists=false) probe was bypassed.
+        svc.set_strict_schema(true);
+        let err = DatabaseService::list(&svc, "ghost", &ListOptions::default())
+            .await
+            .expect_err("strict mode skips the exists guard; a missing table must error");
+        assert!(
+            err.to_string().to_lowercase().contains("no such table"),
+            "expected a missing-table error, got: {err}"
+        );
+    }
+
+    /// STRICT_SCHEMA skips the lazy column-add ALTER path: a write referencing
+    /// an unmigrated column fails loudly instead of the column being
+    /// synthesized. The same write succeeds (column auto-added) when strict.
+    #[tokio::test]
+    async fn strict_schema_skips_lazy_column_add() {
+        let svc = make_test_svc();
+        let table = Table {
+            name: "t".into(),
+            columns: vec![
+                pk("id"),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        svc.ensure_schema_table(&table).await.unwrap();
+
+        svc.set_strict_schema(true);
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), serde_json::json!("r1"));
+        row.insert("extra".to_string(), serde_json::json!("v"));
+        let err = DatabaseService::create(&svc, "t", row)
+            .await
+            .expect_err("strict mode must not synthesize the missing `extra` column");
+        assert!(
+            err.to_string().to_lowercase().contains("no column"),
+            "expected a missing-column error, got: {err}"
+        );
+
+        // Non-strict lazily adds the column and the identical write succeeds.
+        svc.set_strict_schema(false);
+        let mut row2 = std::collections::HashMap::new();
+        row2.insert("id".to_string(), serde_json::json!("r2"));
+        row2.insert("extra".to_string(), serde_json::json!("v"));
+        DatabaseService::create(&svc, "t", row2)
+            .await
+            .expect("non-strict lazily adds the column");
+    }
+
+    /// Dropping a table must invalidate its cached exists=true fact, so a
+    /// follow-up query re-probes and returns empty rather than trusting the
+    /// stale entry and erroring on a SELECT against the vanished table.
+    #[tokio::test]
+    async fn schema_cache_invalidated_on_drop_table() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "temp", vec![serde_json::json!({"v": "1"})]).await;
+
+        // Warm the exists cache (and columns cache) via a real list.
+        let listed = DatabaseService::list(&svc, "temp", &ListOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.records.len(), 1);
+
+        DatabaseService::schema_drop_table(&svc, "temp")
+            .await
+            .unwrap();
+
+        let after = DatabaseService::list(&svc, "temp", &ListOptions::default())
+            .await
+            .expect("a stale exists cache would error here; invalidation returns empty");
+        assert!(after.records.is_empty());
+        assert_eq!(after.total_count, 0);
+    }
+
+    /// Adding a column out-of-band (via `schema_add_column`) invalidates the
+    /// cached column list, so a subsequent filtered query sees the new column
+    /// instead of a stale set that omits it.
+    #[tokio::test]
+    async fn schema_cache_invalidated_on_add_column() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+
+        // Warm the column cache.
+        let _ = DatabaseService::count(&svc, "widgets", &[]).await.unwrap();
+
+        // Add a real column out of band; the cached column list must be dropped.
+        DatabaseService::schema_add_column(
+            &svc,
+            "widgets",
+            &Column::new("flag", DataType::Text).null(),
+        )
+        .await
+        .unwrap();
+
+        // A filter on the freshly-added column must resolve against the true
+        // schema — no lazy re-add, no "no such column".
+        let filters = vec![Filter {
+            field: "flag".to_string(),
+            operator: FilterOp::IsNull,
+            value: serde_json::Value::Null,
+        }];
+        let n = DatabaseService::count(&svc, "widgets", &filters)
+            .await
+            .expect("cache must reflect the added column after invalidation");
+        assert_eq!(n, 1, "the one seeded row has flag IS NULL");
+    }
 }
