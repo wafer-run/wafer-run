@@ -139,6 +139,19 @@ pub fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
     false
 }
 
+/// Decode the IPv4 address embedded in two consecutive IPv6 segments
+/// (`hi:lo`, big-endian octets). Shared by every IPv6 arm of
+/// [`is_blocked_ipv6`] that wraps a v4 address (IPv4-mapped, NAT64,
+/// IPv4-compatible, 6to4).
+fn embedded_v4(hi: u16, lo: u16) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::new(
+        (hi >> 8) as u8,
+        (hi & 0xff) as u8,
+        (lo >> 8) as u8,
+        (lo & 0xff) as u8,
+    )
+}
+
 /// Check whether an IPv6 address is loopback/private/link-local/etc and
 /// should be blocked by SSRF defense. Exposed so DNS resolvers can validate
 /// resolved IPs (defends against DNS rebinding — see SEC-019).
@@ -174,15 +187,37 @@ pub fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
         return true;
     }
 
-    // ::ffff:0:0/96 (IPv4-mapped IPv6) — check the embedded IPv4 address
+    // ::ffff:0:0/96 (IPv4-mapped IPv6) — validate the embedded IPv4 address.
     if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
-        let ipv4 = std::net::Ipv4Addr::new(
-            (segments[6] >> 8) as u8,
-            (segments[6] & 0xff) as u8,
-            (segments[7] >> 8) as u8,
-            (segments[7] & 0xff) as u8,
-        );
-        return is_blocked_ipv4(ipv4);
+        return is_blocked_ipv4(embedded_v4(segments[6], segments[7]));
+    }
+
+    // 64:ff9b::/96 (NAT64 well-known prefix, RFC 6052). In a DNS64 environment
+    // a stub resolver synthesizes AAAA records of this form for A-only hosts,
+    // so a name pointing at e.g. 169.254.169.254 resolves to
+    // `64:ff9b::a9fe:a9fe` (which passes an unaware filter) and NAT64 routes it
+    // back to the private v4. Decode the embedded v4 (low 32 bits) and validate
+    // it, so a NAT64 route to a genuinely PUBLIC v4 stays allowed rather than
+    // blocking the entire /96.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
+        return is_blocked_ipv4(embedded_v4(segments[6], segments[7]));
+    }
+
+    // ::/96 IPv4-compatible IPv6 (deprecated, RFC 4291 §2.5.5.1): `::a.b.c.d`.
+    // The all-zero (`::`) and `::1` cases returned above; any other embedding
+    // (e.g. `::127.0.0.1` → `::7f00:1`) is validated as its embedded v4 so a
+    // loopback/private target in this legacy form is still blocked.
+    if segments[0..6] == [0, 0, 0, 0, 0, 0] {
+        return is_blocked_ipv4(embedded_v4(segments[6], segments[7]));
+    }
+
+    // 2002::/16 6to4 (RFC 3056): `2002:WWXX:YYZZ::/48` embeds the IPv4 address
+    // W.X.Y.Z in segments 1–2. Validate it so a 6to4 address wrapping a
+    // private/loopback v4 (e.g. `2002:7f00:1::` = 127.0.0.1, or
+    // `2002:a9fe:a9fe::` = 169.254.169.254) is blocked; a 6to4 address over a
+    // public v4 stays allowed.
+    if segments[0] == 0x2002 {
+        return is_blocked_ipv4(embedded_v4(segments[1], segments[2]));
     }
 
     false
@@ -552,6 +587,63 @@ mod tests {
         assert!(is_blocked_url("http://[::ffff:127.0.0.1]"));
         assert!(is_blocked_url("http://[::ffff:10.0.0.1]"));
         assert!(!is_blocked_url("http://[::ffff:93.184.216.34]"));
+    }
+
+    #[test]
+    fn test_blocks_nat64_dns64_embedded_private_v4() {
+        use std::net::Ipv6Addr;
+        // 64:ff9b::169.254.169.254 — DNS64 synthesis pointing NAT64 at the
+        // cloud metadata service. 0xa9fe:0xa9fe == 169.254.169.254.
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0xa9fe, 0xa9fe
+        )));
+        assert!(is_blocked_url("http://[64:ff9b::a9fe:a9fe]"));
+        // 64:ff9b::127.0.0.1 (0x7f00:0x0001).
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0x7f00, 0x0001
+        )));
+        // A NAT64 route to a genuinely PUBLIC v4 stays allowed — decode-and-
+        // check, not a blanket /96 block. 0x5db8:0xd822 == 93.184.216.34.
+        assert!(!is_blocked_ipv6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0x5db8, 0xd822
+        )));
+        assert!(!is_blocked_url("http://[64:ff9b::5db8:d822]"));
+    }
+
+    #[test]
+    fn test_blocks_ipv4_compatible_ipv6() {
+        use std::net::Ipv6Addr;
+        // ::127.0.0.1 (deprecated IPv4-compatible loopback) == ::7f00:1.
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0x7f00, 0x0001
+        )));
+        assert!(is_blocked_url("http://[::7f00:1]"));
+        // ::10.0.0.1
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0x0a00, 0x0001
+        )));
+        // A public embedded v4 stays allowed (93.184.216.34).
+        assert!(!is_blocked_ipv6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0x5db8, 0xd822
+        )));
+    }
+
+    #[test]
+    fn test_blocks_6to4_embedded_private_v4() {
+        use std::net::Ipv6Addr;
+        // 2002:7f00:1:: embeds 127.0.0.1.
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0
+        )));
+        assert!(is_blocked_url("http://[2002:7f00:1::]"));
+        // 2002:a9fe:a9fe:: embeds 169.254.169.254 (metadata service).
+        assert!(is_blocked_ipv6(Ipv6Addr::new(
+            0x2002, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0
+        )));
+        // 6to4 wrapping a public v4 (93.184.216.34) stays allowed.
+        assert!(!is_blocked_ipv6(Ipv6Addr::new(
+            0x2002, 0x5db8, 0xd822, 0, 0, 0, 0, 0
+        )));
     }
 
     #[test]

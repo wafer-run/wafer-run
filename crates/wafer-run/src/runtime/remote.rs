@@ -215,6 +215,13 @@ async fn read_body_capped(
 impl Wafer {
     /// Build the short-lived HTTP client used for registry/manifest fetches
     /// during one `seal()` pass.
+    ///
+    /// SSRF note: like the `wafer-run/network` client, the `SsrfFilteringResolver`
+    /// DNS-rebind layer only runs on direct connections. With an
+    /// `HTTP(S)_PROXY` / `ALL_PROXY` env var set, reqwest hands the hostname to
+    /// the proxy and the resolver is bypassed (the `ensure_url_allowed`
+    /// literal-URL gate still applies per fetch); a proxied deploy must enforce
+    /// SSRF at the egress proxy.
     pub(crate) fn registry_http_client() -> Result<reqwest::Client, RuntimeError> {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
