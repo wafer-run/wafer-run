@@ -223,12 +223,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if self.strict_schema() {
             return Ok(true);
         }
-        if let Some(exists) = self.schema_cache().and_then(|c| c.table_exists(table)) {
+        let cache = self.schema_cache();
+        if let Some(exists) = cache.and_then(|c| c.table_exists(table)) {
             return Ok(exists);
         }
+        // Snapshot the generation *before* the probe yields; the gen-guarded
+        // write-back below is dropped if a mutation raced the probe (see
+        // `SchemaCache` docs). Holding `Option<&SchemaCache>` across the await
+        // is fine — it is a plain reference, never a lock guard.
+        let gen0 = cache.map(SchemaCache::generation);
         let exists = self.dbx_table_exists(table).await?;
-        if let Some(cache) = self.schema_cache() {
-            cache.set_table_exists(table, exists);
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_table_exists_if_gen(table, exists, gen0);
         }
         Ok(exists)
     }
@@ -241,9 +247,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// builder, whose result shape (`name` per column) is identical in both
     /// dialects.
     async fn get_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
-        if let Some(columns) = self.schema_cache().and_then(|c| c.columns(table)) {
+        let cache = self.schema_cache();
+        if let Some(columns) = cache.and_then(|c| c.columns(table)) {
             return Ok(columns);
         }
+        // Snapshot the generation before the probe yields; a mutation racing
+        // the introspection drops the write-back rather than caching a stale
+        // column set (see `SchemaCache` docs).
+        let gen0 = cache.map(SchemaCache::generation);
         let (sql, params) = introspect::build_list_columns(table, Self::BACKEND);
         let rows = self.run_fetch(&sql, &params).await?;
         let columns: Vec<String> = rows
@@ -255,8 +266,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     .map(str::to_lowercase)
             })
             .collect();
-        if let Some(cache) = self.schema_cache() {
-            cache.set_columns(table, columns.clone());
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_columns_if_gen(table, columns.clone(), gen0);
         }
         Ok(columns)
     }
@@ -857,5 +868,123 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// (the primitive preserves each backend's error text).
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
         self.dbx_table_exists(name).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// Mock backend whose `dbx_table_exists` parks on a barrier mid-probe, so a
+    /// test can fire an invalidation into the exact TOCTOU window between the
+    /// probe's generation snapshot and its cache write-back. Every other
+    /// primitive is an inert stub.
+    struct BarrierExec {
+        cache: SchemaCache,
+        entered_probe: Arc<Notify>,
+        release_probe: Arc<Notify>,
+        exists: bool,
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for BarrierExec {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn schema_cache(&self) -> Option<&SchemaCache> {
+            Some(&self.cache)
+        }
+
+        async fn run_fetch(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn run_fetch_one(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            Err(DatabaseError::NotFound)
+        }
+
+        async fn run_execute(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            Ok(0.0)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            // Announce that we've captured gen0 and are parked in the probe,
+            // then wait to be released — the window an invalidation must win.
+            self.entered_probe.notify_one();
+            self.release_probe.notified().await;
+            Ok(self.exists)
+        }
+    }
+
+    /// Exec-level proof of the linearizability fix: when an invalidation lands
+    /// while `table_present_for_op` is parked in its probe, the stale
+    /// `exists=false` read (taken just before a concurrent CREATE) is NOT
+    /// written back — the next op re-probes instead of trusting a resurrected
+    /// negative cache (Repro A).
+    #[tokio::test]
+    async fn probe_write_back_dropped_when_invalidated_mid_flight() {
+        let backend = BarrierExec {
+            cache: SchemaCache::new(),
+            entered_probe: Arc::new(Notify::new()),
+            release_probe: Arc::new(Notify::new()),
+            exists: false,
+        };
+        let entered = backend.entered_probe.clone();
+        let release = backend.release_probe.clone();
+
+        let probe = backend.table_present_for_op("orders");
+        let racer = async {
+            // Wait until the probe has snapshotted gen0 and parked in the DB call.
+            entered.notified().await;
+            // A concurrent migration CREATEs the table and invalidates the cache
+            // (bumping the generation past the probe's snapshot).
+            backend.cache.invalidate("orders");
+            // Release the probe to attempt its now-stale write-back.
+            release.notify_one();
+        };
+
+        let (present, ()) = tokio::join!(probe, racer);
+        // The probe still returns what the DB told it at read time...
+        assert!(
+            !present.expect("probe succeeds"),
+            "probe returns its read-time value"
+        );
+        // ...but that stale value must NOT have been cached.
+        assert_eq!(
+            backend.cache.table_exists("orders"),
+            None,
+            "a probe write-back racing an invalidation must be discarded"
+        );
     }
 }
