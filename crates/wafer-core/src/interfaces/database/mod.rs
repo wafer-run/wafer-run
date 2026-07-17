@@ -1,5 +1,6 @@
 /// Shared SQL-backend execution layer (`DbExec`) behind `DatabaseService`.
 pub mod exec;
+pub use exec::{BatchOp, BatchResult};
 pub mod handler;
 /// Per-backend schema-introspection cache (`SchemaCache`) consulted by the
 /// shared executor to elide redundant table-exists / column-list round-trips.

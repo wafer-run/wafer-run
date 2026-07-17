@@ -105,6 +105,99 @@ fn extract_windowed_id_key(
     Ok((id, key))
 }
 
+/// One statement in a [`DbExec::run_batch`] call, tagged with how its result
+/// should be decoded.
+///
+/// `sql` + `params` are exactly what the single-statement primitives take:
+/// `params` is the JSON form produced by
+/// [`sea_values_to_json`](wafer_sql_utils::value::sea_values_to_json)`(stmt.values)`.
+/// Each variant names the primitive whose decoding it mirrors, so a batching
+/// backend can decode each statement's result the same way the corresponding
+/// single-statement primitive would.
+#[derive(Clone, Copy, Debug)]
+pub enum BatchOp<'a> {
+    /// Row-returning; decode every row to a [`Record`] (like
+    /// [`DbExec::run_fetch`]).
+    Rows {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+    /// Expected to return exactly one row; no rows → `NotFound` (like
+    /// [`DbExec::run_fetch_one`]).
+    FetchOne {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+    /// Non-row statement; yields the affected-row count (like
+    /// [`DbExec::run_execute`]).
+    Execute {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+    /// Single `i64` scalar, e.g. `COUNT(*)` (like [`DbExec::run_scalar_i64`]).
+    ScalarI64 {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+    /// Single `f64` scalar, e.g. `SUM(...)` (like [`DbExec::run_scalar_f64`]).
+    ScalarF64 {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+}
+
+impl<'a> BatchOp<'a> {
+    /// The `(sql, params)` pair every variant carries, for backends that
+    /// prepare each statement uniformly before dispatching to a native
+    /// multi-statement API (the D1 override in the impresspress consumer).
+    #[must_use]
+    pub fn sql_params(&self) -> (&'a str, &'a [serde_json::Value]) {
+        match *self {
+            BatchOp::Rows { sql, params }
+            | BatchOp::FetchOne { sql, params }
+            | BatchOp::Execute { sql, params }
+            | BatchOp::ScalarI64 { sql, params }
+            | BatchOp::ScalarF64 { sql, params } => (sql, params),
+        }
+    }
+}
+
+/// The decoded result of one [`BatchOp`], returned in the same position as the
+/// op that produced it.
+#[derive(Debug)]
+pub enum BatchResult {
+    /// Rows decoded from a [`BatchOp::Rows`].
+    Rows(Vec<Record>),
+    /// The single row of a [`BatchOp::FetchOne`].
+    FetchOne(Record),
+    /// Affected-row count of a [`BatchOp::Execute`].
+    Execute(i64),
+    /// Scalar of a [`BatchOp::ScalarI64`].
+    ScalarI64(i64),
+    /// Scalar of a [`BatchOp::ScalarF64`].
+    ScalarF64(f64),
+}
+
+/// A [`run_batch`](DbExec::run_batch) result whose variant doesn't line up with
+/// the [`BatchOp`] submitted at that position is an internal invariant
+/// violation: the sequential default preserves order and variant, and any
+/// batching override must too. Surface it as `Internal` rather than panicking.
+fn batch_shape_error(what: &str, got: Option<&BatchResult>) -> DatabaseError {
+    DatabaseError::Internal(format!(
+        "run_batch returned an unexpected result shape for {what}: {got:?}"
+    ))
+}
+
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
 #[wafer_async_trait]
 pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
@@ -202,6 +295,46 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// tables, whose ids come from [`run_insert`](Self::run_insert).
     async fn table_autogenerates_id(&self, _table: &str) -> bool {
         false
+    }
+
+    /// Run `ops` as one backend round-trip when the backend can, returning one
+    /// [`BatchResult`] per op **in the same order**.
+    ///
+    /// The default executes each op sequentially by dispatching to the
+    /// single-statement primitives ([`run_fetch`](Self::run_fetch),
+    /// [`run_fetch_one`](Self::run_fetch_one), [`run_execute`](Self::run_execute),
+    /// [`run_scalar_i64`](Self::run_scalar_i64),
+    /// [`run_scalar_f64`](Self::run_scalar_f64)) — behaviourally identical to
+    /// issuing the statements one-by-one, which is exactly what every backend
+    /// does today. So sqlite, postgres, the browser backend, and the test mocks
+    /// inherit it unchanged (still N awaits, same order, first failing op
+    /// aborts the whole batch and propagates its error). Only a backend with a
+    /// native multi-statement API (D1 `batch()`) overrides this to collapse the
+    /// round-trips; such a backend must preserve positional alignment and the
+    /// same all-or-nothing failure semantics.
+    async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
+        let mut out = Vec::with_capacity(ops.len());
+        for &op in ops {
+            let result = match op {
+                BatchOp::Rows { sql, params } => {
+                    BatchResult::Rows(self.run_fetch(sql, params).await?)
+                }
+                BatchOp::FetchOne { sql, params } => {
+                    BatchResult::FetchOne(self.run_fetch_one(sql, params).await?)
+                }
+                BatchOp::Execute { sql, params } => {
+                    BatchResult::Execute(self.run_execute(sql, params).await?)
+                }
+                BatchOp::ScalarI64 { sql, params } => {
+                    BatchResult::ScalarI64(self.run_scalar_i64(sql, params).await?)
+                }
+                BatchOp::ScalarF64 { sql, params } => {
+                    BatchResult::ScalarF64(self.run_scalar_f64(sql, params).await?)
+                }
+            };
+            out.push(result);
+        }
+        Ok(out)
     }
 
     // ---- Shared default methods (the dedup'd orchestration) ----
@@ -467,17 +600,48 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             (count_stmt, select_stmt)
         };
 
-        let total_count: Option<i64> = match count_stmt {
-            Some(stmt) => Some(
-                self.run_scalar_i64(&stmt.sql, &sea_values_to_json(stmt.values))
-                    .await?,
-            ),
-            None => None,
+        // Execute count + select together. When a count is requested, issue
+        // both statements through one `run_batch` so a batching backend (D1)
+        // collapses them into a single round-trip; the sequential default runs
+        // them one after another, byte-identical to the prior two separate
+        // awaits (and, on a transactional batch, count and select now see one
+        // consistent snapshot). `skip_count` has no count statement, so it
+        // stays a single `run_fetch`. The JSON params are bound to owned
+        // (`Send`) locals so nothing `!Send` crosses the `.await`.
+        let (total_count, records): (Option<i64>, Vec<Record>) = match count_stmt {
+            Some(count_stmt) => {
+                let count_params = sea_values_to_json(count_stmt.values);
+                let select_params = sea_values_to_json(select_stmt.values);
+                let results = self
+                    .run_batch(&[
+                        BatchOp::ScalarI64 {
+                            sql: &count_stmt.sql,
+                            params: &count_params,
+                        },
+                        BatchOp::Rows {
+                            sql: &select_stmt.sql,
+                            params: &select_params,
+                        },
+                    ])
+                    .await?;
+                let mut results = results.into_iter();
+                let count = match results.next() {
+                    Some(BatchResult::ScalarI64(n)) => n,
+                    other => return Err(batch_shape_error("list count", other.as_ref())),
+                };
+                let records = match results.next() {
+                    Some(BatchResult::Rows(r)) => r,
+                    other => return Err(batch_shape_error("list select", other.as_ref())),
+                };
+                (Some(count), records)
+            }
+            None => {
+                let records = self
+                    .run_fetch(&select_stmt.sql, &sea_values_to_json(select_stmt.values))
+                    .await?;
+                (None, records)
+            }
         };
-
-        let records = self
-            .run_fetch(&select_stmt.sql, &sea_values_to_json(select_stmt.values))
-            .await?;
 
         let page = if opts.limit > 0 {
             (opts.offset / opts.limit) + 1
@@ -584,14 +748,45 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.ensure_data_columns(&table, &data).await?;
 
         let pairs = sorted_pairs(&data);
-        let stmt = wafer_sql_utils::query::build_update_by_id(&table, id, &pairs, Self::BACKEND);
-        let affected = self
-            .run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+        // Batch the UPDATE with the by-id re-fetch so a batching backend (D1)
+        // collapses the two round-trips into one. The re-fetch mirrors
+        // [`get`](Self::get) exactly — `build_select_by_id` on the raw
+        // `collection`, decoded row-by-row. The `Execute` result stays the
+        // authoritative existence check: 0 rows affected → `NotFound`, exactly
+        // as the prior explicit affected-count guard, so the (discarded) select
+        // rows are only read when the row actually existed. The sequential
+        // default runs UPDATE then select one-by-one — observably identical to
+        // the prior `run_execute` + `get` (empty select ⇒ `NotFound`, matching
+        // `run_fetch_one`).
+        let update_stmt =
+            wafer_sql_utils::query::build_update_by_id(&table, id, &pairs, Self::BACKEND);
+        let select_stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Self::BACKEND);
+        let update_params = sea_values_to_json(update_stmt.values);
+        let select_params = sea_values_to_json(select_stmt.values);
+        let results = self
+            .run_batch(&[
+                BatchOp::Execute {
+                    sql: &update_stmt.sql,
+                    params: &update_params,
+                },
+                BatchOp::Rows {
+                    sql: &select_stmt.sql,
+                    params: &select_params,
+                },
+            ])
             .await?;
+        let mut results = results.into_iter();
+        let affected = match results.next() {
+            Some(BatchResult::Execute(n)) => n,
+            other => return Err(batch_shape_error("update statement", other.as_ref())),
+        };
         if affected == 0 {
             return Err(DatabaseError::NotFound);
         }
-        self.get(collection, id).await
+        match results.next() {
+            Some(BatchResult::Rows(rows)) => rows.into_iter().next().ok_or(DatabaseError::NotFound),
+            other => Err(batch_shape_error("update re-fetch", other.as_ref())),
+        }
     }
 
     /// Shared `delete`: delete-by-id; 0 rows → `NotFound`.
@@ -986,5 +1181,409 @@ mod tests {
             None,
             "a probe write-back racing an invalidation must be discarded"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_batch — sequential default + `list`'s use of it
+    // -----------------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    use wafer_block::db::ListOptions;
+
+    /// Backend that inherits the **default** `run_batch` (no override), so the
+    /// tests exercise the sequential fallback. Each primitive records its
+    /// dispatch (`"<kind>:<sql>"`) in call order and returns a distinct
+    /// sentinel so positional decoding can be checked; `run_execute` fails when
+    /// its SQL is `"FAIL"`, to prove first-error-aborts.
+    struct SeqMock {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl SeqMock {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn record(&self, s: String) {
+            self.calls.lock().unwrap().push(s);
+        }
+        fn record_row(sql: &str) -> Record {
+            // id echoes the SQL so a decoded row proves which op produced it.
+            Record {
+                id: sql.to_string(),
+                data: HashMap::new(),
+            }
+        }
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for SeqMock {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        async fn run_fetch(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            self.record(format!("fetch:{sql}"));
+            Ok(vec![Self::record_row(sql)])
+        }
+
+        async fn run_fetch_one(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            self.record(format!("fetch_one:{sql}"));
+            Ok(Self::record_row(sql))
+        }
+
+        async fn run_execute(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            self.record(format!("execute:{sql}"));
+            if sql == "FAIL" {
+                return Err(DatabaseError::Internal("boom".into()));
+            }
+            Ok(7)
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            self.record(format!("scalar_i64:{sql}"));
+            Ok(42)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            self.record(format!("scalar_f64:{sql}"));
+            Ok(2.5)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn run_batch_default_decodes_each_variant_positionally_and_in_order() {
+        let mock = SeqMock::new();
+        let results = mock
+            .run_batch(&[
+                BatchOp::ScalarI64 {
+                    sql: "COUNT",
+                    params: &[],
+                },
+                BatchOp::Rows {
+                    sql: "SELECT",
+                    params: &[],
+                },
+                BatchOp::Execute {
+                    sql: "UPDATE",
+                    params: &[],
+                },
+                BatchOp::ScalarF64 {
+                    sql: "SUM",
+                    params: &[],
+                },
+                BatchOp::FetchOne {
+                    sql: "ONE",
+                    params: &[],
+                },
+            ])
+            .await
+            .expect("sequential batch succeeds");
+
+        // One result per op, decoded to the variant matching the op, each
+        // carrying the value the corresponding single-statement primitive
+        // returns.
+        assert_eq!(results.len(), 5);
+        assert!(matches!(results[0], BatchResult::ScalarI64(42)));
+        match &results[1] {
+            BatchResult::Rows(rows) => assert_eq!(rows[0].id, "SELECT"),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+        assert!(matches!(results[2], BatchResult::Execute(7)));
+        match results[3] {
+            BatchResult::ScalarF64(f) => assert!((f - 2.5).abs() < f64::EPSILON),
+            ref other => panic!("expected ScalarF64, got {other:?}"),
+        }
+        match &results[4] {
+            BatchResult::FetchOne(r) => assert_eq!(r.id, "ONE"),
+            other => panic!("expected FetchOne, got {other:?}"),
+        }
+
+        // Primitives were dispatched once each, in submission order.
+        let calls = mock.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "scalar_i64:COUNT",
+                "fetch:SELECT",
+                "execute:UPDATE",
+                "scalar_f64:SUM",
+                "fetch_one:ONE",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_batch_default_aborts_on_first_error_and_skips_later_ops() {
+        let mock = SeqMock::new();
+        let err = mock
+            .run_batch(&[
+                BatchOp::Rows {
+                    sql: "A",
+                    params: &[],
+                },
+                BatchOp::Execute {
+                    sql: "FAIL",
+                    params: &[],
+                },
+                BatchOp::Rows {
+                    sql: "C",
+                    params: &[],
+                },
+            ])
+            .await
+            .expect_err("the failing op aborts the batch");
+        assert!(matches!(err, DatabaseError::Internal(_)));
+
+        // The op *after* the failure never dispatched — first-error aborts.
+        let calls = mock.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["fetch:A", "execute:FAIL"],
+            "the op after the failing one must not run"
+        );
+    }
+
+    #[test]
+    fn batch_op_sql_params_returns_the_pair_for_every_variant() {
+        let params = vec![serde_json::json!("x")];
+        for op in [
+            BatchOp::Rows {
+                sql: "s",
+                params: &params,
+            },
+            BatchOp::FetchOne {
+                sql: "s",
+                params: &params,
+            },
+            BatchOp::Execute {
+                sql: "s",
+                params: &params,
+            },
+            BatchOp::ScalarI64 {
+                sql: "s",
+                params: &params,
+            },
+            BatchOp::ScalarF64 {
+                sql: "s",
+                params: &params,
+            },
+        ] {
+            let (sql, p) = op.sql_params();
+            assert_eq!(sql, "s");
+            assert_eq!(p, params.as_slice());
+        }
+    }
+
+    /// Backend that **overrides** `run_batch` to record the ops it receives and
+    /// return canned, positionally-aligned results — so a test can prove
+    /// `DbExec::list` hands it exactly `[ScalarI64(count), Rows(select)]`.
+    /// `strict_schema` is on so `list` skips the introspection round-trips and
+    /// goes straight to the count+select batch. `run_fetch` records itself for
+    /// the `skip_count` single-statement path.
+    struct BatchMock {
+        canned_count: i64,
+        batch_calls: Mutex<Vec<Vec<(String, String)>>>,
+        fetch_calls: Mutex<Vec<String>>,
+    }
+
+    impl BatchMock {
+        fn new(canned_count: i64) -> Self {
+            Self {
+                canned_count,
+                batch_calls: Mutex::new(Vec::new()),
+                fetch_calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn canned_rows() -> Vec<Record> {
+            vec![
+                Record {
+                    id: "r1".into(),
+                    data: HashMap::new(),
+                },
+                Record {
+                    id: "r2".into(),
+                    data: HashMap::new(),
+                },
+            ]
+        }
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for BatchMock {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn strict_schema(&self) -> bool {
+            true
+        }
+
+        async fn run_fetch(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            self.fetch_calls.lock().unwrap().push(sql.to_string());
+            Ok(Self::canned_rows())
+        }
+
+        async fn run_fetch_one(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            Err(DatabaseError::NotFound)
+        }
+
+        async fn run_execute(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            Ok(0.0)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            Ok(true)
+        }
+
+        async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
+            // Record each op as (variant-name, sql) for the assertion.
+            let recorded: Vec<(String, String)> = ops
+                .iter()
+                .map(|op| {
+                    let name = match op {
+                        BatchOp::Rows { .. } => "Rows",
+                        BatchOp::FetchOne { .. } => "FetchOne",
+                        BatchOp::Execute { .. } => "Execute",
+                        BatchOp::ScalarI64 { .. } => "ScalarI64",
+                        BatchOp::ScalarF64 { .. } => "ScalarF64",
+                    };
+                    let (sql, _) = op.sql_params();
+                    (name.to_string(), sql.to_string())
+                })
+                .collect();
+            self.batch_calls.lock().unwrap().push(recorded);
+
+            // Return canned results aligned to each op's variant.
+            let out = ops
+                .iter()
+                .map(|op| match op {
+                    BatchOp::ScalarI64 { .. } => BatchResult::ScalarI64(self.canned_count),
+                    BatchOp::Rows { .. } => BatchResult::Rows(Self::canned_rows()),
+                    BatchOp::Execute { .. } => BatchResult::Execute(1),
+                    BatchOp::ScalarF64 { .. } => BatchResult::ScalarF64(0.0),
+                    BatchOp::FetchOne { .. } => {
+                        BatchResult::FetchOne(Self::canned_rows().swap_remove(0))
+                    }
+                })
+                .collect();
+            Ok(out)
+        }
+    }
+
+    #[tokio::test]
+    async fn list_issues_count_and_select_as_one_run_batch() {
+        let mock = BatchMock::new(9);
+        let list = DbExec::list(&mock, "widgets", &ListOptions::default())
+            .await
+            .expect("list succeeds via the batching override");
+
+        // Exactly one run_batch call, carrying [ScalarI64(count), Rows(select)]
+        // in that order — the count first, the select second.
+        let calls = mock.batch_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "list must issue a single batch");
+        let ops = &calls[0];
+        assert_eq!(ops.len(), 2, "count + select");
+        assert_eq!(ops[0].0, "ScalarI64", "first op is the count scalar");
+        assert!(
+            ops[0].1.contains("COUNT(*)"),
+            "count op SQL is a COUNT: {}",
+            ops[0].1
+        );
+        assert_eq!(ops[1].0, "Rows", "second op is the row-returning select");
+        assert!(
+            ops[1].1.to_uppercase().contains("SELECT"),
+            "select op SQL is a SELECT: {}",
+            ops[1].1
+        );
+
+        // list decoded the batch's ScalarI64 as total_count and Rows as records.
+        assert_eq!(list.total_count, 9);
+        assert_eq!(list.records.len(), 2);
+
+        // The count path must not touch the single-statement run_fetch.
+        assert!(
+            mock.fetch_calls.lock().unwrap().is_empty(),
+            "count path batches; it must not call run_fetch directly"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_skip_count_uses_single_fetch_not_a_batch() {
+        let mock = BatchMock::new(9);
+        let opts = ListOptions {
+            skip_count: true,
+            ..Default::default()
+        };
+        let list = DbExec::list(&mock, "widgets", &opts)
+            .await
+            .expect("skip_count list succeeds");
+
+        // No batch — skip_count keeps its single run_fetch.
+        assert!(
+            mock.batch_calls.lock().unwrap().is_empty(),
+            "skip_count must not batch (there is no count statement)"
+        );
+        let fetches = mock.fetch_calls.lock().unwrap().clone();
+        assert_eq!(fetches.len(), 1, "exactly one select");
+        assert!(
+            fetches[0].to_uppercase().contains("SELECT"),
+            "the single statement is the select: {}",
+            fetches[0]
+        );
+
+        // total_count falls back to records.len() when the count is skipped.
+        assert_eq!(list.records.len(), 2);
+        assert_eq!(list.total_count, 2);
     }
 }
