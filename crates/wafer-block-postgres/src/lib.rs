@@ -41,6 +41,13 @@ wafer_core::service_block! {
     category: Infrastructure,
     service: dyn DatabaseService,
     extra_fields: { tables: OnceLock<Vec<Table>> },
+    // NB: STRICT_SCHEMA (`WAFER_RUN__DATABASE__STRICT_SCHEMA`) is an
+    // interface-level flag shared by every `database@v1` backend, so it is
+    // declared once on the generic `wafer-run/database` block — the builder's
+    // config-prefix check requires a block's declared keys to match its own
+    // `WAFER_RUN__POSTGRES__` prefix, which the DATABASE-scoped key doesn't.
+    // This block still *reads* the value via `ctx.config_get` at Init
+    // (see `handle_lifecycle`); it simply doesn't re-declare it.
     info_extras: |_this, info| info.config_keys(vec![ConfigVar::new(
         DATABASE_URL_ENV,
         "PostgreSQL connection URL (postgres://user:pass@host:port/db). \
@@ -51,7 +58,7 @@ wafer_core::service_block! {
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
-    lifecycle: |this, _ctx, event| {
+    lifecycle: |this, ctx, event| {
         if event.event_type == LifecycleType::Init && this.service.get().is_none() {
             let config = BlockConfig::from_event(&event);
 
@@ -95,7 +102,7 @@ wafer_core::service_block! {
         if event.event_type == LifecycleType::Init {
             let tables = this.tables.get().map_or(&[][..], |t| t.as_slice());
             if let Some(service) = this.service.get() {
-                handler::handle_lifecycle(service.as_ref(), tables, &event).await?;
+                handler::handle_lifecycle(service.as_ref(), tables, ctx, &event).await?;
             }
         }
 

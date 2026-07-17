@@ -478,6 +478,18 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Add a column to an existing table.
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
+
+    /// Apply the resolved STRICT_SCHEMA flag
+    /// (`WAFER_RUN__DATABASE__STRICT_SCHEMA`). Called once at lifecycle `Init`
+    /// by the shared database handler, which reads the value from the node
+    /// config on `ctx`.
+    ///
+    /// SQL backends store it so the shared executor
+    /// ([`DbExec::strict_schema`](super::exec::DbExec::strict_schema)) can skip
+    /// schema introspection on the hot path. The default is a no-op — backends
+    /// and test mocks that don't cache a schema (or don't run through
+    /// `DbExec`) simply ignore it.
+    fn set_strict_schema(&self, _enabled: bool) {}
 }
 
 /// Record represents a single database record.

@@ -19,8 +19,9 @@ use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
 
-use super::service::{
-    AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec,
+use super::{
+    schema_cache::SchemaCache,
+    service::{AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec},
 };
 
 /// Sanitize keys and sort `data` into deterministic `(column, value)` pairs.
@@ -110,6 +111,31 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// SQL dialect this backend builds for (placeholder style, introspection).
     const BACKEND: Backend;
 
+    // ---- Backend configuration accessors (defaulted; SQL backends override) ----
+
+    /// Per-backend schema-introspection cache, if the backend keeps one.
+    ///
+    /// SQL backends return `Some` so the shared table-exists and column-list
+    /// paths memoize introspection instead of issuing a round-trip per logical
+    /// operation. The default `None` keeps every other implementor — and any
+    /// backend that can't cache — on the always-introspect path, unchanged.
+    fn schema_cache(&self) -> Option<&SchemaCache> {
+        None
+    }
+
+    /// Whether the backend trusts its migrated schema (STRICT_SCHEMA mode,
+    /// `WAFER_RUN__DATABASE__STRICT_SCHEMA`).
+    ///
+    /// When `true`, the shared orchestration skips both the per-operation
+    /// table-exists guard (migrations are authoritative — the table is assumed
+    /// present) and the lazy column-add `ALTER TABLE` path (the migrated schema
+    /// is trusted — no columns are synthesized), removing schema introspection
+    /// from the hot path entirely. Default `false` preserves the self-healing
+    /// lazy-schema behavior for development, tests, and other implementors.
+    fn strict_schema(&self) -> bool {
+        false
+    }
+
     // ---- Primitives: the only backend-specific execution code ----
     // `params` is the JSON form produced by `sea_values_to_json(stmt.values)`;
     // each backend binds it natively. All callers pass single-statement SQL.
@@ -183,15 +209,55 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // forwards with explicit qualification (`DbExec::get(self, ...)`) to avoid
     // self-recursion.
 
+    /// Cache-consulting hot-path existence guard: `true` if the operation
+    /// should proceed against `table`.
+    ///
+    /// In STRICT_SCHEMA mode always `true` — migrations are authoritative, so
+    /// the table is assumed present and no probe is issued. Otherwise returns
+    /// the memoized [`schema_cache`](Self::schema_cache) fact on a hit, else
+    /// probes once via [`dbx_table_exists`](Self::dbx_table_exists) and stores
+    /// the result. The explicit [`schema_table_exists`](Self::schema_table_exists)
+    /// API deliberately bypasses this and stays a live probe for callers that
+    /// want ground truth.
+    async fn table_present_for_op(&self, table: &str) -> Result<bool, DatabaseError> {
+        if self.strict_schema() {
+            return Ok(true);
+        }
+        let cache = self.schema_cache();
+        if let Some(exists) = cache.and_then(|c| c.table_exists(table)) {
+            return Ok(exists);
+        }
+        // Snapshot the generation *before* the probe yields; the gen-guarded
+        // write-back below is dropped if a mutation raced the probe (see
+        // `SchemaCache` docs). Holding `Option<&SchemaCache>` across the await
+        // is fine — it is a plain reference, never a lock guard.
+        let gen0 = cache.map(SchemaCache::generation);
+        let exists = self.dbx_table_exists(table).await?;
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_table_exists_if_gen(table, exists, gen0);
+        }
+        Ok(exists)
+    }
+
     /// Column names (lowercased) of `table`; empty if the table is missing.
     ///
-    /// Shared across backends via the parameter-bound
-    /// [`introspect::build_list_columns`] builder, whose result shape (`name`
-    /// per column) is identical in both dialects.
+    /// Consults [`schema_cache`](Self::schema_cache) first and populates it on
+    /// a miss, so a warm backend answers without a round-trip. Shared across
+    /// backends via the parameter-bound [`introspect::build_list_columns`]
+    /// builder, whose result shape (`name` per column) is identical in both
+    /// dialects.
     async fn get_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+        let cache = self.schema_cache();
+        if let Some(columns) = cache.and_then(|c| c.columns(table)) {
+            return Ok(columns);
+        }
+        // Snapshot the generation before the probe yields; a mutation racing
+        // the introspection drops the write-back rather than caching a stale
+        // column set (see `SchemaCache` docs).
+        let gen0 = cache.map(SchemaCache::generation);
         let (sql, params) = introspect::build_list_columns(table, Self::BACKEND);
         let rows = self.run_fetch(&sql, &params).await?;
-        Ok(rows
+        let columns: Vec<String> = rows
             .into_iter()
             .filter_map(|r| {
                 r.data
@@ -199,7 +265,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_lowercase)
             })
-            .collect())
+            .collect();
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_columns_if_gen(table, columns.clone(), gen0);
+        }
+        Ok(columns)
     }
 
     /// Add `column` to `table` via `stmt` unless a concurrent writer beat us
@@ -209,13 +279,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// has a race window between the existence check and the `ALTER`. On
     /// failure, re-check: a now-present column means another writer added it
     /// (benign); a still-missing column is a real DDL error and propagates.
+    ///
+    /// Either way the `ALTER` (attempted or raced) changed this table's column
+    /// set, so the cached list is invalidated before the re-check — the
+    /// re-check then re-introspects the true set rather than trusting a stale
+    /// entry.
     async fn add_column_checked(
         &self,
         table: &str,
         column: &str,
         stmt: &wafer_sql_utils::Statement,
     ) -> Result<(), DatabaseError> {
-        if let Err(e) = self.run_execute(&stmt.sql, &[]).await {
+        let outcome = self.run_execute(&stmt.sql, &[]).await;
+        if let Some(cache) = self.schema_cache() {
+            cache.invalidate(table);
+        }
+        if let Err(e) = outcome {
             if !self
                 .get_columns(table)
                 .await?
@@ -239,6 +318,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         table: &str,
         data: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
+        // STRICT_SCHEMA trusts the migrated schema: no introspection, no lazy
+        // ALTER. A write referencing an unmigrated column fails loudly, which
+        // is the intended contract in strict mode.
+        if self.strict_schema() {
+            return Ok(());
+        }
         let existing = self.get_columns(table).await?;
         // Sorted for deterministic DDL order (HashMap iteration is random).
         let mut keys: Vec<&String> = data.keys().collect();
@@ -269,6 +354,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         sort: &[SortField],
         filter_tree: Option<&[FilterTree]>,
     ) -> Result<(), DatabaseError> {
+        // STRICT_SCHEMA trusts the migrated schema: skip the lazy TEXT-column
+        // add (see [`ensure_data_columns`](Self::ensure_data_columns)).
+        if self.strict_schema() {
+            return Ok(());
+        }
         let existing = self.get_columns(table).await?;
         let mut added: Vec<String> = Vec::new();
         let tree_fields = filter_tree.map(tree_leaf_fields).unwrap_or_default();
@@ -312,7 +402,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         opts: &ListOptions,
     ) -> Result<RecordList, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(RecordList {
                 records: Vec::new(),
                 total_count: 0,
@@ -410,7 +500,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Shared `count`: table-exists guard → ensure columns → COUNT(*).
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(0);
         }
         self.ensure_query_columns(&table, filters, &[], None)
@@ -535,7 +625,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(0);
         }
         self.ensure_query_columns(&table, filters, &[], None)
@@ -553,7 +643,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(Vec::new());
         }
         self.ensure_query_columns(&table, filters, &[], None)
@@ -574,7 +664,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Err(DatabaseError::NotFound);
         }
         let mut data = data;
@@ -599,7 +689,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<i64, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(0);
         }
         let mut data = data;
@@ -625,7 +715,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         let table = sanitize_ident(collection);
-        if !self.dbx_table_exists(&table).await? {
+        if !self.table_present_for_op(&table).await? {
             return Ok(0);
         }
         self.ensure_query_columns(&table, filters, &[], None)
@@ -756,17 +846,145 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `exec_raw`: pass-through to `run_execute`.
+    ///
+    /// This is the runtime DDL escape hatch — a raw statement may be DDL
+    /// (`CREATE`/`ALTER`/`DROP TABLE`) whose target table can't be recovered
+    /// from the SQL text here. On success the whole [`schema_cache`](Self::schema_cache)
+    /// is conservatively cleared so no stale entry outlives a schema change; a
+    /// failed statement changed nothing, so the cache is left intact.
     async fn exec_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        self.run_execute(query, args).await
+        let affected = self.run_execute(query, args).await?;
+        if let Some(cache) = self.schema_cache() {
+            cache.clear();
+        }
+        Ok(affected)
     }
 
     /// Shared `schema_table_exists`: pass-through to `dbx_table_exists`
     /// (the primitive preserves each backend's error text).
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
         self.dbx_table_exists(name).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// Mock backend whose `dbx_table_exists` parks on a barrier mid-probe, so a
+    /// test can fire an invalidation into the exact TOCTOU window between the
+    /// probe's generation snapshot and its cache write-back. Every other
+    /// primitive is an inert stub.
+    struct BarrierExec {
+        cache: SchemaCache,
+        entered_probe: Arc<Notify>,
+        release_probe: Arc<Notify>,
+        exists: bool,
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for BarrierExec {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn schema_cache(&self) -> Option<&SchemaCache> {
+            Some(&self.cache)
+        }
+
+        async fn run_fetch(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn run_fetch_one(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            Err(DatabaseError::NotFound)
+        }
+
+        async fn run_execute(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            Ok(0.0)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            // Announce that we've captured gen0 and are parked in the probe,
+            // then wait to be released — the window an invalidation must win.
+            self.entered_probe.notify_one();
+            self.release_probe.notified().await;
+            Ok(self.exists)
+        }
+    }
+
+    /// Exec-level proof of the linearizability fix: when an invalidation lands
+    /// while `table_present_for_op` is parked in its probe, the stale
+    /// `exists=false` read (taken just before a concurrent CREATE) is NOT
+    /// written back — the next op re-probes instead of trusting a resurrected
+    /// negative cache (Repro A).
+    #[tokio::test]
+    async fn probe_write_back_dropped_when_invalidated_mid_flight() {
+        let backend = BarrierExec {
+            cache: SchemaCache::new(),
+            entered_probe: Arc::new(Notify::new()),
+            release_probe: Arc::new(Notify::new()),
+            exists: false,
+        };
+        let entered = backend.entered_probe.clone();
+        let release = backend.release_probe.clone();
+
+        let probe = backend.table_present_for_op("orders");
+        let racer = async {
+            // Wait until the probe has snapshotted gen0 and parked in the DB call.
+            entered.notified().await;
+            // A concurrent migration CREATEs the table and invalidates the cache
+            // (bumping the generation past the probe's snapshot).
+            backend.cache.invalidate("orders");
+            // Release the probe to attempt its now-stale write-back.
+            release.notify_one();
+        };
+
+        let (present, ()) = tokio::join!(probe, racer);
+        // The probe still returns what the DB told it at read time...
+        assert!(
+            !present.expect("probe succeeds"),
+            "probe returns its read-time value"
+        );
+        // ...but that stale value must NOT have been cached.
+        assert_eq!(
+            backend.cache.table_exists("orders"),
+            None,
+            "a probe write-back racing an invalidation must be discarded"
+        );
     }
 }
