@@ -179,11 +179,20 @@ impl StorageService for S3StorageService {
     /// is never buffered whole in memory (the default `get` collects the
     /// entire body first). `ObjectInfo` is resolved eagerly from the response
     /// head. A body-read failure is surfaced as an `Error` terminal.
+    ///
+    /// Enforces the same 100 MiB object cap as local-storage `get` so a huge
+    /// object cannot stream unbounded into an isolate: an advertised
+    /// `Content-Length` over the cap is rejected up front, and the running
+    /// total is checked per chunk (defending against an absent or underreported
+    /// length), surfacing an `Error` terminal on overflow.
     async fn get_streaming(
         &self,
         folder: &str,
         key: &str,
     ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        // Parity with local-storage's `get`/`get_streaming` 100 MiB cap.
+        const MAX_STREAM_BYTES: u64 = 100 * 1024 * 1024;
+
         let s3_key = self.s3_key(folder, key);
 
         let resp = self
@@ -211,6 +220,17 @@ impl StorageService for S3StorageService {
             .last_modified()
             .map_or_else(Utc::now, Self::to_chrono_datetime);
 
+        // Reject up front when the advertised length already exceeds the cap.
+        // A negative/unknown length skips this guard; the running total below
+        // still bounds it.
+        if let Ok(advertised) = u64::try_from(content_length) {
+            if advertised > MAX_STREAM_BYTES {
+                return Err(StorageError::Internal(format!(
+                    "S3 object {s3_key} is {content_length} bytes, exceeds streaming limit of {MAX_STREAM_BYTES} bytes"
+                )));
+            }
+        }
+
         let info = ObjectInfo {
             key: key.to_string(),
             size: content_length,
@@ -219,10 +239,30 @@ impl StorageService for S3StorageService {
         };
 
         let mut body = resp.body;
-        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
+        let stream = OutputStream::from_producer(move |sink, cancel| async move {
+            let mut received: u64 = 0;
             loop {
-                match body.next().await {
+                let next = tokio::select! {
+                    biased;
+                    // Consumer dropped the stream mid-read — abort promptly
+                    // rather than blocking on the upstream S3 read.
+                    () = cancel.cancelled() => return,
+                    next = body.next() => next,
+                };
+                match next {
                     Some(Ok(chunk)) => {
+                        received = received.saturating_add(chunk.len() as u64);
+                        if received > MAX_STREAM_BYTES {
+                            let _ = sink
+                                .error(WaferError::new(
+                                    ErrorCode::Internal,
+                                    format!(
+                                        "S3 object {s3_key} exceeds streaming limit of {MAX_STREAM_BYTES} bytes"
+                                    ),
+                                ))
+                                .await;
+                            return;
+                        }
                         if sink.send_chunk(chunk.to_vec()).await.is_err() {
                             // Consumer dropped the stream — stop reading.
                             return;
@@ -721,6 +761,39 @@ mod tests {
             .body;
         assert_eq!(body, b"hello");
         assert_eq!(get.num_calls(), 1);
+    }
+
+    /// The 100 MiB streaming cap is enforced up front from the advertised
+    /// `Content-Length`: an oversized object is rejected before any bytes
+    /// stream (the mocked body is tiny — only the advertised length is large).
+    #[tokio::test]
+    async fn get_streaming_rejects_object_over_size_cap() {
+        use aws_sdk_s3::{operation::get_object::GetObjectOutput, primitives::ByteStream};
+
+        let oversized: i64 = 200 * 1024 * 1024; // past the 100 MiB cap
+        let get = mock!(aws_sdk_s3::Client::get_object)
+            .match_requests(|req| req.key() == Some("folder/huge.bin"))
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .content_length(oversized)
+                    .body(ByteStream::from(b"x".to_vec()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&get]);
+        let svc = service(client);
+
+        let err = svc
+            .get_streaming("folder", "huge.bin")
+            .await
+            .err()
+            .expect("object exceeding the streaming cap must be rejected");
+        match err {
+            StorageError::Internal(msg) => assert!(
+                msg.contains("exceeds streaming limit"),
+                "expected size-cap rejection, got: {msg}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     /// `delete_folder` streams listing pages and issues one DeleteObjects

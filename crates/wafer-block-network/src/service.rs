@@ -176,6 +176,67 @@ fn check_advertised_len(response: &reqwest::Response, cap: usize) -> Result<(), 
     Ok(())
 }
 
+/// Forward `body` chunks into an [`OutputStream`], enforcing the SEC-020
+/// response `cap` as a running total.
+///
+/// On overflow — or an upstream read error — the stream terminates with an
+/// `Error` terminal AFTER the chunks already forwarded, so a body that
+/// outgrows the cap mid-stream is never reported as a clean `Complete` (no
+/// silent truncation). The producer observes the paired `CancellationToken`,
+/// so a consumer that drops the stream aborts a blocked upstream read promptly
+/// instead of waiting for it to resolve.
+///
+/// Generic over the chunk/error types so it can be unit-tested with a
+/// synthetic stream, not just reqwest's `bytes_stream`.
+fn stream_capped<S, B, E>(body: S, cap: usize) -> OutputStream
+where
+    S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    OutputStream::from_producer(move |sink, cancel| async move {
+        let mut body = std::pin::pin!(body);
+        let mut received: usize = 0;
+        loop {
+            let next = tokio::select! {
+                biased;
+                // Consumer dropped the stream mid-read — abort promptly.
+                () = cancel.cancelled() => return,
+                next = body.next() => next,
+            };
+            let Some(chunk) = next else { break };
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = sink
+                        .error(WaferError::new(
+                            ErrorCode::Unavailable,
+                            format!("reading body: {e}"),
+                        ))
+                        .await;
+                    return;
+                }
+            };
+            let bytes = chunk.as_ref();
+            received = received.saturating_add(bytes.len());
+            if received > cap {
+                let _ = sink
+                    .error(WaferError::new(
+                        ErrorCode::Unavailable,
+                        format!("response body exceeds cap of {cap} bytes"),
+                    ))
+                    .await;
+                return;
+            }
+            if sink.send_chunk(bytes.to_vec()).await.is_err() {
+                // Consumer dropped the stream — stop reading.
+                return;
+            }
+        }
+        let _ = sink.complete(vec![]).await;
+    })
+}
+
 #[wafer_async_trait]
 impl NetworkService for HttpNetworkService {
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
@@ -238,39 +299,7 @@ impl NetworkService for HttpNetworkService {
             headers,
         };
 
-        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
-            let mut received: usize = 0;
-            let mut body = response.bytes_stream();
-            while let Some(chunk) = body.next().await {
-                let chunk = match chunk {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = sink
-                            .error(WaferError::new(
-                                ErrorCode::Unavailable,
-                                format!("reading body: {e}"),
-                            ))
-                            .await;
-                        return;
-                    }
-                };
-                received = received.saturating_add(chunk.len());
-                if received > cap {
-                    let _ = sink
-                        .error(WaferError::new(
-                            ErrorCode::Unavailable,
-                            format!("response body exceeds cap of {cap} bytes"),
-                        ))
-                        .await;
-                    return;
-                }
-                if sink.send_chunk(chunk.to_vec()).await.is_err() {
-                    // Consumer dropped the stream — stop reading.
-                    return;
-                }
-            }
-            let _ = sink.complete(vec![]).await;
-        });
+        let stream = stream_capped(response.bytes_stream(), cap);
 
         Ok((head, stream))
     }
@@ -348,6 +377,41 @@ mod tests {
             ),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SEC-020 on the streaming path: a body that outgrows the cap must
+    /// terminate the stream with an `Error` after forwarding the partial
+    /// bytes seen so far — never a silent truncation reported as `Complete`.
+    /// Driven through `stream_capped` directly with a synthetic multi-chunk
+    /// body so the cap mechanism is exercised without a live server (the
+    /// end-to-end streaming call would trip the SSRF gate on loopback first).
+    #[tokio::test]
+    async fn streaming_body_over_cap_ends_with_error_after_partial() {
+        use futures::stream;
+        use wafer_block::StreamEvent;
+
+        // cap = 5 bytes; three 4-byte chunks = 12 bytes total.
+        let chunks: Vec<Result<Vec<u8>, std::convert::Infallible>> = vec![
+            Ok(b"aaaa".to_vec()),
+            Ok(b"bbbb".to_vec()),
+            Ok(b"cccc".to_vec()),
+        ];
+        let events: Vec<StreamEvent> = stream_capped(stream::iter(chunks), 5).collect().await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, StreamEvent::Chunk(_))),
+            "partial bytes forwarded before the cap tripped must be present, got: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(StreamEvent::Error(_))),
+            "an over-cap body must terminate with Error, got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Complete { .. })),
+            "an over-cap body must NOT be reported as a clean Complete, got: {events:?}"
+        );
     }
 
     /// `client()` caches the built client across calls — two requests on
