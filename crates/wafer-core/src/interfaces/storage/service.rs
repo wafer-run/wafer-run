@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use wafer_block::{InputStream, OutputStream};
 use wafer_block_macro::wafer_async_trait;
 
 /// Errors returned by [`StorageService`] operations.
@@ -29,8 +30,46 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         content_type: &str,
     ) -> Result<(), StorageError>;
 
+    /// Streaming variant of [`put`](Self::put): store an object whose body
+    /// arrives as an [`InputStream`] of byte chunks instead of a single
+    /// fully-buffered slice.
+    ///
+    /// The default collapses the stream to bytes and forwards to
+    /// [`put`](Self::put), so existing backends keep working unchanged.
+    /// Backends whose driver accepts an incremental write (a filesystem
+    /// append, a multipart upload) SHOULD override this to avoid holding the
+    /// whole object in memory — the buffering here is exactly what the
+    /// streaming request path exists to avoid.
+    async fn put_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+        data: InputStream,
+        content_type: &str,
+    ) -> Result<(), StorageError> {
+        let bytes = data.collect_to_bytes().await;
+        self.put(folder, key, &bytes, content_type).await
+    }
+
     /// Get retrieves an object and its metadata from a folder.
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError>;
+
+    /// Streaming variant of [`get`](Self::get): retrieve an object as an
+    /// [`OutputStream`] of body chunks paired with its [`ObjectInfo`].
+    ///
+    /// The default calls [`get`](Self::get) and wraps the buffered body as a
+    /// single-chunk stream, so existing backends keep working unchanged.
+    /// Backends whose driver exposes a chunked or byte-range read (a
+    /// filesystem read, an S3 `GetObject` body stream) SHOULD override this to
+    /// stream the body without buffering it whole.
+    async fn get_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+    ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        let (data, info) = self.get(folder, key).await?;
+        Ok((OutputStream::respond(data), info))
+    }
 
     /// Delete removes an object from a folder.
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError>;
