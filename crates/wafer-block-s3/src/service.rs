@@ -7,6 +7,7 @@
 
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
+use wafer_block::{common::ErrorCode, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
@@ -95,6 +96,12 @@ impl S3StorageService {
 /// per-request key limit).
 const MAX_KEYS_PER_PAGE: usize = 1000;
 
+// Streaming policy: `get_streaming` streams the `GetObject` response body
+// (`ByteStream`) without buffering it whole. `put_streaming` deliberately
+// keeps the buffered default — S3 `PutObject` requires a known
+// `Content-Length`, which an unbounded `InputStream` cannot supply without
+// first collecting it; a true streaming upload needs a multipart flow
+// (initiate / upload-part / complete) and is deferred to a follow-up.
 #[wafer_async_trait]
 impl StorageService for S3StorageService {
     async fn put(
@@ -165,6 +172,78 @@ impl StorageService for S3StorageService {
         };
 
         Ok((body, info))
+    }
+
+    /// Streams the object body straight from the `GetObject` response
+    /// (`ByteStream`) through an [`OutputStream`] producer, so a large object
+    /// is never buffered whole in memory (the default `get` collects the
+    /// entire body first). `ObjectInfo` is resolved eagerly from the response
+    /// head. A body-read failure is surfaced as an `Error` terminal.
+    async fn get_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+    ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        let s3_key = self.s3_key(folder, key);
+
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&s3_key)
+            .send()
+            .await
+            .map_err(|e| {
+                let svc_err = e.into_service_error();
+                if svc_err.is_no_such_key() {
+                    StorageError::NotFound
+                } else {
+                    StorageError::Internal(format!("S3 GetObject {s3_key}: {svc_err}"))
+                }
+            })?;
+
+        let content_type = resp
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let content_length = resp.content_length().unwrap_or(0);
+        let last_modified = resp
+            .last_modified()
+            .map_or_else(Utc::now, Self::to_chrono_datetime);
+
+        let info = ObjectInfo {
+            key: key.to_string(),
+            size: content_length,
+            content_type,
+            last_modified,
+        };
+
+        let mut body = resp.body;
+        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
+            loop {
+                match body.next().await {
+                    Some(Ok(chunk)) => {
+                        if sink.send_chunk(chunk.to_vec()).await.is_err() {
+                            // Consumer dropped the stream — stop reading.
+                            return;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let _ = sink
+                            .error(WaferError::new(
+                                ErrorCode::Internal,
+                                format!("S3 read body {s3_key}: {e}"),
+                            ))
+                            .await;
+                        return;
+                    }
+                    None => break,
+                }
+            }
+            let _ = sink.complete(vec![]).await;
+        });
+
+        Ok((stream, info))
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {

@@ -4,6 +4,8 @@ use std::{
 };
 
 use chrono::Utc;
+use futures::StreamExt;
+use wafer_block::{common::ErrorCode, InputStream, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
@@ -168,6 +170,37 @@ impl StorageService for LocalStorageService {
             .map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
     }
 
+    /// Streams `data` chunk-by-chunk straight to the file via `tokio::fs`,
+    /// never holding the whole object in memory (the buffered default would
+    /// collect the stream first). Each chunk is written as it arrives.
+    async fn put_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+        mut data: InputStream,
+        _content_type: &str,
+    ) -> Result<(), StorageError> {
+        use tokio::io::AsyncWriteExt;
+
+        let path = self.validate_path(&self.object_path(folder, key))?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
+        }
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| StorageError::Internal(format!("create {path:?}: {e}")))?;
+        while let Some(chunk) = data.next().await {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| StorageError::Internal(format!("flush {path:?}: {e}")))
+    }
+
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
         let path = self.validate_path(&self.object_path(folder, key))?;
         let metadata = metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
@@ -199,6 +232,75 @@ impl StorageService for LocalStorageService {
         };
 
         Ok((data, info))
+    }
+
+    /// Streams the file from disk in fixed-size chunks through an
+    /// [`OutputStream`] producer, so a large object is never read whole into
+    /// memory (the buffered default reads the entire file first). The
+    /// `ObjectInfo` is resolved up front from the file metadata.
+    async fn get_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+    ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        let path = self.validate_path(&self.object_path(folder, key))?;
+        let metadata = metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
+
+        // Same guard as `get`: refuse absurdly large files up front.
+        const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(StorageError::Internal(format!(
+                "file {:?} is {} bytes, exceeds limit of {} bytes",
+                path,
+                metadata.len(),
+                MAX_FILE_SIZE
+            )));
+        }
+
+        let last_modified = metadata
+            .modified()
+            .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
+        let info = ObjectInfo {
+            key: key.to_string(),
+            size: metadata.len() as i64,
+            content_type: Self::guess_content_type(key),
+            last_modified,
+        };
+
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| StorageError::Internal(format!("open {path:?}: {e}")))?;
+
+        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
+            use tokio::io::AsyncReadExt;
+
+            let mut file = file;
+            // 64 KiB read window — the chunk size the streaming path emits.
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if sink.send_chunk(buf[..n].to_vec()).await.is_err() {
+                            // Consumer dropped the stream — stop reading.
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = sink
+                            .error(WaferError::new(
+                                ErrorCode::Internal,
+                                format!("read {path:?}: {e}"),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+            let _ = sink.complete(vec![]).await;
+        });
+
+        Ok((stream, info))
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
