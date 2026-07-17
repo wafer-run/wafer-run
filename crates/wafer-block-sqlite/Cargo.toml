@@ -29,6 +29,10 @@ vectors = ["dep:sqlite-vec"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 wafer-block-fastembed = { path = "../wafer-block-fastembed" }
+# Enable the shared DatabaseService conformance suite for tests/conformance.rs.
+# Same crate as the normal dependency above; this dev-only entry just turns on
+# the `conformance` feature for this crate's own test build.
+wafer-core = { path = "../wafer-core", features = ["conformance"] }
 
 [lints]
 workspace = true

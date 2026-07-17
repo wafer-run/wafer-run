@@ -11,6 +11,12 @@ default = []
 # Without this feature, the native async (ctx-based) path is used even on wasm32.
 # This is needed because CF Workers use wasm-bindgen (wasm32 but async), not WIT Components.
 wasm-component = []
+# Compile the backend-agnostic DatabaseService conformance suite
+# (interfaces::database::conformance). Off by default: consumers enable it in
+# their `[dev-dependencies]` so `run_conformance` is available in tests only,
+# never in a production build. Depends only on the trait + plain-data query
+# types already in this crate, so it needs no extra dependencies.
+conformance = []
 
 [dependencies]
 wafer-schema = { workspace = true }

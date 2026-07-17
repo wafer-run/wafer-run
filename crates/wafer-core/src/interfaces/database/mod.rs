@@ -1,3 +1,9 @@
+/// Backend-agnostic [`DatabaseService`](service::DatabaseService) conformance
+/// suite (`run_conformance`). Gated behind the `conformance` feature so it is
+/// only compiled into the test builds of crates that opt in; never into a
+/// production build.
+#[cfg(feature = "conformance")]
+pub mod conformance;
 /// Shared SQL-backend execution layer (`DbExec`) behind `DatabaseService`.
 pub mod exec;
 pub mod handler;

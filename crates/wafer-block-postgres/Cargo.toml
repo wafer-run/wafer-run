@@ -21,6 +21,13 @@ async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 chrono = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# Enable the shared DatabaseService conformance suite for tests/conformance.rs.
+# Same crate as the normal dependency; this dev-only entry turns on the
+# `conformance` feature for this crate's own test build.
+wafer-core = { path = "../wafer-core", features = ["conformance"] }
+
 [lints]
 workspace = true
 
