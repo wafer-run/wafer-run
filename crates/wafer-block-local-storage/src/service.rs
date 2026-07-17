@@ -4,6 +4,8 @@ use std::{
 };
 
 use chrono::Utc;
+use futures::StreamExt;
+use wafer_block::{common::ErrorCode, InputStream, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
@@ -119,6 +121,57 @@ impl LocalStorageService {
     fn guess_content_type(key: &str) -> String {
         wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
     }
+
+    /// Atomically write an object at `path`: `fill` a hidden sibling temp file
+    /// on the same filesystem, then `rename` it onto `path` on success. A
+    /// reader therefore never observes a half-written object at the live key —
+    /// a mid-write failure leaves the previous object (or nothing) in place and
+    /// the temp file is removed. POSIX `rename` within a directory is atomic.
+    ///
+    /// Shared by both `put` (buffered) and `put_streaming` so the atomicity
+    /// guarantee cannot drift between them.
+    async fn atomic_write<F, Fut>(&self, path: &Path, fill: F) -> Result<(), StorageError>
+    where
+        F: FnOnce(tokio::fs::File) -> Fut,
+        Fut: std::future::Future<Output = Result<tokio::fs::File, StorageError>>,
+    {
+        use tokio::io::AsyncWriteExt;
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
+        }
+
+        let tmp = temp_sibling(path);
+
+        // Fill + flush the temp file; on any error remove it and propagate.
+        let filled = async {
+            let file = tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| StorageError::Internal(format!("create temp {tmp:?}: {e}")))?;
+            let mut file = fill(file).await?;
+            file.flush()
+                .await
+                .map_err(|e| StorageError::Internal(format!("flush temp {tmp:?}: {e}")))?;
+            Ok::<(), StorageError>(())
+        }
+        .await;
+
+        if let Err(e) = filled {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+
+        // Commit: atomically swing the name onto the final path.
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(StorageError::Internal(format!(
+                "rename {tmp:?} -> {path:?}: {e}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Map a `spawn_blocking` join failure (panicked or cancelled walk task).
@@ -141,10 +194,34 @@ fn metadata_or_not_found(
     })
 }
 
+/// Monotonic per-process counter making temp-file names unique even when two
+/// writes to the same key begin within the same nanosecond.
+static TEMP_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Build a unique temp path alongside `path` (same parent directory, hence
+/// same filesystem, so a later `rename` onto `path` is atomic). The name is
+/// hidden (leading `.`) and carries the pid plus a monotonic sequence number
+/// so concurrent writers to the same key never collide on the temp file.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let seq = TEMP_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let base = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_name = format!(".{base}.tmp.{pid}.{seq}");
+    match path.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    }
+}
+
 #[wafer_async_trait]
 impl StorageService for LocalStorageService {
-    /// Streams `data` through `tokio::fs` (no payload copy into a
-    /// `spawn_blocking` closure — PERF-02: the executor thread only awaits).
+    /// Buffered write, made atomic via [`Self::atomic_write`]: the bytes land
+    /// in a temp file that is renamed onto `key` only on success, so a reader
+    /// never observes a partially written object (PERF-02: the executor thread
+    /// only awaits; no payload copy into a `spawn_blocking` closure).
     async fn put(
         &self,
         folder: &str,
@@ -152,20 +229,49 @@ impl StorageService for LocalStorageService {
         data: &[u8],
         _content_type: &str,
     ) -> Result<(), StorageError> {
-        use tokio::io::AsyncWriteExt;
-
         let path = self.validate_path(&self.object_path(folder, key))?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+        let err_path = path.clone();
+        self.atomic_write(&path, move |mut file| async move {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(data)
                 .await
-                .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
-        }
-        let mut file = tokio::fs::File::create(&path)
-            .await
-            .map_err(|e| StorageError::Internal(format!("create {path:?}: {e}")))?;
-        file.write_all(data)
-            .await
-            .map_err(|e| StorageError::Internal(format!("write {path:?}: {e}")))
+                .map_err(|e| StorageError::Internal(format!("write {err_path:?}: {e}")))?;
+            Ok(file)
+        })
+        .await
+    }
+
+    /// Streaming write: chunks are written to a temp file as they arrive and
+    /// the temp file is renamed onto `key` only after the stream ends, so a
+    /// reader never observes a partial object — same atomicity as
+    /// [`put`](Self::put) via [`Self::atomic_write`], without holding the whole
+    /// object in memory.
+    ///
+    /// Caveat: [`InputStream`] has no failure terminal — an upstream producer
+    /// that aborts mid-body is indistinguishable from a clean end (the stream
+    /// simply stops yielding chunks). Temp-file + rename still prevents a *torn*
+    /// object at the live key, but a truncated-then-"ended" stream is committed
+    /// as if complete. Distinguishing the two needs an error terminal on
+    /// `InputStream`; tracked as a wafer-block follow-up.
+    async fn put_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+        mut data: InputStream,
+        _content_type: &str,
+    ) -> Result<(), StorageError> {
+        let path = self.validate_path(&self.object_path(folder, key))?;
+        let err_path = path.clone();
+        self.atomic_write(&path, move |mut file| async move {
+            use tokio::io::AsyncWriteExt;
+            while let Some(chunk) = data.next().await {
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| StorageError::Internal(format!("write {err_path:?}: {e}")))?;
+            }
+            Ok(file)
+        })
+        .await
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
@@ -199,6 +305,97 @@ impl StorageService for LocalStorageService {
         };
 
         Ok((data, info))
+    }
+
+    /// Streams the file from disk in fixed-size chunks through an
+    /// [`OutputStream`] producer, so a large object is never read whole into
+    /// memory (the buffered default reads the entire file first).
+    ///
+    /// `ObjectInfo.size` and the streamed bytes come from the SAME open file
+    /// handle: the file is opened first, then `fstat`'d via that handle, then
+    /// read from that handle. A concurrent writer therefore cannot make the
+    /// advertised size disagree with the bytes actually streamed — a consumer
+    /// that sets `Content-Length: size` and then forwards the stream stays
+    /// consistent (TOCTOU-free).
+    async fn get_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+    ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        let path = self.validate_path(&self.object_path(folder, key))?;
+
+        // Open first, then stat *that* handle — one snapshot backs both the
+        // advertised size and the streamed bytes.
+        let file = tokio::fs::File::open(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound
+            } else {
+                StorageError::Internal(format!("open {path:?}: {e}"))
+            }
+        })?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
+
+        // Same guard as `get`: refuse absurdly large files up front.
+        const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(StorageError::Internal(format!(
+                "file {:?} is {} bytes, exceeds limit of {} bytes",
+                path,
+                metadata.len(),
+                MAX_FILE_SIZE
+            )));
+        }
+
+        let last_modified = metadata
+            .modified()
+            .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
+        let info = ObjectInfo {
+            key: key.to_string(),
+            size: metadata.len() as i64,
+            content_type: Self::guess_content_type(key),
+            last_modified,
+        };
+
+        let stream = OutputStream::from_producer(move |sink, cancel| async move {
+            use tokio::io::AsyncReadExt;
+
+            let mut file = file;
+            // 64 KiB read window — the chunk size the streaming path emits.
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let read = tokio::select! {
+                    biased;
+                    // Consumer dropped the stream mid-read — abort promptly
+                    // rather than blocking until the read resolves.
+                    () = cancel.cancelled() => return,
+                    read = file.read(&mut buf) => read,
+                };
+                match read {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if sink.send_chunk(buf[..n].to_vec()).await.is_err() {
+                            // Consumer dropped the stream — stop reading.
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = sink
+                            .error(WaferError::new(
+                                ErrorCode::Internal,
+                                format!("read {path:?}: {e}"),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+            let _ = sink.complete(vec![]).await;
+        });
+
+        Ok((stream, info))
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
@@ -537,6 +734,78 @@ mod tests {
                 "unexpected error variant: {other:?}, expected traversal error (got Ok(empty list) would mean the pre-validation existence check fired again)"
             ),
         }
+    }
+
+    /// The real streaming overrides must round-trip: `put_streaming` writes a
+    /// multi-chunk `InputStream` to disk chunk-by-chunk, and `get_streaming`
+    /// reads it back across its own chunk stream. Both must agree with the
+    /// buffered `get` on bytes and size.
+    #[tokio::test]
+    async fn put_streaming_then_get_streaming_round_trips_chunks() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        const EXPECTED: &[u8] = b"hello streamed world";
+
+        // Multi-chunk input — exercises the incremental write path.
+        let input = InputStream::from_stream(futures::stream::iter(vec![
+            b"hello ".to_vec(),
+            b"streamed ".to_vec(),
+            b"world".to_vec(),
+        ]));
+        svc.put_streaming("f", "greeting.txt", input, "text/plain")
+            .await
+            .expect("put_streaming");
+
+        // Buffered get sees the fully-written object.
+        let (buffered, info) = svc.get("f", "greeting.txt").await.expect("get");
+        assert_eq!(buffered, EXPECTED);
+        assert_eq!(info.size, EXPECTED.len() as i64);
+
+        // Streaming get yields the same bytes across its chunk stream.
+        let (stream, sinfo) = svc
+            .get_streaming("f", "greeting.txt")
+            .await
+            .expect("get_streaming");
+        assert_eq!(sinfo.size, EXPECTED.len() as i64);
+        let body = stream
+            .collect_buffered()
+            .await
+            .expect("stream ends with a Complete terminal")
+            .body;
+        assert_eq!(body, EXPECTED);
+
+        // Atomicity: the temp file was renamed onto the key, not left behind —
+        // the folder holds exactly the object, no `.tmp.` residue.
+        let listing = svc.list("f", &ListOptions::default()).await.expect("list");
+        let keys: Vec<&str> = listing.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["greeting.txt"],
+            "atomic write must leave no temp-file residue"
+        );
+    }
+
+    /// Overwriting an existing key is atomic: the new bytes fully replace the
+    /// old ones (via temp-file + rename), never a mix, and no temp residue is
+    /// left behind.
+    #[tokio::test]
+    async fn put_overwrites_atomically_without_residue() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        svc.put("f", "k.bin", b"original-longer-content", "text/plain")
+            .await
+            .expect("first put");
+        svc.put("f", "k.bin", b"new", "text/plain")
+            .await
+            .expect("overwrite put");
+
+        let (data, _info) = svc.get("f", "k.bin").await.expect("get");
+        assert_eq!(data, b"new", "overwrite must fully replace, not merge");
+
+        let listing = svc.list("f", &ListOptions::default()).await.expect("list");
+        let keys: Vec<&str> = listing.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["k.bin"], "no temp-file residue after overwrite");
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.

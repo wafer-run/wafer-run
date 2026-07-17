@@ -6231,8 +6231,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
  "tokio",
  "tracing",
+ "wafer-block",
  "wafer-block-macro",
  "wafer-core",
 ]
@@ -6276,6 +6278,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "wafer-block",
  "wafer-block-macro",
  "wafer-core",
  "wafer-net-security",

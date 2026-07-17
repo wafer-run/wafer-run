@@ -7,6 +7,7 @@ description = "WAFER block: outbound network requests via NetworkService"
 
 [dependencies]
 wafer-core = { path = "../wafer-core", default-features = false }
+wafer-block = { path = "../wafer-block" }
 wafer-net-security = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
