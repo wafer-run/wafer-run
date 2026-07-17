@@ -179,10 +179,15 @@ pub async fn get_stream(
         key: key.to_string(),
     };
     let resource = format!("{folder}/{key}");
+    // Streaming download: hit the dedicated `storage.get_streaming` op so the
+    // body is forwarded chunk-by-chunk from the backend's `get_streaming`
+    // stream, rather than the backend buffering the whole object and this
+    // client re-framing it. Same request shape, resource, and (read)
+    // authorization as the buffered `get` above.
     let mut out = call_service_streaming(
         ctx,
         BLOCK,
-        ServiceOp::STORAGE_GET,
+        ServiceOp::STORAGE_GET_STREAMING,
         &req,
         Some(resource.as_str()),
         false,

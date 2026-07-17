@@ -711,6 +711,13 @@ fn storage_op_body(op: &str) -> Vec<u8> {
             folder: "uploads".into(),
             key: "k".into(),
         }),
+        // Same request shape as STORAGE_GET — the streaming download op must
+        // stay in the deny loop so it can never ship without the same
+        // authorization gate as the buffered download.
+        ServiceOp::STORAGE_GET_STREAMING => codec::encode(&wire::GetRequest {
+            folder: "uploads".into(),
+            key: "k".into(),
+        }),
         ServiceOp::STORAGE_DELETE => codec::encode(&wire::DeleteRequest {
             folder: "uploads".into(),
             key: "k".into(),
@@ -766,6 +773,15 @@ fn network_op_body(op: &str) -> Vec<u8> {
 
     let encoded = match op {
         ServiceOp::NETWORK_DO_REQUEST => codec::encode(&wire::Request {
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            headers: HashMap::new(),
+            body: None,
+        }),
+        // Same request shape as NETWORK_DO_REQUEST — the streaming download op
+        // must stay in the deny loop so it can never ship without the same
+        // authorization gate as the buffered request.
+        ServiceOp::NETWORK_DO_REQUEST_STREAMING => codec::encode(&wire::Request {
             method: "GET".into(),
             url: "https://example.com".into(),
             headers: HashMap::new(),

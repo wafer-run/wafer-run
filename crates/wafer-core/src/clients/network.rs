@@ -108,10 +108,15 @@ pub async fn do_request_stream(
         headers: headers.clone(),
         body: body.map(|b| b.to_vec()),
     };
+    // Streaming download: hit the dedicated `network.do_streaming` op so the
+    // response body is forwarded chunk-by-chunk from the backend's
+    // `do_request_streaming` stream, rather than the backend buffering the
+    // whole response and this client re-framing it. Same request shape,
+    // resource, and (read) authorization as the buffered `do_request` above.
     let mut out = call_service_streaming(
         ctx,
         BLOCK,
-        ServiceOp::NETWORK_DO_REQUEST,
+        ServiceOp::NETWORK_DO_REQUEST_STREAMING,
         &req,
         Some(url),
         false,

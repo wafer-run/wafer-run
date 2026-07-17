@@ -633,6 +633,24 @@ fn storage_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
+        ServiceOp::STORAGE_GET_STREAMING => ActionSpec {
+            description: "Download an object from a folder, streaming its body out as chunks instead of buffering the whole object. Same WRAP authorization as storage.get. The response is a two-frame stream: an ObjectInfo header chunk followed by zero-or-more body chunks.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "folder": { "type": "string" },
+                    "key": { "type": "string" }
+                },
+                "required": ["folder", "key"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "info": { "type": "object", "description": "ObjectInfo header frame (first chunk)." },
+                    "body": { "type": "string", "description": "Streamed body bytes (subsequent chunks)." }
+                }
+            })),
+        },
         ServiceOp::STORAGE_DELETE => ActionSpec {
             description: "Delete an object from a folder.".into(),
             message_schema: Some(json!({
@@ -831,6 +849,27 @@ fn network_action_spec(op: &str) -> ActionSpec {
                     "status_code": { "type": "integer" },
                     "headers": { "type": "object" },
                     "body": { "type": "string", "description": "Base64-encoded response body" }
+                }
+            })),
+        },
+        ServiceOp::NETWORK_DO_REQUEST_STREAMING => ActionSpec {
+            description: "Make an outbound HTTP request, streaming the response body out as chunks instead of buffering it whole. Same WRAP authorization as network.do. The response is a two-frame stream: a ResponseHeader (status + headers) chunk followed by zero-or-more body chunks.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string" },
+                    "url": { "type": "string" },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "body": { "type": "string", "description": "Base64-encoded request body" }
+                },
+                "required": ["method", "url"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "status_code": { "type": "integer", "description": "From the ResponseHeader header frame (first chunk)." },
+                    "headers": { "type": "object", "description": "From the ResponseHeader header frame (first chunk)." },
+                    "body": { "type": "string", "description": "Streamed body bytes (subsequent chunks)." }
                 }
             })),
         },

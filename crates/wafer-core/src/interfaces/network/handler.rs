@@ -9,8 +9,8 @@ use wafer_block::{
     *,
 };
 
-use super::service::{NetworkError, NetworkService, Request};
-use crate::interfaces::handler_util::decode_and_authorize;
+use super::service::{NetworkError, NetworkService, Request, ResponseHead};
+use crate::interfaces::handler_util::{decode_and_authorize, stream_with_header};
 
 // --- Helpers ---
 
@@ -24,11 +24,14 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
 /// Handle a network message by delegating to the given service.
 ///
 /// `ctx` is the trusted host-side authorization surface: `NETWORK_DO_REQUEST`
-/// authorizes via [`decode_and_authorize`], which bundles the codec decode
-/// with a call to `ctx.check_resource_access` so the arm cannot obtain its
-/// typed request without also being checked. `is_write` is deliberately
-/// `false` for this op — outbound HTTP requests aren't a WRAP write in the
-/// resource sense, and flipping it would regress read-only network grants.
+/// and `NETWORK_DO_REQUEST_STREAMING` both authorize via
+/// [`decode_and_authorize`], which bundles the codec decode with a call to
+/// `ctx.check_resource_access` so the arm cannot obtain its typed request
+/// without also being checked. `is_write` is deliberately `false` for both —
+/// outbound HTTP requests aren't a WRAP write in the resource sense, and
+/// flipping it would regress read-only network grants. The streaming op uses
+/// the identical `(url, Network, read)` authorization tuple as the buffered
+/// op, so it can never be reached with a weaker grant.
 ///
 /// SSRF protection is NOT included here — it is platform-specific.
 /// Native callers should check `wafer_core::security::is_blocked_url` before
@@ -38,7 +41,10 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
 /// [`wire::network::Request`]. The response is emitted as **two frames** on
 /// the OutputStream — a [`wire::network::ResponseHeader`] chunk followed by a
 /// body chunk. The body chunk is omitted entirely when the body is empty
-/// (zero chunks → empty body on the consumer side).
+/// (zero chunks → empty body on the consumer side). `NETWORK_DO_REQUEST`
+/// buffers the whole body first; `NETWORK_DO_REQUEST_STREAMING` forwards the
+/// service's `do_request_streaming` body chunks verbatim as they arrive,
+/// under the same two-frame shape.
 pub async fn handle_message(
     service: &dyn NetworkService,
     ctx: &dyn Context,
@@ -92,6 +98,44 @@ pub async fn handle_message(
                         }
                         let _ = sink.complete(vec![]).await;
                     })
+                }
+                Err(e) => OutputStream::error(network_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::NETWORK_DO_REQUEST_STREAMING => {
+            // Same request shape and WRAP authorization as `NETWORK_DO_REQUEST`
+            // — a read of the target URL — so the streaming download can never
+            // be reached with a weaker grant than the buffered request.
+            let wire_req =
+                match decode_and_authorize::<WireRequest>(ctx, body, "network.do_streaming", |r| {
+                    (r.url.clone(), ResourceType::Network, false)
+                }) {
+                    Ok(r) => r,
+                    Err(out) => return out,
+                };
+
+            let request = Request {
+                method: wire_req.method,
+                url: wire_req.url,
+                headers: wire_req.headers,
+                body: wire_req.body,
+            };
+
+            match service.do_request_streaming(&request).await {
+                Ok((head, body_stream)) => {
+                    // Two-frame response: a `ResponseHeader` (status + headers)
+                    // header chunk followed by the body forwarded verbatim from
+                    // the service's stream (never collapsed via
+                    // `collect_buffered`).
+                    let ResponseHead {
+                        status_code,
+                        headers,
+                    } = head;
+                    let header = ResponseHeader {
+                        status_code,
+                        headers,
+                    };
+                    stream_with_header(header, body_stream, "network.do_streaming")
                 }
                 Err(e) => OutputStream::error(network_error_to_wafer(e)),
             }

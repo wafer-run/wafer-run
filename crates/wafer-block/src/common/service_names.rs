@@ -77,6 +77,11 @@ impl ServiceOp {
     pub const STORAGE_PUT: &str = "storage.put";
     /// Read an object from storage.
     pub const STORAGE_GET: &str = "storage.get";
+    /// Read an object from storage, streaming its body out as chunks rather
+    /// than buffering the whole object first (the download half of the
+    /// streaming wire path). Requires the SAME WRAP authorization as
+    /// [`STORAGE_GET`](Self::STORAGE_GET) — a read of `{folder}/{key}`.
+    pub const STORAGE_GET_STREAMING: &str = "storage.get_streaming";
     /// Delete an object from storage.
     pub const STORAGE_DELETE: &str = "storage.delete";
     /// List objects in a folder.
@@ -99,6 +104,12 @@ impl ServiceOp {
     pub const CRYPTO_RANDOM_BYTES: &str = "crypto.random_bytes";
     /// Perform an outbound HTTP request.
     pub const NETWORK_DO_REQUEST: &str = "network.do";
+    /// Perform an outbound HTTP request, streaming the response body out as
+    /// chunks rather than buffering it whole (the download half of the
+    /// streaming wire path). Requires the SAME WRAP authorization as
+    /// [`NETWORK_DO_REQUEST`](Self::NETWORK_DO_REQUEST) — a read of the target
+    /// URL.
+    pub const NETWORK_DO_REQUEST_STREAMING: &str = "network.do_streaming";
     /// Emit a debug-level log line.
     pub const LOGGER_DEBUG: &str = "logger.debug";
     /// Emit an info-level log line.
@@ -217,6 +228,7 @@ impl ServiceOp {
     pub const STORAGE_OPS: &[&str] = &[
         Self::STORAGE_PUT,
         Self::STORAGE_GET,
+        Self::STORAGE_GET_STREAMING,
         Self::STORAGE_DELETE,
         Self::STORAGE_LIST,
         Self::STORAGE_CREATE_FOLDER,
@@ -236,7 +248,8 @@ impl ServiceOp {
 
     /// Every `network.*` op — drives the `http-client@v1` action catalog in
     /// [`crate::interfaces::http_client_v1`].
-    pub const NETWORK_OPS: &[&str] = &[Self::NETWORK_DO_REQUEST];
+    pub const NETWORK_OPS: &[&str] =
+        &[Self::NETWORK_DO_REQUEST, Self::NETWORK_DO_REQUEST_STREAMING];
 
     /// Every `logger.*` op — drives the `logger@v1` action catalog in
     /// [`crate::interfaces::logger_v1`].

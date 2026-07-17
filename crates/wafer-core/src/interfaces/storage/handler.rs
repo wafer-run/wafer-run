@@ -13,7 +13,7 @@ use wafer_block::{
 };
 
 use super::service::{StorageError, StorageService};
-use crate::interfaces::handler_util::{decode_and_authorize, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize, stream_with_header, to_output};
 
 // --- Helpers ---
 
@@ -68,6 +68,11 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 /// - `STORAGE_GET` emits **two frames**: a [`wire::ObjectInfo`] header chunk
 ///   followed by the body bytes. The body chunk is omitted when empty
 ///   (zero chunks → empty body on the consumer side).
+/// - `STORAGE_GET_STREAMING` emits the SAME two-frame shape — a
+///   [`wire::ObjectInfo`] header chunk followed by zero-or-more body chunks —
+///   but the body chunks are forwarded verbatim from the service's
+///   `get_streaming` stream as they arrive, so a large object is never
+///   buffered whole. It authorizes identically to `STORAGE_GET`.
 /// - All other ops emit a single frame: either an empty ack (PUT, DELETE,
 ///   CREATE_FOLDER, DELETE_FOLDER) or an encoded response (LIST, LIST_FOLDERS).
 pub async fn handle_message(
@@ -136,6 +141,36 @@ pub async fn handle_message(
                         }
                         let _ = sink.complete(vec![]).await;
                     })
+                }
+                Err(e) => OutputStream::error(storage_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::STORAGE_GET_STREAMING => {
+            // Same request shape and WRAP authorization as `STORAGE_GET` — a
+            // read of `{folder}/{key}` — so the streaming download can never be
+            // reached with a weaker grant than the buffered download.
+            let req = match decode_and_authorize::<wire::GetRequest>(
+                ctx,
+                body,
+                "storage.get_streaming",
+                |r| {
+                    (
+                        format!("{}/{}", r.folder, r.key),
+                        ResourceType::Storage,
+                        false,
+                    )
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.get_streaming(&req.folder, &req.key).await {
+                Ok((body_stream, info)) => {
+                    // Two-frame response: an `ObjectInfo` header chunk followed
+                    // by the body forwarded verbatim from the service's stream
+                    // (never collapsed via `collect_buffered`).
+                    let header = service_object_info_to_wire(info);
+                    stream_with_header(header, body_stream, "storage.get_streaming")
                 }
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
