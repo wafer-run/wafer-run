@@ -7,7 +7,7 @@ use wafer_block_macro::wafer_async_trait;
 pub use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response, ResponseHead,
 };
-use wafer_net_security::SsrfFilteringResolver;
+use wafer_net_security::{ssrf_redirect_policy, SsrfFilteringResolver};
 
 /// Config var key controlling the maximum response body size accepted by
 /// `HttpNetworkService`. Read from the process env **once** at service
@@ -93,7 +93,16 @@ impl HttpNetworkService {
             .get_or_init(|| {
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
-                    .redirect(reqwest::redirect::Policy::none())
+                    // SSRF: every redirect hop is revalidated (URL-level by
+                    // `ssrf_redirect_policy`, resolved-IP-level by the DNS
+                    // resolver below), with a bounded hop count. This follows
+                    // legitimate public redirects while blocking a public first
+                    // hop that bounces to an internal address (SEC-019).
+                    .redirect(ssrf_redirect_policy())
+                    // DNS rebinding: drop resolved IPs pointing at
+                    // private/loopback/link-local/multicast addresses. reqwest
+                    // dials exactly the addresses returned here, so the checked
+                    // IP is the dialed IP (no re-resolve TOCTOU).
                     .dns_resolver(Arc::new(SsrfFilteringResolver))
                     .build()
                     .map_err(|e| e.to_string())
@@ -307,6 +316,9 @@ impl NetworkService for HttpNetworkService {
 
 #[cfg(test)]
 mod tests {
+    // Used only by the SSRF-gate tests, which are compiled out under
+    // `allow-private-network` (the gate they assert is itself disabled there).
+    #[cfg(not(feature = "allow-private-network"))]
     use wafer_core::interfaces::network::service::{NetworkService, Request};
 
     use super::*;

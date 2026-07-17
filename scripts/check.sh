@@ -43,6 +43,12 @@ run_test() {
     # under the escape-hatch feature — no other job enables it.
     echo "==> Registry SSRF escape-hatch e2e (allow-private-network)"
     cargo test -p wafer-run --features allow-private-network --test registry_ssrf
+
+    # SEC-019: the outbound-network redirect-follow e2e is likewise only
+    # reachable under the escape-hatch feature (a local wiremock server on
+    # loopback that the SSRF gate otherwise blocks).
+    echo "==> Network redirect SSRF escape-hatch e2e (allow-private-network)"
+    cargo test -p wafer-block-network --features allow-private-network --test redirect_ssrf
 }
 
 run_wasm() {
