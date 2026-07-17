@@ -615,6 +615,20 @@ fn storage_action_spec(op: &str) -> ActionSpec {
             })),
             response_schema: None,
         },
+        ServiceOp::STORAGE_PUT_STREAMING => ActionSpec {
+            description: "Upload an object to a folder, streaming its body in as chunks instead of buffering the whole object. Same WRAP authorization as storage.put. The request is a two-frame stream: a PutStreamingHeader (folder/key/content_type) chunk followed by zero-or-more raw body chunks.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "folder": { "type": "string", "description": "From the PutStreamingHeader header frame (first chunk)." },
+                    "key": { "type": "string", "description": "From the PutStreamingHeader header frame (first chunk)." },
+                    "content_type": { "type": "string", "default": "application/octet-stream", "description": "From the PutStreamingHeader header frame (first chunk)." },
+                    "body": { "type": "string", "description": "Streamed body bytes (subsequent chunks)." }
+                },
+                "required": ["folder", "key"]
+            })),
+            response_schema: None,
+        },
         ServiceOp::STORAGE_GET => ActionSpec {
             description: "Download an object from a folder.".into(),
             message_schema: Some(json!({

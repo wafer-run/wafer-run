@@ -23,6 +23,24 @@ fn default_content_type() -> String {
     "application/octet-stream".to_string()
 }
 
+/// Header frame for `storage.put_streaming` — the object metadata that
+/// precedes the streamed object body on the wire.
+///
+/// The streaming-upload protocol frames the request as this header (frame 1)
+/// followed by zero-or-more raw body-chunk frames, so the object bytes never
+/// sit in a single buffered `data: Vec<u8>` field the way [`PutRequest`]
+/// encodes them. Field-for-field this is [`PutRequest`] minus `data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutStreamingHeader {
+    /// Folder (bucket) name.
+    pub folder: String,
+    /// Object key within `folder`.
+    pub key: String,
+    /// MIME type (defaults to `application/octet-stream`).
+    #[serde(default = "default_content_type")]
+    pub content_type: String,
+}
+
 /// Request for `storage.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
@@ -149,6 +167,39 @@ mod tests {
     }
 
     #[test]
+    fn put_streaming_header_round_trips() {
+        let original = PutStreamingHeader {
+            folder: "uploads".into(),
+            key: "avatar.png".into(),
+            content_type: "image/png".into(),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: PutStreamingHeader = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.folder, original.folder);
+        assert_eq!(decoded.key, original.key);
+        assert_eq!(decoded.content_type, original.content_type);
+    }
+
+    #[test]
+    fn put_streaming_header_defaults_content_type() {
+        // A header encoded without `content_type` (e.g. an older/leaner
+        // producer) must still decode, defaulting the MIME type — mirrors
+        // `PutRequest`'s `#[serde(default)]` behavior.
+        #[derive(serde::Serialize)]
+        struct LeanHeader {
+            folder: String,
+            key: String,
+        }
+        let encoded = codec::encode(&LeanHeader {
+            folder: "f".into(),
+            key: "k".into(),
+        })
+        .expect("encode");
+        let decoded: PutStreamingHeader = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded.content_type, "application/octet-stream");
+    }
+
+    #[test]
     fn get_response_round_trips() {
         let original = GetResponse {
             data: vec![1, 2, 3],
@@ -241,6 +292,21 @@ mod tests {
         assert_eq!(
             hex, "84a6666f6c646572a0a36b6579a0a46461746190ac636f6e74656e745f74797065a0",
             "PutRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn schema_lock_put_streaming_header() {
+        let header = PutStreamingHeader {
+            folder: String::new(),
+            key: String::new(),
+            content_type: String::new(),
+        };
+        let encoded = codec::encode(&header).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "83a6666f6c646572a0a36b6579a0ac636f6e74656e745f74797065a0",
+            "PutStreamingHeader schema changed — review consumer impact before updating this literal"
         );
     }
 
