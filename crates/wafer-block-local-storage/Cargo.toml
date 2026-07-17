@@ -8,6 +8,7 @@ description = "Local filesystem storage block for WAFER"
 [dependencies]
 wafer-core = { path = "../wafer-core", default-features = false }
 wafer-block = { path = "../wafer-block" }
+base64ct = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 tracing = { workspace = true }

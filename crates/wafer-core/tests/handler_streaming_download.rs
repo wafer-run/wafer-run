@@ -250,6 +250,7 @@ impl StorageService for StreamingStorage {
         Ok(ObjectList {
             objects: vec![],
             total_count: 0,
+            next_cursor: None,
         })
     }
     async fn create_folder(&self, _name: &str, _public: bool) -> Result<(), StorageError> {

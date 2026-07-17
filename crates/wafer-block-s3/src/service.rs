@@ -90,6 +90,78 @@ impl S3StorageService {
     fn to_chrono_datetime(dt: &aws_sdk_s3::primitives::DateTime) -> DateTime<Utc> {
         DateTime::from_timestamp(dt.secs(), dt.subsec_nanos()).unwrap_or_else(Utc::now)
     }
+
+    /// Cursor-paginated single-page fetch — the cursor arm of [`Self::list`].
+    ///
+    /// One `ListObjectsV2` request keyed off the opaque continuation token: an
+    /// empty `cursor` starts at the first page (no `ContinuationToken` sent), a
+    /// non-empty one is fed straight to S3 as the `ContinuationToken`. At most
+    /// `limit` keys are requested (S3 caps each page at [`MAX_KEYS_PER_PAGE`]);
+    /// `limit == 0` fetches a full S3 page. The folder marker (the zero-length
+    /// `{folder}/` object) is skipped, so the first page can yield one fewer
+    /// object than `limit`. `next_cursor` is S3's `NextContinuationToken`,
+    /// present exactly when the listing is truncated (`None` on the final
+    /// page), so consecutive pages neither overlap nor gap. `total_count` is
+    /// just this page's object count — a lower bound; the cursor path
+    /// deliberately never walks the keyspace to produce an exact total.
+    async fn list_by_cursor(
+        &self,
+        prefix: &str,
+        search_prefix: &str,
+        cursor: &str,
+        limit: i64,
+    ) -> Result<ObjectList, StorageError> {
+        let mut req = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(search_prefix);
+        // A positive limit caps the page size; 0 means "one full S3 page".
+        if let Some(l) = usize::try_from(limit).ok().filter(|l| *l > 0) {
+            req = req.max_keys(l.min(MAX_KEYS_PER_PAGE) as i32);
+        }
+        // An empty cursor requests the first page (no ContinuationToken); a
+        // non-empty cursor is the opaque token from the previous page.
+        if !cursor.is_empty() {
+            req = req.continuation_token(cursor);
+        }
+
+        let page = req.send().await.map_err(|e| {
+            StorageError::Internal(format!("S3 ListObjectsV2 {search_prefix}: {e}"))
+        })?;
+
+        let mut objects: Vec<ObjectInfo> = Vec::new();
+        for obj in page.contents() {
+            let full_key = obj.key().unwrap_or_default();
+            let relative_key = full_key
+                .strip_prefix(prefix)
+                .unwrap_or(full_key)
+                .to_string();
+            // Skip the folder marker itself (empty key after prefix strip).
+            if relative_key.is_empty() {
+                continue;
+            }
+            let last_modified = obj
+                .last_modified()
+                .map_or_else(Utc::now, Self::to_chrono_datetime);
+            objects.push(ObjectInfo {
+                key: relative_key,
+                size: obj.size().unwrap_or(0),
+                content_type: String::new(), // S3 ListObjects doesn't return content-type
+                last_modified,
+            });
+        }
+
+        // S3 sets NextContinuationToken exactly when the listing is truncated.
+        let next_cursor = page.next_continuation_token().map(str::to_string);
+        let total_count = objects.len() as i64;
+
+        Ok(ObjectList {
+            objects,
+            total_count,
+            next_cursor,
+        })
+    }
 }
 
 /// The S3 `ListObjectsV2` per-page key maximum (also the `DeleteObjects`
@@ -299,20 +371,31 @@ impl StorageService for S3StorageService {
         Ok(())
     }
 
-    /// List objects with pagination pushed down to S3 (PERF-04).
+    /// List objects, either offset-paginated (default) or cursor-paginated
+    /// (`opts.cursor` set), with pagination pushed down to S3 (PERF-04).
     ///
-    /// Pages are walked via continuation tokens and the scan stops as soon
-    /// as `offset + limit` objects (plus one peek object) have been seen —
-    /// the old implementation buffered *every* page before slicing the
-    /// window in memory. Each request also caps `MaxKeys` to what the scan
-    /// still needs, so the final page is not a full 1000-key fetch.
+    /// **Cursor mode** (`opts.cursor == Some`) pages forward using S3's own
+    /// `ContinuationToken`, so a deep page costs a single round trip with no
+    /// re-walk of the preceding keyspace. An empty token means "first page"
+    /// (no `ContinuationToken` sent); a non-empty token is the opaque
+    /// `NextContinuationToken` from the previous page. `offset` is ignored.
+    /// The returned `next_cursor` is S3's `NextContinuationToken` — present
+    /// exactly when the listing is truncated, `None` on the final page. In
+    /// this mode `total_count` is only the current page's object count (a
+    /// lower bound); callers use `next_cursor` as the has-more signal. See
+    /// [`Self::list_by_cursor`].
     ///
-    /// `total_count` is exact when the scan reached the end of the listing.
-    /// When the scan stopped early it is a lower bound of
+    /// **Offset mode** (`opts.cursor == None`) is unchanged: pages are walked
+    /// via continuation tokens and the scan stops as soon as `offset + limit`
+    /// objects (plus one peek object) have been seen — the old implementation
+    /// buffered *every* page before slicing the window in memory. Each request
+    /// also caps `MaxKeys` to what the scan still needs, so the final page is
+    /// not a full 1000-key fetch. `total_count` is exact when the scan reached
+    /// the end of the listing; when it stopped early it is a lower bound of
     /// `offset + limit + 1` — strictly greater than `offset + limit`, so
     /// "more pages exist" checks (`total_count > offset + limit`) remain
     /// correct. S3 has no way to report an exact total without walking the
-    /// whole keyspace.
+    /// whole keyspace. `next_cursor` is always `None` in offset mode.
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
         let prefix = self.folder_prefix(folder);
         let search_prefix = if opts.prefix.is_empty() {
@@ -320,6 +403,13 @@ impl StorageService for S3StorageService {
         } else {
             format!("{}{}", prefix, opts.prefix)
         };
+
+        // Cursor takes precedence over offset (documented on `ListOptions`).
+        if let Some(cursor) = &opts.cursor {
+            return self
+                .list_by_cursor(&prefix, &search_prefix, cursor, opts.limit)
+                .await;
+        }
 
         let offset = usize::try_from(opts.offset).unwrap_or(0);
         let limit = usize::try_from(opts.limit).ok().filter(|l| *l > 0);
@@ -394,6 +484,10 @@ impl StorageService for S3StorageService {
         Ok(ObjectList {
             objects,
             total_count: seen as i64,
+            // Offset mode does not emit a cursor: the scan can stop mid-page,
+            // so there is no page-boundary continuation token that would let a
+            // caller resume without a gap or overlap.
+            next_cursor: None,
         })
     }
 
@@ -589,6 +683,7 @@ mod tests {
                     prefix: String::new(),
                     limit: 2,
                     offset: 1,
+                    cursor: None,
                 },
             )
             .await
@@ -681,6 +776,7 @@ mod tests {
                     prefix: String::new(),
                     limit: 5,
                     offset: 10,
+                    cursor: None,
                 },
             )
             .await
@@ -688,6 +784,87 @@ mod tests {
 
         assert!(list.objects.is_empty());
         assert_eq!(list.total_count, 3);
+    }
+
+    /// Cursor mode: an empty cursor fetches the first page and returns S3's
+    /// `NextContinuationToken` as `next_cursor`; feeding that token back
+    /// returns the following objects with no overlap and no gap; the final
+    /// page reports `next_cursor: None`. `offset` is ignored throughout.
+    #[tokio::test]
+    async fn list_by_cursor_pages_forward_without_overlap_or_gap() {
+        // Page 1: empty cursor → no ContinuationToken, MaxKeys = limit (2).
+        let page1 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| {
+                req.continuation_token().is_none()
+                    && req.max_keys() == Some(2)
+                    && req.prefix() == Some("folder/")
+            })
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/a", 1))
+                    .contents(obj("folder/b", 2))
+                    .is_truncated(true)
+                    .next_continuation_token("tok1")
+                    .build()
+            });
+        // Page 2: cursor = "tok1" → ContinuationToken forwarded, MaxKeys = 2.
+        // Listing ends here (no next token) → next_cursor is None.
+        let page2 = mock!(aws_sdk_s3::Client::list_objects_v2)
+            .match_requests(|req| {
+                req.continuation_token() == Some("tok1") && req.max_keys() == Some(2)
+            })
+            .then_output(|| {
+                ListObjectsV2Output::builder()
+                    .contents(obj("folder/c", 3))
+                    .build()
+            });
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&page1, &page2]);
+        let svc = service(client);
+
+        // Page 1 — bootstrap with an empty cursor. `offset` is deliberately
+        // large to prove cursor mode ignores it.
+        let p1 = svc
+            .list(
+                "folder",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 999,
+                    cursor: Some(String::new()),
+                },
+            )
+            .await
+            .expect("cursor page 1 succeeds");
+        let p1_keys: Vec<&str> = p1.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(p1_keys, vec!["a", "b"]);
+        assert_eq!(
+            p1.next_cursor.as_deref(),
+            Some("tok1"),
+            "a truncated page must surface S3's NextContinuationToken"
+        );
+
+        // Page 2 — resume from the token page 1 handed back.
+        let p2 = svc
+            .list(
+                "folder",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 2,
+                    offset: 0,
+                    cursor: p1.next_cursor.clone(),
+                },
+            )
+            .await
+            .expect("cursor page 2 succeeds");
+        let p2_keys: Vec<&str> = p2.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(p2_keys, vec!["c"], "no overlap with page 1, no gap");
+        assert_eq!(
+            p2.next_cursor, None,
+            "the final page must report no continuation token"
+        );
+        assert_eq!(page1.num_calls(), 1);
+        assert_eq!(page2.num_calls(), 1);
     }
 
     /// PERF-04: `list_folders` must accumulate common prefixes across

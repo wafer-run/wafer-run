@@ -101,7 +101,7 @@ pub struct ObjectInfo {
 }
 
 /// ObjectList represents a paginated list of objects.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectList {
     /// Objects in the current page.
     pub objects: Vec<ObjectInfo>,
@@ -113,7 +113,24 @@ pub struct ObjectList {
     /// greater than `offset + limit` when more objects exist, so
     /// `total_count > offset + limit` remains a correct has-more-pages
     /// check.
+    ///
+    /// In cursor mode (see [`ListOptions::cursor`]) this is only the count of
+    /// objects on the current page — a lower bound that does not walk the rest
+    /// of the keyspace. Cursor-paging callers MUST use `next_cursor.is_some()`
+    /// as the has-more signal, not `total_count`.
     pub total_count: i64,
+    /// Opaque, backend-defined continuation token for the *next* page, or
+    /// `None` when this page is the last (no more objects).
+    ///
+    /// Callers MUST treat this value as opaque — never parse, compare, or
+    /// construct it — and MUST only feed it back to the SAME backend via
+    /// [`ListOptions::cursor`]. A token is backend-specific and is never valid
+    /// across backends (an S3 continuation token means nothing to
+    /// local-storage, and vice versa).
+    ///
+    /// Backends without native cursor support leave this `None`; such stores
+    /// remain offset-only and behave exactly as before.
+    pub next_cursor: Option<String>,
 }
 
 /// FolderInfo contains metadata about a storage folder.
@@ -135,5 +152,25 @@ pub struct ListOptions {
     /// Maximum number of objects to return (0 = backend default).
     pub limit: i64,
     /// Number of objects to skip for pagination.
+    ///
+    /// Ignored when `cursor` is `Some` — cursor pagination takes precedence
+    /// (see `cursor`).
     pub offset: i64,
+    /// Opaque continuation token for cursor-based forward pagination.
+    ///
+    /// Precedence: when `Some`, the backend returns the page STARTING AFTER
+    /// this token and IGNORES `offset` entirely; the backend's native
+    /// (opaque) cursor is used, so a deep page costs no prefix re-walk. When
+    /// `None`, the query is offset-based and behaves exactly as before.
+    ///
+    /// To *begin* a cursor walk, pass `Some(String::new())` (an empty token
+    /// means "before the first object", so the first page is returned along
+    /// with a `next_cursor`). Thereafter pass the [`ObjectList::next_cursor`]
+    /// from the previous page, until it comes back `None`.
+    ///
+    /// The token is OPAQUE and backend-specific: obtain it only from a prior
+    /// [`ObjectList::next_cursor`] of the SAME backend, never parse or
+    /// construct it, and never carry it across backends. Backends without
+    /// native cursor support ignore it and fall back to offset behavior.
+    pub cursor: Option<String>,
 }

@@ -6230,6 +6230,7 @@ name = "wafer-block-local-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64ct",
  "chrono",
  "futures",
  "tokio",

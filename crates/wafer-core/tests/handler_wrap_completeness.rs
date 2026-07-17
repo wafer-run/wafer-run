@@ -314,6 +314,7 @@ mod storage_fakes {
             Ok(ObjectList {
                 objects: vec![],
                 total_count: 0,
+                next_cursor: None,
             })
         }
         async fn create_folder(&self, _name: &str, _public: bool) -> Result<(), StorageError> {
@@ -727,6 +728,7 @@ fn storage_op_body(op: &str) -> Vec<u8> {
             prefix: String::new(),
             limit: 10,
             offset: 0,
+            cursor: None,
         }),
         ServiceOp::STORAGE_CREATE_FOLDER => codec::encode(&wire::CreateFolderRequest {
             name: "uploads".into(),

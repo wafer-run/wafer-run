@@ -65,13 +65,18 @@ dual_api! {
         Ok(())
     }
 
-    /// List objects in `folder` matching `opts` (prefix / pagination).
+    /// List objects in `folder` matching `opts` (prefix / offset / cursor).
+    ///
+    /// When `opts.cursor` is set the backend pages forward from that opaque
+    /// token (offset ignored); the returned [`ObjectList::next_cursor`] feeds
+    /// the next call. Otherwise the query is offset-based, unchanged.
     pub fn list(ctx, folder: &str, opts: &ListOptions) -> Result<ObjectList, WaferError> {
         let req = ListRequest {
             folder: folder.to_string(),
             prefix: opts.prefix.clone(),
             limit: opts.limit,
             offset: opts.offset,
+            cursor: opts.cursor.clone(),
         };
         let data = svc!(
             ctx, BLOCK,
