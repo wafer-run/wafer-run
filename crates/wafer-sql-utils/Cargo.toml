@@ -8,7 +8,16 @@ description = "Shared SQL query builders for WAFER database backends"
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-schema = { workspace = true }
-sea-query = { version = "0.32", features = ["with-json"] }
+# Pure dialect-agnostic query builder: render SQL strings for the sqlite and
+# postgres backends only. `default-features = false` drops the unused MySQL
+# renderer (`backend-mysql`) and the `#[derive(Iden)]` proc-macro stack
+# (`sea-query-derive` → darling), which `wafer-sql-utils` does not use — it
+# implements `Iden` by hand in `ident.rs`. Keeps the wasm graph lean.
+sea-query = { version = "0.32", default-features = false, features = [
+    "backend-sqlite",
+    "backend-postgres",
+    "with-json",
+] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
