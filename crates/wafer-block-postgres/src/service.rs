@@ -549,22 +549,29 @@ macro_rules! generate_bind {
                         q.bind(n.to_string())
                     }
                 }
-                // A bound *text* parameter is rejected by a TIMESTAMPTZ column
-                // ("column ... is of type timestamp with time zone but
-                // expression is of type text"): unlike an untyped string
-                // literal, Postgres will not implicitly cast a text *parameter*.
-                // The shared `create`/`update` path stamps `created_at` /
-                // `updated_at` as RFC3339 strings bound for the TIMESTAMPTZ
-                // columns `wafer_schema::timestamps()` declares, so bind a strict
-                // RFC3339 datetime as `timestamptz`. Non-datetime text (including
-                // a date-only string) binds unchanged; a text column that
-                // receives a datetime value still stores it via Postgres's
-                // `timestamptz -> text` assignment cast. SQLite has its own bind
-                // path, so its TEXT timestamp storage is untouched.
-                serde_json::Value::String(s) => match chrono::DateTime::parse_from_rfc3339(s) {
-                    Ok(dt) => q.bind(dt),
-                    Err(_) => q.bind(s.as_str()),
-                },
+                // Strings are always bound as `text`. This is deliberately NOT
+                // value-driven (e.g. "bind an RFC3339-looking string as
+                // timestamptz"): every block in this workspace stores its
+                // timestamps in TEXT columns holding one canonical RFC3339
+                // string (see impresspress `auth/repo/mod.rs::now_iso`), so
+                // `expires_at < cutoff` / `uploaded_at < cutoff` string
+                // comparisons work. Binding an RFC3339 string as `timestamptz`
+                // would (a) reformat the stored value on write, breaking that
+                // single-format invariant, and (b) make `WHERE text_col <op>
+                // $rfc3339` fail with `operator does not exist: text <op>
+                // timestamp with time zone` — reachable on the file-upload
+                // orphan-sweep and the auth `delete_expired` paths.
+                //
+                // KNOWN FOLLOW-UP (deferred): the shared `create`/`update` path
+                // stamps RFC3339 strings that a *real* `TIMESTAMPTZ` column
+                // (declared via `wafer_schema::timestamps()`) would reject as a
+                // bound text param. No block currently declares such a column, so
+                // this does not manifest. Supporting it correctly needs a
+                // COLUMN-TYPE-AWARE bind (cast/bind per the target column's SQL
+                // type), which requires the schema cache to carry column types —
+                // out of scope here, and a value-driven shortcut is actively
+                // wrong given the TEXT convention above.
+                serde_json::Value::String(s) => q.bind(s.as_str()),
                 serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
             }
         }
