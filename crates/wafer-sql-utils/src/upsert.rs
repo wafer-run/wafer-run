@@ -168,22 +168,33 @@ pub fn build_windowed_counter_upsert(
     values.extend(updated_fields.iter().map(|_| now_expr.clone()));
     query.values_panic(values);
 
-    // {count_field} = CASE WHEN {window_field} < ? THEN 1 ELSE {count_field} + 1 END
+    // Column references inside the `ON CONFLICT ... DO UPDATE SET` clause must
+    // be qualified with the target table. Postgres exposes BOTH the existing
+    // target row and the `excluded` (proposed) row in that scope, under the
+    // same column names, so an UNQUALIFIED counter/window reference is rejected
+    // as ambiguous (`column reference "window_start" is ambiguous`). The
+    // windowed counter always reasons about the STORED row — compare its window,
+    // increment its count — so every reference resolves to the target table.
+    // SQLite accepts the same `"table"."column"` qualifier in its UPSERT
+    // `DO UPDATE` clause, so this single form works on both dialects.
+    let stored = |field: &str| sea_query::Expr::col((DynCol(table.into()), DynCol(field.into())));
+
+    // {count_field} = CASE WHEN {table}.{window_field} < ? THEN 1 ELSE {table}.{count_field} + 1 END
     let count_case: SimpleExpr = CaseStatement::new()
         .case(
-            sea_query::Expr::col(DynCol(window_field.into())).lt(window_cutoff),
+            stored(window_field).lt(window_cutoff),
             SimpleExpr::Value(1i64.into()),
         )
-        .finally(sea_query::Expr::col(DynCol(count_field.into())).add(1))
+        .finally(stored(count_field).add(1))
         .into();
 
-    // {window_field} = CASE WHEN {window_field} < ? THEN ? ELSE {window_field} END
+    // {window_field} = CASE WHEN {table}.{window_field} < ? THEN ? ELSE {table}.{window_field} END
     let window_case: SimpleExpr = CaseStatement::new()
         .case(
-            sea_query::Expr::col(DynCol(window_field.into())).lt(window_cutoff),
+            stored(window_field).lt(window_cutoff),
             SimpleExpr::Value(now.into()),
         )
-        .finally(sea_query::Expr::col(DynCol(window_field.into())))
+        .finally(stored(window_field))
         .into();
 
     let mut on_conflict = OnConflict::column(DynCol(conflict_column.into()));

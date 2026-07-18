@@ -389,29 +389,32 @@ impl DatabaseService for PostgresDatabaseService {
 /// `to_json`.
 ///
 /// Owns the `Ok(Some)`/`Ok(None)`/`Err` triple shared by every `row_to_record`
-/// type arm: a `try_get` `Err` means the column's stored type didn't match the
-/// decoder picked from the SQL type name — a genuine data/schema problem, not
-/// a SQL NULL. We keep the NULL fallback (so a single bad column doesn't sink
-/// the whole row) but log it via `tracing::warn!` so it's observable,
-/// mirroring the SQLite read path's skip-and-warn. `Ok(None)` is a real NULL
-/// and stays silent.
+/// type arm. `Ok(None)` is a real SQL `NULL` and maps to JSON `null`. A
+/// `try_get` `Err` means the decoder picked from the column's SQL type name
+/// could not decode the stored value — i.e. this function's type mapping is
+/// wrong for that column. That is a genuine backend bug, so it is returned as
+/// an [`DatabaseError`], **never silently substituted with NULL**: a silent
+/// NULL turns a wrong type mapping into a wrong *result* (e.g. an aggregate
+/// count coming back empty) that no test or caller can see. Unlike SQLite —
+/// whose reader keys off each value's *runtime* type and so cannot pick a
+/// mismatched decoder — the Postgres reader picks by static SQL type name, so a
+/// gap here is exactly the failure mode this hard error surfaces.
 fn decode_col<'r, T>(
     row: &'r PgRow,
     ordinal: usize,
     col_name: &str,
     type_name: &str,
     to_json: impl FnOnce(T) -> serde_json::Value,
-) -> serde_json::Value
+) -> Result<serde_json::Value, DatabaseError>
 where
     T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
     match row.try_get::<Option<T>, _>(ordinal) {
-        Ok(Some(v)) => to_json(v),
-        Ok(None) => serde_json::Value::Null,
-        Err(e) => {
-            tracing::warn!(column = %col_name, sql_type = %type_name, error = %e, "failed to decode column; substituting NULL");
-            serde_json::Value::Null
-        }
+        Ok(Some(v)) => Ok(to_json(v)),
+        Ok(None) => Ok(serde_json::Value::Null),
+        Err(e) => Err(DatabaseError::Internal(format!(
+            "failed to decode column {col_name:?} (SQL type {type_name}): {e}"
+        ))),
     }
 }
 
@@ -435,37 +438,58 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                 &col_name,
                 type_name,
                 serde_json::Value::String,
-            ),
+            )?,
             "INT2" | "INT4" => decode_col(row, ordinal, &col_name, type_name, |n: i32| {
                 serde_json::Value::Number(n.into())
-            }),
+            })?,
             "INT8" | "BIGINT" => decode_col(row, ordinal, &col_name, type_name, |n: i64| {
                 serde_json::Value::Number(n.into())
-            }),
+            })?,
             "FLOAT4" => decode_col(row, ordinal, &col_name, type_name, |f: f32| {
                 serde_json::Number::from_f64(f64::from(f))
                     .map_or(serde_json::Value::Null, serde_json::Value::Number)
-            }),
-            "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => {
+            })?,
+            "FLOAT8" | "DOUBLE PRECISION" => {
                 decode_col(row, ordinal, &col_name, type_name, |f: f64| {
                     serde_json::Number::from_f64(f)
                         .map_or(serde_json::Value::Null, serde_json::Value::Number)
-                })
+                })?
             }
+            // NUMERIC needs its own decoder: sqlx's `f64` decode rejects the
+            // Postgres `NUMERIC` wire type, so folding it into the FLOAT8 arm
+            // above made every NUMERIC value fail to decode. Now that
+            // `decode_col` hard-errors instead of silently NULLing, that would
+            // be a loud failure for a perfectly ordinary result — e.g. `AVG(<int
+            // column>)` and `SUM(<numeric column>)` both come back as NUMERIC.
+            // Decode via `BigDecimal` (sqlx's `bigdecimal` feature) and convert
+            // to the same `f64` JSON number every other numeric column produces.
+            "NUMERIC" => decode_col(
+                row,
+                ordinal,
+                &col_name,
+                type_name,
+                |d: sqlx::types::BigDecimal| {
+                    d.to_string()
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number)
+                },
+            )?,
             "BOOL" | "BOOLEAN" => {
-                decode_col(row, ordinal, &col_name, type_name, serde_json::Value::Bool)
+                decode_col(row, ordinal, &col_name, type_name, serde_json::Value::Bool)?
             }
             "JSON" | "JSONB" => {
-                decode_col(row, ordinal, &col_name, type_name, |v: serde_json::Value| v)
+                decode_col(row, ordinal, &col_name, type_name, |v: serde_json::Value| v)?
             }
             "BYTEA" => decode_col(row, ordinal, &col_name, type_name, |b: Vec<u8>| {
                 serde_json::Value::String(Base64::encode_string(&b))
-            }),
+            })?,
             "TIMESTAMPTZ" | "TIMESTAMP" => {
-                // Try as a string first; a string-decode error here is not yet
-                // a failure — Postgres returns these as a native type, so we
-                // fall through to the chrono decoder, whose failure on a
-                // non-NULL value is the one that warns.
+                // Try as a string first; a string-decode error here is not yet a
+                // failure — Postgres returns these as a native type, so we fall
+                // through to the chrono decoder, whose failure on a non-NULL
+                // value is the one that hard-errors via `decode_col`.
                 match row.try_get::<Option<String>, _>(ordinal) {
                     Ok(Some(s)) => serde_json::Value::String(s),
                     Ok(None) => serde_json::Value::Null,
@@ -477,12 +501,12 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                         |dt: chrono::DateTime<chrono::Utc>| {
                             serde_json::Value::String(dt.to_rfc3339())
                         },
-                    ),
+                    )?,
                 }
             }
             "UUID" => decode_col(row, ordinal, &col_name, type_name, |u: uuid::Uuid| {
                 serde_json::Value::String(u.to_string())
-            }),
+            })?,
             // Fallback: try as string
             _ => decode_col(
                 row,
@@ -490,7 +514,7 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
                 &col_name,
                 type_name,
                 serde_json::Value::String,
-            ),
+            )?,
         };
 
         if col_name == "id" {
@@ -525,6 +549,28 @@ macro_rules! generate_bind {
                         q.bind(n.to_string())
                     }
                 }
+                // Strings are always bound as `text`. This is deliberately NOT
+                // value-driven (e.g. "bind an RFC3339-looking string as
+                // timestamptz"): every block in this workspace stores its
+                // timestamps in TEXT columns holding one canonical RFC3339
+                // string (see impresspress `auth/repo/mod.rs::now_iso`), so
+                // `expires_at < cutoff` / `uploaded_at < cutoff` string
+                // comparisons work. Binding an RFC3339 string as `timestamptz`
+                // would (a) reformat the stored value on write, breaking that
+                // single-format invariant, and (b) make `WHERE text_col <op>
+                // $rfc3339` fail with `operator does not exist: text <op>
+                // timestamp with time zone` — reachable on the file-upload
+                // orphan-sweep and the auth `delete_expired` paths.
+                //
+                // KNOWN FOLLOW-UP (deferred): the shared `create`/`update` path
+                // stamps RFC3339 strings that a *real* `TIMESTAMPTZ` column
+                // (declared via `wafer_schema::timestamps()`) would reject as a
+                // bound text param. No block currently declares such a column, so
+                // this does not manifest. Supporting it correctly needs a
+                // COLUMN-TYPE-AWARE bind (cast/bind per the target column's SQL
+                // type), which requires the schema cache to carry column types —
+                // out of scope here, and a value-driven shortcut is actively
+                // wrong given the TEXT convention above.
                 serde_json::Value::String(s) => q.bind(s.as_str()),
                 serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
             }

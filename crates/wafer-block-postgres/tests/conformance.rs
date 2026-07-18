@@ -18,13 +18,16 @@
 //! The suite creates and drops its own `conf_*` tables, so it is safe to point
 //! at any scratch database.
 //!
-//! NOTE: against a live server this test currently FAILS — the first live-DB
-//! run of the Postgres backend surfaced real, pre-existing backend bugs
-//! (windowed-counter upsert emits an ambiguous column reference; aggregate
-//! `CaseWhenSum` silently decodes to NULL). Those need production fixes and are
-//! out of scope for this test-only change; see the `conformance` module's
-//! "Known backend divergences" section. The test is gated off by default, so
-//! `cargo test --workspace` stays green regardless.
+//! This passes against a live server. The first live-DB run of the Postgres
+//! backend surfaced four real, pre-existing backend bugs; three are now fixed at
+//! the shared renderer / decoder layer and the suite exercises each (`sum` over
+//! an `INT` column; windowed-counter upsert emitting an ambiguous column
+//! reference; aggregate `CaseWhenSum` silently decoding to NULL). The fourth
+//! (stamped RFC3339 string vs a real `TIMESTAMPTZ` column) is deferred — it
+//! does not manifest for any real code, since every block stores timestamps in
+//! TEXT columns. See the `conformance` module's "Backend divergences" section.
+//! The test is still gated off by default (no `WAFER_CONFORMANCE_POSTGRES_URL`
+//! → skip), so `cargo test --workspace` stays green without a database.
 //!
 //! [`DatabaseService`]: wafer_core::interfaces::database::service::DatabaseService
 
