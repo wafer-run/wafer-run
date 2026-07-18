@@ -53,34 +53,39 @@
 //!   placeholder dialect (`?` vs `$1`) differs by backend and the suite has no
 //!   backend handle. The literals are all suite-controlled constants.
 //!
-//! # Known backend divergences this suite surfaced (PostgreSQL)
+//! # Backend divergences this suite surfaced (PostgreSQL) — now fixed
 //!
 //! Running the suite against a live PostgreSQL server (the gated
-//! `wafer-block-postgres` test) was the first live-DB exercise of that
-//! backend, and it exposed real defects that SQLite's dynamic typing hides.
-//! The suite's schema/type choices steer around the two that are column-type
-//! dependent; the other two are genuine backend bugs the gated Postgres test
-//! still trips (they need production fixes, out of scope for this test-only
-//! change):
+//! `wafer-block-postgres` test) was the first live-DB exercise of that backend,
+//! and it exposed four real defects that SQLite's dynamic typing had hidden.
+//! All four are now fixed at the shared renderer / decoder layer, and this
+//! suite exercises the exact shapes that tripped them, so it regression-guards
+//! every one:
 //!
-//! 1. **`created_at`/`updated_at` as `TEXT`, not `DateTime`.** The shared
-//!    `create`/`update` path (`stamp_timestamps` in `exec.rs`) auto-stamps an
-//!    RFC3339 *string*; a Postgres `TIMESTAMPTZ` column rejects it (`column …
-//!    is of type timestamp with time zone but expression is of type text`).
-//!    Any block using the standard `wafer_schema::timestamps()` helper
-//!    (which declares `DateTime` columns) hits this on Postgres.
-//! 2. **`sum` is asserted over a `FLOAT` column, not an `INT` one.** The
-//!    top-level `sum` op decodes its scalar as `f64`, but Postgres
-//!    `COALESCE(SUM(int), 0)` returns `INT8`, which the `f64` decode rejects.
-//! 3. **`upsert` `WindowedCounter` (unavoidable — still trips Postgres).** The
-//!    `ON CONFLICT DO UPDATE SET` CASE expressions reference the counter/window
-//!    columns unqualified, which Postgres rejects as `column reference … is
-//!    ambiguous`. This is the rate-limiter path, so the fix matters.
-//! 4. **`aggregate` `CaseWhenSum` (unavoidable — still trips Postgres).**
-//!    `SUM(CASE WHEN … THEN 1 ELSE 0 END)` sums bound `BIGINT` literals, so
-//!    Postgres returns `NUMERIC`, which `row_to_record` cannot decode as `f64`
-//!    and *silently drops to `NULL`* — a silent wrong result (the count comes
-//!    back empty). The suite catches it as a hard failure.
+//! 1. **Timestamp string vs `TIMESTAMPTZ`.** The shared `create`/`update` path
+//!    (`stamp_timestamps` in `exec.rs`) auto-stamps `created_at`/`updated_at` as
+//!    an RFC3339 *string*, and every block using the standard
+//!    `wafer_schema::timestamps()` helper declares those as `DateTime`
+//!    (Postgres `TIMESTAMPTZ`). A bound *text* parameter was rejected (`column …
+//!    is of type timestamp with time zone but expression is of type text`); the
+//!    Postgres backend now binds a strict RFC3339 string as `timestamptz`.
+//!    `crud_table` uses `DateTime` timestamps to cover this.
+//! 2. **`sum` over an `INT` column.** The top-level `sum` op decodes its scalar
+//!    as `f64`, but Postgres `COALESCE(SUM(int), 0)` returned `INT8`, which the
+//!    `f64` decode rejected. The `COALESCE` fallback is now floating-point, so
+//!    the result resolves to `DOUBLE PRECISION`. `check_count_and_sum` sums the
+//!    integer `score` column to cover this.
+//! 3. **`upsert` `WindowedCounter` ambiguous column.** The `ON CONFLICT DO
+//!    UPDATE SET` CASE expressions referenced the counter/window columns
+//!    unqualified, which Postgres rejected as `column reference … is
+//!    ambiguous`. The builder now qualifies them with the target table. This is
+//!    the rate-limiter path, so the fix matters.
+//! 4. **`aggregate` `CaseWhenSum` NUMERIC silent-NULL.** `SUM(CASE WHEN … THEN 1
+//!    ELSE 0 END)` summed bound `BIGINT` literals, so Postgres returned
+//!    `NUMERIC`, which `row_to_record` could not decode as `f64` and *silently
+//!    dropped to `NULL`* — a silent wrong result. The builder now emits inline
+//!    `INT4` literals (so the SUM is `INT8`), the decoder now decodes `NUMERIC`
+//!    proper, and an undecodable value now hard-errors instead of NULLing.
 //!
 //! [`exec_raw`]: DatabaseService::exec_raw
 
@@ -143,13 +148,16 @@ fn field_f64(rec: &Record, key: &str) -> f64 {
 /// need: a text PK, text/int payload columns, a nullable column (for
 /// NULL-predicate coverage), and timestamps (for date-bucket grouping).
 ///
-/// `created_at`/`updated_at` are `Text`, not `DateTime`, deliberately: the
-/// shared `create`/`update` path auto-stamps them with an RFC3339 *string*
-/// (`stamp_timestamps` in `exec.rs`), which a Postgres `TIMESTAMPTZ` column
-/// rejects (`column is of type timestamp with time zone but expression is of
-/// type text`). Text columns store that string on every backend, and the
-/// Postgres date-bucket expression casts the text to a date, so grouping still
-/// works. (This mirrors the schema the in-crate SQLite integration tests use.)
+/// `created_at`/`updated_at` are `DateTime` — the type the standard
+/// `wafer_schema::timestamps()` helper declares, which maps to Postgres
+/// `TIMESTAMPTZ` and SQLite `DATETIME`. The shared `create`/`update` path
+/// auto-stamps them with an RFC3339 *string* (`stamp_timestamps` in
+/// `exec.rs`); the Postgres backend binds that string as a `timestamptz`
+/// parameter so the column accepts it, and SQLite stores the text as before.
+/// Exercising the real timestamp type here is deliberate: an earlier version of
+/// this suite used `Text` columns to sidestep a bug where the stamped string
+/// was bound as `text` and a `TIMESTAMPTZ` column rejected it — that bug is now
+/// fixed, and this schema regression-guards it.
 fn crud_table(name: &str) -> Table {
     Table {
         name: name.to_string(),
@@ -157,17 +165,16 @@ fn crud_table(name: &str) -> Table {
             pk("id"),
             Column::new("name", DataType::Text).null(),
             Column::new("category", DataType::Text).null(),
-            // `score` (INT) drives count/filter/increment (the CAS counter).
+            // `score` (INT) drives count/filter/increment (the CAS counter) and
+            // the integer-column `sum` check (`SUM(<int>)` returns Postgres
+            // `INT8`, which the `f64` sum decode must accept).
             Column::new("score", DataType::Int).null(),
-            // `amount` (FLOAT) drives the `sum` op and aggregate Sum/Avg/Max.
-            // It is deliberately floating-point: the top-level `sum` decodes its
-            // scalar result as `f64`, and Postgres `COALESCE(SUM(int), 0)`
-            // returns `INT8`, which that decode rejects — a real backend gap
-            // hidden by SQLite's loose typing (see the module-level notes).
+            // `amount` (FLOAT) drives the aggregate Sum/Avg/Max checks, whose
+            // fractional means need a floating-point column.
             Column::new("amount", DataType::Float).null(),
             Column::new("note", DataType::Text).null(),
-            Column::new("created_at", DataType::Text).null(),
-            Column::new("updated_at", DataType::Text).null(),
+            Column::new("created_at", DataType::DateTime).null(),
+            Column::new("updated_at", DataType::DateTime).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
@@ -236,13 +243,16 @@ async fn seed_read_fixture(svc: &dyn DatabaseService) {
     reset(svc, &table).await;
 
     // (id, name, category, score, amount, note, created_at). `amount` mirrors
-    // `score` so the sum/aggregate expectations stay easy to read.
+    // `score` so the sum/aggregate expectations stay easy to read. `created_at`
+    // is a full RFC3339 timestamp: the column is `DateTime` (Postgres
+    // `TIMESTAMPTZ`), and the date-bucket check groups these into the Jan-15 and
+    // Jan-16 buckets.
     let rows = [
-        ("r1", "alpha", "x", 10, Some("hi"), "2026-01-15"),
-        ("r2", "bravo", "x", 20, None, "2026-01-15"),
-        ("r3", "charlie", "y", 5, None, "2026-01-16"),
-        ("r4", "delta", "y", 5, None, "2026-01-16"),
-        ("r5", "echo", "z", 100, None, "2026-01-16"),
+        ("r1", "alpha", "x", 10, Some("hi"), "2026-01-15T00:00:00Z"),
+        ("r2", "bravo", "x", 20, None, "2026-01-15T00:00:00Z"),
+        ("r3", "charlie", "y", 5, None, "2026-01-16T00:00:00Z"),
+        ("r4", "delta", "y", 5, None, "2026-01-16T00:00:00Z"),
+        ("r5", "echo", "z", 100, None, "2026-01-16T00:00:00Z"),
     ];
     for (id, name, category, score, note, created) in rows {
         let mut data = row([
@@ -446,6 +456,28 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
     assert!(
         (sum_x - 30.0).abs() < 1e-9,
         "sum of category=x amounts == 30, got {sum_x}"
+    );
+
+    // sum over an INTEGER column. `SUM(<int>)` returns Postgres `INT8`, which
+    // the `f64` scalar decode must accept — the top-level `sum` op always yields
+    // an `f64` regardless of the summed column's type. (SQLite's loose typing
+    // hides this; a live Postgres run does not.)
+    let sum_score = svc.sum("conf_read", "score", &[]).await.expect("sum score");
+    assert!(
+        (sum_score - 140.0).abs() < 1e-9,
+        "sum of all scores == 140, got {sum_score}"
+    );
+    let sum_score_y = svc
+        .sum(
+            "conf_read",
+            "score",
+            &[eq("category", serde_json::json!("y"))],
+        )
+        .await
+        .expect("sum score y");
+    assert!(
+        (sum_score_y - 10.0).abs() < 1e-9,
+        "sum of category=y scores == 10, got {sum_score_y}"
     );
 
     // count/sum on a missing table must fail-safe to zero, not error.

@@ -66,7 +66,17 @@ pub fn build_count_with_condition(
     )
 }
 
-/// Build SELECT COALESCE(SUM({field}), 0) FROM {table} WHERE {filters}.
+/// Build SELECT COALESCE(SUM({field}), 0.0) FROM {table} WHERE {filters}.
+///
+/// The COALESCE fallback is a **floating-point** `0.0`, not an integer `0`, on
+/// purpose. The `sum` op decodes its scalar result as `f64`. On Postgres
+/// `SUM(<int column>)` returns `INT8`, and `COALESCE(INT8, 0)` (an integer
+/// fallback) stays `INT8` — which the `f64` scalar decode rejects. Binding the
+/// fallback as `DOUBLE PRECISION` makes Postgres resolve the whole
+/// `COALESCE(...)` to `DOUBLE PRECISION` (the preferred type between `INT8` and
+/// `FLOAT8`), so an integer-column sum comes back as a value the `f64` decode
+/// accepts. SQLite is unaffected: it decodes either an integer or a real sum to
+/// `f64` regardless of the fallback's type.
 pub fn build_sum(
     table: &str,
     field: &str,
@@ -75,7 +85,7 @@ pub fn build_sum(
 ) -> crate::Statement {
     let expr = Func::coalesce([
         Func::sum(Expr::col(DynCol(field.into()))).into(),
-        Expr::val(0i64).into(),
+        Expr::val(0.0_f64).into(),
     ]);
     agg_select(table, expr.into(), "total", filters, None, backend)
 }
@@ -231,9 +241,17 @@ impl AggregateColumn {
     /// );
     /// ```
     pub fn case_when_sum(alias: impl Into<String>, when: SimpleExpr) -> Self {
+        // The THEN/ELSE operands are emitted as INLINE integer literals (`1` /
+        // `0`), not bound parameters. A bound integer parameter binds as `INT8`
+        // (`BIGINT`) on Postgres, so `SUM(CASE ... THEN $1 ELSE $2 END)` sums
+        // `INT8` and Postgres returns `NUMERIC` — which the `f64` row decoder
+        // cannot read, silently dropping the count to NULL. An inline `1`/`0` is
+        // an `INT4` literal, so the SUM is `INT8`, which decodes cleanly as the
+        // integer this conditional row-count is. SQLite is unaffected (it sums
+        // to an integer either way).
         let case: SimpleExpr = sea_query::CaseStatement::new()
-            .case(when, SimpleExpr::Value(1i64.into()))
-            .finally(SimpleExpr::Value(0i64.into()))
+            .case(when, Expr::cust("1"))
+            .finally(Expr::cust("0"))
             .into();
         Self {
             func: AggFunc::Sum,
