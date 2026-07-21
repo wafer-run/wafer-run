@@ -36,6 +36,22 @@ pub enum InputType {
     Color,
     /// URL field (validated on write).
     Url,
+    /// Single choice from the declaring block's [`ConfigVar::options`];
+    /// renders as a `<select>`. Falls back to a plain text input when the
+    /// declaration carries no options.
+    Select,
+    /// Numeric input; renders as `<input type="number">`. Values are still
+    /// stored as strings like every other config value.
+    Number,
+}
+
+/// One choice for an [`InputType::Select`] variable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SelectOption {
+    /// Stored config value.
+    pub value: String,
+    /// Human-readable label shown in the admin UI.
+    pub label: String,
 }
 
 /// A configuration variable declared by a block.
@@ -62,6 +78,11 @@ pub struct ConfigVar {
     /// Input type for UI rendering and validation.
     #[serde(default)]
     pub input_type: InputType,
+    /// Choices for [`InputType::Select`] variables; empty for every other
+    /// input type. Omitted from the wire when empty, so pre-Select stored
+    /// declarations round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<SelectOption>,
     /// Optional warning shown in the admin UI (e.g., "Changing this invalidates sessions").
     #[serde(default)]
     pub warning: String,
@@ -88,6 +109,7 @@ impl ConfigVar {
             description: description.into(),
             default: default.into(),
             input_type: InputType::Text,
+            options: Vec::new(),
             warning: String::new(),
             auto_generate: false,
             optional: false,
@@ -115,6 +137,18 @@ impl ConfigVar {
     /// Set the UI [`InputType`] (drives masking, validation, widget).
     pub fn input_type(mut self, input_type: InputType) -> Self {
         self.input_type = input_type;
+        self
+    }
+
+    /// Set the `(value, label)` choices for an [`InputType::Select`] variable.
+    pub fn options(mut self, options: &[(&str, &str)]) -> Self {
+        self.options = options
+            .iter()
+            .map(|(value, label)| SelectOption {
+                value: (*value).into(),
+                label: (*label).into(),
+            })
+            .collect();
         self
     }
 
@@ -170,5 +204,42 @@ mod input_type_tests {
         assert_eq!(json, "\"textarea\"");
         let back: InputType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, InputType::Textarea);
+    }
+
+    #[test]
+    fn select_and_number_serde_round_trip() {
+        let json = serde_json::to_string(&InputType::Select).unwrap();
+        assert_eq!(json, "\"select\"");
+        assert_eq!(
+            serde_json::from_str::<InputType>(&json).unwrap(),
+            InputType::Select
+        );
+        let json = serde_json::to_string(&InputType::Number).unwrap();
+        assert_eq!(json, "\"number\"");
+        assert_eq!(
+            serde_json::from_str::<InputType>(&json).unwrap(),
+            InputType::Number
+        );
+    }
+
+    #[test]
+    fn select_options_builder_and_wire_compat() {
+        let var = ConfigVar::new("X__MODE", "Mode", "a")
+            .input_type(InputType::Select)
+            .options(&[("a", "Alpha"), ("b", "Beta")]);
+        assert_eq!(var.options.len(), 2);
+        assert_eq!(var.options[0].value, "a");
+        assert_eq!(var.options[0].label, "Alpha");
+
+        // Round-trips through JSON.
+        let json = serde_json::to_string(&var).unwrap();
+        let back: ConfigVar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.options, var.options);
+
+        // Pre-Select JSON (no `options` field) still deserializes: the field
+        // defaults to empty, so existing stored declarations keep working.
+        let legacy = r#"{"key":"X__OLD","description":"d"}"#;
+        let old: ConfigVar = serde_json::from_str(legacy).unwrap();
+        assert!(old.options.is_empty());
     }
 }
