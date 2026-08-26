@@ -242,36 +242,101 @@ impl BlockEndpoint {
     }
 
     /// Derive the request-body JSON Schema from `T` via `schemars`.
+    ///
+    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
-        let schema = schemars::schema_for!(T);
-        self.input_schema = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self.input_schema = Some(self_contained_schema::<T>());
         self
     }
 
     /// Derive the response-body JSON Schema from `T` via `schemars`.
+    ///
+    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
-        let schema = schemars::schema_for!(T);
-        self.output_schema = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self.output_schema = Some(self_contained_schema::<T>());
         self
     }
 
     /// Derive the path-params JSON Schema from `T` via `schemars`.
+    ///
+    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
-        let schema = schemars::schema_for!(T);
-        self.path_params = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self.path_params = Some(self_contained_schema::<T>());
         self
     }
 
     /// Derive the query-params JSON Schema from `T` via `schemars`.
+    ///
+    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
-        let schema = schemars::schema_for!(T);
-        self.query_params = Some(serde_json::to_value(schema).unwrap_or(serde_json::Value::Null));
+        self.query_params = Some(self_contained_schema::<T>());
         self
     }
+}
+
+/// Derive a JSON Schema for `T` that stands on its own.
+///
+/// `schemars::schema_for!` produces a *document*: a root schema plus a
+/// `$defs` table, wired together with `#/$defs/X` references that resolve
+/// against that document's root. Endpoint schemas are never served as
+/// documents — they are embedded as a fragment inside an OpenAPI
+/// `requestBody`/`responses` object, and `path_params`/`query_params` are
+/// taken further apart still, one property at a time, into standalone
+/// OpenAPI parameter objects. In both places `#/$defs/X` resolves against
+/// the *OpenAPI* root, where no `$defs` exists, so every reference dangles.
+///
+/// So the generator inlines subschemas instead of referencing them, and the
+/// two document-level keys are suppressed: `$schema` (the meta-schema URI,
+/// meaningless in a fragment) and `title` (schemars fills it with the Rust
+/// type name, which is not API documentation).
+///
+/// Field descriptions from `///` doc comments survive: schemars emits them
+/// as siblings of the inlined subschema, not as part of the definition they
+/// replaced.
+///
+/// # `$defs` is deliberately *not* removed
+///
+/// With `inline_subschemas` on, `$defs` is emitted for exactly one reason —
+/// a recursive type, which has no finite inlining. schemars closes the cycle
+/// with a `$ref`: `"#"` when it closes on the root type (and then there is
+/// no `$defs` at all), or `#/$defs/X` plus a matching `$defs` entry when it
+/// closes below the root. Deleting the table in that second case would
+/// strand the reference, which is the precise failure this function exists
+/// to prevent. So whatever referent schemars kept, we keep;
+/// `recursive_types_never_reference_a_table_that_was_removed` holds us to
+/// it.
+///
+/// A surviving `$ref` still does not *resolve* inside an OpenAPI document —
+/// both `#` and `#/$defs/X` are rooted at the OpenAPI document rather than
+/// at the embedded schema. Closing that gap means hoisting definitions into
+/// `components/schemas` and rewriting the pointers in `generate_openapi`.
+/// Until then `wafer-core`'s `inline_refs` flattens what it can for the
+/// WebMCP projection, and recursive contracts are the only shape affected.
+#[cfg(feature = "json-schema")]
+fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
+    let mut value = schemars::generate::SchemaSettings::default()
+        .with(|settings| {
+            settings.inline_subschemas = true;
+            settings.meta_schema = None;
+        })
+        .into_generator()
+        .into_root_schema_for::<T>()
+        .to_value();
+
+    if let Some(obj) = value.as_object_mut() {
+        // `$schema` is already suppressed by `meta_schema = None`; `title`
+        // has no such setting, so it is dropped here.
+        obj.remove("title");
+    }
+    value
 }
 
 #[cfg(test)]
@@ -364,6 +429,319 @@ mod block_endpoint_tests {
         assert!(
             json.get("agent_tool").is_none(),
             "absent agent_tool must not appear in serialized output: {json}"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_input_schema_is_self_contained() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum Status {
+            Draft,
+            Active,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct CreateProduct {
+            /// Human-readable product name.
+            name: String,
+            /// Current lifecycle status.
+            status: Status,
+        }
+
+        let ep = BlockEndpoint::post("/b/products").input::<CreateProduct>();
+        let schema = ep.input_schema.expect("input schema set");
+        let rendered = schema.to_string();
+
+        assert!(
+            !rendered.contains("$ref"),
+            "derived schemas are embedded into OpenAPI documents where #/$defs \
+             does not resolve — no $ref may survive: {rendered}"
+        );
+        assert!(
+            !rendered.contains("$defs"),
+            "the $defs table must not travel with the schema: {rendered}"
+        );
+        assert!(
+            schema.get("$schema").is_none(),
+            "root $schema is meaningless inside an OpenAPI requestBody: {rendered}"
+        );
+        assert!(
+            schema.get("title").is_none(),
+            "root title is the Rust type name, not API documentation: {rendered}"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_schema_keeps_field_descriptions() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct WithDocs {
+            /// Human-readable product name.
+            name: String,
+        }
+
+        let ep = BlockEndpoint::post("/b/x").input::<WithDocs>();
+        let schema = ep.input_schema.expect("input schema set");
+        assert_eq!(
+            schema["properties"]["name"]["description"],
+            serde_json::json!("Human-readable product name."),
+            "doc comments must reach the schema — the derive migration relies \
+             on this to preserve editorial text: {schema}"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_schema_keeps_descriptions_on_inlined_named_types() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum Status {
+            Draft,
+            Active,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct WithNamedField {
+            /// Current lifecycle status.
+            status: Status,
+        }
+
+        let ep = BlockEndpoint::post("/b/x").input::<WithNamedField>();
+        let schema = ep.input_schema.expect("input schema set");
+        assert_eq!(
+            schema["properties"]["status"]["description"],
+            serde_json::json!("Current lifecycle status."),
+            "inlining a named type must not swallow the field's own doc \
+             comment: {schema}"
+        );
+        assert_eq!(
+            schema["properties"]["status"]["enum"],
+            serde_json::json!(["Draft", "Active"]),
+            "the named type's own schema must be inlined in place: {schema}"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_query_params_schema_inlines_enums() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum SortOrder {
+            Asc,
+            Desc,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct ListQuery {
+            sort: Option<SortOrder>,
+        }
+
+        let ep = BlockEndpoint::get("/b/x").query_params::<ListQuery>();
+        let schema = ep.query_params.expect("query params schema set");
+        assert!(
+            !schema.to_string().contains("$ref"),
+            "extract_params lifts each property out standalone and drops $defs, \
+             so an enum-typed query param must already be inlined: {schema}"
+        );
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_output_and_path_params_are_self_contained() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum Kind {
+            One,
+            Two,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Payload {
+            kind: Kind,
+        }
+
+        let ep = BlockEndpoint::get("/b/x/{id}")
+            .output::<Payload>()
+            .path_params::<Payload>();
+        for (label, schema) in [
+            ("output", ep.output_schema.expect("output schema set")),
+            ("path_params", ep.path_params.expect("path params set")),
+        ] {
+            let rendered = schema.to_string();
+            assert!(
+                !rendered.contains("$ref") && !rendered.contains("$defs"),
+                "{label} schema must stand alone: {rendered}"
+            );
+            assert!(
+                schema.get("$schema").is_none() && schema.get("title").is_none(),
+                "{label} schema must not carry document-level keys: {rendered}"
+            );
+        }
+    }
+
+    /// Walk a schema and collect every `$ref` string it contains.
+    #[cfg(feature = "json-schema")]
+    fn collect_refs(node: &serde_json::Value, out: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    if key == "$ref" {
+                        if let Some(reference) = value.as_str() {
+                            out.push(reference.to_string());
+                        }
+                    }
+                    collect_refs(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_refs(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Recursion is the one shape `inline_subschemas` cannot fully resolve, and
+    /// this test pins down exactly what escapes so a schemars upgrade cannot
+    /// change it silently.
+    ///
+    /// **This is not the guarantee the other `derived_*` tests give.** Those
+    /// assert no `$ref` at all; recursive contracts still emit one. What is
+    /// guaranteed here is narrower but the one that matters for correctness:
+    /// *a surviving `$ref` always has its referent.* `#` is the schema's own
+    /// root and needs no table; `#/$defs/X` comes with `$defs.X` still
+    /// attached. Nothing is ever left pointing at a table this builder
+    /// deleted.
+    ///
+    /// The remaining gap is a *consumer* problem: inside an OpenAPI document
+    /// both forms resolve against the OpenAPI root rather than the embedded
+    /// schema. Closing it means hoisting `$defs` into `components/schemas` and
+    /// rewriting the pointers in `generate_openapi`, which is a deliberate
+    /// change to a live surface, not something to smuggle in here.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn recursive_types_never_reference_a_table_that_was_removed() {
+        /// A condition tree — the shape that makes this test necessary.
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Condition {
+            all_of: Vec<Condition>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// The condition tree.
+            when: Condition,
+        }
+
+        // Directly recursive at the root: schemars closes the cycle with `#`,
+        // a pointer to the schema's own root, and emits no `$defs` at all.
+        let root = BlockEndpoint::post("/b/x")
+            .input::<Condition>()
+            .input_schema
+            .expect("input schema set");
+        let mut refs = Vec::new();
+        collect_refs(&root, &mut refs);
+        assert_eq!(refs, vec!["#".to_string()], "root-recursive shape: {root}");
+        assert!(
+            root.get("$defs").is_none(),
+            "a `#` cycle-break needs no definitions table: {root}"
+        );
+
+        // Recursive below the root: schemars cannot use `#` (that is `Rule`,
+        // not `Condition`), so it names the type and emits a `$defs` entry.
+        // Deleting that table here — as the naive `obj.remove("$defs")` would
+        // — is exactly the dangling reference this whole change exists to
+        // prevent, so the table stays.
+        let nested = BlockEndpoint::post("/b/x")
+            .input::<Rule>()
+            .input_schema
+            .expect("input schema set");
+        let mut refs = Vec::new();
+        collect_refs(&nested, &mut refs);
+        assert!(
+            !refs.is_empty(),
+            "nested recursion is expected to leave a ref: {nested}"
+        );
+        for reference in &refs {
+            let name = reference
+                .strip_prefix("#/$defs/")
+                .unwrap_or_else(|| panic!("unexpected ref form {reference}: {nested}"));
+            assert!(
+                nested
+                    .get("$defs")
+                    .and_then(|defs| defs.get(name))
+                    .is_some(),
+                "`{reference}` must still have its referent: {nested}"
+            );
+        }
+
+        // The field's doc comment survives the partial inlining too.
+        assert_eq!(
+            nested["properties"]["when"]["description"],
+            serde_json::json!("The condition tree."),
+            "descriptions must survive on recursive fields as well: {nested}"
+        );
+    }
+
+    /// `$defs` is a recursion-only escape hatch, never a routine emission.
+    /// If this ever fails, some non-recursive contract started shipping a
+    /// reference table and the `derived_*` guarantees have quietly narrowed.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn non_recursive_types_never_emit_a_definitions_table() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        enum Currency {
+            Usd,
+            Eur,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Money {
+            amount: i64,
+            currency: Currency,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Order {
+            /// What the buyer pays.
+            total: Money,
+            /// Line item prices.
+            lines: Vec<Money>,
+            refund: Option<Money>,
+        }
+
+        let schema = BlockEndpoint::post("/b/orders")
+            .input::<Order>()
+            .input_schema
+            .expect("input schema set");
+        let rendered = schema.to_string();
+        assert!(
+            !rendered.contains("$defs") && !rendered.contains("$ref"),
+            "a type repeated three times must be inlined three times, not \
+             referenced: {rendered}"
+        );
+        assert_eq!(
+            schema["properties"]["total"]["properties"]["currency"]["enum"],
+            serde_json::json!(["Usd", "Eur"]),
+            "nested named types must be inlined transitively: {rendered}"
+        );
+        assert_eq!(
+            schema["properties"]["lines"]["description"],
+            serde_json::json!("Line item prices."),
+            "descriptions survive alongside inlined array items: {rendered}"
         );
     }
 
