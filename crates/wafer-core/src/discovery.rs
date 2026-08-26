@@ -457,11 +457,11 @@ fn auth_rank(level: AuthLevel) -> u8 {
 /// [`generate_openapi`] and [`generate_agent_card`]. Two things make it
 /// different from those:
 ///
-/// * **Opt-in.** Only endpoints carrying [`AgentTool`] metadata appear.
+/// * **Opt-in.** Only endpoints carrying `AgentTool` metadata appear.
 ///   Carrying a schema is not consent to being called by an agent.
 /// * **Auth-filtered.** Tools above `caller`'s level are omitted entirely —
 ///   not marked unavailable. A name an agent cannot use is recon surface, so
-///   it never reaches the page. This mirrors the [SEC-073] posture applied to
+///   it never reaches the page. This mirrors the SEC-073 posture applied to
 ///   the discovery documents.
 pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
     let ceiling = auth_rank(caller);
@@ -1128,6 +1128,30 @@ mod tests {
     fn webmcp_public_caller_sees_only_public_tools() {
         let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
         assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
+
+        // Name-list assertions above only prove the higher-privilege tools'
+        // *names* are absent. Assert on the fully rendered document too, so a
+        // future bug that leaks a restricted tool's description or
+        // invocation path while omitting only its name would still be
+        // caught — auth filtering is the security property this function
+        // exists for, and a name an agent cannot use is recon surface.
+        let rendered = doc.to_string();
+        assert!(
+            !rendered.contains("list_my_purchases") && !rendered.contains("/b/products/purchases"),
+            "an authenticated-only endpoint must not appear in an anonymous caller's manifest: {rendered}"
+        );
+        assert!(
+            !rendered.contains("List the signed-in user's purchases."),
+            "an authenticated-only tool's description must not leak into an anonymous caller's manifest: {rendered}"
+        );
+        assert!(
+            !rendered.contains("list_users") && !rendered.contains("/b/admin/api/users"),
+            "an admin-only endpoint must not appear in an anonymous caller's manifest: {rendered}"
+        );
+        assert!(
+            !rendered.contains("List all user accounts."),
+            "an admin-only tool's description must not leak into an anonymous caller's manifest: {rendered}"
+        );
     }
 
     #[test]
@@ -1139,6 +1163,20 @@ mod tests {
         assert!(
             !names.contains(&"list_users".to_string()),
             "admin tool must not leak to an authenticated caller: {names:?}"
+        );
+
+        // As above: the name-list check only proves the admin tool's *name*
+        // is absent. Check the full rendered document too, so a leak of the
+        // admin tool's description or invocation path (with the name
+        // suppressed) would still fail this test.
+        let rendered = doc.to_string();
+        assert!(
+            !rendered.contains("list_users") && !rendered.contains("/b/admin/api/users"),
+            "an admin-only endpoint must not appear in an authenticated (non-admin) caller's manifest: {rendered}"
+        );
+        assert!(
+            !rendered.contains("List all user accounts."),
+            "an admin-only tool's description must not leak into an authenticated (non-admin) caller's manifest: {rendered}"
         );
     }
 
