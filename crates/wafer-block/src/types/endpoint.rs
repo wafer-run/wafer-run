@@ -52,6 +52,22 @@ impl std::fmt::Display for AuthLevel {
     }
 }
 
+/// Opt-in metadata marking an endpoint as callable by an agent, with a
+/// curated name and description written for *invocation* rather than
+/// documentation.
+///
+/// Absence is meaningful: an endpoint without this is never exposed as a
+/// tool, no matter what schemas it carries. Tool names are deliberately
+/// independent of the route so renaming a path does not silently rename a
+/// tool that agents have learned.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentTool {
+    /// Stable tool name exposed to agents (e.g. `get_product`).
+    pub name: String,
+    /// Description written to help an agent decide when to call this.
+    pub description: String,
+}
+
 /// An HTTP endpoint exposed by a block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockEndpoint {
@@ -86,6 +102,9 @@ pub struct BlockEndpoint {
     /// Whether the endpoint is marked deprecated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deprecated: bool,
+    /// Opt-in agent-tool metadata. `None` means never exposed as a tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tool: Option<AgentTool>,
 }
 
 impl Default for BlockEndpoint {
@@ -102,6 +121,7 @@ impl Default for BlockEndpoint {
             query_params: None,
             tags: Vec::new(),
             deprecated: false,
+            agent_tool: None,
         }
     }
 }
@@ -120,6 +140,7 @@ impl BlockEndpoint {
             query_params: None,
             tags: Vec::new(),
             deprecated: false,
+            agent_tool: None,
         }
     }
 
@@ -195,6 +216,21 @@ impl BlockEndpoint {
     pub fn deprecated(mut self) -> Self {
         self.deprecated = true;
         self
+    }
+
+    /// Mark this endpoint as an agent-callable tool with a curated name and
+    /// description. Without this call the endpoint is never exposed.
+    pub fn agent_tool(mut self, name: &str, description: &str) -> Self {
+        self.agent_tool = Some(AgentTool {
+            name: name.into(),
+            description: description.into(),
+        });
+        self
+    }
+
+    /// Returns true if this endpoint opted in to agent-tool exposure.
+    pub fn is_agent_tool(&self) -> bool {
+        self.agent_tool.is_some()
     }
 
     /// Returns true if any schema field is set.
@@ -295,5 +331,54 @@ mod block_endpoint_tests {
             .summary("Health check")
             .output_schema(serde_json::json!({"type": "object"}));
         assert!(ep.has_schema());
+    }
+
+    #[test]
+    fn agent_tool_defaults_to_none() {
+        let ep = BlockEndpoint::get("/b/products/storefront/{id}").summary("Get product");
+        assert!(ep.agent_tool.is_none());
+        assert!(!ep.is_agent_tool());
+    }
+
+    #[test]
+    fn agent_tool_builder_sets_name_and_description() {
+        let ep = BlockEndpoint::get("/b/products/storefront/{id}")
+            .summary("Get product")
+            .agent_tool(
+                "get_product",
+                "Fetch a product and its purchasable offers by id.",
+            );
+        let tool = ep.agent_tool.as_ref().expect("agent_tool must be set");
+        assert_eq!(tool.name, "get_product");
+        assert_eq!(
+            tool.description,
+            "Fetch a product and its purchasable offers by id."
+        );
+        assert!(ep.is_agent_tool());
+    }
+
+    #[test]
+    fn agent_tool_is_omitted_from_json_when_absent() {
+        let ep = BlockEndpoint::get("/health").summary("Health check");
+        let json = serde_json::to_value(&ep).expect("serialize");
+        assert!(
+            json.get("agent_tool").is_none(),
+            "absent agent_tool must not appear in serialized output: {json}"
+        );
+    }
+
+    #[test]
+    fn agent_tool_round_trips_through_serde() {
+        let ep = BlockEndpoint::post("/b/products/checkout")
+            .summary("Stripe checkout")
+            .agent_tool("start_checkout", "Create a Stripe Checkout Session.");
+        let json = serde_json::to_value(&ep).expect("serialize");
+        let back: BlockEndpoint = serde_json::from_value(json).expect("deserialize");
+        let tool = back
+            .agent_tool
+            .as_ref()
+            .expect("agent_tool survives round-trip");
+        assert_eq!(tool.name, "start_checkout");
+        assert_eq!(tool.description, "Create a Stripe Checkout Session.");
     }
 }
