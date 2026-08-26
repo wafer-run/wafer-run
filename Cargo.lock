@@ -6433,6 +6433,7 @@ dependencies = [
  "chrono",
  "futures",
  "parking_lot",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror",

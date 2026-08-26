@@ -51,10 +51,38 @@ fn path_to_slug(path: &str) -> String {
 }
 
 /// Maximum `$ref` hops to follow before giving up. Self-referential schemas
-/// (a `Condition` containing child `Condition`s) are legitimate and would
-/// otherwise recurse forever; at the limit we emit `{}` — an unconstrained
-/// schema — which is honest about "anything may go here" rather than wrong.
+/// (a `Condition` containing child `Condition`s) are legitimate and have no
+/// finite inlining; at the limit the chain is truncated to `{}` and reported
+/// as unresolved, because a truncated chain describes "anything may go here"
+/// where the server requires a specific shape.
 const MAX_REF_DEPTH: u8 = 8;
+
+/// Decode a `#/$defs/` pointer segment back into the key it names in the
+/// `$defs` table.
+///
+/// schemars writes reference *names* through its `encode_ref_name`: `~`
+/// becomes `~0` and `/` becomes `~1` (RFC 6901 JSON-Pointer escaping), and
+/// every other byte outside the URI-fragment safe set is percent-encoded
+/// (space, `"`, `#`, `%`, `<`, `>`, `[`, `\`, `]`, `^`, `` ` ``, `{`, `|`,
+/// `}`, and anything non-ASCII). The `$defs` *keys* are left unencoded, so
+/// `#[schemars(rename = "Product Status")]` emits a reference to
+/// `#/$defs/Product%20Status` against a table keyed `Product Status`.
+/// Looking the raw segment up would miss and silently degrade the property
+/// to `{}`.
+///
+/// Unescaping order is load-bearing, and is the order RFC 6901 §4 requires:
+/// `~1` first, then `~0`. Doing `~0` first would turn the encoding of the
+/// literal name `~1` (which is `~01`) into `~1` and then into `/`.
+///
+/// Returns `None` when percent-decoding does not yield valid UTF-8 — a
+/// segment that cannot name any key, and so must be reported as unresolvable
+/// rather than guessed at.
+fn decode_ref_name(encoded: &str) -> Option<String> {
+    let decoded = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .ok()?;
+    Some(decoded.replace("~1", "/").replace("~0", "~"))
+}
 
 /// Rewrite a schemars-generated schema into a self-contained one: every
 /// `#/$defs/*` reference is replaced by its target, and the `$defs` block is
@@ -63,24 +91,43 @@ const MAX_REF_DEPTH: u8 = 8;
 /// OpenAPI clients resolve `$ref` fine, which is why `generate_openapi` does
 /// not do this. Many MCP-style clients do not, so the WebMCP projection must
 /// hand over schemas that stand alone.
-fn inline_refs(schema: &Value) -> Value {
+///
+/// Returns the rewritten schema together with a flag saying whether *any*
+/// reference in it, at any depth, failed to resolve — no matching `$defs`
+/// entry, a form this function does not understand (schemars' root-recursion
+/// marker `{"$ref": "#"}`), or a chain that ran past [`MAX_REF_DEPTH`]. All
+/// three leave `{}` behind: an unconstrained schema standing where the
+/// server requires a concrete type. At the top level that shows up as a
+/// missing `properties` object and is caught by the `unrepresentable` check,
+/// but below the top level — `properties.children.items` for a
+/// `struct Node { children: Vec<Node> }` — nothing else would notice. So the
+/// flag travels out of here and callers refuse to build a tool from a schema
+/// that sets it.
+fn inline_refs(schema: &Value) -> (Value, bool) {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
-    resolve_refs(schema, &defs, 0)
+    let mut unresolved = false;
+    let resolved = resolve_refs(schema, &defs, 0, &mut unresolved);
+    (resolved, unresolved)
 }
 
-fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
+fn resolve_refs(node: &Value, defs: &Value, depth: u8, unresolved: &mut bool) -> Value {
     match node {
         Value::Object(map) => {
             if let Some(Value::String(reference)) = map.get("$ref") {
                 if depth >= MAX_REF_DEPTH {
+                    *unresolved = true;
                     return json!({});
                 }
                 let target = reference
                     .strip_prefix("#/$defs/")
+                    .and_then(decode_ref_name)
                     .and_then(|name| defs.get(name));
                 let mut resolved = match target {
-                    Some(found) => resolve_refs(found, defs, depth + 1),
-                    None => json!({}),
+                    Some(found) => resolve_refs(found, defs, depth + 1, unresolved),
+                    None => {
+                        *unresolved = true;
+                        json!({})
+                    }
                 };
 
                 // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and
@@ -98,7 +145,7 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
                         if key == "$ref" || key == "$defs" {
                             continue;
                         }
-                        out.insert(key.clone(), resolve_refs(value, defs, depth));
+                        out.insert(key.clone(), resolve_refs(value, defs, depth, unresolved));
                     }
                 }
                 return resolved;
@@ -111,23 +158,37 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
                 if key == "$defs" {
                     continue;
                 }
-                out.insert(key.clone(), resolve_refs(value, defs, depth));
+                out.insert(key.clone(), resolve_refs(value, defs, depth, unresolved));
             }
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| resolve_refs(item, defs, depth))
+                .map(|item| resolve_refs(item, defs, depth, unresolved))
                 .collect(),
         ),
         other => other.clone(),
     }
 }
 
+/// What one schema source contributed to the merged agent input schema, and
+/// the two ways it can be unusable.
+#[derive(Debug, Default)]
+struct MergedSource {
+    /// Top-level property names this source contributed, sorted.
+    contributed: Vec<String>,
+    /// The source is present and non-empty but its inlined form has no
+    /// top-level `properties` object — see [`merge_schema_source`].
+    unrepresentable: bool,
+    /// Inlining hit a `$ref` it could not resolve, at any depth — see
+    /// [`inline_refs`].
+    unresolved_ref: bool,
+}
+
 /// Collect `properties` and `required` from one schema source into the
-/// merged accumulators, returning the property names it contributed and
-/// whether the source could not be represented as a flat object schema.
+/// merged accumulators, reporting the property names it contributed and
+/// whether the source could be represented as a flat object schema at all.
 ///
 /// Names come back sorted so the generated manifest is byte-stable across
 /// runs — `serde_json::Map`'s default backing is already a `BTreeMap`
@@ -146,15 +207,21 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
 /// so this survives unresolved and collapses to `{}`). Silently contributing
 /// nothing for any of these would make the merged schema claim the source
 /// takes no arguments while the server still requires one.
+///
+/// That check is top-level only, by construction — it asks whether
+/// `properties` exists. An unresolvable `$ref` *below* the top level leaves
+/// the top level intact and hides a `{}` inside one property, so
+/// [`inline_refs`]'s own report is carried out separately in
+/// `unresolved_ref` rather than folded into `unrepresentable`.
 fn merge_schema_source(
     source: Option<&Value>,
     properties: &mut serde_json::Map<String, Value>,
     required: &mut Vec<String>,
-) -> (Vec<String>, bool) {
+) -> MergedSource {
     let Some(source) = source else {
-        return (Vec::new(), false);
+        return MergedSource::default();
     };
-    let inlined = inline_refs(source);
+    let (inlined, unresolved_ref) = inline_refs(source);
 
     let mut contributed = Vec::new();
     if let Some(props) = inlined.get("properties").and_then(Value::as_object) {
@@ -185,7 +252,11 @@ fn merge_schema_source(
         .is_some();
     let unrepresentable = is_present_and_nonempty && !has_properties;
 
-    (contributed, unrepresentable)
+    MergedSource {
+        contributed,
+        unrepresentable,
+        unresolved_ref,
+    }
 }
 
 /// The flattened agent-facing input schema for one endpoint, plus the
@@ -209,6 +280,14 @@ pub(crate) struct AgentInputSchema {
     /// still requires one, and a tool that can lie about its own arguments
     /// is worse than no tool.
     pub unrepresentable: Vec<String>,
+    /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining hit a
+    /// `$ref` it could not resolve — see [`inline_refs`]. Non-empty means
+    /// this endpoint MUST NOT be exposed as a tool: somewhere in the schema
+    /// sits a bare `{}` that accepts anything while the server requires a
+    /// specific type. Unlike [`Self::unrepresentable`] this catches the case
+    /// at any depth, including the nested one that leaves the top-level
+    /// `properties` object looking perfectly healthy.
+    pub unresolved_refs: Vec<String>,
 }
 
 /// Flatten an endpoint's path, query, and body schemas into the single
@@ -234,24 +313,25 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
 
-    let (path_params, path_unrepresentable) =
-        merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
-    let (query_params, query_unrepresentable) =
-        merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
-    let (body_params, body_unrepresentable) =
-        merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+    let path = merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
+    let query = merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
+    let body = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
 
     let mut unrepresentable = Vec::new();
-    if path_unrepresentable {
-        unrepresentable.push("path".to_string());
-    }
-    if query_unrepresentable {
-        unrepresentable.push("query".to_string());
-    }
-    if body_unrepresentable {
-        unrepresentable.push("body".to_string());
+    let mut unresolved_refs = Vec::new();
+    for (label, merged) in [("path", &path), ("query", &query), ("body", &body)] {
+        if merged.unrepresentable {
+            unrepresentable.push(label.to_string());
+        }
+        if merged.unresolved_ref {
+            unresolved_refs.push(label.to_string());
+        }
     }
     unrepresentable.sort();
+    unresolved_refs.sort();
+
+    let (path_params, query_params, body_params) =
+        (path.contributed, query.contributed, body.contributed);
 
     let mut counts: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
     for name in path_params
@@ -283,6 +363,39 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         body_params,
         collisions,
         unrepresentable,
+        unresolved_refs,
+    }
+}
+
+/// Extract the `{name}` placeholders from a URL path template, in order of
+/// appearance.
+///
+/// `None` means the template is malformed — an unmatched `{` or `}`, an
+/// empty `{}`, or a nested `{`. That is itself grounds to refuse: a path
+/// whose placeholders cannot be parsed cannot be filled in reliably either.
+fn path_placeholders(path: &str) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut rest = path;
+    loop {
+        let Some(open) = rest.find('{') else {
+            // A `}` with no `{` before it anywhere in the remainder.
+            return if rest.contains('}') {
+                None
+            } else {
+                Some(names)
+            };
+        };
+        if rest[..open].contains('}') {
+            return None;
+        }
+        let after = &rest[open + 1..];
+        let close = after.find('}')?;
+        let name = &after[..close];
+        if name.is_empty() || name.contains('{') {
+            return None;
+        }
+        names.push(name.to_string());
+        rest = &after[close + 1..];
     }
 }
 
@@ -521,16 +634,76 @@ fn auth_rank(level: AuthLevel) -> u8 {
 ///   not marked unavailable. A name an agent cannot use is recon surface, so
 ///   it never reaches the page. This mirrors the SEC-073 posture applied to
 ///   the discovery documents.
+///
+/// # Declared auth is not always the enforced auth
+///
+/// This wrapper treats each endpoint's declared `ep.auth` as the level that
+/// will actually be enforced. That is only true when nothing in the
+/// consumer's routing can raise it. A consumer that mounts blocks under
+/// access-tiered prefixes enforces `max(prefix_tier, ep.auth)`, so a `Public`
+/// endpoint mounted under an admin-only prefix would be advertised here to
+/// anonymous callers and then rejected on every call — and, in the other
+/// direction, a stricter `ep.auth` on a route the consumer serves publicly
+/// would hide a tool that is genuinely reachable.
+///
+/// Only the consumer knows its prefix table, so it must supply the answer:
+/// use [`generate_webmcp_with`] and pass a resolver that returns the level
+/// the router will really enforce.
 pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
+    generate_webmcp_with(blocks, caller, |_block, ep| ep.auth)
+}
+
+/// [`generate_webmcp`], with the effective auth level of each endpoint
+/// supplied by the caller.
+///
+/// `effective_auth` is asked, for one block and one of its endpoints, what
+/// access level the consumer's router will actually enforce on that route —
+/// which for a prefix-tiered router is `max(prefix_tier, ep.auth)`, not
+/// `ep.auth` alone. Everything else matches [`generate_webmcp`], whose docs
+/// describe the projection and why the auth filter matters.
+pub fn generate_webmcp_with(
+    blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+) -> Value {
     let ceiling = auth_rank(caller);
-    let mut candidates: Vec<Value> = Vec::new();
+
+    // A WebMCP client registers tools by name, so two endpoints sharing a
+    // name are ambiguous no matter which one "wins".
+    //
+    // This pass deliberately runs over EVERY opted-in endpoint — before the
+    // auth filter and before every skip below — so a name is unique, or not,
+    // for all callers alike. Counting after filtering would make the name's
+    // meaning auth-dependent in exactly the way the rule exists to prevent
+    // (a public caller gets `get_thing`; an admin sees two and gets
+    // neither, so privilege strictly *reduces* the tool set), and would let
+    // one filter launder a duplicate for another: drop the colliding
+    // `get_thing` first and the surviving one silently inherits the name as
+    // if it had always been unique.
+    //
+    // Counting first and then emitting only what turned out unique is also
+    // order-independent by construction, unlike dropping the later
+    // duplicate.
+    let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for block in blocks {
+        for ep in &block.endpoints {
+            if let Some(tool) = ep.agent_tool.as_ref() {
+                *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut tools: Vec<Value> = Vec::new();
 
     for block in blocks {
         for ep in &block.endpoints {
             let Some(tool) = ep.agent_tool.as_ref() else {
                 continue;
             };
-            if auth_rank(ep.auth) > ceiling {
+            if name_counts.get(tool.name.as_str()).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if auth_rank(effective_auth(block, ep)) > ceiling {
                 continue;
             }
 
@@ -555,45 +728,64 @@ pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
                 continue;
             }
 
-            candidates.push(json!({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": input.schema,
-                "invocation": {
+            // A `$ref` that did not resolve leaves `{}` — "send anything" —
+            // where the server requires a specific type. Below the top level
+            // that is invisible to the check above: the schema still has its
+            // `properties` object, one entry of which now accepts garbage.
+            // Same lie, quieter.
+            if !input.unresolved_refs.is_empty() {
+                continue;
+            }
+
+            // `invocation.path` is handed to the client verbatim, so every
+            // `{placeholder}` in it must have a declared path param to fill
+            // it, and every declared path param must have a placeholder to
+            // go into. An unfilled placeholder means the client GETs a
+            // literal `{product_id}` and 404s forever; a declared param with
+            // nowhere to go means an argument the agent supplies is silently
+            // dropped. A tool whose URL can never be built is a lie about
+            // what it does, so it is not published at all.
+            let Some(mut placeholders) = path_placeholders(&ep.path) else {
+                continue;
+            };
+            placeholders.sort();
+            placeholders.dedup();
+            if placeholders != input.path_params {
+                continue;
+            }
+
+            // A deprecated endpoint still works, so it is still published —
+            // a missing tool helps no one — but the signal travels with it.
+            // The machine-readable `deprecated` flag is what a client should
+            // key off; the description prefix is what actually reaches a
+            // model, since clients routinely forward only name, description,
+            // and inputSchema.
+            let description = if ep.deprecated {
+                format!("[Deprecated] {}", tool.description)
+            } else {
+                tool.description.clone()
+            };
+
+            let mut emitted = serde_json::Map::new();
+            emitted.insert("name".into(), json!(tool.name));
+            emitted.insert("description".into(), json!(description));
+            if ep.deprecated {
+                emitted.insert("deprecated".into(), json!(true));
+            }
+            emitted.insert("inputSchema".into(), input.schema);
+            emitted.insert(
+                "invocation".into(),
+                json!({
                     "method": method_key(ep.method),
                     "path": ep.path,
                     "path_params": input.path_params,
                     "query_params": input.query_params,
                     "body_params": input.body_params,
-                },
-            }));
+                }),
+            );
+            tools.push(Value::Object(emitted));
         }
     }
-
-    // A WebMCP client registers tools by name, so two endpoints sharing a
-    // name are ambiguous no matter which one "wins" — and the name's
-    // meaning would become auth-dependent (one `get_thing` for an anonymous
-    // caller, two for an admin). Dropping only the later duplicate would
-    // make the output depend on block/endpoint declaration order, so this
-    // counts names in a first pass and then emits only the ones that turned
-    // out unique, which is order-independent by construction.
-    let mut name_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for candidate in &candidates {
-        let name = candidate["name"]
-            .as_str()
-            .expect("candidate tool always has a string name");
-        *name_counts.entry(name.to_string()).or_insert(0) += 1;
-    }
-    let tools: Vec<Value> = candidates
-        .into_iter()
-        .filter(|candidate| {
-            let name = candidate["name"]
-                .as_str()
-                .expect("candidate tool always has a string name");
-            name_counts.get(name).copied().unwrap_or(0) == 1
-        })
-        .collect();
 
     json!({
         "schema_version": 1,
@@ -829,7 +1021,9 @@ mod tests {
             "properties": { "id": { "type": "string" } },
             "required": ["id"]
         });
-        assert_eq!(inline_refs(&schema), schema);
+        let (out, unresolved) = inline_refs(&schema);
+        assert_eq!(out, schema);
+        assert!(!unresolved, "a schema with no $ref resolves cleanly");
     }
 
     // 13. inline_refs_replaces_ref_with_target_and_drops_defs
@@ -842,12 +1036,13 @@ mod tests {
                 "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
             }
         });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["status"],
             json!({ "type": "string", "enum": ["draft", "active"] })
         );
         assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
+        assert!(!unresolved, "a resolvable ref must not be reported: {out}");
     }
 
     // 14. inline_refs_resolves_nested_refs
@@ -864,11 +1059,12 @@ mod tests {
                 "BillingScheme": { "type": "string", "enum": ["per_unit", "tiered"] }
             }
         });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["tier"]["properties"]["scheme"],
             json!({ "type": "string", "enum": ["per_unit", "tiered"] })
         );
+        assert!(!unresolved, "both hops resolve: {out}");
     }
 
     // 15. inline_refs_resolves_refs_inside_arrays
@@ -881,11 +1077,12 @@ mod tests {
             },
             "$defs": { "Offer": { "type": "object" } }
         });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["offers"]["items"],
             json!({ "type": "object" })
         );
+        assert!(!unresolved, "a ref inside an array resolves: {out}");
     }
 
     // 16. inline_refs_terminates_on_self_referential_schema
@@ -893,7 +1090,9 @@ mod tests {
     fn inline_refs_terminates_on_self_referential_schema() {
         // A `Condition` that can contain child `Condition`s is a real shape in
         // products/contracts.rs. Inlining must bottom out rather than recurse
-        // forever.
+        // forever — and must say so: the chain is cut at MAX_REF_DEPTH and the
+        // deepest `items` becomes `{}`, which accepts anything where the
+        // server requires a `Condition`.
         let schema = json!({
             "$ref": "#/$defs/Condition",
             "$defs": {
@@ -903,12 +1102,17 @@ mod tests {
                 }
             }
         });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
         assert_eq!(out["type"], json!("object"));
         let rendered = out.to_string();
         assert!(
             !rendered.contains("$ref"),
             "no unresolved $ref may survive: {rendered}"
+        );
+        assert!(
+            unresolved,
+            "a chain truncated at MAX_REF_DEPTH leaves `{{}}` behind and must be \
+             reported as unresolved: {rendered}"
         );
     }
 
@@ -929,16 +1133,74 @@ mod tests {
                 }
             }
         });
-        let out = inline_refs(&schema);
+        let (out, _unresolved) = inline_refs(&schema);
         assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
     }
 
-    // 18. inline_refs_drops_unresolvable_ref_to_empty_schema
+    // 18. inline_refs_reports_an_unresolvable_ref_it_had_to_drop
     #[test]
-    fn inline_refs_drops_unresolvable_ref_to_empty_schema() {
+    fn inline_refs_reports_an_unresolvable_ref_it_had_to_drop() {
         let schema = json!({ "properties": { "x": { "$ref": "#/$defs/Missing" } } });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
         assert_eq!(out["properties"]["x"], json!({}));
+        assert!(
+            unresolved,
+            "a ref with no matching $defs entry degrades to `{{}}` and must be \
+             reported, not passed off as a schema: {out}"
+        );
+    }
+
+    // 18b. inline_refs_resolves_a_percent_encoded_ref_name
+    #[test]
+    fn inline_refs_resolves_a_percent_encoded_ref_name() {
+        // schemars percent-encodes reference *names* (`encode_ref_name`) but
+        // leaves the `$defs` keys unencoded, so a `#[schemars(rename = "...")]`
+        // with a space in it only resolves if the pointer is decoded first.
+        let schema = json!({
+            "type": "object",
+            "properties": { "status": { "$ref": "#/$defs/Product%20Status" } },
+            "$defs": {
+                "Product Status": { "type": "string", "enum": ["draft", "active"] }
+            }
+        });
+        let (out, unresolved) = inline_refs(&schema);
+        assert_eq!(
+            out["properties"]["status"],
+            json!({ "type": "string", "enum": ["draft", "active"] }),
+            "a percent-encoded ref name must be decoded before lookup: {out}"
+        );
+        assert!(
+            !unresolved,
+            "the ref resolved, so nothing is reported: {out}"
+        );
+    }
+
+    // 18c. inline_refs_resolves_a_json_pointer_escaped_ref_name
+    #[test]
+    fn inline_refs_resolves_a_json_pointer_escaped_ref_name() {
+        // `/` -> `~1` and `~` -> `~0`, unescaped in that order per RFC 6901 §4.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "slash": { "$ref": "#/$defs/a~1b" },
+                "tilde": { "$ref": "#/$defs/c~0d" },
+                "literal_tilde_one": { "$ref": "#/$defs/~01" }
+            },
+            "$defs": {
+                "a/b": { "type": "string" },
+                "c~d": { "type": "integer" },
+                "~1": { "type": "boolean" }
+            }
+        });
+        let (out, unresolved) = inline_refs(&schema);
+        assert_eq!(out["properties"]["slash"], json!({ "type": "string" }));
+        assert_eq!(out["properties"]["tilde"], json!({ "type": "integer" }));
+        assert_eq!(
+            out["properties"]["literal_tilde_one"],
+            json!({ "type": "boolean" }),
+            "unescaping `~0` before `~1` would turn `~01` into `/`: {out}"
+        );
+        assert!(!unresolved, "all three refs resolved: {out}");
     }
 
     // 19. inline_refs_preserves_keywords_sitting_beside_a_ref
@@ -959,7 +1221,8 @@ mod tests {
                 "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
             }
         });
-        let out = inline_refs(&schema);
+        let (out, unresolved) = inline_refs(&schema);
+        assert!(!unresolved, "the ref resolves: {out}");
         let status = &out["properties"]["status"];
 
         assert_eq!(
@@ -1678,5 +1941,469 @@ mod tests {
                 ]
             })
         );
+    }
+
+    // -----------------------------------------------------------------
+    // path templates
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn path_placeholders_extracts_names_and_rejects_malformed_templates() {
+        assert_eq!(path_placeholders("/b/x/list"), Some(Vec::new()));
+        assert_eq!(
+            path_placeholders("/b/products/storefront/{product_id}"),
+            Some(vec!["product_id".to_string()])
+        );
+        assert_eq!(
+            path_placeholders("/b/x/{a}/y/{b}"),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+
+        for malformed in [
+            "/b/x/{id",   // unclosed
+            "/b/x/id}",   // unopened
+            "/b/x/}{id}", // closer before opener
+            "/b/x/{}",    // empty name
+            "/b/x/{a{b}", // nested opener
+        ] {
+            assert_eq!(
+                path_placeholders(malformed),
+                None,
+                "`{malformed}` is not a template this function can fill in"
+            );
+        }
+    }
+
+    /// The shape that motivated this check: no production endpoint declares a
+    /// `path_params` schema today, so the first annotated templated route
+    /// would have shipped a tool whose client GETs a literal `{product_id}`.
+    #[test]
+    fn webmcp_skips_a_templated_path_with_no_declared_path_params() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/products/storefront/{product_id}")
+                    .summary("Storefront product")
+                    .auth(AuthLevel::Public)
+                    .agent_tool(
+                        "get_product",
+                        "Should never be emitted: {product_id} unfilled.",
+                    ),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a placeholder with no declared path param leaves a URL that can never \
+             be built, so no tool may be emitted: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_a_templated_path_whose_param_name_disagrees() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/products/storefront/{product_id}")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } },
+                        "required": ["id"]
+                    }))
+                    .agent_tool("get_product", "Should never be emitted: name mismatch."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a declared param whose name does not match the placeholder still \
+             leaves `{{product_id}}` unfilled: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_a_declared_path_param_with_no_placeholder() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/products/list")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "product_id": { "type": "string" } }
+                    }))
+                    .agent_tool(
+                        "list_products",
+                        "Should never be emitted: nowhere to put it.",
+                    ),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a declared path param with no placeholder to go into would be a \
+             required argument the client silently drops: {doc}"
+        );
+    }
+
+    /// Guard against over-refusing: the check must pass the correct case.
+    #[test]
+    fn webmcp_emits_a_correctly_matched_templated_path() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/{owner}/items/{item_id}")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "item_id": { "type": "string" }
+                        },
+                        "required": ["owner", "item_id"]
+                    }))
+                    .agent_tool("get_item", "Fetch one item."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["get_item".to_string()]);
+        assert_eq!(
+            doc["tools"][0]["invocation"]["path_params"],
+            json!(["item_id", "owner"])
+        );
+    }
+
+    #[test]
+    fn webmcp_emits_a_non_templated_path_with_no_path_params() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/list")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("list_things", "Nothing to fill in."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["list_things".to_string()]);
+    }
+
+    // -----------------------------------------------------------------
+    // effective auth
+    // -----------------------------------------------------------------
+
+    fn tiered_block() -> BlockInfo {
+        BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            // Declared Public, but a consumer may mount it under an
+            // admin-only prefix and enforce max(prefix, declared).
+            BlockEndpoint::get("/b/admin/api/stats")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_stats", "Instance statistics."),
+        ])
+    }
+
+    /// A consumer whose router enforces `max(prefix_tier, ep.auth)` cannot be
+    /// described by `ep.auth` alone, and `generate_webmcp` structurally
+    /// cannot see the prefix table. The resolver is where that knowledge
+    /// belongs.
+    #[test]
+    fn webmcp_with_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
+        let blocks = [tiered_block()];
+        let with_admin_prefix = |_block: &BlockInfo, ep: &BlockEndpoint| {
+            if ep.path.starts_with("/b/admin/") {
+                AuthLevel::Admin
+            } else {
+                ep.auth
+            }
+        };
+
+        // The declared-auth wrapper trusts `ep.auth` and would publish it.
+        assert_eq!(
+            tool_names(&generate_webmcp(&blocks, AuthLevel::Public)),
+            vec!["get_stats".to_string()],
+            "declared-auth-only filtering advertises this to anonymous callers"
+        );
+
+        // A resolver that knows about the admin prefix must hide it.
+        let doc = generate_webmcp_with(&blocks, AuthLevel::Public, with_admin_prefix);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a tool the router will 403 must not be advertised, and its name is \
+             recon surface either way: {doc}"
+        );
+        let rendered = doc.to_string();
+        assert!(
+            !rendered.contains("get_stats") && !rendered.contains("/b/admin/api/stats"),
+            "nothing about the endpoint may leak: {rendered}"
+        );
+
+        // An admin caller is above the effective level and still sees it.
+        let doc = generate_webmcp_with(&blocks, AuthLevel::Admin, with_admin_prefix);
+        assert_eq!(tool_names(&doc), vec!["get_stats".to_string()]);
+    }
+
+    #[test]
+    fn webmcp_with_reveals_a_tool_the_resolver_lowers() {
+        // The filter runs the other way too: a route the consumer serves
+        // without auth must not stay hidden behind a stricter declared level.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/public-mirror")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("read_mirror", "Publicly served by this consumer."),
+            ]);
+        let blocks = [block];
+
+        assert_eq!(
+            generate_webmcp(&blocks, AuthLevel::Public)["tools"],
+            json!([]),
+            "declared-auth-only filtering hides it"
+        );
+        assert_eq!(
+            tool_names(&generate_webmcp_with(&blocks, AuthLevel::Public, |_, _| {
+                AuthLevel::Public
+            })),
+            vec!["read_mirror".to_string()],
+        );
+    }
+
+    #[test]
+    fn webmcp_passes_the_owning_block_to_the_resolver() {
+        // A consumer mounts *blocks* under prefixes, so the resolver has to
+        // be able to key off the owning block, not just the endpoint.
+        let doc = generate_webmcp_with(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
+            if block.name == "impresspress/products" {
+                AuthLevel::Public
+            } else {
+                ep.auth
+            }
+        });
+        let mut names = tool_names(&doc);
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["get_product".to_string(), "list_my_purchases".to_string()],
+            "the products block's authenticated endpoint is public under this \
+             consumer's routing, and the admin block's is not: {doc}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // duplicate names are counted before any filtering
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webmcp_duplicate_name_across_auth_levels_is_dropped_for_every_caller() {
+        // A name shared by a Public and an Admin endpoint. Counting names
+        // after the auth filter would hand a public caller one unambiguous
+        // `get_thing` and an admin caller none — privilege would strictly
+        // *reduce* the tool set, and the name's meaning would depend on who
+        // asked. The name is ambiguous in the declarations, so it is
+        // ambiguous for everyone.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/public")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Public get_thing."),
+                BlockEndpoint::get("/b/x/admin")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("get_thing", "Admin get_thing."),
+                BlockEndpoint::get("/b/x/other")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_other_thing", "Uniquely named."),
+            ]);
+        let blocks = [block];
+
+        for caller in [
+            AuthLevel::Public,
+            AuthLevel::Authenticated,
+            AuthLevel::Admin,
+        ] {
+            let doc = generate_webmcp(&blocks, caller);
+            assert_eq!(
+                tool_names(&doc),
+                vec!["get_other_thing".to_string()],
+                "`get_thing` is duplicated in the declarations, so no caller — \
+                 {caller} included — may receive it: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn webmcp_duplicate_name_still_suppresses_a_side_filtered_out_for_another_reason() {
+        // The second endpoint is dropped for a parameter collision. If
+        // duplicate counting ran after that skip, the first would silently
+        // inherit `get_thing` as though it had always been unique — the
+        // collision filter would have laundered the ambiguity away.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/a")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Clean endpoint."),
+                BlockEndpoint::post("/b/x/{id}")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } }
+                    }))
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } }
+                    }))
+                    .agent_tool("get_thing", "Colliding endpoint."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a duplicated name must stay duplicated even when the other side is \
+             dropped for an unrelated reason: {doc}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // unresolvable refs below the top level
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn agent_input_schema_reports_a_nested_unresolvable_ref() {
+        // `struct Node { children: Vec<Node> }` — schemars closes the cycle
+        // with the root marker `{"$ref": "#"}`, which sits at
+        // `properties.children.items`. The top level still has `properties`,
+        // so `unrepresentable` stays empty and only the dedicated report
+        // catches it.
+        let ep = BlockEndpoint::post("/b/x/tree").input_schema(json!({
+            "type": "object",
+            "properties": {
+                "children": { "type": "array", "items": { "$ref": "#" } }
+            }
+        }));
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.unrepresentable.is_empty(),
+            "the top level is a healthy object, which is exactly why the \
+             properties-based check cannot see this: {:?}",
+            result.unrepresentable
+        );
+        assert_eq!(result.unresolved_refs, vec!["body".to_string()]);
+        assert_eq!(
+            result.schema["properties"]["children"]["items"],
+            json!({}),
+            "and this is what would otherwise have shipped: an unconstrained \
+             schema where the server requires a Node"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_an_endpoint_with_a_nested_root_recursive_ref() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/tree")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "children": { "type": "array", "items": { "$ref": "#" } }
+                        }
+                    }))
+                    .agent_tool("set_tree", "Should never be emitted: nested `#` ref."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a `{{}}` hidden one level down is the same lie as one at the top: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_an_endpoint_with_a_ref_to_a_missing_def() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "status": { "$ref": "#/$defs/Missing" } }
+                    }))
+                    .agent_tool("set_thing", "Should never be emitted: dangling ref."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a ref with no referent must refuse, not degrade to `{{}}`: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_emits_a_tool_whose_ref_name_is_percent_encoded() {
+        // The other half of the ref fix: decoding must make legitimately-named
+        // types resolve, so this endpoint is published rather than refused.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "status": { "$ref": "#/$defs/Product%20Status" } },
+                        "$defs": {
+                            "Product Status": { "type": "string", "enum": ["draft", "active"] }
+                        }
+                    }))
+                    .agent_tool("set_thing", "Set a product status."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["set_thing".to_string()]);
+        assert_eq!(
+            doc["tools"][0]["inputSchema"]["properties"]["status"],
+            json!({ "type": "string", "enum": ["draft", "active"] })
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // deprecation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webmcp_marks_a_deprecated_tool_without_hiding_it() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/old")
+                    .auth(AuthLevel::Public)
+                    .deprecated()
+                    .agent_tool("get_old_thing", "Fetch a thing the old way."),
+                BlockEndpoint::get("/b/x/new")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_new_thing", "Fetch a thing."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let tools = doc["tools"].as_array().expect("tools array");
+
+        let old = tools
+            .iter()
+            .find(|t| t["name"] == "get_old_thing")
+            .expect("a deprecated endpoint that still works is still published");
+        assert_eq!(old["deprecated"], json!(true));
+        assert_eq!(
+            old["description"],
+            json!("[Deprecated] Fetch a thing the old way."),
+            "clients routinely forward only name/description/inputSchema to the \
+             model, so the signal has to reach the description too"
+        );
+
+        let new = tools
+            .iter()
+            .find(|t| t["name"] == "get_new_thing")
+            .expect("get_new_thing");
+        assert!(
+            new.get("deprecated").is_none(),
+            "a live tool must not carry the key at all: {new}"
+        );
+        assert_eq!(new["description"], json!("Fetch a thing."));
     }
 }
