@@ -1,9 +1,7 @@
 //! Discovery document generation — OpenAPI 3.1 and A2A AgentCard.
 
 use serde_json::{json, Value};
-#[cfg(test)]
-use wafer_block::types::BlockEndpoint;
-use wafer_block::types::{AuthLevel, BlockInfo, HttpMethod};
+use wafer_block::types::{AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,11 +54,6 @@ fn path_to_slug(path: &str) -> String {
 /// (a `Condition` containing child `Condition`s) are legitimate and would
 /// otherwise recurse forever; at the limit we emit `{}` — an unconstrained
 /// schema — which is honest about "anything may go here" rather than wrong.
-// `inline_refs` has no caller yet outside `#[cfg(test)]` — it lands in this
-// task standalone and is wired into the WebMCP schema projection in a
-// follow-up task. Allow dead_code until then rather than gating the
-// production function itself behind `#[cfg(test)]`.
-#[allow(dead_code)]
 const MAX_REF_DEPTH: u8 = 8;
 
 /// Rewrite a schemars-generated schema into a self-contained one: every
@@ -70,13 +63,11 @@ const MAX_REF_DEPTH: u8 = 8;
 /// OpenAPI clients resolve `$ref` fine, which is why `generate_openapi` does
 /// not do this. Many MCP-style clients do not, so the WebMCP projection must
 /// hand over schemas that stand alone.
-#[allow(dead_code)]
 fn inline_refs(schema: &Value) -> Value {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
     resolve_refs(schema, &defs, 0)
 }
 
-#[allow(dead_code)]
 fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
     match node {
         Value::Object(map) => {
@@ -132,6 +123,83 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Collect `properties` and `required` from one schema source into the
+/// merged accumulators, returning the property names it contributed.
+///
+/// Names come back sorted so the generated manifest is byte-stable across
+/// runs — `serde_json::Map` iteration order is insertion order, but the
+/// upstream schema's order is not something we control.
+// `merge_schema_source` has no caller yet outside `#[cfg(test)]` — it is
+// wired into the WebMCP tool-manifest generator in a follow-up task. Allow
+// dead_code until then rather than gating the production function itself
+// behind `#[cfg(test)]`.
+#[allow(dead_code)]
+fn merge_schema_source(
+    source: Option<&Value>,
+    properties: &mut serde_json::Map<String, Value>,
+    required: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(source) = source else {
+        return Vec::new();
+    };
+    let inlined = inline_refs(source);
+
+    let mut contributed = Vec::new();
+    if let Some(props) = inlined.get("properties").and_then(Value::as_object) {
+        for (name, schema) in props {
+            properties.insert(name.clone(), schema.clone());
+            contributed.push(name.clone());
+        }
+    }
+    if let Some(reqs) = inlined.get("required").and_then(Value::as_array) {
+        for name in reqs.iter().filter_map(Value::as_str) {
+            let owned = name.to_string();
+            if !required.contains(&owned) {
+                required.push(owned);
+            }
+        }
+    }
+
+    contributed.sort();
+    contributed
+}
+
+/// Flatten an endpoint's path, query, and body schemas into the single
+/// `inputSchema` a WebMCP tool exposes, plus the provenance lists the client
+/// needs to rebuild a real HTTP request from the agent's flat argument
+/// object.
+///
+/// Returns `(schema, path_params, query_params, body_params)`.
+// `agent_input_schema` has no caller yet outside `#[cfg(test)]` — it is
+// wired into the WebMCP tool-manifest generator in a follow-up task. Allow
+// dead_code until then rather than gating the production function itself
+// behind `#[cfg(test)]`.
+#[allow(dead_code)]
+fn agent_input_schema(ep: &BlockEndpoint) -> (Value, Vec<String>, Vec<String>, Vec<String>) {
+    let mut properties = serde_json::Map::new();
+    let mut required: Vec<String> = Vec::new();
+
+    let path_params = merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
+    let query_params =
+        merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
+    let body_params = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".into(), json!("object"));
+    schema.insert("properties".into(), Value::Object(properties));
+    if !required.is_empty() {
+        required.sort();
+        schema.insert("required".into(), json!(required));
+    }
+
+    (
+        Value::Object(schema),
+        path_params,
+        query_params,
+        body_params,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -710,5 +778,100 @@ mod tests {
         );
         assert_eq!(status["type"], json!("string"));
         assert_eq!(status["enum"], json!(["draft", "active"]));
+    }
+
+    // 20. agent_input_schema_is_empty_object_when_endpoint_has_no_schemas
+    #[test]
+    fn agent_input_schema_is_empty_object_when_endpoint_has_no_schemas() {
+        let ep = BlockEndpoint::get("/b/products/storefront/config");
+        let (schema, path, query, body) = agent_input_schema(&ep);
+        assert_eq!(schema, json!({ "type": "object", "properties": {} }));
+        assert!(path.is_empty() && query.is_empty() && body.is_empty());
+    }
+
+    // 21. agent_input_schema_merges_all_three_sources_and_records_provenance
+    #[test]
+    fn agent_input_schema_merges_all_three_sources_and_records_provenance() {
+        let ep = BlockEndpoint::post("/b/products/products/{product_id}/offers")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "product_id": { "type": "string" } },
+                "required": ["product_id"]
+            }))
+            .query_params_schema(json!({
+                "type": "object",
+                "properties": { "expand": { "type": "string" } }
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }));
+
+        let (schema, path, query, body) = agent_input_schema(&ep);
+
+        assert_eq!(
+            schema["properties"]["product_id"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(schema["properties"]["expand"], json!({ "type": "string" }));
+        assert_eq!(schema["properties"]["name"], json!({ "type": "string" }));
+
+        let required = schema["required"].as_array().expect("required array");
+        assert!(required.contains(&json!("product_id")));
+        assert!(required.contains(&json!("name")));
+        assert!(
+            !required.contains(&json!("expand")),
+            "optional query param must not become required"
+        );
+
+        assert_eq!(path, vec!["product_id".to_string()]);
+        assert_eq!(query, vec!["expand".to_string()]);
+        assert_eq!(body, vec!["name".to_string()]);
+    }
+
+    // 22. agent_input_schema_inlines_refs_from_each_source
+    #[test]
+    fn agent_input_schema_inlines_refs_from_each_source() {
+        let ep = BlockEndpoint::post("/b/products/checkout").input_schema(json!({
+            "type": "object",
+            "properties": { "presentation": { "$ref": "#/$defs/CheckoutPresentation" } },
+            "$defs": {
+                "CheckoutPresentation": { "type": "string", "enum": ["hosted", "embedded"] }
+            }
+        }));
+        let (schema, _, _, body) = agent_input_schema(&ep);
+        assert_eq!(
+            schema["properties"]["presentation"],
+            json!({ "type": "string", "enum": ["hosted", "embedded"] })
+        );
+        assert!(schema.get("$defs").is_none());
+        assert_eq!(body, vec!["presentation".to_string()]);
+    }
+
+    // 23. agent_input_schema_omits_required_key_when_nothing_is_required
+    #[test]
+    fn agent_input_schema_omits_required_key_when_nothing_is_required() {
+        let ep = BlockEndpoint::get("/b/products/list").query_params_schema(json!({
+            "type": "object",
+            "properties": { "page": { "type": "integer" } }
+        }));
+        let (schema, _, query, _) = agent_input_schema(&ep);
+        assert!(
+            schema.get("required").is_none(),
+            "an all-optional schema must not carry an empty required array: {schema}"
+        );
+        assert_eq!(query, vec!["page".to_string()]);
+    }
+
+    // 24. agent_input_schema_provenance_is_sorted_for_deterministic_output
+    #[test]
+    fn agent_input_schema_provenance_is_sorted_for_deterministic_output() {
+        let ep = BlockEndpoint::get("/b/x/{b}/{a}").path_params_schema(json!({
+            "type": "object",
+            "properties": { "b": { "type": "string" }, "a": { "type": "string" } }
+        }));
+        let (_, path, _, _) = agent_input_schema(&ep);
+        assert_eq!(path, vec!["a".to_string(), "b".to_string()]);
     }
 }
