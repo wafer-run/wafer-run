@@ -126,18 +126,33 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
 }
 
 /// Collect `properties` and `required` from one schema source into the
-/// merged accumulators, returning the property names it contributed.
+/// merged accumulators, returning the property names it contributed and
+/// whether the source could not be represented as a flat object schema.
 ///
 /// Names come back sorted so the generated manifest is byte-stable across
-/// runs — `serde_json::Map` iteration order is insertion order, but the
-/// upstream schema's order is not something we control.
+/// runs — `serde_json::Map`'s default backing is already a `BTreeMap`
+/// (`serde_json`'s `preserve_order` feature, which would make it
+/// insertion-ordered instead, is not enabled anywhere in this workspace),
+/// but the upstream schema's own key order is not something we control, so
+/// the sort here makes that intent explicit and keeps it correct if that
+/// feature is ever flipped on.
+///
+/// A source is *unrepresentable* when it is present and non-empty but its
+/// inlined form has no top-level `properties` object: a tagged-enum body
+/// (`#[serde(tag = "...")]` → `{"oneOf": [...]}`), an array body
+/// (`Vec<T>` → `{"type": "array", ...}`), or a root-recursive body (schemars
+/// closes a cycle on the root type with a bare `{"$ref": "#"}` and no
+/// `$defs` table at all — `inline_refs` only resolves `#/$defs/*` pointers,
+/// so this survives unresolved and collapses to `{}`). Silently contributing
+/// nothing for any of these would make the merged schema claim the source
+/// takes no arguments while the server still requires one.
 fn merge_schema_source(
     source: Option<&Value>,
     properties: &mut serde_json::Map<String, Value>,
     required: &mut Vec<String>,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let Some(source) = source else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let inlined = inline_refs(source);
 
@@ -158,7 +173,19 @@ fn merge_schema_source(
     }
 
     contributed.sort();
-    contributed
+
+    let is_present_and_nonempty = match source {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    let has_properties = inlined
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some();
+    let unrepresentable = is_present_and_nonempty && !has_properties;
+
+    (contributed, unrepresentable)
 }
 
 /// The flattened agent-facing input schema for one endpoint, plus the
@@ -174,6 +201,14 @@ pub(crate) struct AgentInputSchema {
     /// merged schema can only describe one of the colliding locations, so
     /// any tool built from it would misdescribe its own arguments.
     pub collisions: Vec<String>,
+    /// Source labels (`"path"`, `"query"`, `"body"`) that were present and
+    /// non-empty but contributed no top-level `properties` object — see
+    /// [`merge_schema_source`] for the shapes that trigger this. Non-empty
+    /// means this endpoint MUST NOT be exposed as a tool: the manifest would
+    /// claim the tool takes no arguments from that source while the server
+    /// still requires one, and a tool that can lie about its own arguments
+    /// is worse than no tool.
+    pub unrepresentable: Vec<String>,
 }
 
 /// Flatten an endpoint's path, query, and body schemas into the single
@@ -187,14 +222,36 @@ pub(crate) struct AgentInputSchema {
 /// function does not panic or pick a winner — it reports the conflict and
 /// lets the caller (the WebMCP manifest generator) decide to skip the
 /// endpoint rather than publish a tool that can lie about its arguments.
+/// Likewise, a source that cannot be flattened at all (see
+/// [`merge_schema_source`]) is recorded in `unrepresentable` rather than
+/// silently omitted.
+///
+/// The merge only reads `properties` and `required` from each source, so a
+/// `deny_unknown_fields` source's `additionalProperties: false` is dropped:
+/// the merged schema is strictly more permissive than what the server will
+/// actually accept.
 fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
 
-    let path_params = merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
-    let query_params =
+    let (path_params, path_unrepresentable) =
+        merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
+    let (query_params, query_unrepresentable) =
         merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
-    let body_params = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+    let (body_params, body_unrepresentable) =
+        merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+
+    let mut unrepresentable = Vec::new();
+    if path_unrepresentable {
+        unrepresentable.push("path".to_string());
+    }
+    if query_unrepresentable {
+        unrepresentable.push("query".to_string());
+    }
+    if body_unrepresentable {
+        unrepresentable.push("body".to_string());
+    }
+    unrepresentable.sort();
 
     let mut counts: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
     for name in path_params
@@ -225,6 +282,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         query_params,
         body_params,
         collisions,
+        unrepresentable,
     }
 }
 
@@ -465,7 +523,7 @@ fn auth_rank(level: AuthLevel) -> u8 {
 ///   the discovery documents.
 pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
     let ceiling = auth_rank(caller);
-    let mut tools: Vec<Value> = Vec::new();
+    let mut candidates: Vec<Value> = Vec::new();
 
     for block in blocks {
         for ep in &block.endpoints {
@@ -486,7 +544,18 @@ pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
                 continue;
             }
 
-            tools.push(json!({
+            // A source that is present but reduces to no top-level
+            // `properties` (a tagged-enum body, an array body, a
+            // root-recursive `$ref`) can't be flattened into the
+            // object-shaped `inputSchema` a tool exposes. A tool claiming it
+            // takes no arguments from that source while the server still
+            // requires one is exactly the kind of lie `collisions` above
+            // already refuses to tell.
+            if !input.unrepresentable.is_empty() {
+                continue;
+            }
+
+            candidates.push(json!({
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": input.schema,
@@ -500,6 +569,31 @@ pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
             }));
         }
     }
+
+    // A WebMCP client registers tools by name, so two endpoints sharing a
+    // name are ambiguous no matter which one "wins" — and the name's
+    // meaning would become auth-dependent (one `get_thing` for an anonymous
+    // caller, two for an admin). Dropping only the later duplicate would
+    // make the output depend on block/endpoint declaration order, so this
+    // counts names in a first pass and then emits only the ones that turned
+    // out unique, which is order-independent by construction.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for candidate in &candidates {
+        let name = candidate["name"]
+            .as_str()
+            .expect("candidate tool always has a string name");
+        *name_counts.entry(name.to_string()).or_insert(0) += 1;
+    }
+    let tools: Vec<Value> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let name = candidate["name"]
+                .as_str()
+                .expect("candidate tool always has a string name");
+            name_counts.get(name).copied().unwrap_or(0) == 1
+        })
+        .collect();
 
     json!({
         "schema_version": 1,
@@ -1066,6 +1160,65 @@ mod tests {
         );
     }
 
+    // 28. agent_input_schema_flags_tagged_enum_body_as_unrepresentable
+    #[test]
+    fn agent_input_schema_flags_tagged_enum_body_as_unrepresentable() {
+        // A `#[serde(tag = "...")]` enum body has no top-level `properties`
+        // object at all — schemars renders it as `oneOf`. The merge must
+        // not silently contribute nothing; it must flag the body as
+        // unrepresentable so the caller refuses to build a tool from it.
+        let ep = BlockEndpoint::post("/b/products/conditions").input_schema(json!({
+            "oneOf": [
+                { "type": "object", "properties": { "kind": { "const": "always" } } },
+                { "type": "object", "properties": { "kind": { "const": "never" } } }
+            ]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+        assert!(result.body_params.is_empty());
+    }
+
+    // 29. agent_input_schema_flags_array_body_as_unrepresentable
+    #[test]
+    fn agent_input_schema_flags_array_body_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/bulk").input_schema(json!({
+            "type": "array",
+            "items": { "type": "string" }
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+        assert!(result.body_params.is_empty());
+    }
+
+    // 30. agent_input_schema_flags_root_recursive_ref_as_unrepresentable
+    #[test]
+    fn agent_input_schema_flags_root_recursive_ref_as_unrepresentable() {
+        // schemars closes a cycle on the root type with a bare `{"$ref": "#"}`
+        // and no `$defs` table at all. `inline_refs` only resolves
+        // `#/$defs/*` pointers, so this survives inlining unresolved and
+        // collapses to `{}` — no top-level `properties`.
+        let ep = BlockEndpoint::post("/b/products/condition").input_schema(json!({ "$ref": "#" }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+        assert!(result.body_params.is_empty());
+    }
+
+    // 31. agent_input_schema_ordinary_object_source_is_representable
+    #[test]
+    fn agent_input_schema_ordinary_object_source_is_representable() {
+        let ep = BlockEndpoint::post("/b/products/rename").input_schema(json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        }));
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.unrepresentable.is_empty(),
+            "an ordinary object source must not be flagged: {:?}",
+            result.unrepresentable
+        );
+    }
+
     // -----------------------------------------------------------------
     // generate_webmcp
     // -----------------------------------------------------------------
@@ -1183,7 +1336,18 @@ mod tests {
     #[test]
     fn webmcp_admin_caller_sees_every_tool() {
         let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
-        assert_eq!(tool_names(&doc).len(), 3);
+        let mut names = tool_names(&doc);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "get_product".to_string(),
+                "list_my_purchases".to_string(),
+                "list_users".to_string(),
+            ],
+            "an admin caller must see exactly these three tools, by name — a length-only \
+             assertion here previously let real bugs through: {doc}"
+        );
     }
 
     #[test]
@@ -1227,6 +1391,130 @@ mod tests {
     }
 
     #[test]
+    fn webmcp_skips_an_endpoint_whose_body_is_a_tagged_enum() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/conditions")
+                    .summary("Set condition")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "oneOf": [
+                            { "type": "object", "properties": { "kind": { "const": "always" } } }
+                        ]
+                    }))
+                    .agent_tool(
+                        "set_condition",
+                        "Should never be emitted: body is a tagged enum.",
+                    ),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a tagged-enum body must produce no tool: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_an_endpoint_whose_body_is_an_array() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/bulk")
+                    .summary("Bulk import")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({ "type": "array", "items": { "type": "string" } }))
+                    .agent_tool("bulk_import", "Should never be emitted: body is an array."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "an array body must produce no tool: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_an_endpoint_whose_body_is_a_root_recursive_ref() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/condition")
+                    .summary("Set condition")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({ "$ref": "#" }))
+                    .agent_tool(
+                        "set_condition",
+                        "Should never be emitted: body is a root-recursive $ref.",
+                    ),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "a root-recursive $ref body must produce no tool: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_drops_all_tools_sharing_a_duplicate_name() {
+        // Two endpoints both claim `get_thing`. Neither may appear: keeping
+        // either one arbitrarily would make the manifest's meaning depend
+        // on which endpoint happened to be declared (or iterated) first.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/a")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "First get_thing."),
+                BlockEndpoint::get("/b/x/b")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Second get_thing."),
+                BlockEndpoint::get("/b/x/c")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_other_thing", "Uniquely named, must still appear."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_other_thing".to_string()],
+            "both endpoints sharing the duplicated name must be dropped, and the uniquely \
+             named endpoint must still appear: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_duplicate_name_drop_is_order_independent() {
+        let make_block = |order: [&str; 3]| {
+            let by_id = |id: &str| match id {
+                "a" => BlockEndpoint::get("/b/x/a")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "First get_thing."),
+                "b" => BlockEndpoint::get("/b/x/b")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Second get_thing."),
+                "c" => BlockEndpoint::get("/b/x/c")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_other_thing", "Uniquely named."),
+                other => panic!("unknown endpoint id: {other}"),
+            };
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test")
+                .endpoints(order.iter().map(|id| by_id(id)).collect())
+        };
+
+        let forward = generate_webmcp(&[make_block(["a", "b", "c"])], AuthLevel::Admin);
+        let reversed = generate_webmcp(&[make_block(["c", "b", "a"])], AuthLevel::Admin);
+
+        assert_eq!(tool_names(&forward), vec!["get_other_thing".to_string()]);
+        assert_eq!(
+            tool_names(&forward),
+            tool_names(&reversed),
+            "dropping duplicate-named tools must not depend on endpoint declaration order"
+        );
+    }
+
+    #[test]
     fn webmcp_tool_carries_invocation_metadata() {
         let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
         let tool = &doc["tools"][0];
@@ -1257,10 +1545,138 @@ mod tests {
     }
 
     #[test]
-    fn webmcp_tool_order_is_deterministic() {
-        let blocks = webmcp_fixture_blocks();
-        let first = generate_webmcp(&blocks, AuthLevel::Admin);
-        let second = generate_webmcp(&blocks, AuthLevel::Admin);
-        assert_eq!(first, second);
+    fn webmcp_public_manifest_matches_snapshot() {
+        // Full-document snapshot at each auth level: exercises the exact
+        // output an agent would receive, not just tool names, and is a
+        // stronger determinism check than calling the pure function twice
+        // in one process (which cannot fail).
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        assert_eq!(
+            doc,
+            json!({
+                "schema_version": 1,
+                "tools": [
+                    {
+                        "name": "get_product",
+                        "description": "Fetch a product and its offers by id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "product_id": { "type": "string" } },
+                            "required": ["product_id"]
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/products/storefront/{product_id}",
+                            "path_params": ["product_id"],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn webmcp_authenticated_manifest_matches_snapshot() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        assert_eq!(
+            doc,
+            json!({
+                "schema_version": 1,
+                "tools": [
+                    {
+                        "name": "get_product",
+                        "description": "Fetch a product and its offers by id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "product_id": { "type": "string" } },
+                            "required": ["product_id"]
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/products/storefront/{product_id}",
+                            "path_params": ["product_id"],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    },
+                    {
+                        "name": "list_my_purchases",
+                        "description": "List the signed-in user's purchases.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/products/purchases",
+                            "path_params": [],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn webmcp_admin_manifest_matches_snapshot() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        assert_eq!(
+            doc,
+            json!({
+                "schema_version": 1,
+                "tools": [
+                    {
+                        "name": "get_product",
+                        "description": "Fetch a product and its offers by id.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "product_id": { "type": "string" } },
+                            "required": ["product_id"]
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/products/storefront/{product_id}",
+                            "path_params": ["product_id"],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    },
+                    {
+                        "name": "list_my_purchases",
+                        "description": "List the signed-in user's purchases.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/products/purchases",
+                            "path_params": [],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    },
+                    {
+                        "name": "list_users",
+                        "description": "List all user accounts.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        },
+                        "invocation": {
+                            "method": "get",
+                            "path": "/b/admin/api/users",
+                            "path_params": [],
+                            "query_params": [],
+                            "body_params": []
+                        }
+                    }
+                ]
+            })
+        );
     }
 }
