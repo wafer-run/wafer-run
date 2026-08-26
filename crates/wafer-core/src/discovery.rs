@@ -166,18 +166,38 @@ fn merge_schema_source(
     contributed
 }
 
+/// The flattened agent-facing input schema for one endpoint, plus the
+/// provenance a client needs to rebuild a real HTTP request.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentInputSchema {
+    pub schema: Value,
+    pub path_params: Vec<String>,
+    pub query_params: Vec<String>,
+    pub body_params: Vec<String>,
+    /// Property names contributed by more than one of path/query/body.
+    /// Non-empty means this endpoint MUST NOT be exposed as a tool: the
+    /// merged schema can only describe one of the colliding locations, so
+    /// any tool built from it would misdescribe its own arguments.
+    pub collisions: Vec<String>,
+}
+
 /// Flatten an endpoint's path, query, and body schemas into the single
-/// `inputSchema` a WebMCP tool exposes, plus the provenance lists the client
-/// needs to rebuild a real HTTP request from the agent's flat argument
-/// object.
+/// `inputSchema` a WebMCP tool exposes, plus the provenance the client needs
+/// to rebuild a real HTTP request from the agent's flat argument object.
 ///
-/// Returns `(schema, path_params, query_params, body_params)`.
+/// A property name contributed by more than one of path/query/body is
+/// recorded in `collisions` rather than silently resolved by last-source-wins:
+/// the merged schema can only describe one of the colliding locations, so a
+/// tool built from it would misdescribe its own arguments to the agent. This
+/// function does not panic or pick a winner — it reports the conflict and
+/// lets the caller (the WebMCP manifest generator) decide to skip the
+/// endpoint rather than publish a tool that can lie about its arguments.
 // `agent_input_schema` has no caller yet outside `#[cfg(test)]` — it is
 // wired into the WebMCP tool-manifest generator in a follow-up task. Allow
 // dead_code until then rather than gating the production function itself
 // behind `#[cfg(test)]`.
 #[allow(dead_code)]
-fn agent_input_schema(ep: &BlockEndpoint) -> (Value, Vec<String>, Vec<String>, Vec<String>) {
+fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
 
@@ -185,6 +205,21 @@ fn agent_input_schema(ep: &BlockEndpoint) -> (Value, Vec<String>, Vec<String>, V
     let query_params =
         merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
     let body_params = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+
+    let mut counts: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+    for name in path_params
+        .iter()
+        .chain(query_params.iter())
+        .chain(body_params.iter())
+    {
+        *counts.entry(name.as_str()).or_insert(0) += 1;
+    }
+    let mut collisions: Vec<String> = counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    collisions.sort();
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".into(), json!("object"));
@@ -194,12 +229,13 @@ fn agent_input_schema(ep: &BlockEndpoint) -> (Value, Vec<String>, Vec<String>, V
         schema.insert("required".into(), json!(required));
     }
 
-    (
-        Value::Object(schema),
+    AgentInputSchema {
+        schema: Value::Object(schema),
         path_params,
         query_params,
         body_params,
-    )
+        collisions,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -784,9 +820,14 @@ mod tests {
     #[test]
     fn agent_input_schema_is_empty_object_when_endpoint_has_no_schemas() {
         let ep = BlockEndpoint::get("/b/products/storefront/config");
-        let (schema, path, query, body) = agent_input_schema(&ep);
-        assert_eq!(schema, json!({ "type": "object", "properties": {} }));
-        assert!(path.is_empty() && query.is_empty() && body.is_empty());
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.schema, json!({ "type": "object", "properties": {} }));
+        assert!(
+            result.path_params.is_empty()
+                && result.query_params.is_empty()
+                && result.body_params.is_empty()
+        );
+        assert!(result.collisions.is_empty());
     }
 
     // 21. agent_input_schema_merges_all_three_sources_and_records_provenance
@@ -808,26 +849,32 @@ mod tests {
                 "required": ["name"]
             }));
 
-        let (schema, path, query, body) = agent_input_schema(&ep);
+        let result = agent_input_schema(&ep);
 
         assert_eq!(
-            schema["properties"]["product_id"],
+            result.schema["properties"]["product_id"],
             json!({ "type": "string" })
         );
-        assert_eq!(schema["properties"]["expand"], json!({ "type": "string" }));
-        assert_eq!(schema["properties"]["name"], json!({ "type": "string" }));
-
-        let required = schema["required"].as_array().expect("required array");
-        assert!(required.contains(&json!("product_id")));
-        assert!(required.contains(&json!("name")));
-        assert!(
-            !required.contains(&json!("expand")),
-            "optional query param must not become required"
+        assert_eq!(
+            result.schema["properties"]["expand"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            result.schema["properties"]["name"],
+            json!({ "type": "string" })
         );
 
-        assert_eq!(path, vec!["product_id".to_string()]);
-        assert_eq!(query, vec!["expand".to_string()]);
-        assert_eq!(body, vec!["name".to_string()]);
+        assert_eq!(
+            result.schema["required"],
+            json!(["name", "product_id"]),
+            "required must be exactly the sorted union of both sources' required lists, \
+             with expand excluded and no duplicates"
+        );
+
+        assert_eq!(result.path_params, vec!["product_id".to_string()]);
+        assert_eq!(result.query_params, vec!["expand".to_string()]);
+        assert_eq!(result.body_params, vec!["name".to_string()]);
+        assert!(result.collisions.is_empty());
     }
 
     // 22. agent_input_schema_inlines_refs_from_each_source
@@ -840,13 +887,13 @@ mod tests {
                 "CheckoutPresentation": { "type": "string", "enum": ["hosted", "embedded"] }
             }
         }));
-        let (schema, _, _, body) = agent_input_schema(&ep);
+        let result = agent_input_schema(&ep);
         assert_eq!(
-            schema["properties"]["presentation"],
+            result.schema["properties"]["presentation"],
             json!({ "type": "string", "enum": ["hosted", "embedded"] })
         );
-        assert!(schema.get("$defs").is_none());
-        assert_eq!(body, vec!["presentation".to_string()]);
+        assert!(result.schema.get("$defs").is_none());
+        assert_eq!(result.body_params, vec!["presentation".to_string()]);
     }
 
     // 23. agent_input_schema_omits_required_key_when_nothing_is_required
@@ -856,12 +903,13 @@ mod tests {
             "type": "object",
             "properties": { "page": { "type": "integer" } }
         }));
-        let (schema, _, query, _) = agent_input_schema(&ep);
+        let result = agent_input_schema(&ep);
         assert!(
-            schema.get("required").is_none(),
-            "an all-optional schema must not carry an empty required array: {schema}"
+            result.schema.get("required").is_none(),
+            "an all-optional schema must not carry an empty required array: {}",
+            result.schema
         );
-        assert_eq!(query, vec!["page".to_string()]);
+        assert_eq!(result.query_params, vec!["page".to_string()]);
     }
 
     // 24. agent_input_schema_provenance_is_sorted_for_deterministic_output
@@ -871,7 +919,89 @@ mod tests {
             "type": "object",
             "properties": { "b": { "type": "string" }, "a": { "type": "string" } }
         }));
-        let (_, path, _, _) = agent_input_schema(&ep);
-        assert_eq!(path, vec!["a".to_string(), "b".to_string()]);
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.path_params, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    // 25. agent_input_schema_no_collision_across_distinct_names
+    #[test]
+    fn agent_input_schema_no_collision_across_distinct_names() {
+        // Same multi-source shape as test 21: three distinct property names,
+        // one per source — nothing should be flagged as colliding.
+        let ep = BlockEndpoint::post("/b/products/products/{product_id}/offers")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "product_id": { "type": "string" } }
+            }))
+            .query_params_schema(json!({
+                "type": "object",
+                "properties": { "expand": { "type": "string" } }
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } }
+            }));
+
+        let result = agent_input_schema(&ep);
+        assert!(result.collisions.is_empty());
+    }
+
+    // 26. agent_input_schema_records_collision_between_path_and_body
+    #[test]
+    fn agent_input_schema_records_collision_between_path_and_body() {
+        let ep = BlockEndpoint::post("/b/products/products/{id}")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } }
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "id": { "type": "integer" } }
+            }));
+
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.collisions,
+            vec!["id".to_string()],
+            "a name contributed by both path and body must be flagged, not silently \
+             resolved by last-source-wins"
+        );
+        // Provenance still records the name on both sides — the caller
+        // needs that to see exactly which locations collided.
+        assert_eq!(result.path_params, vec!["id".to_string()]);
+        assert_eq!(result.body_params, vec!["id".to_string()]);
+    }
+
+    // 27. agent_input_schema_collects_every_colliding_name_not_just_the_first
+    #[test]
+    fn agent_input_schema_collects_every_colliding_name_not_just_the_first() {
+        // "id" collides between path and body; "owner" collides between
+        // path and query. Both must come back, sorted.
+        let ep = BlockEndpoint::post("/b/products/products/{id}/{owner}")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "owner": { "type": "string" }
+                }
+            }))
+            .query_params_schema(json!({
+                "type": "object",
+                "properties": { "owner": { "type": "string" } }
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" }
+                }
+            }));
+
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.collisions,
+            vec!["id".to_string(), "owner".to_string()],
+            "every colliding name must be collected and sorted, not just the first found"
+        );
     }
 }
