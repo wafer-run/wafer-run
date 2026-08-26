@@ -52,6 +52,88 @@ fn path_to_slug(path: &str) -> String {
         .replace('/', "_")
 }
 
+/// Maximum `$ref` hops to follow before giving up. Self-referential schemas
+/// (a `Condition` containing child `Condition`s) are legitimate and would
+/// otherwise recurse forever; at the limit we emit `{}` — an unconstrained
+/// schema — which is honest about "anything may go here" rather than wrong.
+// `inline_refs` has no caller yet outside `#[cfg(test)]` — it lands in this
+// task standalone and is wired into the WebMCP schema projection in a
+// follow-up task. Allow dead_code until then rather than gating the
+// production function itself behind `#[cfg(test)]`.
+#[allow(dead_code)]
+const MAX_REF_DEPTH: u8 = 8;
+
+/// Rewrite a schemars-generated schema into a self-contained one: every
+/// `#/$defs/*` reference is replaced by its target, and the `$defs` block is
+/// removed.
+///
+/// OpenAPI clients resolve `$ref` fine, which is why `generate_openapi` does
+/// not do this. Many MCP-style clients do not, so the WebMCP projection must
+/// hand over schemas that stand alone.
+#[allow(dead_code)]
+fn inline_refs(schema: &Value) -> Value {
+    let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
+    resolve_refs(schema, &defs, 0)
+}
+
+#[allow(dead_code)]
+fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
+    match node {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref") {
+                if depth >= MAX_REF_DEPTH {
+                    return json!({});
+                }
+                let target = reference
+                    .strip_prefix("#/$defs/")
+                    .and_then(|name| defs.get(name));
+                let mut resolved = match target {
+                    Some(found) => resolve_refs(found, defs, depth + 1),
+                    None => json!({}),
+                };
+
+                // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and
+                // schemars uses exactly that: a doc-commented field of a
+                // named type emits `{"description": "...", "$ref": "#/$defs/Status"}`.
+                // Returning only the resolved target would silently delete
+                // every such field description. Siblings win over the
+                // target's own keys, since they are the more specific
+                // annotation. `$defs` is excluded here too — it is the
+                // reference table itself, not a schema keyword, and must
+                // never survive into the output (it can appear as a literal
+                // sibling of `$ref` when the ref sits at the schema root).
+                if let Some(out) = resolved.as_object_mut() {
+                    for (key, value) in map {
+                        if key == "$ref" || key == "$defs" {
+                            continue;
+                        }
+                        out.insert(key.clone(), resolve_refs(value, defs, depth));
+                    }
+                }
+                return resolved;
+            }
+
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                // `$defs` is the reference table itself, never part of the
+                // resulting schema.
+                if key == "$defs" {
+                    continue;
+                }
+                out.insert(key.clone(), resolve_refs(value, defs, depth));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| resolve_refs(item, defs, depth))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // generate_openapi
 // ---------------------------------------------------------------------------
@@ -478,5 +560,155 @@ mod tests {
 
         assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
+    }
+
+    // 12. inline_refs_leaves_flat_schema_unchanged
+    #[test]
+    fn inline_refs_leaves_flat_schema_unchanged() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"]
+        });
+        assert_eq!(inline_refs(&schema), schema);
+    }
+
+    // 13. inline_refs_replaces_ref_with_target_and_drops_defs
+    #[test]
+    fn inline_refs_replaces_ref_with_target_and_drops_defs() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "status": { "$ref": "#/$defs/ProductStatus" } },
+            "$defs": {
+                "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
+            }
+        });
+        let out = inline_refs(&schema);
+        assert_eq!(
+            out["properties"]["status"],
+            json!({ "type": "string", "enum": ["draft", "active"] })
+        );
+        assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
+    }
+
+    // 14. inline_refs_resolves_nested_refs
+    #[test]
+    fn inline_refs_resolves_nested_refs() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "tier": { "$ref": "#/$defs/PricingTier" } },
+            "$defs": {
+                "PricingTier": {
+                    "type": "object",
+                    "properties": { "scheme": { "$ref": "#/$defs/BillingScheme" } }
+                },
+                "BillingScheme": { "type": "string", "enum": ["per_unit", "tiered"] }
+            }
+        });
+        let out = inline_refs(&schema);
+        assert_eq!(
+            out["properties"]["tier"]["properties"]["scheme"],
+            json!({ "type": "string", "enum": ["per_unit", "tiered"] })
+        );
+    }
+
+    // 15. inline_refs_resolves_refs_inside_arrays
+    #[test]
+    fn inline_refs_resolves_refs_inside_arrays() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "offers": { "type": "array", "items": { "$ref": "#/$defs/Offer" } }
+            },
+            "$defs": { "Offer": { "type": "object" } }
+        });
+        let out = inline_refs(&schema);
+        assert_eq!(
+            out["properties"]["offers"]["items"],
+            json!({ "type": "object" })
+        );
+    }
+
+    // 16. inline_refs_terminates_on_self_referential_schema
+    #[test]
+    fn inline_refs_terminates_on_self_referential_schema() {
+        // A `Condition` that can contain child `Condition`s is a real shape in
+        // products/contracts.rs. Inlining must bottom out rather than recurse
+        // forever.
+        let schema = json!({
+            "$ref": "#/$defs/Condition",
+            "$defs": {
+                "Condition": {
+                    "type": "object",
+                    "properties": { "all_of": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } }
+                }
+            }
+        });
+        let out = inline_refs(&schema);
+        assert_eq!(out["type"], json!("object"));
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("$ref"),
+            "no unresolved $ref may survive: {rendered}"
+        );
+    }
+
+    // 17. inline_refs_strips_defs_even_when_ref_is_schema_root
+    #[test]
+    fn inline_refs_strips_defs_even_when_ref_is_schema_root() {
+        // When `$ref` sits at the schema root, `$defs` is a literal sibling
+        // of it in the same JSON object — the same shape that carries a
+        // legitimate sibling like `description` in the test above. Unlike
+        // `description`, `$defs` is the reference table itself and must
+        // never be merged back into the output.
+        let schema = json!({
+            "$ref": "#/$defs/Condition",
+            "$defs": {
+                "Condition": {
+                    "type": "object",
+                    "properties": { "all_of": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } }
+                }
+            }
+        });
+        let out = inline_refs(&schema);
+        assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
+    }
+
+    // 18. inline_refs_drops_unresolvable_ref_to_empty_schema
+    #[test]
+    fn inline_refs_drops_unresolvable_ref_to_empty_schema() {
+        let schema = json!({ "properties": { "x": { "$ref": "#/$defs/Missing" } } });
+        let out = inline_refs(&schema);
+        assert_eq!(out["properties"]["x"], json!({}));
+    }
+
+    // 19. inline_refs_preserves_keywords_sitting_beside_a_ref
+    #[test]
+    fn inline_refs_preserves_keywords_sitting_beside_a_ref() {
+        // JSON Schema 2020-12 allows keywords alongside `$ref`, and schemars uses
+        // that for field-level docs on a named type. Returning only the target
+        // would delete every such description.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "description": "Current lifecycle status of the product.",
+                    "$ref": "#/$defs/ProductStatus"
+                }
+            },
+            "$defs": {
+                "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
+            }
+        });
+        let out = inline_refs(&schema);
+        let status = &out["properties"]["status"];
+
+        assert_eq!(
+            status["description"],
+            json!("Current lifecycle status of the product."),
+            "a description beside $ref must survive inlining: {status}"
+        );
+        assert_eq!(status["type"], json!("string"));
+        assert_eq!(status["enum"], json!(["draft", "active"]));
     }
 }
