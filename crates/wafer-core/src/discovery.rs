@@ -131,11 +131,6 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8) -> Value {
 /// Names come back sorted so the generated manifest is byte-stable across
 /// runs — `serde_json::Map` iteration order is insertion order, but the
 /// upstream schema's order is not something we control.
-// `merge_schema_source` has no caller yet outside `#[cfg(test)]` — it is
-// wired into the WebMCP tool-manifest generator in a follow-up task. Allow
-// dead_code until then rather than gating the production function itself
-// behind `#[cfg(test)]`.
-#[allow(dead_code)]
 fn merge_schema_source(
     source: Option<&Value>,
     properties: &mut serde_json::Map<String, Value>,
@@ -192,11 +187,6 @@ pub(crate) struct AgentInputSchema {
 /// function does not panic or pick a winner — it reports the conflict and
 /// lets the caller (the WebMCP manifest generator) decide to skip the
 /// endpoint rather than publish a tool that can lie about its arguments.
-// `agent_input_schema` has no caller yet outside `#[cfg(test)]` — it is
-// wired into the WebMCP tool-manifest generator in a follow-up task. Allow
-// dead_code until then rather than gating the production function itself
-// behind `#[cfg(test)]`.
-#[allow(dead_code)]
 fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
@@ -443,6 +433,77 @@ pub fn generate_agent_card(
         "default_input_modes": ["application/json"],
         "default_output_modes": ["application/json"],
         "skills": skills,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// generate_webmcp
+// ---------------------------------------------------------------------------
+
+/// `Public < Authenticated < Admin`, expressed explicitly because
+/// `AuthLevel` deliberately does not derive `Ord`.
+fn auth_rank(level: AuthLevel) -> u8 {
+    match level {
+        AuthLevel::Public => 0,
+        AuthLevel::Authenticated => 1,
+        AuthLevel::Admin => 2,
+    }
+}
+
+/// Project the blocks' endpoint declarations into a WebMCP tool manifest,
+/// filtered to what `caller` is allowed to invoke.
+///
+/// This is the third projection of `BlockInfo::endpoints`, alongside
+/// [`generate_openapi`] and [`generate_agent_card`]. Two things make it
+/// different from those:
+///
+/// * **Opt-in.** Only endpoints carrying [`AgentTool`] metadata appear.
+///   Carrying a schema is not consent to being called by an agent.
+/// * **Auth-filtered.** Tools above `caller`'s level are omitted entirely —
+///   not marked unavailable. A name an agent cannot use is recon surface, so
+///   it never reaches the page. This mirrors the [SEC-073] posture applied to
+///   the discovery documents.
+pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
+    let ceiling = auth_rank(caller);
+    let mut tools: Vec<Value> = Vec::new();
+
+    for block in blocks {
+        for ep in &block.endpoints {
+            let Some(tool) = ep.agent_tool.as_ref() else {
+                continue;
+            };
+            if auth_rank(ep.auth) > ceiling {
+                continue;
+            }
+
+            let input = agent_input_schema(ep);
+
+            // A property name arriving from two of path/query/body cannot be
+            // honestly described by one flat schema, and the client would put
+            // the value in both places. Emitting no tool is the safe, visible
+            // failure; emitting a lying one is neither.
+            if !input.collisions.is_empty() {
+                continue;
+            }
+
+            tools.push(json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": input.schema,
+                "invocation": {
+                    "method": method_key(ep.method),
+                    "path": ep.path,
+                    "path_params": input.path_params,
+                    "query_params": input.query_params,
+                    "body_params": input.body_params,
+                },
+            }));
+        }
+    }
+
+    json!({
+        "schema_version": 1,
+        "tools": tools,
     })
 }
 
@@ -1003,5 +1064,165 @@ mod tests {
             vec!["id".to_string(), "owner".to_string()],
             "every colliding name must be collected and sorted, not just the first found"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // generate_webmcp
+    // -----------------------------------------------------------------
+
+    /// Two blocks spanning all three auth levels, used by the tests below.
+    fn webmcp_fixture_blocks() -> Vec<BlockInfo> {
+        let products = BlockInfo::new(
+            "impresspress/products",
+            "1.0.0",
+            "http-handler@v1",
+            "Commerce block",
+        )
+        .endpoints(vec![
+            BlockEndpoint::get("/b/products/storefront/{product_id}")
+                .summary("Storefront product")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "product_id": { "type": "string" } },
+                    "required": ["product_id"]
+                }))
+                .agent_tool("get_product", "Fetch a product and its offers by id."),
+            BlockEndpoint::get("/b/products/purchases")
+                .summary("List own purchases")
+                .auth(AuthLevel::Authenticated)
+                .output_schema(json!({ "type": "object" }))
+                .agent_tool("list_my_purchases", "List the signed-in user's purchases."),
+            // Carries schemas but never opted in — must never appear.
+            BlockEndpoint::post("/b/products/webhooks")
+                .summary("Stripe webhook")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({ "type": "object" })),
+        ]);
+
+        let admin = BlockInfo::new(
+            "impresspress/admin",
+            "1.0.0",
+            "http-handler@v1",
+            "Admin block",
+        )
+        .endpoints(vec![BlockEndpoint::get("/b/admin/api/users")
+            .summary("List users")
+            .auth(AuthLevel::Admin)
+            .output_schema(json!({ "type": "object" }))
+            .agent_tool("list_users", "List all user accounts.")]);
+
+        vec![products, admin]
+    }
+
+    fn tool_names(doc: &Value) -> Vec<String> {
+        doc["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn webmcp_public_caller_sees_only_public_tools() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
+    }
+
+    #[test]
+    fn webmcp_authenticated_caller_sees_public_and_authenticated() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        let names = tool_names(&doc);
+        assert!(names.contains(&"get_product".to_string()));
+        assert!(names.contains(&"list_my_purchases".to_string()));
+        assert!(
+            !names.contains(&"list_users".to_string()),
+            "admin tool must not leak to an authenticated caller: {names:?}"
+        );
+    }
+
+    #[test]
+    fn webmcp_admin_caller_sees_every_tool() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        assert_eq!(tool_names(&doc).len(), 3);
+    }
+
+    #[test]
+    fn webmcp_excludes_endpoints_that_did_not_opt_in() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let rendered = doc.to_string();
+        assert!(
+            !rendered.contains("/b/products/webhooks"),
+            "a schema-carrying endpoint without agent_tool must be absent: {rendered}"
+        );
+    }
+
+    #[test]
+    fn webmcp_skips_an_endpoint_whose_parameter_names_collide() {
+        // `id` arrives from BOTH the path and the body. One flat schema cannot
+        // honestly describe both locations, so no tool may be emitted — an
+        // absent tool is visible, a lying one is not.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/{id}")
+                    .summary("Collides")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } },
+                        "required": ["id"]
+                    }))
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } }
+                    }))
+                    .agent_tool("colliding_tool", "Should never be emitted."),
+            ]);
+
+        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        assert_eq!(
+            doc["tools"],
+            json!([]),
+            "an endpoint with a cross-location name collision must produce no tool: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_tool_carries_invocation_metadata() {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let tool = &doc["tools"][0];
+        assert_eq!(tool["name"], json!("get_product"));
+        assert_eq!(
+            tool["description"],
+            json!("Fetch a product and its offers by id.")
+        );
+        assert_eq!(tool["invocation"]["method"], json!("get"));
+        assert_eq!(
+            tool["invocation"]["path"],
+            json!("/b/products/storefront/{product_id}")
+        );
+        assert_eq!(tool["invocation"]["path_params"], json!(["product_id"]));
+        assert_eq!(tool["invocation"]["query_params"], json!([]));
+        assert_eq!(tool["invocation"]["body_params"], json!([]));
+        assert_eq!(
+            tool["inputSchema"]["properties"]["product_id"],
+            json!({ "type": "string" })
+        );
+    }
+
+    #[test]
+    fn webmcp_emits_schema_version_and_empty_tools_for_no_blocks() {
+        let doc = generate_webmcp(&[], AuthLevel::Admin);
+        assert_eq!(doc["schema_version"], json!(1));
+        assert_eq!(doc["tools"], json!([]));
+    }
+
+    #[test]
+    fn webmcp_tool_order_is_deterministic() {
+        let blocks = webmcp_fixture_blocks();
+        let first = generate_webmcp(&blocks, AuthLevel::Admin);
+        let second = generate_webmcp(&blocks, AuthLevel::Admin);
+        assert_eq!(first, second);
     }
 }
