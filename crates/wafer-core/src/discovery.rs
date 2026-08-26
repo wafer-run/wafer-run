@@ -1,7 +1,7 @@
 //! Discovery document generation — OpenAPI 3.1 and A2A AgentCard.
 
 use serde_json::{json, Value};
-use wafer_block::types::{AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
+use wafer_block::types::{AgentTool, AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -173,22 +173,154 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8, unresolved: &mut bool) ->
 }
 
 /// What one schema source contributed to the merged agent input schema, and
-/// the two ways it can be unusable.
+/// the ways it can be unusable.
 #[derive(Debug, Default)]
 struct MergedSource {
     /// Top-level property names this source contributed, sorted.
     contributed: Vec<String>,
-    /// The source is present and non-empty but its inlined form has no
-    /// top-level `properties` object — see [`merge_schema_source`].
+    /// The endpoint declared something here (not `None`, not `{}`, not
+    /// `null`). A source that declared nothing contributes nothing and
+    /// constrains nothing.
+    present: bool,
+    /// The source is present but cannot be honestly flattened into the
+    /// merged object schema — see [`source_is_flattenable`].
     unrepresentable: bool,
     /// Inlining hit a `$ref` it could not resolve, at any depth — see
     /// [`inline_refs`].
     unresolved_ref: bool,
+    /// The source declared `additionalProperties: false`. The merged object
+    /// can only repeat that claim when *every* present source makes it —
+    /// see [`agent_input_schema`].
+    closed: bool,
+}
+
+/// Schema keywords the flattening in [`merge_schema_source`] knows how to
+/// either carry across or drop without changing what the endpoint accepts.
+///
+/// This is an allow-list on purpose. JSON Schema keeps growing keywords, and
+/// the failure mode of guessing wrong is a tool whose `inputSchema` silently
+/// omits a constraint the server still enforces. Refusing an endpoint is
+/// visible and fixable; publishing a tool that lies about its own arguments
+/// is neither.
+///
+/// The structural entries — `type`, `properties`, `required` — are what the
+/// merge reads, plus `additionalProperties`, handled explicitly in
+/// [`source_is_flattenable`]. The rest are pure annotations with no effect
+/// on validation:
+///
+/// * `title` — on a derived schema this is the *Rust type name* of the
+///   source struct (or the author's `#[schemars(title = "...")]`). It names
+///   the source type, not the merged argument object an agent fills in, so
+///   the WebMCP projection deliberately drops it here. It is *kept* in the
+///   stored schema, because `/openapi.json` embeds these verbatim and
+///   OpenAPI client generators use `title` to name the types they generate —
+///   see `wafer_block::types::endpoint`'s `self_contained_schema`.
+/// * `description`, `$comment`, `examples`, `default`, `deprecated`,
+///   `readOnly`, `writeOnly`, `$id`, `$schema` — documentation and metadata;
+///   dropping them loses prose, not constraints.
+const FLATTENABLE_KEYWORDS: &[&str] = &[
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "title",
+    "description",
+    "$comment",
+    "examples",
+    "default",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+    "$id",
+    "$schema",
+];
+
+/// Whether `inlined` — one already-`$ref`-flattened schema source — can be
+/// honestly folded into the merged agent input schema.
+///
+/// The question deliberately is *not* "does it have a `properties` object?".
+/// That test is wrong in both directions, and both directions ship a bad
+/// tool:
+///
+/// * **It misses lies.** Composition keywords sit *beside* `properties` at
+///   least as often as they replace it. A body struct with
+///   `#[serde(flatten)] kind: SomeEnum` emits the enum's `oneOf` as a
+///   sibling of the merged `properties`, so a properties-based test sees a
+///   healthy schema, publishes the tool, and every field and `required`
+///   entry inside those branches is missing from `inputSchema`. The agent
+///   400s forever. `allOf`, `anyOf`, `if`/`then`, `not`,
+///   `patternProperties`, `dependentRequired`, `minProperties`, `const`, a
+///   surviving `$ref` — anything outside [`FLATTENABLE_KEYWORDS`] — has the
+///   same shape of failure.
+/// * **It over-refuses.** A fieldless struct derives `{"type": "object"}`
+///   with no `properties` at all, and genuinely takes no arguments.
+///   Contributing nothing for it is the truth, not a lie, so it is
+///   representable.
+///
+/// So the question asked here is "is the entire content of this source
+/// expressible as `properties` + `required` in a single flat object whose
+/// values the name-based `invocation` provenance can route?" Anything else
+/// is refused.
+///
+/// Non-object shapes fail outright: a tagged-enum body (`{"oneOf": [...]}`),
+/// an array body (`Vec<T>`), a nullable body (`{"type": ["object",
+/// "null"]}`), a boolean schema (`serde_json::Value` derives `true`), or the
+/// universal schema `{}` that inlining leaves behind for a reference it
+/// could not resolve. None of them is an object with named members, so a
+/// flat object schema cannot describe them at all.
+///
+/// `additionalProperties` is the one keyword that is both carried and
+/// restricted:
+///
+/// * `false` closes the object. Representable, and reported through
+///   [`MergedSource::closed`] so the merged schema can repeat the claim when
+///   every present source agrees.
+/// * Absent is the serde default — unknown fields are ignored, so there is
+///   nothing to carry.
+/// * A *schema* (a `HashMap<String, T>` body) or `true` means the server
+///   accepts arbitrary extra keys that carry meaning. `invocation` routes
+///   arguments by name — `path_params` / `query_params` / `body_params` are
+///   fixed name lists — so a key the agent invents has nowhere to go and is
+///   dropped on the way to the server, which then rejects the request for
+///   the missing data. Advertising an open object the client cannot actually
+///   transmit fails on every single invocation, so it is refused rather than
+///   published.
+fn source_is_flattenable(inlined: &Value) -> bool {
+    let Some(map) = inlined.as_object() else {
+        // A boolean schema (`true` / `false`) or any non-object node.
+        return false;
+    };
+
+    // `{}` accepts literally anything, including non-objects. It is also
+    // what `inline_refs` leaves behind for a reference it could not resolve.
+    if map.is_empty() {
+        return false;
+    }
+
+    match map.get("type") {
+        Some(Value::String(t)) if t == "object" => {}
+        // No `type` at all is object-shaped only if it says so some other
+        // way; `properties` is the only such signal the merge can act on.
+        None if map.contains_key("properties") => {}
+        _ => return false,
+    }
+
+    if map
+        .keys()
+        .any(|key| !FLATTENABLE_KEYWORDS.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    matches!(
+        map.get("additionalProperties"),
+        None | Some(Value::Bool(false))
+    )
 }
 
 /// Collect `properties` and `required` from one schema source into the
 /// merged accumulators, reporting the property names it contributed and
-/// whether the source could be represented as a flat object schema at all.
+/// whether the source could be flattened into the merged object at all.
 ///
 /// Names come back sorted so the generated manifest is byte-stable across
 /// runs — `serde_json::Map`'s default backing is already a `BTreeMap`
@@ -198,21 +330,15 @@ struct MergedSource {
 /// the sort here makes that intent explicit and keeps it correct if that
 /// feature is ever flipped on.
 ///
-/// A source is *unrepresentable* when it is present and non-empty but its
-/// inlined form has no top-level `properties` object: a tagged-enum body
-/// (`#[serde(tag = "...")]` → `{"oneOf": [...]}`), an array body
-/// (`Vec<T>` → `{"type": "array", ...}`), or a root-recursive body (schemars
-/// closes a cycle on the root type with a bare `{"$ref": "#"}` and no
-/// `$defs` table at all — `inline_refs` only resolves `#/$defs/*` pointers,
-/// so this survives unresolved and collapses to `{}`). Silently contributing
-/// nothing for any of these would make the merged schema claim the source
-/// takes no arguments while the server still requires one.
+/// Representability is decided by [`source_is_flattenable`], which documents
+/// the shapes that fail and why. An unrepresentable source contributes
+/// nothing at all — the caller refuses the endpoint outright, so there is no
+/// half-merged schema to keep consistent.
 ///
-/// That check is top-level only, by construction — it asks whether
-/// `properties` exists. An unresolvable `$ref` *below* the top level leaves
-/// the top level intact and hides a `{}` inside one property, so
-/// [`inline_refs`]'s own report is carried out separately in
-/// `unresolved_ref` rather than folded into `unrepresentable`.
+/// That check is top-level only, by construction. An unresolvable `$ref`
+/// *below* the top level leaves the top level intact and hides a `{}` inside
+/// one property, so [`inline_refs`]'s own report is carried out separately
+/// in `unresolved_ref` rather than folded into `unrepresentable`.
 fn merge_schema_source(
     source: Option<&Value>,
     properties: &mut serde_json::Map<String, Value>,
@@ -221,7 +347,31 @@ fn merge_schema_source(
     let Some(source) = source else {
         return MergedSource::default();
     };
+    // `None`, `null`, and `{}` all mean "this endpoint declares nothing
+    // here". Reading a hand-written `{}` as "nothing declared" matches the
+    // endpoint that omits the builder call entirely; read as a schema it
+    // would mean "accepts anything", which is not what an author writing
+    // `{}` intends and which `source_is_flattenable` refuses anyway.
+    let present = match source {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    if !present {
+        return MergedSource::default();
+    }
+
     let (inlined, unresolved_ref) = inline_refs(source);
+
+    if !source_is_flattenable(&inlined) {
+        return MergedSource {
+            contributed: Vec::new(),
+            present,
+            unrepresentable: true,
+            unresolved_ref,
+            closed: false,
+        };
+    }
 
     let mut contributed = Vec::new();
     if let Some(props) = inlined.get("properties").and_then(Value::as_object) {
@@ -241,21 +391,14 @@ fn merge_schema_source(
 
     contributed.sort();
 
-    let is_present_and_nonempty = match source {
-        Value::Null => false,
-        Value::Object(map) => !map.is_empty(),
-        _ => true,
-    };
-    let has_properties = inlined
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_some();
-    let unrepresentable = is_present_and_nonempty && !has_properties;
+    let closed = inlined.get("additionalProperties") == Some(&Value::Bool(false));
 
     MergedSource {
         contributed,
-        unrepresentable,
+        present,
+        unrepresentable: false,
         unresolved_ref,
+        closed,
     }
 }
 
@@ -272,13 +415,13 @@ pub(crate) struct AgentInputSchema {
     /// merged schema can only describe one of the colliding locations, so
     /// any tool built from it would misdescribe its own arguments.
     pub collisions: Vec<String>,
-    /// Source labels (`"path"`, `"query"`, `"body"`) that were present and
-    /// non-empty but contributed no top-level `properties` object — see
-    /// [`merge_schema_source`] for the shapes that trigger this. Non-empty
-    /// means this endpoint MUST NOT be exposed as a tool: the manifest would
-    /// claim the tool takes no arguments from that source while the server
-    /// still requires one, and a tool that can lie about its own arguments
-    /// is worse than no tool.
+    /// Source labels (`"path"`, `"query"`, `"body"`) that were present but
+    /// could not be honestly flattened into the merged object — see
+    /// [`source_is_flattenable`] for the shapes that trigger this and why.
+    /// Non-empty means this endpoint MUST NOT be exposed as a tool: the
+    /// manifest would describe arguments the server does not accept, or omit
+    /// ones it requires, and a tool that can lie about its own arguments is
+    /// worse than no tool.
     pub unrepresentable: Vec<String>,
     /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining hit a
     /// `$ref` it could not resolve — see [`inline_refs`]. Non-empty means
@@ -302,13 +445,26 @@ pub(crate) struct AgentInputSchema {
 /// lets the caller (the WebMCP manifest generator) decide to skip the
 /// endpoint rather than publish a tool that can lie about its arguments.
 /// Likewise, a source that cannot be flattened at all (see
-/// [`merge_schema_source`]) is recorded in `unrepresentable` rather than
+/// [`source_is_flattenable`]) is recorded in `unrepresentable` rather than
 /// silently omitted.
 ///
-/// The merge only reads `properties` and `required` from each source, so a
-/// `deny_unknown_fields` source's `additionalProperties: false` is dropped:
-/// the merged schema is strictly more permissive than what the server will
-/// actually accept.
+/// # Path parameters are forced required
+///
+/// `invocation.path` is a template the client fills in by name. A
+/// placeholder with no argument leaves the client nothing to substitute, so
+/// it fetches `/b/products/storefront/undefined`. Every name the path source
+/// contributed is therefore forced into the merged `required` list,
+/// regardless of what that source said.
+///
+/// A source that declared a path parameter optional — a
+/// `path_params_schema` written without a `required` entry, or a
+/// `#[serde(default)]` on the field — is stating a contradiction, because
+/// the route cannot match without a value in that segment. Forcing is
+/// preferred to refusing because the forced form is simply the truth: the
+/// endpoint really does require it, and refusing would delete a working tool
+/// over a redundant annotation. The caller separately requires that the path
+/// source's names are exactly the template's placeholders, so this can never
+/// mark something required that does not appear in the URL.
 fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
@@ -316,6 +472,13 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let path = merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
     let query = merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
     let body = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+
+    // See "Path parameters are forced required" above.
+    for name in &path.contributed {
+        if !required.contains(name) {
+            required.push(name.clone());
+        }
+    }
 
     let mut unrepresentable = Vec::new();
     let mut unresolved_refs = Vec::new();
@@ -329,6 +492,19 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     }
     unrepresentable.sort();
     unresolved_refs.sort();
+
+    // `additionalProperties: false` describes the *merged* object, so it can
+    // only be repeated when every source that fed that object closed itself.
+    // One open source (a struct without `#[serde(deny_unknown_fields)]`)
+    // means an unknown key is legal somewhere, and claiming otherwise would
+    // make a strict client refuse arguments the server would have accepted.
+    let merged_is_closed = {
+        let mut present = [&path, &query, &body]
+            .into_iter()
+            .filter(|merged| merged.present)
+            .peekable();
+        present.peek().is_some() && present.all(|merged| merged.closed)
+    };
 
     let (path_params, query_params, body_params) =
         (path.contributed, query.contributed, body.contributed);
@@ -354,6 +530,9 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     if !required.is_empty() {
         required.sort();
         schema.insert("required".into(), json!(required));
+    }
+    if merged_is_closed {
+        schema.insert("additionalProperties".into(), json!(false));
     }
 
     AgentInputSchema {
@@ -621,6 +800,153 @@ fn auth_rank(level: AuthLevel) -> u8 {
     }
 }
 
+/// Whether a request with this method can carry a body an agent's arguments
+/// could travel in.
+///
+/// `GET` cannot: the Fetch standard makes constructing a `Request` with a
+/// body on a `GET` or `HEAD` a `TypeError`, so a tool that declares body
+/// arguments on a `GET` throws before it ever reaches the network — it fails
+/// on 100% of invocations.
+///
+/// `DELETE` is treated as body-less too. `fetch` does not object to it, but
+/// RFC 9110 §9.3.5 gives a `DELETE` payload no defined semantics,
+/// intermediaries are permitted to drop it, and no endpoint in this workspace
+/// declares one — so the shape has no established meaning to preserve. The
+/// refusal is not silent (see [`WebMcpRefusal`]), so an author who genuinely
+/// needs a `DELETE` body learns exactly why the tool is missing rather than
+/// shipping one that works in one deployment and not the next.
+fn method_can_carry_body(method: HttpMethod) -> bool {
+    match method {
+        HttpMethod::Post | HttpMethod::Patch => true,
+        HttpMethod::Get | HttpMethod::Delete => false,
+    }
+}
+
+/// Why one opted-in endpoint did not become a WebMCP tool.
+///
+/// Every variant is a defect in the endpoint's own declarations, not a
+/// property of the caller: the auth filter is not represented here, because
+/// hiding a tool from a caller who may not invoke it is the projection
+/// working, not failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WebMcpRefusal {
+    /// The tool name is not a legal MCP tool name — see
+    /// `AgentTool::is_valid_name`. `BlockInfo::validate` rejects this at
+    /// registration; reaching the generator means something bypassed it.
+    InvalidToolName,
+    /// More than one opted-in endpoint declares this tool name, so none of
+    /// them can claim it. Carries how many endpoints share it.
+    DuplicateToolName {
+        /// How many opted-in endpoints declare this name.
+        count: usize,
+    },
+    /// Property names arriving from more than one of path/query/body.
+    CollidingParameterNames {
+        /// The colliding names, sorted.
+        names: Vec<String>,
+    },
+    /// Schema sources (`"path"`, `"query"`, `"body"`) that could not be
+    /// honestly flattened — see `source_is_flattenable`.
+    UnrepresentableSources {
+        /// The offending source labels, sorted.
+        sources: Vec<String>,
+    },
+    /// Schema sources whose inlining hit a `$ref` it could not resolve.
+    UnresolvedRefs {
+        /// The offending source labels, sorted.
+        sources: Vec<String>,
+    },
+    /// The URL path template has an unmatched or empty `{}` placeholder.
+    MalformedPathTemplate,
+    /// The declared path parameters are not exactly the template's
+    /// placeholders, so the client cannot build the URL.
+    PathParamsDisagreeWithTemplate {
+        /// Placeholder names found in the path template, sorted and deduped.
+        placeholders: Vec<String>,
+        /// Property names the path schema declared, sorted.
+        declared: Vec<String>,
+    },
+    /// The endpoint declares body arguments on a method that cannot carry a
+    /// body — see [`method_can_carry_body`].
+    BodyOnBodylessMethod {
+        /// The body property names that have nowhere to travel, sorted.
+        body_params: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for WebMcpRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidToolName => f.write_str(
+                "tool name is not a legal MCP tool name (1-128 characters of [A-Za-z0-9_-])",
+            ),
+            Self::DuplicateToolName { count } => write!(
+                f,
+                "tool name is declared by {count} endpoints, so none of them can claim it"
+            ),
+            Self::CollidingParameterNames { names } => write!(
+                f,
+                "parameter name(s) {} arrive from more than one of path/query/body and cannot be described by one flat schema",
+                names.join(", ")
+            ),
+            Self::UnrepresentableSources { sources } => write!(
+                f,
+                "schema source(s) {} cannot be flattened into the tool's object-shaped inputSchema without losing constraints",
+                sources.join(", ")
+            ),
+            Self::UnresolvedRefs { sources } => write!(
+                f,
+                "schema source(s) {} contain a $ref that could not be resolved, leaving an unconstrained {{}} where the server requires a type",
+                sources.join(", ")
+            ),
+            Self::MalformedPathTemplate => {
+                f.write_str("path template has an unmatched, empty, or nested {} placeholder")
+            }
+            Self::PathParamsDisagreeWithTemplate {
+                placeholders,
+                declared,
+            } => write!(
+                f,
+                "path template placeholders [{}] do not match the declared path params [{}], so the request URL cannot be built",
+                placeholders.join(", "),
+                declared.join(", ")
+            ),
+            Self::BodyOnBodylessMethod { body_params } => write!(
+                f,
+                "body parameter(s) {} are declared on a method that cannot carry a request body",
+                body_params.join(", ")
+            ),
+        }
+    }
+}
+
+/// One endpoint that opted in to agent-tool exposure and was refused, named
+/// precisely enough to find in source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebMcpRefusalReport {
+    /// Name of the block declaring the endpoint.
+    pub block: String,
+    /// HTTP method of the refused endpoint.
+    pub method: HttpMethod,
+    /// URL path of the refused endpoint.
+    pub path: String,
+    /// The tool name the endpoint asked for.
+    pub tool_name: String,
+    /// Why it was refused.
+    pub reason: WebMcpRefusal,
+}
+
+impl std::fmt::Display for WebMcpRefusalReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "block '{}' endpoint {} {} (tool '{}'): {}",
+            self.block, self.method, self.path, self.tool_name, self.reason
+        )
+    }
+}
+
 /// Project the blocks' endpoint declarations into a WebMCP tool manifest,
 /// filtered to what `caller` is allowed to invoke.
 ///
@@ -661,12 +987,59 @@ pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
 /// which for a prefix-tiered router is `max(prefix_tier, ep.auth)`, not
 /// `ep.auth` alone. Everything else matches [`generate_webmcp`], whose docs
 /// describe the projection and why the auth filter matters.
+///
+/// Every endpoint this refuses is logged at `warn!` with the block, method,
+/// path, tool name, and reason. Use [`generate_webmcp_report`] to receive the
+/// refusals as data instead.
 pub fn generate_webmcp_with(
     blocks: &[BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
 ) -> Value {
+    let (manifest, refused) = generate_webmcp_report(blocks, caller, effective_auth);
+    for refusal in &refused {
+        tracing::warn!(
+            block = %refusal.block,
+            method = %refusal.method,
+            path = %refusal.path,
+            tool = %refusal.tool_name,
+            reason = %refusal.reason,
+            "webmcp: endpoint opted in to agent-tool exposure but was refused"
+        );
+    }
+    manifest
+}
+
+/// [`generate_webmcp_with`], returning the refused endpoints alongside the
+/// manifest instead of logging them.
+///
+/// # Why refusals are not in the manifest
+///
+/// The refusal list is deliberately a *second* return value rather than a
+/// section of the served document. A caller who cannot see a tool must not be
+/// told that a tool they cannot see exists, let alone what is wrong with it;
+/// that is the same existence-oracle the auth filter is there to close. The
+/// refusals are for the operator's logs and for tests, and the manifest is
+/// for the agent.
+///
+/// # Refusals are the same for every caller
+///
+/// Every refusal reason is a defect in the endpoint's own declarations, so
+/// the structural checks run *before* the auth filter and the returned list
+/// does not depend on `caller`. A broken admin endpoint is broken when an
+/// anonymous visitor loads the manifest too, and an author debugging it
+/// should not have to guess which caller makes the diagnostic appear. The
+/// auth filter itself is not a refusal — omitting a tool the caller may not
+/// invoke is the projection working — so it is applied last and reported
+/// nowhere.
+pub fn generate_webmcp_report(
+    blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+) -> (Value, Vec<WebMcpRefusalReport>) {
     let ceiling = auth_rank(caller);
+
+    let mut refused: Vec<WebMcpRefusalReport> = Vec::new();
 
     // A WebMCP client registers tools by name, so two endpoints sharing a
     // name are ambiguous no matter which one "wins".
@@ -684,11 +1057,20 @@ pub fn generate_webmcp_with(
     // Counting first and then emitting only what turned out unique is also
     // order-independent by construction, unlike dropping the later
     // duplicate.
+    //
+    // Names that are not legal MCP tool names are excluded from the count.
+    // They are refused on their own terms below, and counting them would let
+    // one defect cause another: two endpoints that both forgot a name would
+    // share the empty-string bucket, and every future endpoint that also
+    // forgot one would keep that bucket above 1 — a `DuplicateToolName`
+    // verdict that says nothing true about either endpoint.
     let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for block in blocks {
         for ep in &block.endpoints {
             if let Some(tool) = ep.agent_tool.as_ref() {
-                *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
+                if AgentTool::is_valid_name(&tool.name) {
+                    *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
+                }
             }
         }
     }
@@ -700,10 +1082,30 @@ pub fn generate_webmcp_with(
             let Some(tool) = ep.agent_tool.as_ref() else {
                 continue;
             };
-            if name_counts.get(tool.name.as_str()).copied().unwrap_or(0) != 1 {
+
+            let mut refuse = |reason: WebMcpRefusal| {
+                refused.push(WebMcpRefusalReport {
+                    block: block.name.clone(),
+                    method: ep.method,
+                    path: ep.path.clone(),
+                    tool_name: tool.name.clone(),
+                    reason,
+                });
+            };
+
+            // `BlockInfo::validate` rejects an illegal name at registration,
+            // so reaching here means a block was constructed without going
+            // through it. Skipping defensively keeps a name an MCP client
+            // would reject — and which the consumer's per-tool try/catch
+            // would swallow — out of the manifest.
+            if !AgentTool::is_valid_name(&tool.name) {
+                refuse(WebMcpRefusal::InvalidToolName);
                 continue;
             }
-            if auth_rank(effective_auth(block, ep)) > ceiling {
+
+            let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
+            if count != 1 {
+                refuse(WebMcpRefusal::DuplicateToolName { count });
                 continue;
             }
 
@@ -714,17 +1116,23 @@ pub fn generate_webmcp_with(
             // the value in both places. Emitting no tool is the safe, visible
             // failure; emitting a lying one is neither.
             if !input.collisions.is_empty() {
+                refuse(WebMcpRefusal::CollidingParameterNames {
+                    names: input.collisions.clone(),
+                });
                 continue;
             }
 
-            // A source that is present but reduces to no top-level
-            // `properties` (a tagged-enum body, an array body, a
-            // root-recursive `$ref`) can't be flattened into the
-            // object-shaped `inputSchema` a tool exposes. A tool claiming it
-            // takes no arguments from that source while the server still
-            // requires one is exactly the kind of lie `collisions` above
-            // already refuses to tell.
+            // A source that cannot be honestly flattened into the
+            // object-shaped `inputSchema` a tool exposes — a tagged-enum
+            // body, an array body, a composition keyword sitting beside
+            // `properties`, an open map the invocation cannot route. A tool
+            // that misdescribes the arguments its source really takes is
+            // exactly the kind of lie `collisions` above already refuses to
+            // tell. See `source_is_flattenable`.
             if !input.unrepresentable.is_empty() {
+                refuse(WebMcpRefusal::UnrepresentableSources {
+                    sources: input.unrepresentable.clone(),
+                });
                 continue;
             }
 
@@ -734,6 +1142,9 @@ pub fn generate_webmcp_with(
             // `properties` object, one entry of which now accepts garbage.
             // Same lie, quieter.
             if !input.unresolved_refs.is_empty() {
+                refuse(WebMcpRefusal::UnresolvedRefs {
+                    sources: input.unresolved_refs.clone(),
+                });
                 continue;
             }
 
@@ -746,11 +1157,37 @@ pub fn generate_webmcp_with(
             // dropped. A tool whose URL can never be built is a lie about
             // what it does, so it is not published at all.
             let Some(mut placeholders) = path_placeholders(&ep.path) else {
+                refuse(WebMcpRefusal::MalformedPathTemplate);
                 continue;
             };
             placeholders.sort();
             placeholders.dedup();
             if placeholders != input.path_params {
+                refuse(WebMcpRefusal::PathParamsDisagreeWithTemplate {
+                    placeholders,
+                    declared: input.path_params.clone(),
+                });
+                continue;
+            }
+
+            // Body arguments on a method that cannot carry a body have
+            // nowhere to travel: a client that honours `body_params` builds a
+            // request the Fetch standard refuses to construct, and one that
+            // quietly drops them sends a request the server rejects for
+            // missing data. Either way the tool fails on every invocation, so
+            // it is not published. See `method_can_carry_body`.
+            if !input.body_params.is_empty() && !method_can_carry_body(ep.method) {
+                refuse(WebMcpRefusal::BodyOnBodylessMethod {
+                    body_params: input.body_params.clone(),
+                });
+                continue;
+            }
+
+            // Everything above is a defect in the endpoint. This is not: a
+            // tool the caller may not invoke is omitted, silently and by
+            // design. See the "Refusals are the same for every caller"
+            // section.
+            if auth_rank(effective_auth(block, ep)) > ceiling {
                 continue;
             }
 
@@ -787,10 +1224,13 @@ pub fn generate_webmcp_with(
         }
     }
 
-    json!({
-        "schema_version": 1,
-        "tools": tools,
-    })
+    (
+        json!({
+            "schema_version": 1,
+            "tools": tools,
+        }),
+        refused,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1920,300 @@ mod tests {
             "an ordinary object source must not be flagged: {:?}",
             result.unrepresentable
         );
+        assert_eq!(result.body_params, vec!["name".to_string()]);
+    }
+
+    // -----------------------------------------------------------------
+    // representability: composition keywords beside `properties`
+    // -----------------------------------------------------------------
+
+    /// `#[serde(flatten)] kind: SomeEnum` on a body struct: schemars emits
+    /// the enum's `oneOf` as a *sibling* of the merged `properties`. A
+    /// "does it have `properties`?" test sees a healthy schema and publishes
+    /// a tool whose `inputSchema` is missing every field inside those
+    /// branches — and the `required` entries with them.
+    ///
+    /// The literal below is what `BlockEndpoint::input::<T>()` emits for
+    /// `struct Body { name: String, #[serde(flatten)] kind: Kind }` with
+    /// `#[serde(tag = "kind")] enum Kind { Percent { percent: f64 },
+    /// Amount { amount: i64 } }`, root `title` included.
+    #[test]
+    fn agent_input_schema_flags_a_oneof_beside_properties_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/rules").input_schema(json!({
+            "title": "Body",
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "const": "Percent", "type": "string" },
+                        "percent": { "format": "double", "type": "number" }
+                    },
+                    "required": ["kind", "percent"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "amount": { "format": "int64", "type": "integer" },
+                        "kind": { "const": "Amount", "type": "string" }
+                    },
+                    "required": ["kind", "amount"]
+                }
+            ]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.unrepresentable,
+            vec!["body".to_string()],
+            "a oneOf sitting beside properties must be flagged, not silently \
+             dropped: {}",
+            result.schema
+        );
+        assert!(
+            result.body_params.is_empty(),
+            "an unrepresentable source contributes nothing"
+        );
+    }
+
+    #[test]
+    fn agent_input_schema_flags_an_allof_beside_properties_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/rules").input_schema(json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "allOf": [
+                { "type": "object", "properties": { "extra": { "type": "string" } } }
+            ]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn agent_input_schema_flags_an_if_then_beside_properties_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/rules").input_schema(json!({
+            "type": "object",
+            "properties": { "mode": { "type": "string" } },
+            "if": { "properties": { "mode": { "const": "advanced" } } },
+            "then": { "required": ["threshold"] }
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn agent_input_schema_flags_a_nullable_source_as_unrepresentable() {
+        // `Option<T>`: schemars emits `"type": [T, "null"]`, and `null` is
+        // not something a flat object schema can express.
+        let ep = BlockEndpoint::post("/b/products/maybe").input_schema(json!({
+            "title": "Nullable_string",
+            "type": ["string", "null"]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn agent_input_schema_flags_a_boolean_schema_source_as_unrepresentable() {
+        // The JSON Schema "accept anything" form. It admits arrays and
+        // scalars too, which a flat object cannot describe, and the agent
+        // has no named argument to put anything into.
+        let ep = BlockEndpoint::post("/b/products/raw").input_schema(json!(true));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn agent_input_schema_flags_an_untyped_any_source_as_unrepresentable() {
+        // What `BlockEndpoint::input::<serde_json::Value>()` emits: a bare
+        // annotation with no `type` and no `properties`, which constrains
+        // nothing at all.
+        let ep =
+            BlockEndpoint::post("/b/products/raw").input_schema(json!({ "title": "AnyValue" }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    // -----------------------------------------------------------------
+    // representability: shapes the old `properties`-based test over-refused
+    // -----------------------------------------------------------------
+
+    /// A fieldless struct derives `{"title": "Empty", "type": "object"}` with
+    /// no `properties` at all, and genuinely takes no arguments.
+    /// Contributing nothing for it is the truth, not a lie, so it must not
+    /// be refused.
+    #[test]
+    fn agent_input_schema_treats_an_empty_object_source_as_representable() {
+        let ep = BlockEndpoint::post("/b/products/ping").input_schema(json!({
+            "title": "Empty",
+            "type": "object"
+        }));
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.unrepresentable.is_empty(),
+            "a fieldless object body takes no arguments and is representable: {:?}",
+            result.unrepresentable
+        );
+        assert!(result.body_params.is_empty());
+        assert_eq!(result.schema, json!({ "type": "object", "properties": {} }));
+    }
+
+    /// `#[serde(deny_unknown_fields)]` derives `additionalProperties: false`.
+    /// It is representable, and the merged object may repeat the claim
+    /// because every source that fed it made the same one.
+    #[test]
+    fn agent_input_schema_carries_additional_properties_false_when_every_source_closes() {
+        let ep = BlockEndpoint::post("/b/products/strict/{id}")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false
+            }));
+        let result = agent_input_schema(&ep);
+        assert!(result.unrepresentable.is_empty());
+        assert_eq!(
+            result.schema["additionalProperties"],
+            json!(false),
+            "every present source closed itself, so the merged object may \
+             say so too: {}",
+            result.schema
+        );
+    }
+
+    /// One open source means an unknown key is legal somewhere. Claiming the
+    /// merged object is closed would make a strict client refuse arguments
+    /// the server would have accepted.
+    #[test]
+    fn agent_input_schema_drops_additional_properties_false_when_one_source_is_open() {
+        let ep = BlockEndpoint::post("/b/products/strict/{id}")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } }
+            }));
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.schema.get("additionalProperties").is_none(),
+            "one open source means the merged object is not closed: {}",
+            result.schema
+        );
+    }
+
+    /// A `HashMap<String, T>` body derives `{"type": "object",
+    /// "additionalProperties": {...}}`. The schema shape alone is
+    /// flattenable, but the `invocation` provenance routes arguments by
+    /// *name* — `body_params` is a fixed list — so a key the agent invents
+    /// has nowhere to go and never reaches the server. Publishing a tool
+    /// whose only usable arguments cannot be transmitted fails on every
+    /// invocation, so it is refused.
+    #[test]
+    fn agent_input_schema_flags_an_open_map_body_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/settings").input_schema(json!({
+            "title": "MapBody",
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.unrepresentable,
+            vec!["body".to_string()],
+            "an open map body has no named arguments the client can route: {}",
+            result.schema
+        );
+    }
+
+    #[test]
+    fn agent_input_schema_flags_an_explicitly_open_object_as_unrepresentable() {
+        let ep = BlockEndpoint::post("/b/products/settings").input_schema(json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "additionalProperties": true
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+    }
+
+    // -----------------------------------------------------------------
+    // path placeholders are structurally mandatory
+    // -----------------------------------------------------------------
+
+    /// A path source with no `required` key at all still yields a `required`
+    /// list containing the placeholder. Without this the emitted schema marks
+    /// the path param OPTIONAL, the agent legitimately omits it, and the
+    /// client fetches `/b/x/undefined`.
+    #[test]
+    fn agent_input_schema_forces_an_optional_path_param_required() {
+        let ep = BlockEndpoint::get("/b/x/{id}").path_params_schema(json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } }
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.schema["required"],
+            json!(["id"]),
+            "a path placeholder is structurally mandatory whatever the source \
+             said: {}",
+            result.schema
+        );
+    }
+
+    #[test]
+    fn agent_input_schema_keeps_a_path_param_the_source_already_required() {
+        let ep = BlockEndpoint::get("/b/x/{id}").path_params_schema(json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(
+            result.schema["required"],
+            json!(["id"]),
+            "no duplicate entry when the source already said so: {}",
+            result.schema
+        );
+    }
+
+    #[test]
+    fn agent_input_schema_forces_every_placeholder_on_a_multi_placeholder_path() {
+        let ep = BlockEndpoint::get("/b/x/{tenant}/y/{id}").path_params_schema(json!({
+            "type": "object",
+            "properties": { "tenant": { "type": "string" }, "id": { "type": "string" } }
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.schema["required"], json!(["id", "tenant"]));
+    }
+
+    /// Forcing applies only to the path source. A query or body property the
+    /// author marked optional stays optional.
+    #[test]
+    fn agent_input_schema_does_not_force_query_or_body_params_required() {
+        let ep = BlockEndpoint::post("/b/x/{id}")
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } }
+            }))
+            .query_params_schema(json!({
+                "type": "object",
+                "properties": { "expand": { "type": "string" } }
+            }))
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } }
+            }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.schema["required"], json!(["id"]));
     }
 
     // -----------------------------------------------------------------
@@ -2405,5 +3139,442 @@ mod tests {
             "a live tool must not carry the key at all: {new}"
         );
         assert_eq!(new["description"], json!("Fetch a thing."));
+    }
+
+    // -----------------------------------------------------------------
+    // methods that cannot carry a body
+    // -----------------------------------------------------------------
+
+    /// Build a one-endpoint block, and return the manifest plus the refusals
+    /// an admin caller's generation produced.
+    fn report_for(ep: BlockEndpoint) -> (Value, Vec<WebMcpRefusalReport>) {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![ep]);
+        generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth)
+    }
+
+    #[test]
+    fn webmcp_refuses_a_get_that_declares_a_request_body() {
+        // The Fetch standard makes a GET with a body a TypeError, so a client
+        // honouring `body_params` throws before the request leaves the page.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/search")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }))
+                .agent_tool("search_things", "Search things."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new());
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::BodyOnBodylessMethod {
+                body_params: vec!["query".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn webmcp_refuses_a_delete_that_declares_a_request_body() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::delete("/b/x/things")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+                }))
+                .agent_tool("delete_things", "Delete things."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new());
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::BodyOnBodylessMethod {
+                body_params: vec!["ids".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn webmcp_emits_a_get_with_only_path_and_query_params() {
+        // Guard against over-refusal: the rule is about *body* arguments, not
+        // about GET.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/things/{id}")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }))
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": { "expand": { "type": "string" } }
+                }))
+                .agent_tool("get_thing", "Fetch a thing."),
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()]);
+        assert!(refused.is_empty(), "{refused:?}");
+    }
+
+    #[test]
+    fn webmcp_emits_a_post_that_declares_a_request_body() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::post("/b/x/things")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "name": { "type": "string" } },
+                    "required": ["name"]
+                }))
+                .agent_tool("create_thing", "Create a thing."),
+        );
+        assert_eq!(tool_names(&doc), vec!["create_thing".to_string()]);
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["invocation"]["body_params"],
+            json!(["name"])
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // representability, end to end
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webmcp_refuses_an_endpoint_whose_body_flattens_an_enum() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::post("/b/x/rules")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "name": { "type": "string" } },
+                    "oneOf": [
+                        { "type": "object", "properties": { "kind": { "const": "a" } } },
+                        { "type": "object", "properties": { "kind": { "const": "b" } } }
+                    ]
+                }))
+                .agent_tool("create_rule", "Create a rule."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new());
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::UnrepresentableSources {
+                sources: vec!["body".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn webmcp_emits_a_tool_for_a_fieldless_object_body() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::post("/b/x/ping")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({ "type": "object" }))
+                .agent_tool("ping", "Ping the service."),
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["inputSchema"],
+            json!({ "type": "object", "properties": {} }),
+            "a fieldless body takes no arguments, which is the truth: {doc}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // path placeholders are emitted as required
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webmcp_emits_a_path_param_as_required_even_when_the_source_did_not() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/things/{id}")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } }
+                }))
+                .agent_tool("get_thing", "Fetch a thing."),
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["inputSchema"]["required"],
+            json!(["id"]),
+            "an optional path param would let the agent omit it and the client \
+             fetch /b/x/things/undefined: {doc}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // the source root `title` is WebMCP-side noise
+    // -----------------------------------------------------------------
+
+    /// The stored schema keeps its root `title` — `/openapi.json` embeds
+    /// these verbatim and client generators name types from it. The merged
+    /// agent input schema drops it: it names the source Rust type, not the
+    /// argument object the agent fills in.
+    #[test]
+    fn webmcp_input_schema_drops_the_source_root_title() {
+        let source = json!({
+            "title": "CreateThing",
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let (doc, refused) = report_for(
+            BlockEndpoint::post("/b/x/things")
+                .auth(AuthLevel::Public)
+                .input_schema(source.clone())
+                .agent_tool("create_thing", "Create a thing."),
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["inputSchema"],
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }),
+            "the Rust type name is noise for an agent: {doc}"
+        );
+        assert_eq!(
+            source["title"],
+            json!("CreateThing"),
+            "and the stored schema is untouched, so /openapi.json still names \
+             the generated type"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // tool-name validation at the generator
+    // -----------------------------------------------------------------
+
+    /// `BlockInfo::validate` rejects these at boot. If one reaches the
+    /// generator anyway it must be skipped rather than emitted — and it must
+    /// not be counted, or two endpoints that both forgot a name would share
+    /// the empty-string bucket and turn each other into "duplicates".
+    #[test]
+    fn webmcp_refuses_an_invalid_tool_name_without_poisoning_other_names() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/a")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("", "Nameless."),
+                BlockEndpoint::get("/b/x/b")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("", "Also nameless."),
+                BlockEndpoint::get("/b/x/c")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get thing", "Space in the name."),
+                BlockEndpoint::get("/b/x/d")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Perfectly fine."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_thing".to_string()],
+            "the valid tool must survive its neighbours' bad names: {doc}"
+        );
+        assert_eq!(refused.len(), 3);
+        for refusal in &refused {
+            assert_eq!(
+                refusal.reason,
+                WebMcpRefusal::InvalidToolName,
+                "an empty name must be reported as invalid, never as a \
+                 duplicate of the other empty one: {refusal}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // refusal diagnostics
+    // -----------------------------------------------------------------
+
+    /// Every refusal path names the endpoint precisely enough to find in
+    /// source, and says which rule it broke. Before this, all seven were a
+    /// bare `continue` and an author who annotated an endpoint and got no
+    /// tool had nothing to go on.
+    #[test]
+    fn webmcp_report_names_the_endpoint_and_the_reason_for_every_refusal() {
+        let colliding = json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"]
+        });
+
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                // 1. invalid name
+                BlockEndpoint::get("/b/x/invalid").agent_tool("get thing", "Space in the name."),
+                // 2 + 3. duplicate name (both sides)
+                BlockEndpoint::get("/b/x/dup_a").agent_tool("dup", "One."),
+                BlockEndpoint::get("/b/x/dup_b").agent_tool("dup", "Two."),
+                // 4. colliding parameter names
+                BlockEndpoint::get("/b/x/collide/{id}")
+                    .path_params_schema(colliding.clone())
+                    .query_params_schema(colliding.clone())
+                    .agent_tool("collide", "Collide."),
+                // 5. unrepresentable source
+                BlockEndpoint::post("/b/x/enum")
+                    .input_schema(json!({ "oneOf": [{ "type": "object" }] }))
+                    .agent_tool("tagged_enum_body", "Tagged enum body."),
+                // 6. unresolved `$ref`
+                BlockEndpoint::post("/b/x/tree")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/Missing" } }
+                    }))
+                    .agent_tool("dangling_ref", "Dangling ref."),
+                // 7. malformed path template
+                BlockEndpoint::get("/b/x/broken/{id").agent_tool("malformed", "Malformed."),
+                // 8. path params disagree with the template
+                BlockEndpoint::get("/b/x/mismatch/{product_id}")
+                    .path_params_schema(colliding)
+                    .agent_tool("mismatch", "Mismatch."),
+                // 9. body on a body-less method
+                BlockEndpoint::get("/b/x/get_with_body")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "q": { "type": "string" } }
+                    }))
+                    .agent_tool("get_with_body", "Get with a body."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(
+            tool_names(&doc),
+            Vec::<String>::new(),
+            "every endpoint here is broken: {doc}"
+        );
+
+        let by_tool: std::collections::HashMap<&str, &WebMcpRefusalReport> =
+            refused.iter().map(|r| (r.tool_name.as_str(), r)).collect();
+
+        let expected: Vec<(&str, &str, WebMcpRefusal)> = vec![
+            ("get thing", "/b/x/invalid", WebMcpRefusal::InvalidToolName),
+            (
+                "collide",
+                "/b/x/collide/{id}",
+                WebMcpRefusal::CollidingParameterNames {
+                    names: vec!["id".to_string()],
+                },
+            ),
+            (
+                "tagged_enum_body",
+                "/b/x/enum",
+                WebMcpRefusal::UnrepresentableSources {
+                    sources: vec!["body".to_string()],
+                },
+            ),
+            (
+                "dangling_ref",
+                "/b/x/tree",
+                WebMcpRefusal::UnresolvedRefs {
+                    sources: vec!["body".to_string()],
+                },
+            ),
+            (
+                "malformed",
+                "/b/x/broken/{id",
+                WebMcpRefusal::MalformedPathTemplate,
+            ),
+            (
+                "mismatch",
+                "/b/x/mismatch/{product_id}",
+                WebMcpRefusal::PathParamsDisagreeWithTemplate {
+                    placeholders: vec!["product_id".to_string()],
+                    declared: vec!["id".to_string()],
+                },
+            ),
+            (
+                "get_with_body",
+                "/b/x/get_with_body",
+                WebMcpRefusal::BodyOnBodylessMethod {
+                    body_params: vec!["q".to_string()],
+                },
+            ),
+        ];
+
+        for (tool_name, path, reason) in expected {
+            let refusal = by_tool
+                .get(tool_name)
+                .unwrap_or_else(|| panic!("no refusal reported for {tool_name}: {refused:?}"));
+            assert_eq!(refusal.reason, reason, "wrong reason for {tool_name}");
+            assert_eq!(refusal.path, path);
+            assert_eq!(refusal.block, "test/block");
+
+            // The rendered line has to be enough to find the endpoint.
+            let rendered = refusal.to_string();
+            assert!(rendered.contains("test/block"), "{rendered}");
+            assert!(rendered.contains(path), "{rendered}");
+            assert!(rendered.contains(tool_name), "{rendered}");
+            assert!(rendered.contains(&refusal.method.to_string()), "{rendered}");
+        }
+
+        // Both sides of the duplicate are reported, each naming the count.
+        let duplicates: Vec<&WebMcpRefusalReport> =
+            refused.iter().filter(|r| r.tool_name == "dup").collect();
+        assert_eq!(duplicates.len(), 2, "{refused:?}");
+        for refusal in duplicates {
+            assert_eq!(
+                refusal.reason,
+                WebMcpRefusal::DuplicateToolName { count: 2 }
+            );
+        }
+    }
+
+    /// The refusal list is a defect report about the endpoints, not about the
+    /// caller, so it must not vary with `caller` — an author debugging a
+    /// missing admin tool should not have to authenticate to see why.
+    #[test]
+    fn webmcp_refusals_do_not_depend_on_the_caller() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/admin_broken/{id}")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("admin_broken", "Broken admin tool."),
+            ]);
+
+        let (public_doc, public_refusals) =
+            generate_webmcp_report(std::slice::from_ref(&block), AuthLevel::Public, |_, ep| {
+                ep.auth
+            });
+        let (_, admin_refusals) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+
+        assert_eq!(tool_names(&public_doc), Vec::<String>::new());
+        assert_eq!(public_refusals, admin_refusals);
+        assert_eq!(
+            public_refusals[0].reason,
+            WebMcpRefusal::PathParamsDisagreeWithTemplate {
+                placeholders: vec!["id".to_string()],
+                declared: Vec::new(),
+            }
+        );
+    }
+
+    /// Hiding a tool the caller may not invoke is the projection working, so
+    /// it must not be reported as a refusal — the refusal channel is for
+    /// defects an author has to fix.
+    #[test]
+    fn webmcp_auth_filtering_is_not_reported_as_a_refusal() {
+        let (doc, refused) =
+            generate_webmcp_report(&webmcp_fixture_blocks(), AuthLevel::Public, |_, ep| ep.auth);
+        assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
+        assert!(
+            refused.is_empty(),
+            "the hidden admin and authenticated tools are healthy, just \
+             out of reach: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn webmcp_with_matches_the_report_variant_manifest() {
+        let blocks = webmcp_fixture_blocks();
+        let (reported, _) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(generate_webmcp(&blocks, AuthLevel::Admin), reported);
     }
 }
