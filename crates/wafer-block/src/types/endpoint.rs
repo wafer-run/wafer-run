@@ -243,7 +243,8 @@ impl BlockEndpoint {
 
     /// Derive the request-body JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// Inlined and self-contained: no `$schema`, no schemars-default root
+    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
     /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
@@ -253,7 +254,8 @@ impl BlockEndpoint {
 
     /// Derive the response-body JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// Inlined and self-contained: no `$schema`, no schemars-default root
+    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
     /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
@@ -263,7 +265,8 @@ impl BlockEndpoint {
 
     /// Derive the path-params JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// Inlined and self-contained: no `$schema`, no schemars-default root
+    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
     /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
@@ -273,7 +276,8 @@ impl BlockEndpoint {
 
     /// Derive the query-params JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no root `title`, and no
+    /// Inlined and self-contained: no `$schema`, no schemars-default root
+    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
     /// `$ref` unless `T` is recursive. See `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
@@ -295,8 +299,9 @@ impl BlockEndpoint {
 ///
 /// So the generator inlines subschemas instead of referencing them, and the
 /// two document-level keys are suppressed: `$schema` (the meta-schema URI,
-/// meaningless in a fragment) and `title` (schemars fills it with the Rust
-/// type name, which is not API documentation).
+/// meaningless in a fragment) and `title` — but only the *default* title,
+/// the Rust type name schemars fills in when the author supplied none. An
+/// explicit `#[schemars(title = "...")]` is editorial text and survives.
 ///
 /// Field descriptions from `///` doc comments survive: schemars emits them
 /// as siblings of the inlined subschema, not as part of the definition they
@@ -322,7 +327,14 @@ impl BlockEndpoint {
 /// WebMCP projection, and recursive contracts are the only shape affected.
 #[cfg(feature = "json-schema")]
 fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    let mut value = schemars::generate::SchemaSettings::default()
+    // Pinned to draft 2020-12 rather than `SchemaSettings::default()`.
+    // schemars documents the default as liable to change between minor
+    // versions, and this draft is what produces the `#/$defs/X` reference
+    // form that `wafer-core::discovery::inline_refs` hardcodes when it
+    // flattens these schemas for the WebMCP projection. A default flip to
+    // draft-07 would move every reference to `#/definitions/X`, silently
+    // resolving none of them, with no compile error anywhere.
+    let mut value = schemars::generate::SchemaSettings::draft2020_12()
         .with(|settings| {
             settings.inline_subschemas = true;
             settings.meta_schema = None;
@@ -333,8 +345,15 @@ fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
 
     if let Some(obj) = value.as_object_mut() {
         // `$schema` is already suppressed by `meta_schema = None`; `title`
-        // has no such setting, so it is dropped here.
-        obj.remove("title");
+        // has no such setting, so the schemars-supplied default is dropped
+        // here — and *only* that default. schemars fills the root title with
+        // `entry("title").or_insert_with(T::schema_name)`, so a title that
+        // is not the Rust type name was written deliberately by the author
+        // (`#[schemars(title = "...")]`) and is API documentation worth
+        // keeping.
+        if obj.get("title").and_then(serde_json::Value::as_str) == Some(T::schema_name().as_ref()) {
+            obj.remove("title");
+        }
     }
     value
 }
@@ -471,6 +490,48 @@ mod block_endpoint_tests {
         assert!(
             schema.get("title").is_none(),
             "root title is the Rust type name, not API documentation: {rendered}"
+        );
+    }
+
+    /// The root `title` schemars supplies by default is the Rust type name,
+    /// which is not API documentation and is dropped. A title the author
+    /// wrote is editorial text — schemars only *defaults* the key
+    /// (`entry("title").or_insert_with(T::schema_name)`), so anything else
+    /// found there was deliberate and must survive into the schema.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn derived_schema_keeps_an_author_supplied_root_title() {
+        #[derive(schemars::JsonSchema)]
+        #[schemars(title = "Create a product")]
+        #[allow(dead_code)]
+        struct TitledProduct {
+            name: String,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct UntitledProduct {
+            name: String,
+        }
+
+        let titled = BlockEndpoint::post("/b/products")
+            .input::<TitledProduct>()
+            .input_schema
+            .expect("input schema set");
+        assert_eq!(
+            titled["title"],
+            serde_json::json!("Create a product"),
+            "an explicit #[schemars(title = ...)] must survive: {titled}"
+        );
+
+        let untitled = BlockEndpoint::post("/b/products")
+            .input::<UntitledProduct>()
+            .input_schema
+            .expect("input schema set");
+        assert!(
+            untitled.get("title").is_none(),
+            "the schemars-default title is the Rust type name and must be \
+             dropped: {untitled}"
         );
     }
 
