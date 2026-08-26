@@ -62,10 +62,39 @@ impl std::fmt::Display for AuthLevel {
 /// tool that agents have learned.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentTool {
-    /// Stable tool name exposed to agents (e.g. `get_product`).
+    /// Stable tool name exposed to agents (e.g. `get_product`). Must satisfy
+    /// [`AgentTool::is_valid_name`]; [`crate::BlockInfo::validate`] enforces
+    /// that at registration so boot fails rather than the tool vanishing.
     pub name: String,
     /// Description written to help an agent decide when to call this.
     pub description: String,
+}
+
+impl AgentTool {
+    /// Longest tool name the MCP tool-name constraint admits.
+    pub const MAX_NAME_LEN: usize = 128;
+
+    /// Whether `name` is a legal MCP tool name: non-empty, at most
+    /// [`Self::MAX_NAME_LEN`] bytes, and drawn from `[A-Za-z0-9_-]`.
+    ///
+    /// This is not cosmetic. An MCP client rejects a name outside that set,
+    /// and the rejection surfaces inside the consumer's per-tool
+    /// registration `try`/`catch` — so the tool simply disappears, with no
+    /// error reaching the author, the server, or the agent. An empty name is
+    /// worse still: it is a name every unnamed endpoint shares, so the
+    /// duplicate-name rule then suppresses *unrelated* tools.
+    ///
+    /// The set is intentionally the conservative intersection of what MCP
+    /// clients accept, rather than anything wider that some client might
+    /// tolerate — a name that works in one client and vanishes in another is
+    /// the failure this exists to prevent.
+    pub fn is_valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= Self::MAX_NAME_LEN
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
 }
 
 /// An HTTP endpoint exposed by a block.
@@ -243,9 +272,8 @@ impl BlockEndpoint {
 
     /// Derive the request-body JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no schemars-default root
-    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
-    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
+    /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
+    /// recursive. The root `title` is kept — see `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
         self.input_schema = Some(self_contained_schema::<T>());
@@ -254,9 +282,8 @@ impl BlockEndpoint {
 
     /// Derive the response-body JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no schemars-default root
-    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
-    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
+    /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
+    /// recursive. The root `title` is kept — see `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
         self.output_schema = Some(self_contained_schema::<T>());
@@ -265,9 +292,8 @@ impl BlockEndpoint {
 
     /// Derive the path-params JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no schemars-default root
-    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
-    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
+    /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
+    /// recursive. The root `title` is kept — see `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
         self.path_params = Some(self_contained_schema::<T>());
@@ -276,9 +302,8 @@ impl BlockEndpoint {
 
     /// Derive the query-params JSON Schema from `T` via `schemars`.
     ///
-    /// Inlined and self-contained: no `$schema`, no schemars-default root
-    /// `title` (an explicit `#[schemars(title = "...")]` survives), and no
-    /// `$ref` unless `T` is recursive. See `self_contained_schema`.
+    /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
+    /// recursive. The root `title` is kept — see `self_contained_schema`.
     #[cfg(feature = "json-schema")]
     pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
         self.query_params = Some(self_contained_schema::<T>());
@@ -297,15 +322,29 @@ impl BlockEndpoint {
 /// OpenAPI parameter objects. In both places `#/$defs/X` resolves against
 /// the *OpenAPI* root, where no `$defs` exists, so every reference dangles.
 ///
-/// So the generator inlines subschemas instead of referencing them, and the
-/// two document-level keys are suppressed: `$schema` (the meta-schema URI,
-/// meaningless in a fragment) and `title` — but only the *default* title,
-/// the Rust type name schemars fills in when the author supplied none. An
-/// explicit `#[schemars(title = "...")]` is editorial text and survives.
+/// So the generator inlines subschemas instead of referencing them, and one
+/// document-level key is suppressed: `$schema`, the meta-schema URI, which
+/// is meaningless in an embedded fragment and which no consumer of these
+/// schemas reads.
 ///
 /// Field descriptions from `///` doc comments survive: schemars emits them
 /// as siblings of the inlined subschema, not as part of the definition they
 /// replaced.
+///
+/// # The root `title` is kept
+///
+/// schemars fills the root `title` with the Rust type name. That looks like
+/// noise, and for an agent reading a WebMCP `inputSchema` it is — but these
+/// schemas are also embedded verbatim into `/openapi.json`, where OpenAPI
+/// client generators use `title` to *name* the type they generate for the
+/// request or response body. Stripping it there degrades every generated
+/// client's type names to positional placeholders (`InlineResponse200`), so
+/// it stays in the stored schema.
+///
+/// The WebMCP projection drops it instead, at the point where it is actually
+/// noise: `wafer-core`'s `discovery::FLATTENABLE_KEYWORDS` lists `title`
+/// among the annotations a source may carry and the merged agent input
+/// schema does not reproduce.
 ///
 /// # `$defs` is deliberately *not* removed
 ///
@@ -334,28 +373,16 @@ fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     // flattens these schemas for the WebMCP projection. A default flip to
     // draft-07 would move every reference to `#/definitions/X`, silently
     // resolving none of them, with no compile error anywhere.
-    let mut value = schemars::generate::SchemaSettings::draft2020_12()
+    // `$schema` is suppressed by `meta_schema = None`. `title` is kept — see
+    // "The root `title` is kept" above.
+    schemars::generate::SchemaSettings::draft2020_12()
         .with(|settings| {
             settings.inline_subschemas = true;
             settings.meta_schema = None;
         })
         .into_generator()
         .into_root_schema_for::<T>()
-        .to_value();
-
-    if let Some(obj) = value.as_object_mut() {
-        // `$schema` is already suppressed by `meta_schema = None`; `title`
-        // has no such setting, so the schemars-supplied default is dropped
-        // here — and *only* that default. schemars fills the root title with
-        // `entry("title").or_insert_with(T::schema_name)`, so a title that
-        // is not the Rust type name was written deliberately by the author
-        // (`#[schemars(title = "...")]`) and is API documentation worth
-        // keeping.
-        if obj.get("title").and_then(serde_json::Value::as_str) == Some(T::schema_name().as_ref()) {
-            obj.remove("title");
-        }
-    }
-    value
+        .to_value()
 }
 
 #[cfg(test)]
@@ -487,20 +514,24 @@ mod block_endpoint_tests {
             schema.get("$schema").is_none(),
             "root $schema is meaningless inside an OpenAPI requestBody: {rendered}"
         );
-        assert!(
-            schema.get("title").is_none(),
-            "root title is the Rust type name, not API documentation: {rendered}"
+        assert_eq!(
+            schema["title"],
+            serde_json::json!("CreateProduct"),
+            "the root title names the generated type in /openapi.json and \
+             must survive: {rendered}"
         );
     }
 
-    /// The root `title` schemars supplies by default is the Rust type name,
-    /// which is not API documentation and is dropped. A title the author
-    /// wrote is editorial text — schemars only *defaults* the key
-    /// (`entry("title").or_insert_with(T::schema_name)`), so anything else
-    /// found there was deliberate and must survive into the schema.
+    /// The stored schema is embedded verbatim into `/openapi.json`, where
+    /// OpenAPI client generators read the root `title` to name the type they
+    /// generate for the body. Both the schemars default (the Rust type name)
+    /// and an explicit `#[schemars(title = "...")]` are therefore kept;
+    /// dropping either degrades generated client type names to positional
+    /// placeholders. The WebMCP projection drops the title on its own side,
+    /// where the Rust type name is genuinely noise for an agent.
     #[cfg(feature = "json-schema")]
     #[test]
-    fn derived_schema_keeps_an_author_supplied_root_title() {
+    fn derived_schema_keeps_its_root_title() {
         #[derive(schemars::JsonSchema)]
         #[schemars(title = "Create a product")]
         #[allow(dead_code)]
@@ -528,10 +559,11 @@ mod block_endpoint_tests {
             .input::<UntitledProduct>()
             .input_schema
             .expect("input schema set");
-        assert!(
-            untitled.get("title").is_none(),
-            "the schemars-default title is the Rust type name and must be \
-             dropped: {untitled}"
+        assert_eq!(
+            untitled["title"],
+            serde_json::json!("UntitledProduct"),
+            "the schemars-default title names the generated OpenAPI type and \
+             must survive: {untitled}"
         );
     }
 
@@ -641,8 +673,13 @@ mod block_endpoint_tests {
                 "{label} schema must stand alone: {rendered}"
             );
             assert!(
-                schema.get("$schema").is_none() && schema.get("title").is_none(),
-                "{label} schema must not carry document-level keys: {rendered}"
+                schema.get("$schema").is_none(),
+                "{label} schema must not carry the meta-schema URI: {rendered}"
+            );
+            assert_eq!(
+                schema["title"],
+                serde_json::json!("Payload"),
+                "{label} schema keeps its root title for /openapi.json: {rendered}"
             );
         }
     }

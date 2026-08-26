@@ -2,7 +2,7 @@
 
 use super::{
     config_var::{ConfigVar, WAFER_RUN_SHARED_PREFIX},
-    endpoint::BlockEndpoint,
+    endpoint::{AgentTool, BlockEndpoint, HttpMethod},
     grants::ResourceGrant,
     schema::CollectionSchema,
     skill::{ExternalAsset, SkillTool},
@@ -54,6 +54,27 @@ pub enum BlockInfoError {
         block: String,
         /// The reserved config key the block tried to declare.
         key: String,
+    },
+
+    /// An endpoint's [`AgentTool`] name is not a legal MCP tool name — see
+    /// [`AgentTool::is_valid_name`]. Caught at registration because the
+    /// alternative is silence: an MCP client rejects the name inside the
+    /// consumer's per-tool `try`/`catch`, so the tool disappears with no
+    /// error anywhere, and an *empty* name additionally collides with every
+    /// other empty one and suppresses unrelated tools.
+    #[error(
+        "block '{block}' endpoint {method} {path} declares agent tool name '{name}': tool names must be 1-{max} characters of [A-Za-z0-9_-]",
+        max = AgentTool::MAX_NAME_LEN
+    )]
+    InvalidAgentToolName {
+        /// Name of the block that declared the offending tool.
+        block: String,
+        /// HTTP method of the endpoint carrying the tool.
+        method: HttpMethod,
+        /// URL path of the endpoint carrying the tool.
+        path: String,
+        /// The rejected tool name.
+        name: String,
     },
 }
 
@@ -201,7 +222,7 @@ impl BlockInfo {
         }
     }
 
-    /// Validate declared config keys against platform-reserved prefixes.
+    /// Validate declared config keys and agent-tool names.
     ///
     /// A block may not *declare* a `config_keys` or `flow_config` entry whose
     /// name starts with [`WAFER_RUN_SHARED_PREFIX`]. That prefix is owned by the
@@ -209,15 +230,33 @@ impl BlockInfo {
     /// [`ConfigVar::is_deletable`] and `wafer_block::wrap::check_access`), so a
     /// block declaring one would create a key it cannot legitimately own.
     ///
+    /// An endpoint's [`AgentTool`] name must be a legal MCP tool name — see
+    /// [`AgentTool::is_valid_name`] for the rule and for what goes wrong
+    /// downstream when it is not.
+    ///
     /// Called at block registration time by the runtime; returns the first
-    /// offending key as a typed [`BlockInfoError`] so boot fails loudly and
-    /// callers can match on the failure rather than parse a string.
+    /// offending declaration as a typed [`BlockInfoError`] so boot fails
+    /// loudly and callers can match on the failure rather than parse a
+    /// string.
     pub fn validate(&self) -> Result<(), BlockInfoError> {
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
             if var.key.starts_with(WAFER_RUN_SHARED_PREFIX) {
                 return Err(BlockInfoError::ReservedConfigKey {
                     block: self.name.clone(),
                     key: var.key.clone(),
+                });
+            }
+        }
+        for ep in &self.endpoints {
+            let Some(tool) = ep.agent_tool.as_ref() else {
+                continue;
+            };
+            if !AgentTool::is_valid_name(&tool.name) {
+                return Err(BlockInfoError::InvalidAgentToolName {
+                    block: self.name.clone(),
+                    method: ep.method,
+                    path: ep.path.clone(),
+                    name: tool.name.clone(),
                 });
             }
         }
@@ -422,5 +461,75 @@ mod block_info_tests {
             ),
         ]);
         assert!(info.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_a_legal_agent_tool_name() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").endpoints(vec![
+            BlockEndpoint::get("/b/b/thing").agent_tool("get_thing-v2", "Fetch the thing."),
+        ]);
+        assert!(info.validate().is_ok());
+    }
+
+    /// An MCP client rejects a name outside `[A-Za-z0-9_-]`, and the
+    /// rejection is swallowed by the consumer's per-tool try/catch — the
+    /// tool just vanishes. Boot is the last place that failure can still be
+    /// loud.
+    #[test]
+    fn validate_rejects_an_illegal_agent_tool_name() {
+        for name in [
+            "",
+            "get thing",
+            "get.thing",
+            "get/thing",
+            "gét_thing",
+            &"a".repeat(AgentTool::MAX_NAME_LEN + 1),
+        ] {
+            let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").endpoints(vec![
+                BlockEndpoint::get("/b/b/thing").agent_tool(name, "Fetch the thing."),
+            ]);
+            let Err(err) = info.validate() else {
+                panic!("name {name:?} must be rejected");
+            };
+            assert_eq!(
+                err,
+                BlockInfoError::InvalidAgentToolName {
+                    block: "org/b".to_string(),
+                    method: HttpMethod::Get,
+                    path: "/b/b/thing".to_string(),
+                    name: name.to_string(),
+                }
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("org/b"), "message: {msg}");
+            assert!(msg.contains("/b/b/thing"), "message: {msg}");
+            assert!(msg.contains("GET"), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn validate_ignores_endpoints_that_did_not_opt_in() {
+        let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
+            .endpoints(vec![BlockEndpoint::get("/b/b/thing").summary("no tool")]);
+        assert!(info.validate().is_ok());
+    }
+
+    #[test]
+    fn agent_tool_name_charset_is_the_mcp_one() {
+        assert!(AgentTool::is_valid_name("get_product"));
+        assert!(AgentTool::is_valid_name("a"));
+        assert!(AgentTool::is_valid_name("A-9_z"));
+        assert!(AgentTool::is_valid_name(
+            &"a".repeat(AgentTool::MAX_NAME_LEN)
+        ));
+
+        assert!(!AgentTool::is_valid_name(""));
+        assert!(!AgentTool::is_valid_name("has space"));
+        assert!(!AgentTool::is_valid_name("has.dot"));
+        assert!(!AgentTool::is_valid_name("has:colon"));
+        assert!(!AgentTool::is_valid_name("emoji🙂"));
+        assert!(!AgentTool::is_valid_name(
+            &"a".repeat(AgentTool::MAX_NAME_LEN + 1)
+        ));
     }
 }

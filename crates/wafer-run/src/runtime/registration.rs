@@ -265,10 +265,11 @@ impl RegistrationCore {
 
         // Reject declared config keys under platform-reserved prefixes
         // (e.g. WAFER_RUN_SHARED__): those keys are platform-owned, not
-        // block-owned. Fails boot loudly rather than silently accepting a
-        // key the block can never legitimately write.
+        // block-owned. Also rejects an agent-tool name an MCP client would
+        // refuse, which would otherwise vanish silently inside a consumer's
+        // per-tool try/catch. Fails boot loudly rather than accepting either.
         let info = block.info();
-        info.validate().map_err(RuntimeError::ReservedConfigKey)?;
+        info.validate()?;
 
         // Validate that all config_keys use the block's own prefix.
         // Block "my-org/auth" may only declare keys starting with "MY_ORG__AUTH__".
@@ -318,8 +319,10 @@ impl RegistrationCore {
         let info = block.info();
         // Reserved-prefix declaration is a platform-ownership invariant, not a
         // naming-convention nicety, so it applies to remote blocks too (unlike
-        // the block-name / config-prefix checks this helper skips).
-        info.validate().map_err(RuntimeError::ReservedConfigKey)?;
+        // the block-name / config-prefix checks this helper skips). The same
+        // goes for agent-tool names: a remote block's tool is published from
+        // the same manifest as a local one's.
+        info.validate()?;
 
         self.insert_block_with_grants(name, block, &info);
         Ok(())

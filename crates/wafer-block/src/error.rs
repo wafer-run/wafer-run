@@ -53,11 +53,18 @@ pub enum RuntimeError {
         prefix: String,
     },
 
-    /// A block declared a config var under a platform-reserved prefix (e.g.
-    /// `WAFER_RUN_SHARED__`). Wraps the typed failure produced by
-    /// [`crate::BlockInfo::validate`].
+    /// A block's declarations did not survive [`crate::BlockInfo::validate`]
+    /// — a config var under a platform-reserved prefix (e.g.
+    /// `WAFER_RUN_SHARED__`), or an agent-tool name an MCP client would
+    /// reject. Wraps the typed failure so callers can match on the specific
+    /// cause.
+    ///
+    /// Boxed deliberately. This fires once, at registration, and its payload
+    /// is the largest in the enum; storing it inline would widen every
+    /// `Result<_, RuntimeError>` the runtime moves around on its hot paths.
+    /// `From<BlockInfoError>` is implemented below so `?` still works.
     #[error(transparent)]
-    ReservedConfigKey(#[from] crate::types::BlockInfoError),
+    InvalidBlockInfo(Box<crate::types::BlockInfoError>),
 
     // ── Block lifecycle ─────────────────────────────────────────────────
     /// A block failed during initialization (lifecycle start).
@@ -137,6 +144,12 @@ pub enum RuntimeError {
     /// operators can find the link-graph cause inline.
     #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
+}
+
+impl From<crate::types::BlockInfoError> for RuntimeError {
+    fn from(err: crate::types::BlockInfoError) -> Self {
+        Self::InvalidBlockInfo(Box::new(err))
+    }
 }
 
 /// Detail of a single grant-validation rejection from
