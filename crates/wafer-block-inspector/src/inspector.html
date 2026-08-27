@@ -109,6 +109,37 @@
     border: 6px solid transparent; border-top-color: var(--accent); opacity: 0.5;
   }
 
+  /* ── Agent tools (WebMCP) view ─────────────────────── */
+  .caveat {
+    font-size: 13px; line-height: 1.5; color: #92610a; background: #fef9e7;
+    border: 1px solid #f0d78c; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; max-width: 900px;
+  }
+  .tiers { display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 14px; align-items: start; }
+  .tier { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .tier-head { padding: 10px 14px; border-bottom: 1px solid var(--border-light); display: flex; align-items: baseline; gap: 8px; }
+  .tier-head h3 { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
+  .tier-head .count { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
+  .tier-body { padding: 10px 14px 14px; }
+  .tool { border-left: 3px solid var(--border); padding: 8px 0 8px 10px; margin-bottom: 10px; }
+  .tool.is-new { border-left-color: var(--wafer); }
+  .tool-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; color: var(--text); word-break: break-all; }
+  .tool-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin: 3px 0; }
+  .tool-route { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+  .tool-args { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-secondary); margin-top: 3px; word-break: break-all; }
+  .tool-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .badge-new { background: #fef9e7; color: #92610a; border: 1px solid #f0d78c; }
+  .badge-out { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+  .badge-noout { background: var(--bg-secondary); color: var(--text-muted); border: 1px solid var(--border); }
+  .badge-dep { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+  .tier-refusals { border-top: 1px solid var(--border-light); padding: 10px 14px 14px; background: var(--bg-secondary); }
+  .tier-refusals h4 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin-bottom: 8px; }
+  .refusal { font-size: 12px; line-height: 1.45; margin-bottom: 10px; }
+  .refusal .r-tool { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; color: #991b1b; word-break: break-all; }
+  .refusal .r-tool.r-partial { color: #92610a; }
+  .refusal .r-route { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+  .refusal .r-why { color: var(--text-secondary); }
+  .tier-empty { font-size: 12px; color: var(--text-muted); font-style: italic; }
+
   /* ── Detail popup ────────────────────────────────────── */
   .detail-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.25); z-index: 50;
@@ -186,6 +217,7 @@
     <div class="tab active" data-tab="app">App</div>
     <div class="tab" data-tab="flows">Flows</div>
     <div class="tab" data-tab="blocks">Blocks</div>
+    <div class="tab" data-tab="webmcp">Agent tools</div>
   </div>
 </div>
 
@@ -205,6 +237,15 @@
   <div class="search-bar"><input type="text" id="block-search" placeholder="Search blocks by name, interface, or summary..." /></div>
   <div id="block-cards" class="cards">
     <div class="loading">Loading blocks...</div>
+  </div>
+</div>
+
+<!-- ── Agent tools (WebMCP) view ────────────────────── -->
+<div id="webmcp-view" class="content" style="display:none;">
+  <p class="intro">The WebMCP tool manifest as each caller receives it. An endpoint becomes a tool only by opting in, and only when its declarations can be projected into one honestly &mdash; so the same site presents a different tool surface depending on who is asking, and an endpoint that opted in and produced no tool says why.</p>
+  <div id="webmcp-caveat"></div>
+  <div id="webmcp-tiers">
+    <div class="loading">Loading agent tools...</div>
   </div>
 </div>
 
@@ -246,7 +287,7 @@
   let flowItems = []; // track flow list items for auto-select
 
   // ── Tab switching ───────────────────────────────────
-  const views = ['app', 'blocks', 'flows'];
+  const views = ['app', 'blocks', 'flows', 'webmcp'];
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -924,6 +965,110 @@
       openInstanceModePopup(modeBadge.dataset.instanceMode);
     }
   });
+
+  // ── Agent tools (WebMCP) ────────────────────────────
+  fetch(base + '/webmcp')
+    .then(r => r.json())
+    .then(renderWebmcp)
+    .catch(e => {
+      document.getElementById('webmcp-tiers').innerHTML =
+        '<div class="loading">Error loading agent tools: ' + esc(e.message) + '</div>';
+    });
+
+  /**
+   * One column per auth level, left to right in increasing privilege, so the
+   * growth of the tool surface reads as a diff rather than as three lists a
+   * viewer has to compare by hand. A tool the previous column did not carry
+   * is marked, and every opted-in endpoint that produced no tool is named
+   * under the column it failed in, with the producer's own reason text.
+   */
+  function renderWebmcp(data) {
+    const levels = data.levels || [];
+    const caveat = document.getElementById('webmcp-caveat');
+    if (data.auth_basis === 'declared') {
+      caveat.innerHTML =
+        '<div class="caveat"><b>Projected from each endpoint’s declared auth level.</b> ' +
+        'A router that raises access by mount prefix enforces max(prefix tier, declared) and will serve a ' +
+        'narrower surface than the columns below. This block cannot see the route table, so it shows what the ' +
+        'declarations alone say.</div>';
+    }
+
+    const container = document.getElementById('webmcp-tiers');
+    container.innerHTML = '';
+    if (!levels.length) {
+      container.innerHTML = '<div class="tier-empty">No auth levels reported.</div>';
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'tiers';
+
+    let previousNames = null;
+    levels.forEach(level => {
+      const tools = (level.manifest && level.manifest.tools) || [];
+      const names = new Set(tools.map(t => t.name));
+      const refusals = level.refusals || [];
+
+      const col = document.createElement('div');
+      col.className = 'tier';
+
+      let html = '<div class="tier-head"><h3>' + esc(level.level) + '</h3>' +
+        '<span class="count">' + tools.length + ' of ' + (data.opted_in_endpoints || 0) + ' opted in</span></div>' +
+        '<div class="tier-body">';
+
+      if (!tools.length) {
+        html += '<div class="tier-empty">No tools at this level.</div>';
+      }
+      tools.forEach(t => {
+        const isNew = previousNames !== null && !previousNames.has(t.name);
+        const inv = t.invocation || {};
+        const badges = [];
+        if (isNew) badges.push('<span class="badge badge-new">first at this level</span>');
+        if (t.deprecated) badges.push('<span class="badge badge-dep">deprecated</span>');
+        badges.push(t.outputSchema
+          ? '<span class="badge badge-out">outputSchema</span>'
+          : '<span class="badge badge-noout">no outputSchema</span>');
+
+        html += '<div class="tool' + (isNew ? ' is-new' : '') + '">' +
+          '<div class="tool-name">' + esc(t.name) + '</div>' +
+          '<div class="tool-desc">' + esc(t.description) + '</div>' +
+          '<div class="tool-route">' + esc(String(inv.method || '').toUpperCase()) + ' ' + esc(inv.path) + '</div>' +
+          '<div class="tool-args">' + esc(describeArgs(t)) + '</div>' +
+          '<div class="tool-badges">' + badges.join('') + '</div>' +
+          '</div>';
+      });
+      html += '</div>';
+
+      if (refusals.length) {
+        html += '<div class="tier-refusals"><h4>Opted in, no tool</h4>';
+        refusals.forEach(r => {
+          const partial = r.scope === 'outputSchema';
+          html += '<div class="refusal">' +
+            '<span class="r-tool' + (partial ? ' r-partial' : '') + '">' + esc(r.tool_name) + '</span>' +
+            (partial ? ' <span class="badge badge-noout">outputSchema only</span>' : '') +
+            '<div class="r-route">' + esc(r.method) + ' ' + esc(r.path) + ' &middot; ' + esc(r.block) + '</div>' +
+            '<div class="r-why">' + esc(r.reason) + '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+      }
+
+      col.innerHTML = html;
+      grid.appendChild(col);
+      previousNames = names;
+    });
+
+    container.appendChild(grid);
+  }
+
+  /** One line naming every argument the tool takes, required ones marked `*`. */
+  function describeArgs(tool) {
+    const schema = tool.inputSchema || {};
+    const props = Object.keys(schema.properties || {}).sort();
+    if (!props.length) return 'no arguments';
+    const required = new Set(schema.required || []);
+    return props.map(p => required.has(p) ? p + '*' : p).join(', ');
+  }
 
   function esc(s) {
     if (s == null) return '';
