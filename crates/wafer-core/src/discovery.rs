@@ -1418,10 +1418,15 @@ fn method_can_carry_body(method: HttpMethod) -> bool {
 
 /// Why one opted-in endpoint did not become a WebMCP tool.
 ///
-/// Every variant is a defect in the endpoint's own declarations, not a
-/// property of the caller: the auth filter is not represented here, because
-/// hiding a tool from a caller who may not invoke it is the projection
-/// working, not failing.
+/// Every variant except [`Self::DuplicateToolName`] is a defect in the
+/// endpoint's own declarations, not a property of the caller. That one is
+/// caller-scoped, because tool-name uniqueness is a property of a manifest
+/// and a manifest is auth-filtered — see its own docs and the census in
+/// [`generate_webmcp_report`].
+///
+/// The auth filter itself is not represented here, because hiding a tool
+/// from a caller who may not invoke it is the projection working, not
+/// failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WebMcpRefusal {
@@ -1438,6 +1443,14 @@ pub enum WebMcpRefusal {
     /// anonymous visitor. See the census in `generate_webmcp_report` for
     /// why, and for why an `Admin` ceiling still sees every collision that
     /// exists anywhere.
+    ///
+    /// **A runtime that went through `Wafer::seal()` never produces this.**
+    /// `seal()` refuses to boot on a tool name two endpoints claim
+    /// (`RuntimeError::DuplicateToolNames`), precisely because the
+    /// per-manifest resolution above is caller-dependent: an agent below
+    /// admin would bind the name to whichever endpoint shadows the other
+    /// with no diagnostic reaching it. This variant survives as the safety
+    /// net for a consumer that projects `BlockInfo`s that gate never saw.
     DuplicateToolName {
         /// How many endpoints visible to this caller declare this name.
         count: usize,
@@ -1549,7 +1562,7 @@ impl std::fmt::Display for WebMcpRefusal {
             ),
             Self::DuplicateToolName { count } => write!(
                 f,
-                "tool name is declared by {count} endpoints, so none of them can claim it"
+                "tool name is claimed by {count} endpoints this caller may invoke, so none of them can claim it in this caller's manifest"
             ),
             Self::CollidingParameterNames { names } => write!(
                 f,
@@ -1797,6 +1810,26 @@ pub fn generate_webmcp_report(
     // A WebMCP client registers tools by name, so two endpoints sharing a
     // name are ambiguous no matter which one "wins", and neither may claim
     // it.
+    //
+    // # This is a safety net that should never fire
+    //
+    // Everything below describes what happens *if* a duplicate name reaches
+    // this function, and in a runtime that went through `Wafer::seal()` none
+    // ever does: `seal()` counts tool names across every registered block
+    // and refuses to boot on a collision
+    // (`RuntimeError::DuplicateToolNames`). The reason the gate is there
+    // rather than here is the whole "what it does cost" section further
+    // down — every runtime resolution of an ambiguous name is bad for
+    // somebody, and the per-manifest one is bad for the caller least able to
+    // notice. A name that cannot be deployed twice needs no runtime
+    // resolution at all.
+    //
+    // The census stays because this function is a pure projection of
+    // `BlockInfo`s and does not know where they came from. A consumer can
+    // hand it declarations that never passed through `seal()` — a
+    // hand-assembled `Vec<BlockInfo>`, an inspector view, a test — and in
+    // that case an ambiguous name must still not be published as though it
+    // were unique.
     //
     // # Uniqueness is a property of a manifest, not of the deployment
     //
