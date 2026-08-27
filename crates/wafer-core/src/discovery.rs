@@ -1671,37 +1671,30 @@ impl std::fmt::Display for WebMcpRefusalReport {
 /// schema this projection can vouch for (see [`agent_output_schema`]) and
 /// `deprecated` when the endpoint is.
 ///
-/// # Declared auth is not always the enforced auth
-///
-/// This wrapper treats each endpoint's declared `ep.auth` as the level that
-/// will actually be enforced. That is only true when nothing in the
-/// consumer's routing can raise it. A consumer that mounts blocks under
-/// access-tiered prefixes enforces `max(prefix_tier, ep.auth)`, so a `Public`
-/// endpoint mounted under an admin-only prefix would be advertised here to
-/// anonymous callers and then rejected on every call — and, in the other
-/// direction, a stricter `ep.auth` on a route the consumer serves publicly
-/// would hide a tool that is genuinely reachable.
-///
-/// Only the consumer knows its prefix table, so it must supply the answer:
-/// use [`generate_webmcp_with`] and pass a resolver that returns the level
-/// the router will really enforce.
-pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
-    generate_webmcp_with(blocks, caller, |_block, ep| ep.auth)
-}
-
-/// [`generate_webmcp`], with the effective auth level of each endpoint
-/// supplied by the caller.
+/// # `effective_auth` is required because declared auth is not enforced auth
 ///
 /// `effective_auth` is asked, for one block and one of its endpoints, what
-/// access level the consumer's router will actually enforce on that route —
-/// which for a prefix-tiered router is `max(prefix_tier, ep.auth)`, not
-/// `ep.auth` alone. Everything else matches [`generate_webmcp`], whose docs
-/// describe the projection and why the auth filter matters.
+/// access level the consumer's router will actually enforce on that route.
+/// For a router that mounts blocks under access-tiered prefixes that is
+/// `max(prefix_tier, ep.auth)`, not `ep.auth` alone.
+///
+/// It is an argument rather than a default because only the consumer knows
+/// its prefix table, and getting it wrong is not a cosmetic error in either
+/// direction. A `Public` endpoint mounted under an admin-only prefix, judged
+/// by `ep.auth`, is advertised to anonymous callers and rejected on every
+/// call — the recon surface the auth filter exists to remove. A stricter
+/// `ep.auth` on a route the consumer serves publicly hides a tool that is
+/// genuinely reachable.
+///
+/// A consumer whose routing cannot raise an endpoint's declared level may
+/// use [`generate_webmcp_declared_auth`], which is this function with
+/// `|_, ep| ep.auth`. Its name says at the call site which claim is being
+/// made, so a reviewer can check it without opening the docs.
 ///
 /// Every endpoint this refuses is logged at `warn!` with the block, method,
 /// path, tool name, scope, and reason. Use [`generate_webmcp_report`] to
 /// receive the refusals as data instead.
-pub fn generate_webmcp_with(
+pub fn generate_webmcp(
     blocks: &[BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
@@ -1721,7 +1714,34 @@ pub fn generate_webmcp_with(
     manifest
 }
 
-/// [`generate_webmcp_with`], returning the refused endpoints alongside the
+/// [`generate_webmcp`] for a consumer whose routing never raises an
+/// endpoint's declared access level: `ep.auth` is taken as the level the
+/// router will enforce.
+///
+/// # Read this as a claim, not a default
+///
+/// This function is the whole of `generate_webmcp(blocks, caller, |_, ep|
+/// ep.auth)`, and it exists only so that the claim it makes is written at
+/// the call site. It used to be the one *called* `generate_webmcp` — the
+/// short, autocomplete-first name — while the resolver-taking form was
+/// `generate_webmcp_with`. That put the looser filter on the obvious name,
+/// so a consumer that reached for it got weaker auth filtering silently, and
+/// the one in-tree consumer with a prefix-tiered router needed a ten-line
+/// comment to stop a future editor doing exactly that. The names are now the
+/// other way round: the safe call is the short one, and this one says what
+/// it assumes.
+///
+/// Do not use it if anything between the request and the block can raise the
+/// enforced level — an access-tiered mount prefix, a middleware that gates a
+/// path family, a route table that re-declares auth. In any of those cases
+/// the declared level is not the enforced one and this will publish tools
+/// that fail on every call, or hide tools that would have worked. See
+/// [`generate_webmcp`].
+pub fn generate_webmcp_declared_auth(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
+    generate_webmcp(blocks, caller, |_block, ep| ep.auth)
+}
+
+/// [`generate_webmcp`], returning the refused endpoints alongside the
 /// manifest instead of logging them.
 ///
 /// # Why refusals are not in the manifest
@@ -3624,7 +3644,7 @@ mod tests {
 
     #[test]
     fn webmcp_public_caller_sees_only_public_tools() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
 
         // Name-list assertions above only prove the higher-privilege tools'
@@ -3654,7 +3674,7 @@ mod tests {
 
     #[test]
     fn webmcp_authenticated_caller_sees_public_and_authenticated() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
         let names = tool_names(&doc);
         assert!(names.contains(&"get_product".to_string()));
         assert!(names.contains(&"list_my_purchases".to_string()));
@@ -3680,7 +3700,7 @@ mod tests {
 
     #[test]
     fn webmcp_admin_caller_sees_every_tool() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         let mut names = tool_names(&doc);
         names.sort();
         assert_eq!(
@@ -3697,7 +3717,7 @@ mod tests {
 
     #[test]
     fn webmcp_excludes_endpoints_that_did_not_opt_in() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         let rendered = doc.to_string();
         assert!(
             !rendered.contains("/b/products/webhooks"),
@@ -3727,7 +3747,7 @@ mod tests {
                     .agent_tool("colliding_tool", "Should never be emitted."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3753,7 +3773,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3772,7 +3792,7 @@ mod tests {
                     .agent_tool("bulk_import", "Should never be emitted: body is an array."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3794,7 +3814,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3820,7 +3840,7 @@ mod tests {
                     .agent_tool("get_other_thing", "Uniquely named, must still appear."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             tool_names(&doc),
             vec!["get_other_thing".to_string()],
@@ -3848,8 +3868,10 @@ mod tests {
                 .endpoints(order.iter().map(|id| by_id(id)).collect())
         };
 
-        let forward = generate_webmcp(&[make_block(["a", "b", "c"])], AuthLevel::Admin);
-        let reversed = generate_webmcp(&[make_block(["c", "b", "a"])], AuthLevel::Admin);
+        let forward =
+            generate_webmcp_declared_auth(&[make_block(["a", "b", "c"])], AuthLevel::Admin);
+        let reversed =
+            generate_webmcp_declared_auth(&[make_block(["c", "b", "a"])], AuthLevel::Admin);
 
         assert_eq!(tool_names(&forward), vec!["get_other_thing".to_string()]);
         assert_eq!(
@@ -3861,7 +3883,7 @@ mod tests {
 
     #[test]
     fn webmcp_tool_carries_invocation_metadata() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         let tool = &doc["tools"][0];
         assert_eq!(tool["name"], json!("get_product"));
         assert_eq!(
@@ -3884,7 +3906,7 @@ mod tests {
 
     #[test]
     fn webmcp_emits_schema_version_and_empty_tools_for_no_blocks() {
-        let doc = generate_webmcp(&[], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[], AuthLevel::Admin);
         assert_eq!(doc["schema_version"], json!(1));
         assert_eq!(doc["tools"], json!([]));
     }
@@ -3895,7 +3917,7 @@ mod tests {
         // output an agent would receive, not just tool names, and is a
         // stronger determinism check than calling the pure function twice
         // in one process (which cannot fail).
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         assert_eq!(
             doc,
             json!({
@@ -3924,7 +3946,7 @@ mod tests {
 
     #[test]
     fn webmcp_authenticated_manifest_matches_snapshot() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
         assert_eq!(
             doc,
             json!({
@@ -3969,7 +3991,7 @@ mod tests {
 
     #[test]
     fn webmcp_admin_manifest_matches_snapshot() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         assert_eq!(
             doc,
             json!({
@@ -4375,7 +4397,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4398,7 +4420,7 @@ mod tests {
                     .agent_tool("get_product", "Should never be emitted: name mismatch."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4423,7 +4445,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4450,7 +4472,7 @@ mod tests {
                     .agent_tool("get_item", "Fetch one item."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["get_item".to_string()]);
         assert_eq!(
             doc["tools"][0]["invocation"]["path_params"],
@@ -4467,7 +4489,7 @@ mod tests {
                     .agent_tool("list_things", "Nothing to fill in."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["list_things".to_string()]);
     }
 
@@ -4486,11 +4508,11 @@ mod tests {
     }
 
     /// A consumer whose router enforces `max(prefix_tier, ep.auth)` cannot be
-    /// described by `ep.auth` alone, and `generate_webmcp` structurally
+    /// described by `ep.auth` alone, and `generate_webmcp_declared_auth` structurally
     /// cannot see the prefix table. The resolver is where that knowledge
     /// belongs.
     #[test]
-    fn webmcp_with_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
+    fn webmcp_resolver_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
         let blocks = [tiered_block()];
         let with_admin_prefix = |_block: &BlockInfo, ep: &BlockEndpoint| {
             if ep.path.starts_with("/b/admin/") {
@@ -4502,13 +4524,13 @@ mod tests {
 
         // The declared-auth wrapper trusts `ep.auth` and would publish it.
         assert_eq!(
-            tool_names(&generate_webmcp(&blocks, AuthLevel::Public)),
+            tool_names(&generate_webmcp_declared_auth(&blocks, AuthLevel::Public)),
             vec!["get_stats".to_string()],
             "declared-auth-only filtering advertises this to anonymous callers"
         );
 
         // A resolver that knows about the admin prefix must hide it.
-        let doc = generate_webmcp_with(&blocks, AuthLevel::Public, with_admin_prefix);
+        let doc = generate_webmcp(&blocks, AuthLevel::Public, with_admin_prefix);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4522,12 +4544,12 @@ mod tests {
         );
 
         // An admin caller is above the effective level and still sees it.
-        let doc = generate_webmcp_with(&blocks, AuthLevel::Admin, with_admin_prefix);
+        let doc = generate_webmcp(&blocks, AuthLevel::Admin, with_admin_prefix);
         assert_eq!(tool_names(&doc), vec!["get_stats".to_string()]);
     }
 
     #[test]
-    fn webmcp_with_reveals_a_tool_the_resolver_lowers() {
+    fn webmcp_resolver_reveals_a_tool_it_lowers() {
         // The filter runs the other way too: a route the consumer serves
         // without auth must not stay hidden behind a stricter declared level.
         let block =
@@ -4539,12 +4561,12 @@ mod tests {
         let blocks = [block];
 
         assert_eq!(
-            generate_webmcp(&blocks, AuthLevel::Public)["tools"],
+            generate_webmcp_declared_auth(&blocks, AuthLevel::Public)["tools"],
             json!([]),
             "declared-auth-only filtering hides it"
         );
         assert_eq!(
-            tool_names(&generate_webmcp_with(&blocks, AuthLevel::Public, |_, _| {
+            tool_names(&generate_webmcp(&blocks, AuthLevel::Public, |_, _| {
                 AuthLevel::Public
             })),
             vec!["read_mirror".to_string()],
@@ -4555,7 +4577,7 @@ mod tests {
     fn webmcp_passes_the_owning_block_to_the_resolver() {
         // A consumer mounts *blocks* under prefixes, so the resolver has to
         // be able to key off the owning block, not just the endpoint.
-        let doc = generate_webmcp_with(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
             if block.name == "impresspress/products" {
                 AuthLevel::Public
             } else {
@@ -4601,7 +4623,7 @@ mod tests {
         let blocks = [block];
 
         for caller in [AuthLevel::Public, AuthLevel::Authenticated] {
-            let doc = generate_webmcp(&blocks, caller);
+            let doc = generate_webmcp_declared_auth(&blocks, caller);
             assert_eq!(
                 tool_names(&doc),
                 vec!["get_thing".to_string(), "get_other_thing".to_string()],
@@ -4665,7 +4687,7 @@ mod tests {
             AuthLevel::Authenticated,
             AuthLevel::Admin,
         ] {
-            let doc = generate_webmcp(&blocks, caller);
+            let doc = generate_webmcp_declared_auth(&blocks, caller);
             for tool in doc["tools"].as_array().expect("tools array") {
                 let name = tool["name"].as_str().expect("tool name").to_string();
                 if let Some(previous) = seen.get(&name) {
@@ -4794,7 +4816,7 @@ mod tests {
                     .agent_tool("set_tree", "Should never be emitted: nested `#` ref."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4815,7 +4837,7 @@ mod tests {
                     .agent_tool("set_thing", "Should never be emitted: dangling ref."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4841,7 +4863,7 @@ mod tests {
                     .agent_tool("set_thing", "Set a product status."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["set_thing".to_string()]);
         assert_eq!(
             doc["tools"][0]["inputSchema"]["properties"]["status"],
@@ -4866,7 +4888,7 @@ mod tests {
                     .agent_tool("get_new_thing", "Fetch a thing."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         let tools = doc["tools"].as_array().expect("tools array");
 
         let old = tools
@@ -5718,9 +5740,12 @@ mod tests {
     }
 
     #[test]
-    fn webmcp_with_matches_the_report_variant_manifest() {
+    fn webmcp_matches_the_report_variant_manifest() {
         let blocks = webmcp_fixture_blocks();
         let (reported, _) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
-        assert_eq!(generate_webmcp(&blocks, AuthLevel::Admin), reported);
+        assert_eq!(
+            generate_webmcp_declared_auth(&blocks, AuthLevel::Admin),
+            reported
+        );
     }
 }
