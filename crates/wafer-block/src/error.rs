@@ -11,7 +11,8 @@
 ///   `Inventory`): raised while blocks are being added to a [`crate`]-level
 ///   registry, before the runtime is sealed. They name the offending block so
 ///   the misconfiguration can be fixed at its source.
-/// - **Boot / seal-time** (`GrantsRejected`, `BlocksNotFound`): raised once,
+/// - **Boot / seal-time** (`GrantsRejected`, `BlocksNotFound`,
+///   `DuplicateToolNames`): raised once,
 ///   during `Wafer::start()` / `seal()`, after all blocks are registered and
 ///   the link graph is validated as a whole. These are the *aggregating*
 ///   variants: each wraps a `Vec` and renders every item through
@@ -144,6 +145,32 @@ pub enum RuntimeError {
     /// operators can find the link-graph cause inline.
     #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
+
+    // ── Agent-tool names (seal-time) ────────────────────────────────────
+    /// Two or more endpoints declare the same WebMCP agent-tool name.
+    ///
+    /// A WebMCP client registers tools by name, so a name claimed twice is
+    /// ambiguous no matter which claimant "wins" — and the projection that
+    /// builds the manifest (`wafer_core::discovery::generate_webmcp`) has no
+    /// non-arbitrary way to pick one. Its own tie-break is per-manifest and
+    /// therefore auth-scoped: a name claimed by a `Public` and an `Admin`
+    /// endpoint is unambiguous in an anonymous caller's manifest, so the
+    /// public endpoint is published there as the sole claimant while only an
+    /// admin's manifest reports the collision. An agent below admin then
+    /// binds the name to whichever endpoint shadows the other, with no
+    /// diagnostic reaching it.
+    ///
+    /// That is a silent name-squat on a tool agents actually invoke, so the
+    /// collision is refused here instead: `seal()` aggregates every
+    /// duplicated name across every registered block and refuses boot, which
+    /// makes the ambiguity impossible to deploy rather than something whose
+    /// runtime consequences depend on who is asking. The per-manifest census
+    /// in `generate_webmcp_report` stays as a safety net for a consumer that
+    /// projects `BlockInfo`s this gate never saw.
+    ///
+    /// Remediation: rename one of the endpoints' `agent_tool(...)` names.
+    #[error("{}", render_boot_error_list("duplicate agent tool name(s)", .0, render_duplicate_tool_name))]
+    DuplicateToolNames(Vec<DuplicateToolNameError>),
 }
 
 impl From<crate::types::BlockInfoError> for RuntimeError {
@@ -273,6 +300,31 @@ pub struct BlockReferenceError {
     pub sources: Vec<BlockReferenceSource>,
 }
 
+/// One duplicated agent-tool name in [`RuntimeError::DuplicateToolNames`].
+/// Aggregated by `Wafer::seal()` so a single error lists every collision
+/// with every endpoint that claims the name.
+#[derive(Debug, Clone)]
+pub struct DuplicateToolNameError {
+    /// The agent-tool name more than one endpoint declared.
+    pub name: String,
+    /// Every endpoint claiming it, sorted by block then method then path so
+    /// the rendered message is stable across boots (the block registry is a
+    /// `HashMap`).
+    pub claimants: Vec<AgentToolClaimant>,
+}
+
+/// One endpoint claiming an agent-tool name, named precisely enough to find
+/// in source. Entry of [`DuplicateToolNameError::claimants`].
+#[derive(Debug, Clone)]
+pub struct AgentToolClaimant {
+    /// Name of the block declaring the endpoint.
+    pub block: String,
+    /// HTTP method of the endpoint.
+    pub method: crate::types::HttpMethod,
+    /// URL path of the endpoint.
+    pub path: String,
+}
+
 /// One block reference declared by a block's own config. Returned by
 /// [`crate::Block::collect_block_refs`] for each reference the
 /// implementing block finds.
@@ -321,6 +373,19 @@ fn render_boot_error_list<T>(
 
 fn render_grant_rejection(e: &GrantValidationError) -> String {
     format!("  - block `{}`: {}", e.block, e.reason)
+}
+
+fn render_duplicate_tool_name(e: &DuplicateToolNameError) -> String {
+    format!(
+        "  - `{}` claimed by {} endpoints:\n{}",
+        e.name,
+        e.claimants.len(),
+        e.claimants
+            .iter()
+            .map(|c| format!("      \u{2022} block `{}` {} {}", c.block, c.method, c.path))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn render_block_reference_error(e: &BlockReferenceError) -> String {
@@ -482,6 +547,46 @@ mod tests {
         assert!(msg.contains("- `org/missing-b`"), "got: {msg}");
         assert!(
             msg.contains("from block `my-router` route /x"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_names_renders_every_claimant() {
+        use crate::types::HttpMethod;
+
+        let err = RuntimeError::DuplicateToolNames(vec![DuplicateToolNameError {
+            name: "get_thing".to_string(),
+            claimants: vec![
+                AgentToolClaimant {
+                    block: "org/shop".to_string(),
+                    method: HttpMethod::Get,
+                    path: "/b/shop/thing".to_string(),
+                },
+                AgentToolClaimant {
+                    block: "org/shop-admin".to_string(),
+                    method: HttpMethod::Get,
+                    path: "/b/shop/admin/thing".to_string(),
+                },
+            ],
+        }]);
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("1 duplicate agent tool name(s):"),
+            "got: {msg}"
+        );
+        // Both claimants must be named: an operator fixing the collision has
+        // to know which two endpoints to look at, not just that one exists.
+        assert!(
+            msg.contains("`get_thing` claimed by 2 endpoints"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("block `org/shop` GET /b/shop/thing"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("block `org/shop-admin` GET /b/shop/admin/thing"),
             "got: {msg}"
         );
     }

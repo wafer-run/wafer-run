@@ -6238,6 +6238,7 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-block-macro",
+ "wafer-core",
 ]
 
 [[package]]

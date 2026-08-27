@@ -457,6 +457,26 @@ const FLATTENABLE_KEYWORDS: &[&str] = &[
     "$schema",
 ];
 
+/// Whether a schema object describes a plain JSON object.
+///
+/// Shared by [`source_is_flattenable`] and [`agent_output_schema`] so the
+/// two never drift on what "object-shaped" means — one is deciding whether a
+/// source can be folded into the merged `inputSchema`, the other whether a
+/// declaration can be published as an `outputSchema`, and both questions
+/// start here.
+fn schema_is_object_shaped(map: &serde_json::Map<String, Value>) -> bool {
+    match map.get("type") {
+        Some(Value::String(t)) if t == "object" => true,
+        // No `type` at all is object-shaped only if it says so some other
+        // way; `properties` is the only such signal the merge can act on.
+        None => map.contains_key("properties"),
+        // Anything else, including a non-string `type` — the keyword is only
+        // ever a string or an array of strings, and neither an array-typed
+        // nor a malformed `type` names a plain object.
+        _ => false,
+    }
+}
+
 /// Whether `inlined` — one already-`$ref`-flattened schema source — can be
 /// honestly folded into the merged agent input schema.
 ///
@@ -527,15 +547,8 @@ fn source_is_flattenable(inlined: &Value) -> bool {
         return false;
     }
 
-    match map.get("type") {
-        Some(Value::String(t)) if t == "object" => {}
-        // No `type` at all is object-shaped only if it says so some other
-        // way; `properties` is the only such signal the merge can act on.
-        None if map.contains_key("properties") => {}
-        // Anything else, including a non-string `type` — the keyword is only
-        // ever a string or an array of strings, and neither an array-typed
-        // nor a malformed `type` names a plain object.
-        _ => return false,
+    if !schema_is_object_shaped(map) {
+        return false;
     }
 
     if map
@@ -957,6 +970,169 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     }
 }
 
+/// The agent-facing projection of one endpoint's declared `output_schema`,
+/// and — when there is none to publish — why.
+#[derive(Debug, Clone, PartialEq)]
+struct AgentOutputSchema {
+    /// The self-contained schema to publish as the tool's `outputSchema`,
+    /// or `None` when the endpoint declared nothing or the projection could
+    /// not vouch for what it declared.
+    schema: Option<Value>,
+    /// Set when the endpoint *did* declare an output schema and it was
+    /// dropped. `None` both when nothing was declared and when the
+    /// projection succeeded.
+    dropped: Option<WebMcpRefusal>,
+}
+
+/// Project an endpoint's declared response schema into the tool's
+/// `outputSchema`: the same self-containment treatment `inputSchema` gets —
+/// every `#/$defs/*` reference inlined, the `$defs` table removed, the root
+/// `title` dropped — under the same [`MAX_INLINED_NODES`] budget.
+///
+/// # Why a bad output schema drops the field and not the tool
+///
+/// Every other verdict in this module refuses the whole tool, on the rule
+/// that a tool that can lie about its arguments is worse than no tool. That
+/// rule still applies here; it just lands somewhere else, because **the unit
+/// of refusal is the smallest thing that can carry the lie.**
+///
+/// For `inputSchema` the smallest such unit *is* the whole tool. The field is
+/// mandatory, and there is no way to say "I don't know what this takes": an
+/// omitted or empty input schema is itself a claim — "this tool takes no
+/// arguments" — which is exactly the lie being avoided. Refusing the field
+/// and refusing the tool are the same act.
+///
+/// `outputSchema` is optional, and its absence claims nothing. That is not
+/// merely a matter of description quality, which is the tempting reading:
+/// outputs are read rather than supplied, so a missing one "only" costs the
+/// agent a guess. But a *wrong* one costs more than a missing one, in two
+/// concrete ways. A client that validates a tool's structured result against
+/// the schema fails calls that would have succeeded. And a truncated
+/// expansion can emit something that is not a schema at all — the budget
+/// bailout replaces whatever node it lands on with `{}`, so a `required`
+/// array can come out as `"required": {}` — which a client that validates
+/// tool *definitions* rejects, taking the whole tool down with it inside the
+/// consumer's per-tool `try`/`catch`, silently.
+///
+/// So: publish a schema this function can vouch for, publish none when it
+/// cannot, and never withhold the tool over it. The endpoint's arguments are
+/// unaffected by anything wrong with its response schema, and a missing tool
+/// helps no one — the same reasoning that keeps a `deprecated` endpoint
+/// published.
+///
+/// The drop is not silent: it travels back as a [`WebMcpRefusal`] and is
+/// reported under [`WebMcpRefusalScope::OutputSchema`], so an author who
+/// declared `.output::<T>()` and sees no `outputSchema` learns why. The
+/// reasons are the `OutputSchema*` variants and nothing else: the input
+/// side's `UnresolvedRefs` / `RecursiveSchema` / `SchemaTooLarge` name
+/// `inputSchema` in their own message text, so reusing them here would tell
+/// an author who declared only an output type that their arguments are at
+/// fault.
+///
+/// # Why a non-object schema is dropped
+///
+/// A tool's `outputSchema` describes a *structured result*, and a structured
+/// result is a JSON object — MCP types the field as an object schema for
+/// that reason. An array-valued or scalar-valued response has no honest slot
+/// here: publishing `{"type": "array"}` tells a validating client to expect
+/// an object and check an array against it, which fails on every call.
+///
+/// The object test is [`schema_is_object_shaped`], the same one
+/// [`source_is_flattenable`] applies: an explicit `"type": "object"`, or no
+/// `type` at all alongside a `properties` map. A composition-keyword
+/// response (`oneOf` of several object shapes) is therefore dropped too.
+/// That is over-refusal, and it is the right direction: what is lost is
+/// prose about a response the endpoint's OpenAPI document still describes in
+/// full, and the alternative is vouching for a shape this function cannot
+/// actually check.
+///
+/// # Why the whole flattenability wall is applied, not just the object test
+///
+/// Being object-*shaped* is not being well-*formed*. `{"type": "object",
+/// "properties": "oops", "required": {"a": 1}}` passes the object test and
+/// is not a JSON Schema at all: `properties` must be an object and
+/// `required` an array of strings. Published verbatim it is exactly the
+/// malformed document the budget-bailout argument above is about — a client
+/// that validates tool *definitions* rejects it and takes the whole tool
+/// down inside the consumer's per-tool `try`/`catch`, silently. Only a
+/// hand-written schema reaches these shapes; schemars never emits them.
+///
+/// So [`source_is_flattenable`] is applied whole rather than re-deriving a
+/// second, weaker test here. It is stricter than this path strictly needs —
+/// nothing is being merged, so its keyword allow-list and its
+/// `additionalProperties` rule are refusing shapes that could have been
+/// published verbatim without lying. That is the same over-refusal the
+/// object test already accepts, in exchange for one wall instead of two
+/// walls that drift. Every schema `wafer-block` derives passes it.
+fn agent_output_schema(ep: &BlockEndpoint) -> AgentOutputSchema {
+    let nothing = AgentOutputSchema {
+        schema: None,
+        dropped: None,
+    };
+    let drop = |reason: WebMcpRefusal| AgentOutputSchema {
+        schema: None,
+        dropped: Some(reason),
+    };
+
+    let Some(source) = ep.output_schema.as_ref() else {
+        return nothing;
+    };
+    // `null` and `{}` mean "declared nothing", exactly as they do for the
+    // input sources — see `merge_schema_source`. Nothing was declared, so
+    // nothing was dropped and there is nothing to report.
+    let declared = match source {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    if !declared {
+        return nothing;
+    }
+
+    let (inlined, issues) = inline_refs(source);
+
+    // Checked first, and for the reason the input side checks it first: past
+    // the budget the walk stopped partway, so every verdict below would be
+    // drawn from a document the endpoint never declared.
+    if issues.oversized {
+        return drop(WebMcpRefusal::OutputSchemaTooLarge);
+    }
+    if issues.unresolved {
+        return drop(WebMcpRefusal::OutputSchemaUnresolvedRef);
+    }
+    if issues.recursive {
+        return drop(WebMcpRefusal::OutputSchemaRecursive);
+    }
+
+    let Some(map) = inlined.as_object() else {
+        return drop(WebMcpRefusal::OutputSchemaNotAnObject);
+    };
+    // The same wall the input sources pass, for the same reason: a top level
+    // this function cannot account for is one it cannot vouch for. The
+    // object test comes first so the two failures stay distinguishable —
+    // "your response is a `Vec<T>`" and "your response object is malformed"
+    // send an author to different places.
+    if !schema_is_object_shaped(map) {
+        return drop(WebMcpRefusal::OutputSchemaNotAnObject);
+    }
+    if !source_is_flattenable(&inlined) {
+        return drop(WebMcpRefusal::OutputSchemaUnrepresentable);
+    }
+
+    // The root `title` is the source Rust type's name. `wafer-block` keeps it
+    // in the stored schema because `/openapi.json` embeds these verbatim and
+    // client generators read it to name generated types; here it is noise
+    // for an agent, and the merged `inputSchema` drops it on the same
+    // grounds.
+    let mut published = map.clone();
+    published.remove("title");
+
+    AgentOutputSchema {
+        schema: Some(Value::Object(published)),
+        dropped: None,
+    }
+}
+
 /// Why a URL path template cannot be turned into a fillable tool URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PathTemplateError {
@@ -1280,10 +1456,15 @@ fn method_can_carry_body(method: HttpMethod) -> bool {
 
 /// Why one opted-in endpoint did not become a WebMCP tool.
 ///
-/// Every variant is a defect in the endpoint's own declarations, not a
-/// property of the caller: the auth filter is not represented here, because
-/// hiding a tool from a caller who may not invoke it is the projection
-/// working, not failing.
+/// Every variant except [`Self::DuplicateToolName`] is a defect in the
+/// endpoint's own declarations, not a property of the caller. That one is
+/// caller-scoped, because tool-name uniqueness is a property of a manifest
+/// and a manifest is auth-filtered — see its own docs and the census in
+/// [`generate_webmcp_report`].
+///
+/// The auth filter itself is not represented here, because hiding a tool
+/// from a caller who may not invoke it is the projection working, not
+/// failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WebMcpRefusal {
@@ -1291,10 +1472,25 @@ pub enum WebMcpRefusal {
     /// `AgentTool::is_valid_name`. `BlockInfo::validate` rejects this at
     /// registration; reaching the generator means something bypassed it.
     InvalidToolName,
-    /// More than one opted-in endpoint declares this tool name, so none of
-    /// them can claim it. Carries how many endpoints share it.
+    /// More than one endpoint *this caller may invoke* declares this tool
+    /// name, so none of them can claim it in this caller's manifest.
+    ///
+    /// The only caller-scoped reason there is: tool-name uniqueness is a
+    /// property of a manifest rather than of the deployment, so the same
+    /// endpoint can be refused here for an admin and published for an
+    /// anonymous visitor. See the census in `generate_webmcp_report` for
+    /// why, and for why an `Admin` ceiling still sees every collision that
+    /// exists anywhere.
+    ///
+    /// **A runtime that went through `Wafer::seal()` never produces this.**
+    /// `seal()` refuses to boot on a tool name two endpoints claim
+    /// (`RuntimeError::DuplicateToolNames`), precisely because the
+    /// per-manifest resolution above is caller-dependent: an agent below
+    /// admin would bind the name to whichever endpoint shadows the other
+    /// with no diagnostic reaching it. This variant survives as the safety
+    /// net for a consumer that projects `BlockInfo`s that gate never saw.
     DuplicateToolName {
-        /// How many opted-in endpoints declare this name.
+        /// How many endpoints visible to this caller declare this name.
         count: usize,
     },
     /// Property names arriving from more than one of path/query/body.
@@ -1362,6 +1558,59 @@ pub enum WebMcpRefusal {
         /// The body property names that have nowhere to travel, sorted.
         body_params: Vec<String>,
     },
+    /// The declared response schema does not describe a JSON *object*, so it
+    /// cannot be published as an `outputSchema` — see
+    /// [`agent_output_schema`].
+    ///
+    /// One of the four `OutputSchema*` reasons. They exist separately from
+    /// the input side's otherwise-identical verdicts because the input
+    /// side's message text names `inputSchema`, and telling an author who
+    /// declared `.output::<T>()` that their *arguments* cannot be inlined
+    /// sends them to the wrong declaration. Every one of them is only ever
+    /// reported with [`WebMcpRefusalScope::OutputSchema`]: the tool is still
+    /// published, without the field.
+    OutputSchemaNotAnObject,
+    /// The declared response schema is object-shaped but not something this
+    /// projection can vouch for — a `properties` that is not an object, a
+    /// `required` that is not an array of strings, an `additionalProperties`
+    /// other than `false`, or a top-level keyword outside
+    /// [`FLATTENABLE_KEYWORDS`]. See [`agent_output_schema`].
+    OutputSchemaUnrepresentable,
+    /// Inlining the declared response schema hit a `$ref` it could not
+    /// resolve, which would leave an unconstrained `{}` where the endpoint
+    /// returns a specific type.
+    OutputSchemaUnresolvedRef,
+    /// The declared response schema is recursive, so it has no finite
+    /// self-contained form.
+    OutputSchemaRecursive,
+    /// Inlining the declared response schema expanded past
+    /// [`MAX_INLINED_NODES`] and stopped partway, so what is in hand is a
+    /// truncated document rather than a weaker one.
+    OutputSchemaTooLarge,
+}
+
+/// What a [`WebMcpRefusalReport`] is about: the whole tool, or one optional
+/// part of it that was dropped while the tool was published anyway.
+///
+/// The distinction exists because the two are not equally costly, and the
+/// projection should refuse the *smallest* thing that can carry the lie. See
+/// [`agent_output_schema`] for the argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WebMcpRefusalScope {
+    /// No tool was published for this endpoint.
+    Tool,
+    /// The tool was published, but without its `outputSchema`.
+    OutputSchema,
+}
+
+impl std::fmt::Display for WebMcpRefusalScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool => f.write_str("tool"),
+            Self::OutputSchema => f.write_str("outputSchema"),
+        }
+    }
 }
 
 impl std::fmt::Display for WebMcpRefusal {
@@ -1374,7 +1623,7 @@ impl std::fmt::Display for WebMcpRefusal {
             ),
             Self::DuplicateToolName { count } => write!(
                 f,
-                "tool name is declared by {count} endpoints, so none of them can claim it"
+                "tool name is claimed by {count} endpoints this caller may invoke, so none of them can claim it in this caller's manifest"
             ),
             Self::CollidingParameterNames { names } => write!(
                 f,
@@ -1432,13 +1681,39 @@ impl std::fmt::Display for WebMcpRefusal {
                 "body parameter(s) {} are declared on a method that cannot carry a request body",
                 body_params.join(", ")
             ),
+            Self::OutputSchemaNotAnObject => f.write_str(
+                "the declared output schema does not describe a JSON object, and a tool's outputSchema describes a structured result, which is always an object",
+            ),
+            Self::OutputSchemaUnrepresentable => f.write_str(
+                "the declared output schema's top level carries a keyword this projection cannot account for, or a malformed 'properties'/'required'/'additionalProperties' value, so it cannot be published as an outputSchema this tool vouches for",
+            ),
+            Self::OutputSchemaUnresolvedRef => f.write_str(
+                "the declared output schema contains a $ref that could not be resolved, leaving an unconstrained {} in the outputSchema where the endpoint returns a specific type",
+            ),
+            Self::OutputSchemaRecursive => f.write_str(
+                "the declared output schema is recursive, so it cannot be inlined into a self-contained outputSchema",
+            ),
+            Self::OutputSchemaTooLarge => write!(
+                f,
+                "the declared output schema expands past {MAX_INLINED_NODES} JSON nodes when its $refs are inlined — nothing is missing and nothing is recursive, but a definition reached from several levels is copied out once per path, so the self-contained outputSchema has no workable size"
+            ),
         }
     }
 }
 
-/// One endpoint that opted in to agent-tool exposure and was refused, named
-/// precisely enough to find in source.
+/// One thing the projection refused to publish for an endpoint that opted in
+/// to agent-tool exposure, named precisely enough to find in source.
+///
+/// [`Self::scope`] says what was refused. Most entries refuse the whole tool;
+/// an entry scoped to [`WebMcpRefusalScope::OutputSchema`] means the tool was
+/// published and only its `outputSchema` was dropped.
+///
+/// `#[non_exhaustive]`: the fields are a diagnostic record whose shape is
+/// expected to grow, and a consumer must never be able to exhaustively
+/// destructure one — a new field would then be a silent behaviour change at
+/// the consumer rather than a compile error here.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WebMcpRefusalReport {
     /// Name of the block declaring the endpoint.
     pub block: String,
@@ -1448,17 +1723,44 @@ pub struct WebMcpRefusalReport {
     pub path: String,
     /// The tool name the endpoint asked for.
     pub tool_name: String,
+    /// What was refused: the whole tool, or one optional part of it.
+    pub scope: WebMcpRefusalScope,
     /// Why it was refused.
     pub reason: WebMcpRefusal,
+    /// Whether the caller this report was generated for may invoke the
+    /// endpoint this entry is about.
+    ///
+    /// Structural refusals are deliberately reported to *every* caller — a
+    /// malformed path template is a defect whether an anonymous visitor or
+    /// an admin asked, and an author debugging one should not have to
+    /// authenticate to see it. That is right for a log, and wrong for any
+    /// consumer that renders a refusal list *as one caller sees it*: naming
+    /// an admin-only endpoint's block, method, path and tool name under a
+    /// "Public" heading discloses across the tier the auth filter exists to
+    /// separate, and misdescribes what that caller receives.
+    ///
+    /// Such a consumer filters on this flag rather than re-deriving the auth
+    /// decision, which would be a second implementation of a
+    /// security-critical filter. Entries scoped to
+    /// [`WebMcpRefusalScope::OutputSchema`] and
+    /// [`WebMcpRefusal::DuplicateToolName`] are always `true`: both are
+    /// decided after the auth filter.
+    pub visible_to_caller: bool,
 }
 
 impl std::fmt::Display for WebMcpRefusalReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "block '{}' endpoint {} {} (tool '{}'): {}",
-            self.block, self.method, self.path, self.tool_name, self.reason
-        )
+            "block '{}' endpoint {} {} (tool '{}'): ",
+            self.block, self.method, self.path, self.tool_name
+        )?;
+        match self.scope {
+            WebMcpRefusalScope::Tool => write!(f, "{}", self.reason),
+            WebMcpRefusalScope::OutputSchema => {
+                write!(f, "published without outputSchema — {}", self.reason)
+            }
+        }
     }
 }
 
@@ -1476,37 +1778,35 @@ impl std::fmt::Display for WebMcpRefusalReport {
 ///   it never reaches the page. This mirrors the SEC-073 posture applied to
 ///   the discovery documents.
 ///
-/// # Declared auth is not always the enforced auth
+/// Each emitted tool carries `name`, `description`, `inputSchema`, and
+/// `invocation`, plus `outputSchema` when the endpoint declares a response
+/// schema this projection can vouch for (see [`agent_output_schema`]) and
+/// `deprecated` when the endpoint is.
 ///
-/// This wrapper treats each endpoint's declared `ep.auth` as the level that
-/// will actually be enforced. That is only true when nothing in the
-/// consumer's routing can raise it. A consumer that mounts blocks under
-/// access-tiered prefixes enforces `max(prefix_tier, ep.auth)`, so a `Public`
-/// endpoint mounted under an admin-only prefix would be advertised here to
-/// anonymous callers and then rejected on every call — and, in the other
-/// direction, a stricter `ep.auth` on a route the consumer serves publicly
-/// would hide a tool that is genuinely reachable.
-///
-/// Only the consumer knows its prefix table, so it must supply the answer:
-/// use [`generate_webmcp_with`] and pass a resolver that returns the level
-/// the router will really enforce.
-pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
-    generate_webmcp_with(blocks, caller, |_block, ep| ep.auth)
-}
-
-/// [`generate_webmcp`], with the effective auth level of each endpoint
-/// supplied by the caller.
+/// # `effective_auth` is required because declared auth is not enforced auth
 ///
 /// `effective_auth` is asked, for one block and one of its endpoints, what
-/// access level the consumer's router will actually enforce on that route —
-/// which for a prefix-tiered router is `max(prefix_tier, ep.auth)`, not
-/// `ep.auth` alone. Everything else matches [`generate_webmcp`], whose docs
-/// describe the projection and why the auth filter matters.
+/// access level the consumer's router will actually enforce on that route.
+/// For a router that mounts blocks under access-tiered prefixes that is
+/// `max(prefix_tier, ep.auth)`, not `ep.auth` alone.
+///
+/// It is an argument rather than a default because only the consumer knows
+/// its prefix table, and getting it wrong is not a cosmetic error in either
+/// direction. A `Public` endpoint mounted under an admin-only prefix, judged
+/// by `ep.auth`, is advertised to anonymous callers and rejected on every
+/// call — the recon surface the auth filter exists to remove. A stricter
+/// `ep.auth` on a route the consumer serves publicly hides a tool that is
+/// genuinely reachable.
+///
+/// A consumer whose routing cannot raise an endpoint's declared level may
+/// use [`generate_webmcp_declared_auth`], which is this function with
+/// `|_, ep| ep.auth`. Its name says at the call site which claim is being
+/// made, so a reviewer can check it without opening the docs.
 ///
 /// Every endpoint this refuses is logged at `warn!` with the block, method,
-/// path, tool name, and reason. Use [`generate_webmcp_report`] to receive the
-/// refusals as data instead.
-pub fn generate_webmcp_with(
+/// path, tool name, scope, and reason. Use [`generate_webmcp_report`] to
+/// receive the refusals as data instead.
+pub fn generate_webmcp(
     blocks: &[BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
@@ -1518,6 +1818,7 @@ pub fn generate_webmcp_with(
             method = %refusal.method,
             path = %refusal.path,
             tool = %refusal.tool_name,
+            scope = %refusal.scope,
             reason = %refusal.reason,
             "webmcp: endpoint opted in to agent-tool exposure but was refused"
         );
@@ -1525,7 +1826,34 @@ pub fn generate_webmcp_with(
     manifest
 }
 
-/// [`generate_webmcp_with`], returning the refused endpoints alongside the
+/// [`generate_webmcp`] for a consumer whose routing never raises an
+/// endpoint's declared access level: `ep.auth` is taken as the level the
+/// router will enforce.
+///
+/// # Read this as a claim, not a default
+///
+/// This function is the whole of `generate_webmcp(blocks, caller, |_, ep|
+/// ep.auth)`, and it exists only so that the claim it makes is written at
+/// the call site. It used to be the one *called* `generate_webmcp` — the
+/// short, autocomplete-first name — while the resolver-taking form was
+/// `generate_webmcp_with`. That put the looser filter on the obvious name,
+/// so a consumer that reached for it got weaker auth filtering silently, and
+/// the one in-tree consumer with a prefix-tiered router needed a ten-line
+/// comment to stop a future editor doing exactly that. The names are now the
+/// other way round: the safe call is the short one, and this one says what
+/// it assumes.
+///
+/// Do not use it if anything between the request and the block can raise the
+/// enforced level — an access-tiered mount prefix, a middleware that gates a
+/// path family, a route table that re-declares auth. In any of those cases
+/// the declared level is not the enforced one and this will publish tools
+/// that fail on every call, or hide tools that would have worked. See
+/// [`generate_webmcp`].
+pub fn generate_webmcp_declared_auth(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
+    generate_webmcp(blocks, caller, |_block, ep| ep.auth)
+}
+
+/// [`generate_webmcp`], returning the refused endpoints alongside the
 /// manifest instead of logging them.
 ///
 /// # Why refusals are not in the manifest
@@ -1537,41 +1865,143 @@ pub fn generate_webmcp_with(
 /// refusals are for the operator's logs and for tests, and the manifest is
 /// for the agent.
 ///
-/// # Refusals are the same for every caller
+/// # Refusals are the same for every caller — with two exceptions
 ///
-/// Every refusal reason is a defect in the endpoint's own declarations, so
-/// the structural checks run *before* the auth filter and the returned list
-/// does not depend on `caller`. A broken admin endpoint is broken when an
-/// anonymous visitor loads the manifest too, and an author debugging it
-/// should not have to guess which caller makes the diagnostic appear. The
-/// auth filter itself is not a refusal — omitting a tool the caller may not
-/// invoke is the projection working — so it is applied last and reported
-/// nowhere.
+/// Every *tool-scoped* refusal reason except
+/// [`WebMcpRefusal::DuplicateToolName`] is a defect in the endpoint's own
+/// declarations, so the structural checks run *before* the auth filter and
+/// that part of the returned list does not depend on `caller`. A broken
+/// admin endpoint is broken when an anonymous visitor loads the manifest
+/// too, and an author debugging it should not have to guess which caller
+/// makes the diagnostic appear. The auth filter itself is not a refusal —
+/// omitting a tool the caller may not invoke is the projection working — so
+/// it is reported nowhere.
+///
+/// Those entries do carry [`WebMcpRefusalReport::visible_to_caller`], and a
+/// consumer that renders a refusal list as one caller's own view of the
+/// deployment must filter on it. Reporting to every caller is right for a
+/// log and wrong for a page that claims to show what a given tier receives.
+///
+/// The two exceptions run *after* the auth filter, so they only ever
+/// describe an endpoint this caller can see:
+///
+/// * A **duplicate name** is not a defect in one endpoint; it is a property
+///   of the manifest the two endpoints land in, and that manifest is
+///   auth-filtered. Counting names across endpoints the caller cannot see
+///   would make a missing tool an oracle for a higher-privilege endpoint's
+///   existence — the same recon surface the auth filter exists to close. So
+///   the census is scoped to the caller, and collisions are reported for the
+///   callers in whose manifest they actually occur. Because the auth filter
+///   is monotone, a report taken at `AuthLevel::Admin` still contains every
+///   collision that exists anywhere, which is what a boot-time diagnostic
+///   pass should ask for. (A runtime sealed by `Wafer::seal()` has none —
+///   see [`WebMcpRefusal::DuplicateToolName`].)
+/// * A **dropped `outputSchema`** is a defect in the endpoint's declaration,
+///   but the entry says "published without outputSchema", and that is only
+///   true where the tool was in fact published. Recorded ahead of the two
+///   gates above it would claim a field is missing from a tool that is not
+///   in the manifest at all.
+///
+/// # Not every refusal costs the tool
+///
+/// A report entry carries a [`WebMcpRefusalScope`]. Most say the endpoint
+/// produced no tool at all; one — [`WebMcpRefusalScope::OutputSchema`] —
+/// says the tool *was* published and only its `outputSchema` was dropped.
+/// A consumer that counts refusals as missing tools must filter on the
+/// scope. See [`agent_output_schema`] for why that case refuses a field
+/// rather than a tool.
 pub fn generate_webmcp_report(
     blocks: &[BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
+    use WebMcpRefusalScope as Scope;
+
     let ceiling = auth_rank(caller);
 
     let mut refused: Vec<WebMcpRefusalReport> = Vec::new();
 
     // A WebMCP client registers tools by name, so two endpoints sharing a
-    // name are ambiguous no matter which one "wins".
+    // name are ambiguous no matter which one "wins", and neither may claim
+    // it.
     //
-    // This pass deliberately runs over EVERY opted-in endpoint — before the
-    // auth filter and before every skip below — so a name is unique, or not,
-    // for all callers alike. Counting after filtering would make the name's
-    // meaning auth-dependent in exactly the way the rule exists to prevent
-    // (a public caller gets `get_thing`; an admin sees two and gets
-    // neither, so privilege strictly *reduces* the tool set), and would let
-    // one filter launder a duplicate for another: drop the colliding
-    // `get_thing` first and the surviving one silently inherits the name as
-    // if it had always been unique.
+    // # This is a safety net that should never fire
     //
-    // Counting first and then emitting only what turned out unique is also
-    // order-independent by construction, unlike dropping the later
-    // duplicate.
+    // Everything below describes what happens *if* a duplicate name reaches
+    // this function, and in a runtime that went through `Wafer::seal()` none
+    // ever does: `seal()` counts tool names across every registered block
+    // and refuses to boot on a collision
+    // (`RuntimeError::DuplicateToolNames`). The reason the gate is there
+    // rather than here is the whole "what it does cost" section further
+    // down — every runtime resolution of an ambiguous name is bad for
+    // somebody, and the per-manifest one is bad for the caller least able to
+    // notice. A name that cannot be deployed twice needs no runtime
+    // resolution at all.
+    //
+    // The census stays because this function is a pure projection of
+    // `BlockInfo`s and does not know where they came from. A consumer can
+    // hand it declarations that never passed through `seal()` — a
+    // hand-assembled `Vec<BlockInfo>`, an inspector view, a test — and in
+    // that case an ambiguous name must still not be published as though it
+    // were unique.
+    //
+    // # Uniqueness is a property of a manifest, not of the deployment
+    //
+    // The question this census answers is which of two readings of
+    // "unique" the projection enforces:
+    //
+    // * **Global** — a name claimed anywhere is claimed everywhere, so
+    //   counting runs over every opted-in endpoint regardless of who asked.
+    // * **Per-manifest** — a name is unique if it is unambiguous *in the
+    //   document this caller receives*, so counting runs over the endpoints
+    //   this caller may invoke.
+    //
+    // This counts per manifest, because global counting leaks. An
+    // admin-only endpoint that collides with a public one suppresses the
+    // public tool for everyone, so an anonymous caller who knows the public
+    // block — its source is not a secret — fetches the manifest, finds
+    // `get_thing` missing, and has learned that some endpoint they cannot
+    // reach claims that name. The auth filter four lines below exists
+    // precisely so that a name an agent cannot use never reaches the page;
+    // under global counting the *absence* of a name leaks the same fact.
+    // Nothing about a caller's manifest may depend on an endpoint that
+    // caller cannot see, and this is the last place it did.
+    //
+    // # What per-manifest counting does not cost
+    //
+    // The review that introduced global counting worried that a name could
+    // then mean different things to different callers. It cannot, and the
+    // reason is that the auth filter is monotone in the caller's rank: a
+    // higher tier sees a superset of a lower tier's endpoints. If a name is
+    // unique at some tier, its one claimant is visible there; at any lower
+    // tier the candidate set only shrinks, so that name is either still
+    // claimed by the same endpoint or claimed by nobody. A name therefore
+    // never denotes two different endpoints across two manifests — it is
+    // present or absent, never ambiguous.
+    //
+    // Order-independence is unchanged: counting first and emitting only what
+    // turned out unique cannot depend on declaration order, unlike dropping
+    // the later duplicate.
+    //
+    // Laundering is unchanged too, and is the reason this census is scoped
+    // by auth *only*. It runs before every structural verdict below, so an
+    // endpoint that will be refused for a malformed path or an
+    // unrepresentable body still spends its claim on the name. Otherwise
+    // dropping the broken side would let the survivor silently inherit the
+    // name as though it had always been unique, and repairing the broken
+    // endpoint later would silently change what the name means.
+    //
+    // # What it does cost
+    //
+    // Cross-tier monotonicity of the tool set. A public caller can now
+    // receive a `get_thing` that an admin — who sees both claimants — does
+    // not. That reads backwards, and it is the honest answer: at the admin's
+    // tier the name really is ambiguous, and at the anonymous visitor's tier
+    // it really is not. The cost also lands in the right place, on the
+    // operator who can see the refusal log and fix the collision, rather
+    // than on the visitor who can do neither. Because the filter is
+    // monotone, an `Admin` census sees every collision that exists anywhere,
+    // so boot-time diagnostics generated at that ceiling lose nothing.
     //
     // Names that are not legal MCP tool names are excluded from the count.
     // They are refused on their own terms below, and counting them would let
@@ -1583,7 +2013,9 @@ pub fn generate_webmcp_report(
     for block in blocks {
         for ep in &block.endpoints {
             if let Some(tool) = ep.agent_tool.as_ref() {
-                if AgentTool::is_valid_name(&tool.name) {
+                if AgentTool::is_valid_name(&tool.name)
+                    && auth_rank(effective_auth(block, ep)) <= ceiling
+                {
                     *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
                 }
             }
@@ -1598,13 +2030,23 @@ pub fn generate_webmcp_report(
                 continue;
             };
 
-            let mut refuse = |reason: WebMcpRefusal| {
+            // Resolved here rather than at the filter below because every
+            // refusal recorded on the way there has to carry it: a consumer
+            // rendering "what this caller receives" must be able to drop the
+            // entries about endpoints this caller cannot see, and it must
+            // not re-derive that decision itself. The filter below still
+            // decides the manifest; this only records what it will decide.
+            let visible_to_caller = auth_rank(effective_auth(block, ep)) <= ceiling;
+
+            let mut refuse = |scope: Scope, reason: WebMcpRefusal| {
                 refused.push(WebMcpRefusalReport {
                     block: block.name.clone(),
                     method: ep.method,
                     path: ep.path.clone(),
                     tool_name: tool.name.clone(),
+                    scope,
                     reason,
+                    visible_to_caller,
                 });
             };
 
@@ -1614,13 +2056,7 @@ pub fn generate_webmcp_report(
             // would reject — and which the consumer's per-tool try/catch
             // would swallow — out of the manifest.
             if !AgentTool::is_valid_name(&tool.name) {
-                refuse(WebMcpRefusal::InvalidToolName);
-                continue;
-            }
-
-            let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
-            if count != 1 {
-                refuse(WebMcpRefusal::DuplicateToolName { count });
+                refuse(Scope::Tool, WebMcpRefusal::InvalidToolName);
                 continue;
             }
 
@@ -1631,9 +2067,12 @@ pub fn generate_webmcp_report(
             // the value in both places. Emitting no tool is the safe, visible
             // failure; emitting a lying one is neither.
             if !input.collisions.is_empty() {
-                refuse(WebMcpRefusal::CollidingParameterNames {
-                    names: input.collisions.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::CollidingParameterNames {
+                        names: input.collisions.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1646,9 +2085,12 @@ pub fn generate_webmcp_report(
             // an unrepresentable source and send the author looking at the
             // wrong thing. See `MAX_INLINED_NODES`.
             if !input.oversized_schemas.is_empty() {
-                refuse(WebMcpRefusal::SchemaTooLarge {
-                    sources: input.oversized_schemas.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::SchemaTooLarge {
+                        sources: input.oversized_schemas.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1660,9 +2102,12 @@ pub fn generate_webmcp_report(
             // exactly the kind of lie `collisions` above already refuses to
             // tell. See `source_is_flattenable`.
             if !input.unrepresentable.is_empty() {
-                refuse(WebMcpRefusal::UnrepresentableSources {
-                    sources: input.unrepresentable.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::UnrepresentableSources {
+                        sources: input.unrepresentable.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1672,9 +2117,12 @@ pub fn generate_webmcp_report(
             // `properties` object, one entry of which now accepts garbage.
             // Same lie, quieter.
             if !input.unresolved_refs.is_empty() {
-                refuse(WebMcpRefusal::UnresolvedRefs {
-                    sources: input.unresolved_refs.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::UnresolvedRefs {
+                        sources: input.unresolved_refs.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1684,9 +2132,12 @@ pub fn generate_webmcp_report(
             // telling the author a reference "could not be resolved" sends
             // them hunting for an entry that is already there.
             if !input.recursive_refs.is_empty() {
-                refuse(WebMcpRefusal::RecursiveSchema {
-                    sources: input.recursive_refs.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::RecursiveSchema {
+                        sources: input.recursive_refs.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1698,9 +2149,12 @@ pub fn generate_webmcp_report(
             // Filtering the names out of `required` instead would swap one
             // lie for another: the server's own schema still requires them.
             if !input.undeclared_required.is_empty() {
-                refuse(WebMcpRefusal::RequiredNotDeclared {
-                    names: input.undeclared_required.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::RequiredNotDeclared {
+                        names: input.undeclared_required.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1708,9 +2162,12 @@ pub fn generate_webmcp_report(
             // agreed URL serialization, and `invocation` carries no
             // `style`/`explode` to settle it. See `param_is_scalar_valued`.
             if !input.non_scalar_params.is_empty() {
-                refuse(WebMcpRefusal::NonScalarPathOrQueryParams {
-                    params: input.non_scalar_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::NonScalarPathOrQueryParams {
+                        params: input.non_scalar_params.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1725,21 +2182,24 @@ pub fn generate_webmcp_report(
             let mut placeholders = match path_placeholders(&ep.path) {
                 Ok(placeholders) => placeholders,
                 Err(PathTemplateError::Malformed) => {
-                    refuse(WebMcpRefusal::MalformedPathTemplate);
+                    refuse(Scope::Tool, WebMcpRefusal::MalformedPathTemplate);
                     continue;
                 }
                 Err(PathTemplateError::Wildcard { segment }) => {
-                    refuse(WebMcpRefusal::WildcardPathSegment { segment });
+                    refuse(Scope::Tool, WebMcpRefusal::WildcardPathSegment { segment });
                     continue;
                 }
             };
             placeholders.sort();
             placeholders.dedup();
             if placeholders != input.path_params {
-                refuse(WebMcpRefusal::PathParamsDisagreeWithTemplate {
-                    placeholders,
-                    declared: input.path_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::PathParamsDisagreeWithTemplate {
+                        placeholders,
+                        declared: input.path_params.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1750,9 +2210,12 @@ pub fn generate_webmcp_report(
             // missing data. Either way the tool fails on every invocation, so
             // it is not published. See `method_can_carry_body`.
             if !input.body_params.is_empty() && !method_can_carry_body(ep.method) {
-                refuse(WebMcpRefusal::BodyOnBodylessMethod {
-                    body_params: input.body_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::BodyOnBodylessMethod {
+                        body_params: input.body_params.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1760,8 +2223,41 @@ pub fn generate_webmcp_report(
             // tool the caller may not invoke is omitted, silently and by
             // design. See the "Refusals are the same for every caller"
             // section.
-            if auth_rank(effective_auth(block, ep)) > ceiling {
+            if !visible_to_caller {
                 continue;
+            }
+
+            // Uniqueness is scoped to this manifest, so the check belongs
+            // after the auth filter that defines it — see the census above.
+            // The count is over endpoints this caller may invoke, so a
+            // filtered-out endpoint has no count and must not be asked for
+            // one; and running the structural checks first means an endpoint
+            // that is both broken and duplicated is reported by the defect
+            // its author can actually fix, keeping every caller-independent
+            // verdict ahead of the one caller-scoped verdict there is.
+            let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
+            if count != 1 {
+                refuse(Scope::Tool, WebMcpRefusal::DuplicateToolName { count });
+                continue;
+            }
+
+            // The one verdict that does not take the tool down with it: a
+            // response schema this cannot vouch for costs the `outputSchema`
+            // field and nothing else. See `agent_output_schema` for why the
+            // unit of refusal is smaller here than everywhere above.
+            //
+            // Last, and specifically *after* both caller-scoped gates above,
+            // because a field-scoped refusal only means anything when the
+            // field's tool actually ships. "Published without outputSchema"
+            // is a false statement about an endpoint the caller cannot see,
+            // and about one whose name collided — in both cases no tool was
+            // published at all, and a report that says otherwise sends its
+            // reader looking for a tool that is not in the manifest. The
+            // verdict itself is still a property of the declaration alone,
+            // so it reads the same for every caller who receives the tool.
+            let output = agent_output_schema(ep);
+            if let Some(reason) = output.dropped {
+                refuse(Scope::OutputSchema, reason);
             }
 
             // A deprecated endpoint still works, so it is still published —
@@ -1783,6 +2279,9 @@ pub fn generate_webmcp_report(
                 emitted.insert("deprecated".into(), json!(true));
             }
             emitted.insert("inputSchema".into(), input.schema);
+            if let Some(schema) = output.schema {
+                emitted.insert("outputSchema".into(), schema);
+            }
             emitted.insert(
                 "invocation".into(),
                 json!({
@@ -3306,7 +3805,7 @@ mod tests {
 
     #[test]
     fn webmcp_public_caller_sees_only_public_tools() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
 
         // Name-list assertions above only prove the higher-privilege tools'
@@ -3336,7 +3835,7 @@ mod tests {
 
     #[test]
     fn webmcp_authenticated_caller_sees_public_and_authenticated() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
         let names = tool_names(&doc);
         assert!(names.contains(&"get_product".to_string()));
         assert!(names.contains(&"list_my_purchases".to_string()));
@@ -3362,7 +3861,7 @@ mod tests {
 
     #[test]
     fn webmcp_admin_caller_sees_every_tool() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         let mut names = tool_names(&doc);
         names.sort();
         assert_eq!(
@@ -3379,7 +3878,7 @@ mod tests {
 
     #[test]
     fn webmcp_excludes_endpoints_that_did_not_opt_in() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         let rendered = doc.to_string();
         assert!(
             !rendered.contains("/b/products/webhooks"),
@@ -3409,7 +3908,7 @@ mod tests {
                     .agent_tool("colliding_tool", "Should never be emitted."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3435,7 +3934,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3454,7 +3953,7 @@ mod tests {
                     .agent_tool("bulk_import", "Should never be emitted: body is an array."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3476,7 +3975,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3502,7 +4001,7 @@ mod tests {
                     .agent_tool("get_other_thing", "Uniquely named, must still appear."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             tool_names(&doc),
             vec!["get_other_thing".to_string()],
@@ -3530,8 +4029,10 @@ mod tests {
                 .endpoints(order.iter().map(|id| by_id(id)).collect())
         };
 
-        let forward = generate_webmcp(&[make_block(["a", "b", "c"])], AuthLevel::Admin);
-        let reversed = generate_webmcp(&[make_block(["c", "b", "a"])], AuthLevel::Admin);
+        let forward =
+            generate_webmcp_declared_auth(&[make_block(["a", "b", "c"])], AuthLevel::Admin);
+        let reversed =
+            generate_webmcp_declared_auth(&[make_block(["c", "b", "a"])], AuthLevel::Admin);
 
         assert_eq!(tool_names(&forward), vec!["get_other_thing".to_string()]);
         assert_eq!(
@@ -3543,7 +4044,7 @@ mod tests {
 
     #[test]
     fn webmcp_tool_carries_invocation_metadata() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         let tool = &doc["tools"][0];
         assert_eq!(tool["name"], json!("get_product"));
         assert_eq!(
@@ -3566,7 +4067,7 @@ mod tests {
 
     #[test]
     fn webmcp_emits_schema_version_and_empty_tools_for_no_blocks() {
-        let doc = generate_webmcp(&[], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[], AuthLevel::Admin);
         assert_eq!(doc["schema_version"], json!(1));
         assert_eq!(doc["tools"], json!([]));
     }
@@ -3577,7 +4078,7 @@ mod tests {
         // output an agent would receive, not just tool names, and is a
         // stronger determinism check than calling the pure function twice
         // in one process (which cannot fail).
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Public);
         assert_eq!(
             doc,
             json!({
@@ -3606,7 +4107,7 @@ mod tests {
 
     #[test]
     fn webmcp_authenticated_manifest_matches_snapshot() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Authenticated);
         assert_eq!(
             doc,
             json!({
@@ -3635,6 +4136,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/products/purchases",
@@ -3650,7 +4152,7 @@ mod tests {
 
     #[test]
     fn webmcp_admin_manifest_matches_snapshot() {
-        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&webmcp_fixture_blocks(), AuthLevel::Admin);
         assert_eq!(
             doc,
             json!({
@@ -3679,6 +4181,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/products/purchases",
@@ -3694,6 +4197,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/admin/api/users",
@@ -3704,6 +4208,374 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // outputSchema
+    // -----------------------------------------------------------------
+
+    /// One block with a single opted-in endpoint carrying `output`, so the
+    /// output-schema tests differ only in the schema under test.
+    fn block_with_output_schema(output: Value) -> BlockInfo {
+        BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            BlockEndpoint::get("/b/x/thing")
+                .auth(AuthLevel::Public)
+                .output_schema(output)
+                .agent_tool("get_thing", "Fetch a thing."),
+        ])
+    }
+
+    #[test]
+    fn webmcp_publishes_a_self_contained_output_schema() {
+        // The same treatment `inputSchema` gets: references inlined, the
+        // `$defs` table gone, the root `title` (the source Rust type's name)
+        // dropped, and a `$ref` sibling annotation preserved.
+        let block = block_with_output_schema(json!({
+            "title": "Thing",
+            "type": "object",
+            "properties": {
+                "status": { "description": "Lifecycle state.", "$ref": "#/$defs/Status" }
+            },
+            "required": ["status"],
+            "$defs": { "Status": { "type": "string", "enum": ["draft", "active"] } }
+        }));
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert!(refused.is_empty(), "nothing to report: {refused:?}");
+        assert_eq!(
+            doc["tools"][0]["outputSchema"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "description": "Lifecycle state.",
+                        "type": "string",
+                        "enum": ["draft", "active"]
+                    }
+                },
+                "required": ["status"]
+            }),
+            "a client that cannot resolve $ref must still get the whole shape: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_omits_output_schema_when_the_endpoint_declares_none() {
+        // No key at all rather than `null` or `{}` — an empty schema would
+        // claim "the response can be anything", which is a claim, not a
+        // silence. And nothing is reported: nothing was dropped.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Fetch a thing."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert!(refused.is_empty(), "nothing was declared: {refused:?}");
+        assert!(
+            doc["tools"][0].get("outputSchema").is_none(),
+            "an undeclared response shape must leave the key absent: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_declaring_an_empty_output_schema_is_declaring_nothing() {
+        for empty in [json!(null), json!({})] {
+            let block = block_with_output_schema(empty.clone());
+            let (doc, refused) =
+                generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+            assert!(refused.is_empty(), "{empty} is not a defect: {refused:?}");
+            assert!(
+                doc["tools"][0].get("outputSchema").is_none(),
+                "{empty} means nothing was declared, exactly as it does for the \
+                 input sources: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn webmcp_publishes_the_tool_without_an_output_schema_it_cannot_vouch_for() {
+        // The asymmetry this whole design turns on. The SAME dangling `$ref`
+        // costs the tool on the input side and costs only the field on the
+        // output side, because `inputSchema` is mandatory — omitting it is
+        // itself the false claim "takes no arguments" — while `outputSchema`
+        // is optional and its absence claims nothing.
+        let dangling = json!({
+            "type": "object",
+            "properties": { "status": { "$ref": "#/$defs/Missing" } }
+        });
+
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(dangling.clone())],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_thing".to_string()],
+            "a defect in the response shape says nothing about the arguments, \
+             and a missing tool helps no one: {doc}"
+        );
+        assert!(
+            doc["tools"][0].get("outputSchema").is_none(),
+            "the field must be absent, not `{{}}`: {doc}"
+        );
+        assert_eq!(refused.len(), 1, "the drop must not be silent: {refused:?}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaUnresolvedRef);
+        let rendered = refused[0].to_string();
+        assert!(
+            rendered.contains("published without outputSchema"),
+            "the rendered report must not read as a missing tool: {rendered}"
+        );
+        // And the reason text must name the declaration that is actually at
+        // fault. The input side's identical verdict says "inputSchema",
+        // which would send an author who declared only `.output::<T>()`
+        // looking at their arguments.
+        assert!(
+            rendered.contains("output schema") && !rendered.contains("inputSchema"),
+            "the output drop must not borrow the input side's wording: {rendered}"
+        );
+
+        // Same schema, input side: the tool goes.
+        let on_input =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .input_schema(dangling)
+                    .agent_tool("set_thing", "Set a thing."),
+            ]);
+        let (doc, refused) = generate_webmcp_report(&[on_input], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(doc["tools"], json!([]), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::Tool);
+    }
+
+    #[test]
+    fn webmcp_drops_an_output_schema_that_does_not_describe_an_object() {
+        // A `Vec<T>` response. `outputSchema` describes a structured result,
+        // which is an object, so there is no honest slot for an array here —
+        // and telling a validating client to check an array against an object
+        // schema fails every call.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(json!({
+                "type": "array",
+                "items": { "type": "object", "properties": { "id": { "type": "string" } } }
+            }))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaNotAnObject);
+        assert!(
+            refused[0].to_string().contains("output schema"),
+            "the reason text must name the output schema: {}",
+            refused[0]
+        );
+    }
+
+    #[test]
+    fn webmcp_drops_a_structurally_malformed_output_schema() {
+        // Object-shaped is not well-formed. `properties` must be an object
+        // and `required` an array of strings; neither is true here, so this
+        // is not a JSON Schema at all. Published verbatim it is the same
+        // malformed tool *definition* the budget bailout can produce, which
+        // a client that validates definitions rejects — taking the whole
+        // tool down inside the consumer's per-tool try/catch, silently.
+        // Only a hand-written schema reaches this; schemars never emits it.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(json!({
+                "type": "object",
+                "required": { "a": 1 },
+                "properties": "oops"
+            }))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(
+            doc["tools"][0].get("outputSchema").is_none(),
+            "the malformed document must not ship verbatim: {doc}"
+        );
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::OutputSchemaUnrepresentable
+        );
+        assert!(
+            refused[0].to_string().contains("output schema"),
+            "the reason text must name the output schema: {}",
+            refused[0]
+        );
+    }
+
+    #[test]
+    fn webmcp_publishes_an_output_schema_that_only_looks_unusual() {
+        // The wall is the input side's, which is stricter than this path
+        // needs — so pin the shapes that must still get through: an
+        // annotation-carrying object with a well-formed `required`, and a
+        // closed one.
+        for schema in [
+            json!({
+                "type": "object",
+                "title": "Thing",
+                "description": "A thing.",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "additionalProperties": false
+            }),
+        ] {
+            let (doc, refused) = generate_webmcp_report(
+                &[block_with_output_schema(schema.clone())],
+                AuthLevel::Admin,
+                |_, ep| ep.auth,
+            );
+            assert!(
+                doc["tools"][0].get("outputSchema").is_some(),
+                "{schema} must publish: {doc}"
+            );
+            assert!(refused.is_empty(), "{schema}: {refused:?}");
+        }
+    }
+
+    #[test]
+    fn webmcp_drops_a_recursive_output_schema() {
+        // `struct Node { children: Vec<Node> }` — schemars closes the cycle
+        // with `{"$ref": "#"}`, which has no finite inlining. Reported as
+        // recursive rather than unresolvable: nothing is missing from `$defs`.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(json!({
+                "type": "object",
+                "properties": {
+                    "children": { "type": "array", "items": { "$ref": "#" } }
+                }
+            }))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaRecursive);
+        let rendered = refused[0].to_string();
+        assert!(
+            rendered.contains("output schema") && !rendered.contains("inputSchema"),
+            "the output drop must not borrow the input side's wording: {rendered}"
+        );
+    }
+
+    #[test]
+    fn webmcp_drops_an_output_schema_that_expands_past_the_node_budget() {
+        // The output side pays into the same `MAX_INLINED_NODES` budget. It
+        // matters most here: past the budget the walk emits `{}` wherever it
+        // stopped, so a `required` array can come out as `"required": {}` —
+        // not a weaker schema but a malformed one, which a client that
+        // validates tool definitions rejects, taking the tool with it.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(doubling_schema(22))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaTooLarge);
+        let rendered = refused[0].to_string();
+        assert!(
+            rendered.contains("output schema") && !rendered.contains("inputSchema"),
+            "the output drop must not borrow the input side's wording: {rendered}"
+        );
+    }
+
+    #[test]
+    fn webmcp_output_schema_drops_are_reported_only_where_the_tool_ships() {
+        // A field-scoped refusal renders as "published without outputSchema",
+        // which is a claim about a tool that is *in the manifest*. For a
+        // caller who cannot see the endpoint no tool was published at all,
+        // so the entry would describe something that does not exist and send
+        // its reader hunting for it. The verdict is still caller-independent
+        // — the same reason text reaches every caller who receives the tool
+        // — it is only recorded where it is true.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/admin_thing")
+                    .auth(AuthLevel::Admin)
+                    .output_schema(json!({ "type": "array" }))
+                    .agent_tool("get_admin_thing", "Fetch an admin thing."),
+            ]);
+
+        let (public_doc, public_refusals) =
+            generate_webmcp_report(std::slice::from_ref(&block), AuthLevel::Public, |_, ep| {
+                ep.auth
+            });
+        let (admin_doc, admin_refusals) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+
+        assert_eq!(
+            tool_names(&public_doc),
+            Vec::<String>::new(),
+            "the tool itself stays hidden: {public_doc}"
+        );
+        assert_eq!(
+            public_refusals,
+            Vec::new(),
+            "no tool was published to this caller, so nothing was published \
+             without an outputSchema: {public_refusals:?}"
+        );
+
+        assert_eq!(tool_names(&admin_doc), vec!["get_admin_thing".to_string()]);
+        assert_eq!(admin_refusals.len(), 1, "{admin_refusals:?}");
+        assert_eq!(admin_refusals[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(
+            admin_refusals[0].reason,
+            WebMcpRefusal::OutputSchemaNotAnObject
+        );
+        assert!(admin_refusals[0].visible_to_caller);
+    }
+
+    #[test]
+    fn webmcp_a_duplicated_name_is_not_also_reported_as_an_output_schema_drop() {
+        // Two claimants, both with an unpublishable response schema. Neither
+        // tool ships, so "published without outputSchema" is false for both
+        // and only the collision — the thing that actually cost the tool —
+        // is reported.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/a")
+                    .auth(AuthLevel::Public)
+                    .output_schema(json!({ "type": "array" }))
+                    .agent_tool("get_thing", "First."),
+                BlockEndpoint::get("/b/x/b")
+                    .auth(AuthLevel::Public)
+                    .output_schema(json!({ "type": "array" }))
+                    .agent_tool("get_thing", "Second."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(doc["tools"], json!([]), "{doc}");
+        assert_eq!(
+            refused
+                .iter()
+                .map(|r| (r.scope, r.reason.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    WebMcpRefusalScope::Tool,
+                    WebMcpRefusal::DuplicateToolName { count: 2 }
+                ),
+                (
+                    WebMcpRefusalScope::Tool,
+                    WebMcpRefusal::DuplicateToolName { count: 2 }
+                ),
+            ],
+            "{refused:?}"
         );
     }
 
@@ -3811,7 +4683,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3834,7 +4706,7 @@ mod tests {
                     .agent_tool("get_product", "Should never be emitted: name mismatch."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3859,7 +4731,7 @@ mod tests {
                     ),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3886,7 +4758,7 @@ mod tests {
                     .agent_tool("get_item", "Fetch one item."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["get_item".to_string()]);
         assert_eq!(
             doc["tools"][0]["invocation"]["path_params"],
@@ -3903,7 +4775,7 @@ mod tests {
                     .agent_tool("list_things", "Nothing to fill in."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["list_things".to_string()]);
     }
 
@@ -3922,11 +4794,11 @@ mod tests {
     }
 
     /// A consumer whose router enforces `max(prefix_tier, ep.auth)` cannot be
-    /// described by `ep.auth` alone, and `generate_webmcp` structurally
+    /// described by `ep.auth` alone, and `generate_webmcp_declared_auth` structurally
     /// cannot see the prefix table. The resolver is where that knowledge
     /// belongs.
     #[test]
-    fn webmcp_with_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
+    fn webmcp_resolver_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
         let blocks = [tiered_block()];
         let with_admin_prefix = |_block: &BlockInfo, ep: &BlockEndpoint| {
             if ep.path.starts_with("/b/admin/") {
@@ -3938,13 +4810,13 @@ mod tests {
 
         // The declared-auth wrapper trusts `ep.auth` and would publish it.
         assert_eq!(
-            tool_names(&generate_webmcp(&blocks, AuthLevel::Public)),
+            tool_names(&generate_webmcp_declared_auth(&blocks, AuthLevel::Public)),
             vec!["get_stats".to_string()],
             "declared-auth-only filtering advertises this to anonymous callers"
         );
 
         // A resolver that knows about the admin prefix must hide it.
-        let doc = generate_webmcp_with(&blocks, AuthLevel::Public, with_admin_prefix);
+        let doc = generate_webmcp(&blocks, AuthLevel::Public, with_admin_prefix);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -3958,12 +4830,12 @@ mod tests {
         );
 
         // An admin caller is above the effective level and still sees it.
-        let doc = generate_webmcp_with(&blocks, AuthLevel::Admin, with_admin_prefix);
+        let doc = generate_webmcp(&blocks, AuthLevel::Admin, with_admin_prefix);
         assert_eq!(tool_names(&doc), vec!["get_stats".to_string()]);
     }
 
     #[test]
-    fn webmcp_with_reveals_a_tool_the_resolver_lowers() {
+    fn webmcp_resolver_reveals_a_tool_it_lowers() {
         // The filter runs the other way too: a route the consumer serves
         // without auth must not stay hidden behind a stricter declared level.
         let block =
@@ -3975,12 +4847,12 @@ mod tests {
         let blocks = [block];
 
         assert_eq!(
-            generate_webmcp(&blocks, AuthLevel::Public)["tools"],
+            generate_webmcp_declared_auth(&blocks, AuthLevel::Public)["tools"],
             json!([]),
             "declared-auth-only filtering hides it"
         );
         assert_eq!(
-            tool_names(&generate_webmcp_with(&blocks, AuthLevel::Public, |_, _| {
+            tool_names(&generate_webmcp(&blocks, AuthLevel::Public, |_, _| {
                 AuthLevel::Public
             })),
             vec!["read_mirror".to_string()],
@@ -3991,7 +4863,7 @@ mod tests {
     fn webmcp_passes_the_owning_block_to_the_resolver() {
         // A consumer mounts *blocks* under prefixes, so the resolver has to
         // be able to key off the owning block, not just the endpoint.
-        let doc = generate_webmcp_with(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
+        let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
             if block.name == "impresspress/products" {
                 AuthLevel::Public
             } else {
@@ -4009,17 +4881,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // duplicate names are counted before any filtering
+    // duplicate names are counted per manifest, before every structural
+    // verdict
     // -----------------------------------------------------------------
 
     #[test]
-    fn webmcp_duplicate_name_across_auth_levels_is_dropped_for_every_caller() {
-        // A name shared by a Public and an Admin endpoint. Counting names
-        // after the auth filter would hand a public caller one unambiguous
-        // `get_thing` and an admin caller none — privilege would strictly
-        // *reduce* the tool set, and the name's meaning would depend on who
-        // asked. The name is ambiguous in the declarations, so it is
-        // ambiguous for everyone.
+    fn webmcp_a_duplicate_in_a_higher_tier_does_not_reach_a_lower_manifest() {
+        // The existence oracle this census is scoped to close. A public and
+        // an admin endpoint both claim `get_thing`. Counting names globally
+        // would drop the public tool for the anonymous caller — who, knowing
+        // the public block (its source is not a secret), would infer from the
+        // gap that an endpoint they cannot reach claims that name. The
+        // anonymous manifest must be a function of the anonymous surface and
+        // nothing else.
         let block =
             BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
                 BlockEndpoint::get("/b/x/public")
@@ -4034,19 +4908,90 @@ mod tests {
             ]);
         let blocks = [block];
 
+        for caller in [AuthLevel::Public, AuthLevel::Authenticated] {
+            let doc = generate_webmcp_declared_auth(&blocks, caller);
+            assert_eq!(
+                tool_names(&doc),
+                vec!["get_thing".to_string(), "get_other_thing".to_string()],
+                "`get_thing` is unambiguous in {caller}'s manifest, and whether an \
+                 admin endpoint also claims the name is not {caller}'s business: {doc}"
+            );
+            let rendered = doc.to_string();
+            assert!(
+                !rendered.contains("/b/x/admin") && !rendered.contains("Admin get_thing"),
+                "the published tool must be the one this caller can invoke: {rendered}"
+            );
+        }
+
+        // At the admin's own tier the name really is ambiguous, so neither
+        // claimant may have it — and the collision is reported, to the one
+        // caller who can do something about it.
+        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_other_thing".to_string()],
+            "{doc}"
+        );
+        let duplicates = refused
+            .iter()
+            .filter(|r| {
+                r.tool_name == "get_thing"
+                    && r.reason == WebMcpRefusal::DuplicateToolName { count: 2 }
+            })
+            .count();
+        assert_eq!(
+            duplicates, 2,
+            "both claimants must be named in the operator's diagnostic: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn webmcp_a_tool_name_never_denotes_two_endpoints_across_manifests() {
+        // The property per-manifest uniqueness has to keep, and the one the
+        // global census was introduced to protect. The auth filter is
+        // monotone in the caller's rank, so a lower tier's candidate set is a
+        // subset of a higher tier's: a name that is unique somewhere is
+        // either claimed by that same endpoint at every tier that can see it,
+        // or claimed by nobody. Present or absent, never ambiguous.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/public_thing")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Public get_thing."),
+                BlockEndpoint::get("/b/x/admin_thing")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("get_thing", "Admin get_thing."),
+                BlockEndpoint::get("/b/x/authed_only")
+                    .auth(AuthLevel::Authenticated)
+                    .agent_tool("get_authed_thing", "Authenticated-only tool."),
+            ]);
+        let blocks = [block];
+
+        let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
         for caller in [
             AuthLevel::Public,
             AuthLevel::Authenticated,
             AuthLevel::Admin,
         ] {
-            let doc = generate_webmcp(&blocks, caller);
-            assert_eq!(
-                tool_names(&doc),
-                vec!["get_other_thing".to_string()],
-                "`get_thing` is duplicated in the declarations, so no caller — \
-                 {caller} included — may receive it: {doc}"
-            );
+            let doc = generate_webmcp_declared_auth(&blocks, caller);
+            for tool in doc["tools"].as_array().expect("tools array") {
+                let name = tool["name"].as_str().expect("tool name").to_string();
+                if let Some(previous) = seen.get(&name) {
+                    assert_eq!(
+                        previous, &tool["invocation"],
+                        "tool '{name}' points at a different endpoint for {caller} \
+                         than it did for a lower tier"
+                    );
+                } else {
+                    seen.insert(name, tool["invocation"].clone());
+                }
+            }
         }
+        assert!(
+            seen.contains_key("get_thing") && seen.contains_key("get_authed_thing"),
+            "the fixture must actually exercise both a duplicated and a \
+             tier-restricted name: {seen:?}"
+        );
     }
 
     #[test]
@@ -4073,12 +5018,32 @@ mod tests {
                     .agent_tool("get_thing", "Colliding endpoint."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
         assert_eq!(
             doc["tools"],
             json!([]),
             "a duplicated name must stay duplicated even when the other side is \
              dropped for an unrelated reason: {doc}"
+        );
+        // Scoping the census by auth did not scope it by structural verdict:
+        // the broken endpoint still spends its claim on the name, so the
+        // clean one is refused as a duplicate rather than inheriting it. The
+        // broken one is reported by the defect its author can fix.
+        assert_eq!(
+            refused
+                .iter()
+                .map(|r| (r.path.as_str(), r.reason.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/b/x/a", WebMcpRefusal::DuplicateToolName { count: 2 }),
+                (
+                    "/b/x/{id}",
+                    WebMcpRefusal::CollidingParameterNames {
+                        names: vec!["id".to_string()]
+                    }
+                ),
+            ],
+            "{refused:?}"
         );
     }
 
@@ -4137,7 +5102,7 @@ mod tests {
                     .agent_tool("set_tree", "Should never be emitted: nested `#` ref."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4158,7 +5123,7 @@ mod tests {
                     .agent_tool("set_thing", "Should never be emitted: dangling ref."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -4184,7 +5149,7 @@ mod tests {
                     .agent_tool("set_thing", "Set a product status."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         assert_eq!(tool_names(&doc), vec!["set_thing".to_string()]);
         assert_eq!(
             doc["tools"][0]["inputSchema"]["properties"]["status"],
@@ -4209,7 +5174,7 @@ mod tests {
                     .agent_tool("get_new_thing", "Fetch a thing."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
         let tools = doc["tools"].as_array().expect("tools array");
 
         let old = tools
@@ -5015,9 +5980,11 @@ mod tests {
         );
     }
 
-    /// The refusal list is a defect report about the endpoints, not about the
-    /// caller, so it must not vary with `caller` — an author debugging a
-    /// missing admin tool should not have to authenticate to see why.
+    /// A structural refusal is a defect report about the endpoint, not about
+    /// the caller, so the diagnostic itself must not vary with `caller` — an
+    /// author debugging a missing admin tool should not have to authenticate
+    /// to see why. What *does* vary is `visible_to_caller`, which is how a
+    /// consumer rendering one caller's own view knows to drop it.
     #[test]
     fn webmcp_refusals_do_not_depend_on_the_caller() {
         let block =
@@ -5035,7 +6002,19 @@ mod tests {
             generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
 
         assert_eq!(tool_names(&public_doc), Vec::<String>::new());
-        assert_eq!(public_refusals, admin_refusals);
+        let diagnostic = |r: &WebMcpRefusalReport| {
+            (
+                r.block.clone(),
+                r.path.clone(),
+                r.tool_name.clone(),
+                r.scope,
+                r.reason.clone(),
+            )
+        };
+        assert_eq!(
+            public_refusals.iter().map(diagnostic).collect::<Vec<_>>(),
+            admin_refusals.iter().map(diagnostic).collect::<Vec<_>>(),
+        );
         assert_eq!(
             public_refusals[0].reason,
             WebMcpRefusal::PathParamsDisagreeWithTemplate {
@@ -5043,6 +6022,12 @@ mod tests {
                 declared: Vec::new(),
             }
         );
+
+        // The endpoint is admin-only, so a page rendering "what the public
+        // caller receives" must not name it. That decision belongs to the
+        // producer's own filter, and this is how it travels.
+        assert!(!public_refusals[0].visible_to_caller);
+        assert!(admin_refusals[0].visible_to_caller);
     }
 
     /// Hiding a tool the caller may not invoke is the projection working, so
@@ -5061,9 +6046,12 @@ mod tests {
     }
 
     #[test]
-    fn webmcp_with_matches_the_report_variant_manifest() {
+    fn webmcp_matches_the_report_variant_manifest() {
         let blocks = webmcp_fixture_blocks();
         let (reported, _) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
-        assert_eq!(generate_webmcp(&blocks, AuthLevel::Admin), reported);
+        assert_eq!(
+            generate_webmcp_declared_auth(&blocks, AuthLevel::Admin),
+            reported
+        );
     }
 }

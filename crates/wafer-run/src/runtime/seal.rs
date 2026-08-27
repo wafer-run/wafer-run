@@ -1,11 +1,15 @@
 //! [`Wafer::seal`] — the once-per-boot finalization pipeline, decomposed
 //! into named phases: grant-rejection gate, remote resolution, config
 //! expansion, capability computation, wasm instance-pooling policy,
-//! block-reference resolution, and startup-snapshot finalization.
+//! block-reference resolution, agent-tool-name uniqueness, and
+//! startup-snapshot finalization.
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use wafer_block::error::{BlockReferenceError, BlockReferenceSource, RuntimeError};
+use wafer_block::error::{
+    AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateToolNameError,
+    RuntimeError,
+};
 
 use super::Wafer;
 
@@ -32,7 +36,10 @@ impl Wafer {
     ///    Aggregates every missing reference into one
     ///    `RuntimeError::BlocksNotFound` so operators see the full punch
     ///    list with each missing block's source.
-    /// 6. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
+    /// 6. Refuse boot if two endpoints — in the same block or across blocks
+    ///    — declare the same WebMCP agent-tool name. Runs after step 5 so
+    ///    downloaded remote blocks are covered too.
+    /// 7. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
     ///    every [`crate::runtime::RuntimeContext`].
     ///
     /// Block `Init` lifecycle events are **not** dispatched here. Each block
@@ -57,8 +64,92 @@ impl Wafer {
 
         self.resolve_block_references().await?;
 
+        self.fail_on_duplicate_tool_names()?;
+
         self.finalize_snapshot();
         Ok(())
+    }
+
+    /// Refuse boot when two endpoints declare the same WebMCP agent-tool
+    /// name.
+    ///
+    /// # Why this is a deployment-time failure and not a runtime one
+    ///
+    /// `BlockInfo::validate` already rejects a *malformed* tool name at
+    /// registration, but it sees one block at a time, so a name claimed by
+    /// two blocks — or by two endpoints of one block — reaches the runtime
+    /// intact. The manifest projection then has to decide what to do with an
+    /// ambiguous name, and every available runtime answer is bad:
+    ///
+    /// * Drop both claimants globally, and the *absence* of a name in an
+    ///   anonymous caller's manifest tells them an endpoint they cannot
+    ///   reach claims it — an existence oracle.
+    /// * Drop them per manifest, and the collision resolves differently per
+    ///   caller: a `Public` endpoint colliding with an `Admin` one is
+    ///   published to anonymous and authenticated callers as the sole
+    ///   claimant of the name, and only an admin's manifest reports the
+    ///   collision. Every agent below admin binds the name to the shadowing
+    ///   endpoint with no diagnostic reaching it.
+    ///
+    /// Neither is a property the deployment should have. So the ambiguity is
+    /// made impossible to declare instead: one loud error at boot, listing
+    /// every colliding name and every endpoint claiming it, the same shape
+    /// [`Self::fail_on_rejected_grants`] and
+    /// [`Self::resolve_block_references`] use for their own cross-block
+    /// verdicts. `wafer_core::discovery`'s per-manifest census stays where it
+    /// is as a safety net for consumers that project `BlockInfo`s this gate
+    /// never saw, and in a runtime that went through `seal()` it never fires.
+    ///
+    /// Names that are not legal MCP tool names are skipped: registration
+    /// already refused them (`BlockInfoError::InvalidAgentToolName`), and
+    /// counting them here would let one defect manufacture another — two
+    /// endpoints that both forgot a name would collide in the empty-string
+    /// bucket and be reported as a duplicate, which says nothing true about
+    /// either.
+    fn fail_on_duplicate_tool_names(&self) -> Result<(), RuntimeError> {
+        // BTreeMap so the aggregated message is name-sorted and stable
+        // across boots; `registration.blocks` is a HashMap.
+        let mut claimants: BTreeMap<String, Vec<AgentToolClaimant>> = BTreeMap::new();
+        for block in self.registration.blocks.values() {
+            let info = block.info();
+            for ep in &info.endpoints {
+                let Some(tool) = ep.agent_tool.as_ref() else {
+                    continue;
+                };
+                if !wafer_block::AgentTool::is_valid_name(&tool.name) {
+                    continue;
+                }
+                claimants
+                    .entry(tool.name.clone())
+                    .or_default()
+                    .push(AgentToolClaimant {
+                        block: info.name.clone(),
+                        method: ep.method,
+                        path: ep.path.clone(),
+                    });
+            }
+        }
+
+        let duplicates: Vec<DuplicateToolNameError> = claimants
+            .into_iter()
+            .filter(|(_, claimants)| claimants.len() > 1)
+            .map(|(name, mut claimants)| {
+                claimants.sort_by(|a, b| {
+                    (&a.block, a.method.to_string(), &a.path).cmp(&(
+                        &b.block,
+                        b.method.to_string(),
+                        &b.path,
+                    ))
+                });
+                DuplicateToolNameError { name, claimants }
+            })
+            .collect();
+
+        if duplicates.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::DuplicateToolNames(duplicates))
+        }
     }
 
     /// Drain the grant-validation accumulator before sealing. This is the
@@ -482,6 +573,195 @@ fn collect_flow_step_refs(
                 collect_flow_step_refs(wafer, flow_id, &branch.steps, &nested, references);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_name_tests {
+    //! Cross-block agent-tool-name uniqueness. `BlockInfo::validate` sees one
+    //! block at a time, so a name two blocks both claim only becomes visible
+    //! once every block is registered — which is what `seal()` is for.
+
+    use std::sync::Arc;
+
+    use wafer_block::{
+        error::RuntimeError,
+        streams::{input::InputStream, output::OutputStream},
+        AuthLevel, Block, BlockEndpoint, BlockInfo, Context, LifecycleEvent, Message, WaferError,
+    };
+
+    use super::super::Wafer;
+
+    struct FakeInfoBlock {
+        info: BlockInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl Block for FakeInfoBlock {
+        fn info(&self) -> BlockInfo {
+            self.info.clone()
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(Vec::new())
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    fn wafer_with(infos: Vec<BlockInfo>) -> Wafer {
+        let mut wafer = Wafer::empty();
+        for info in infos {
+            let name = info.name.clone();
+            wafer
+                .register_block(name, Arc::new(FakeInfoBlock { info }))
+                .expect("register");
+        }
+        wafer
+    }
+
+    fn shop(endpoints: Vec<BlockEndpoint>) -> BlockInfo {
+        BlockInfo::new("test/shop", "1.0.0", "http-handler@v1", "Shop").endpoints(endpoints)
+    }
+
+    #[test]
+    fn accepts_distinct_tool_names_across_blocks() {
+        let wafer = wafer_with(vec![
+            shop(vec![BlockEndpoint::get("/b/shop/things")
+                .auth(AuthLevel::Public)
+                .agent_tool("list_things", "List things.")]),
+            BlockInfo::new("test/admin", "1.0.0", "http-handler@v1", "Admin").endpoints(vec![
+                BlockEndpoint::get("/b/admin/things")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("list_all_things", "List every thing."),
+            ]),
+        ]);
+        assert!(wafer.fail_on_duplicate_tool_names().is_ok());
+    }
+
+    #[test]
+    fn refuses_a_name_claimed_by_a_public_and_an_admin_endpoint() {
+        // The collision the per-manifest census resolves *differently per
+        // caller*: the public endpoint would be published to anonymous and
+        // authenticated callers as the sole `get_thing`, and only an admin's
+        // manifest would report the ambiguity. Refused at boot instead.
+        let wafer = wafer_with(vec![
+            shop(vec![BlockEndpoint::get("/b/shop/thing")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "Public thing.")]),
+            BlockInfo::new("test/admin", "1.0.0", "http-handler@v1", "Admin").endpoints(vec![
+                BlockEndpoint::get("/b/admin/thing")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("get_thing", "Admin thing."),
+            ]),
+        ]);
+
+        let err = wafer
+            .fail_on_duplicate_tool_names()
+            .expect_err("a cross-block collision must refuse boot");
+        let RuntimeError::DuplicateToolNames(duplicates) = &err else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].name, "get_thing");
+        assert_eq!(duplicates[0].claimants.len(), 2);
+
+        let msg = err.to_string();
+        for expected in [
+            "get_thing",
+            "block `test/admin` GET /b/admin/thing",
+            "block `test/shop` GET /b/shop/thing",
+        ] {
+            assert!(msg.contains(expected), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_name_claimed_twice_inside_one_block() {
+        let wafer = wafer_with(vec![shop(vec![
+            BlockEndpoint::get("/b/shop/a")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "First."),
+            BlockEndpoint::get("/b/shop/b")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "Second."),
+        ])]);
+        let err = wafer
+            .fail_on_duplicate_tool_names()
+            .expect_err("a same-block collision is a collision too");
+        assert!(err.to_string().contains("get_thing"), "message: {err}");
+    }
+
+    #[test]
+    fn aggregates_every_collision_rather_than_stopping_at_the_first() {
+        // The same posture as `BlocksNotFound`: an operator sees the whole
+        // punch list, not one name per boot attempt.
+        let wafer = wafer_with(vec![shop(vec![
+            BlockEndpoint::get("/b/shop/a")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "First."),
+            BlockEndpoint::get("/b/shop/b")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "Second."),
+            BlockEndpoint::get("/b/shop/c")
+                .auth(AuthLevel::Public)
+                .agent_tool("set_thing", "Third."),
+            BlockEndpoint::post("/b/shop/d")
+                .auth(AuthLevel::Public)
+                .agent_tool("set_thing", "Fourth."),
+        ])]);
+        let err = wafer
+            .fail_on_duplicate_tool_names()
+            .expect_err("two collisions");
+        let RuntimeError::DuplicateToolNames(duplicates) = &err else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(
+            duplicates
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["get_thing", "set_thing"],
+            "sorted by name so the message is stable across boots"
+        );
+    }
+
+    #[test]
+    fn endpoints_that_did_not_opt_in_never_collide() {
+        // Two endpoints can share everything else; only a declared
+        // `agent_tool` name is a claim on the agent-facing namespace.
+        let wafer = wafer_with(vec![shop(vec![
+            BlockEndpoint::get("/b/shop/a").auth(AuthLevel::Public),
+            BlockEndpoint::get("/b/shop/b").auth(AuthLevel::Public),
+        ])]);
+        assert!(wafer.fail_on_duplicate_tool_names().is_ok());
+    }
+
+    #[tokio::test]
+    async fn seal_refuses_to_boot_on_a_duplicate_tool_name() {
+        // The gate is wired into the boot funnel, not merely available.
+        let mut wafer = wafer_with(vec![shop(vec![
+            BlockEndpoint::get("/b/shop/a")
+                .auth(AuthLevel::Public)
+                .agent_tool("get_thing", "First."),
+            BlockEndpoint::get("/b/shop/b")
+                .auth(AuthLevel::Admin)
+                .agent_tool("get_thing", "Second."),
+        ])]);
+        let err = wafer.seal().await.expect_err("seal must refuse");
+        assert!(
+            matches!(err, RuntimeError::DuplicateToolNames(_)),
+            "wrong variant: {err:?}"
+        );
     }
 }
 

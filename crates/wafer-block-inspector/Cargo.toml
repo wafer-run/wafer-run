@@ -7,6 +7,22 @@ description = "WAFER block: runtime introspection — blocks, flows, and visual 
 
 [dependencies]
 wafer-block = { path = "../wafer-block" }
+# The WebMCP view (`/webmcp`, rendered by the "Agent tools" tab) shows the
+# tool manifest each auth level receives, and why an opted-in endpoint
+# produced no tool. The only honest way to show that is to call the same
+# projection the runtime serves — `wafer_core::discovery::generate_webmcp_report`
+# — because a second implementation of a security-critical filter would
+# drift, and an inspector that renders a manifest the producer does not
+# actually emit is exactly the lie that module exists to refuse.
+#
+# This is the established direction: eight of the sibling `wafer-block-*`
+# crates already depend on `wafer-core`, whose own description is "shared
+# interfaces, clients, and utilities for WAFER blocks". The alternative —
+# moving the projection down into `wafer-block` — would put fifteen hundred
+# lines of manifest machinery into the SDK crate that compiles into every
+# WASM guest, to avoid a dependency the workspace already takes everywhere
+# else.
+wafer-core = { path = "../wafer-core" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 percent-encoding = { workspace = true }
