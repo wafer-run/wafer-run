@@ -5,11 +5,28 @@
 ignore = [
     "RUSTSEC-2023-0071", # rsa timing side-channel — no fix available
     "RUSTSEC-2026-0002", # lru stacked borrows — pinned by aws-sdk-s3
-    "RUSTSEC-2026-0098", # rustls-webpki 0.101.7 URI name constraints — pinned by AWS SDK rustls 0.21
-    "RUSTSEC-2026-0099", # rustls-webpki 0.101.7 wildcard name constraints — pinned by AWS SDK rustls 0.21
     "RUSTSEC-2026-0097", # rand — waiting for upstream fix
     "RUSTSEC-2025-0119", # number_prefix unmaintained — transitive via fastembed → hf-hub → indicatif
     "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed → tokenizers
-    "RUSTSEC-2026-0104", # rustls-webpki panic on malformed CRL — 0.101.7 pinned by aws-sdk-s3, 0.103.12 pinned by reqwest-rustls 0.26 chain; DoS-only, no code exec
+    # h2 unbounded empty DATA frames.
+    #   Scope: DEV/TEST ONLY. `cargo tree --locked -e normal -i h2@0.3.27`
+    #   prints nothing — the vulnerable crate is in no production artifact.
+    #   It is reached solely through wafer-block-s3's [dev-dependencies]
+    #   `aws-sdk-s3 features = ["test-util"]` → aws-smithy-runtime/test-util
+    #   → legacy-test-util → connector-hyper-0-14-x → hyper 0.14 → h2 0.3.27,
+    #   inside test binaries that mock the transport and never open a socket.
+    #   Our production h2 (via hyper 1.x) is 0.4.19, which IS patched.
+    #   Why not fixed: `patched = [">= 0.4.16"]`, so the 0.3.x line has no fix
+    #   at all — it needs a major bump upstream. The test-util feature cannot
+    #   simply be dropped either: `aws_smithy_mocks::mock_client!` expands to
+    #   `with_test_defaults_v2()`, which is gated on that feature.
+    #   REMOVE WHEN: smithy-rs decouples `legacy-test-util` from `test-util`.
+    #   Still coupled as of aws-smithy-runtime 1.14 / aws-smithy-http-client
+    #   1.4, so a plain `cargo update` will clear this once they split.
+    #   NOTE: cargo-audit ignores are advisory-wide, not version-scoped, so
+    #   this also silences the advisory for our 0.4.x line. A downgrade there
+    #   below 0.4.16 would go unflagged — it would require an explicit
+    #   lockfile change, which review should catch.
+    "RUSTSEC-2026-0258",
 ]
 informational_warnings = ["unmaintained"]

@@ -69,9 +69,9 @@ pub use wafer_block::{
         output::{OutputSink, OutputStream, TerminalNotResponse},
     },
     types::{
-        AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime, CollectionSchema,
-        ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet, MetaSet,
-        RequestAction, ResourceGrant, ResourceType, UnknownResourceType,
+        AgentTool, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockRuntime,
+        CollectionSchema, ConfigVar, FieldSchema, HttpMethod, IndexSchema, InputType, MetaGet,
+        MetaSet, RequestAction, ResourceGrant, ResourceType, UnknownResourceType,
     },
     wrap,
     ErrorCode,

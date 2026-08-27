@@ -35,6 +35,9 @@ wafer-block-macro = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
+# Decoding schemars' percent-encoded `#/$defs/` reference names back to the
+# unencoded `$defs` keys they point at (see `discovery::decode_ref_name`).
+percent-encoding = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Blocking-pool offload for CPU-heavy crypto ops (PERF-02); wasm32 builds

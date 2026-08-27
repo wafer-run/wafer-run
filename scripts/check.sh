@@ -11,10 +11,11 @@
 #
 # Steps: fixtures fmt clippy test wasm audit
 #
-# The audit step is advisory in the full run (CI marks its audit job
-# continue-on-error; a local full run mirrors that and only warns). When
-# named explicitly, audit propagates cargo-audit's exit code so the CI
-# job surfaces failures.
+# The audit step is BLOCKING, here and in CI. It used to be advisory —
+# CI's audit job carried continue-on-error and the full local run only
+# warned to match. PR #287 made the CI job blocking but left this script
+# warning, so `check.sh` printed "All checks passed." while CI went red.
+# Both paths now propagate cargo-audit's exit code.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -80,9 +81,7 @@ if [ "$#" -eq 0 ]; then
     run_clippy
     run_test
     run_wasm
-    if ! run_audit; then
-        echo "warning: cargo audit reported issues (non-blocking, matches CI)" >&2
-    fi
+    run_audit
     echo "==> All checks passed."
 else
     for step in "$@"; do
