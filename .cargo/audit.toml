@@ -11,5 +11,6 @@ ignore = [
     "RUSTSEC-2025-0119", # number_prefix unmaintained — transitive via fastembed → hf-hub → indicatif
     "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed → tokenizers
     "RUSTSEC-2026-0104", # rustls-webpki panic on malformed CRL — 0.101.7 pinned by aws-sdk-s3, 0.103.12 pinned by reqwest-rustls 0.26 chain; DoS-only, no code exec
+    "RUSTSEC-2026-0258", # h2 unbounded empty DATA frames — 0.3.27 pinned by aws-smithy-http-client → hyper 0.14; the fix is only in 0.4.16+, a major bump upstream must make. Our 0.4.x instance IS patched (0.4.19). DoS against an HTTP/2 *server*; this h2 is the AWS SDK's *client* to S3/STS, so exploiting it means controlling the AWS endpoint.
 ]
 informational_warnings = ["unmaintained"]
