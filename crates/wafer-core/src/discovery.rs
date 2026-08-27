@@ -1429,10 +1429,17 @@ pub enum WebMcpRefusal {
     /// `AgentTool::is_valid_name`. `BlockInfo::validate` rejects this at
     /// registration; reaching the generator means something bypassed it.
     InvalidToolName,
-    /// More than one opted-in endpoint declares this tool name, so none of
-    /// them can claim it. Carries how many endpoints share it.
+    /// More than one endpoint *this caller may invoke* declares this tool
+    /// name, so none of them can claim it in this caller's manifest.
+    ///
+    /// The only caller-scoped reason there is: tool-name uniqueness is a
+    /// property of a manifest rather than of the deployment, so the same
+    /// endpoint can be refused here for an admin and published for an
+    /// anonymous visitor. See the census in `generate_webmcp_report` for
+    /// why, and for why an `Admin` ceiling still sees every collision that
+    /// exists anywhere.
     DuplicateToolName {
-        /// How many opted-in endpoints declare this name.
+        /// How many endpoints visible to this caller declare this name.
         count: usize,
     },
     /// Property names arriving from more than one of path/query/body.
@@ -1726,16 +1733,27 @@ pub fn generate_webmcp_with(
 /// refusals are for the operator's logs and for tests, and the manifest is
 /// for the agent.
 ///
-/// # Refusals are the same for every caller
+/// # Refusals are the same for every caller — with one exception
 ///
-/// Every refusal reason is a defect in the endpoint's own declarations, so
-/// the structural checks run *before* the auth filter and the returned list
-/// does not depend on `caller`. A broken admin endpoint is broken when an
-/// anonymous visitor loads the manifest too, and an author debugging it
-/// should not have to guess which caller makes the diagnostic appear. The
-/// auth filter itself is not a refusal — omitting a tool the caller may not
-/// invoke is the projection working — so it is applied last and reported
-/// nowhere.
+/// Every refusal reason except [`WebMcpRefusal::DuplicateToolName`] is a
+/// defect in the endpoint's own declarations, so the structural checks run
+/// *before* the auth filter and that part of the returned list does not
+/// depend on `caller`. A broken admin endpoint is broken when an anonymous
+/// visitor loads the manifest too, and an author debugging it should not
+/// have to guess which caller makes the diagnostic appear. The auth filter
+/// itself is not a refusal — omitting a tool the caller may not invoke is
+/// the projection working — so it is reported nowhere.
+///
+/// A duplicate name is not a defect in one endpoint; it is a property of the
+/// manifest the two endpoints land in, and that manifest is auth-filtered.
+/// Counting names across endpoints the caller cannot see would make a
+/// missing tool an oracle for a higher-privilege endpoint's existence — the
+/// same recon surface the auth filter exists to close. So the census is
+/// scoped to the caller, and collisions are reported for the callers in
+/// whose manifest they actually occur. Because the auth filter is monotone,
+/// a report taken at `AuthLevel::Admin` still contains every collision that
+/// exists anywhere, which is what a boot-time diagnostic pass should ask
+/// for.
 ///
 /// # Not every refusal costs the tool
 ///
@@ -1757,21 +1775,66 @@ pub fn generate_webmcp_report(
     let mut refused: Vec<WebMcpRefusalReport> = Vec::new();
 
     // A WebMCP client registers tools by name, so two endpoints sharing a
-    // name are ambiguous no matter which one "wins".
+    // name are ambiguous no matter which one "wins", and neither may claim
+    // it.
     //
-    // This pass deliberately runs over EVERY opted-in endpoint — before the
-    // auth filter and before every skip below — so a name is unique, or not,
-    // for all callers alike. Counting after filtering would make the name's
-    // meaning auth-dependent in exactly the way the rule exists to prevent
-    // (a public caller gets `get_thing`; an admin sees two and gets
-    // neither, so privilege strictly *reduces* the tool set), and would let
-    // one filter launder a duplicate for another: drop the colliding
-    // `get_thing` first and the surviving one silently inherits the name as
-    // if it had always been unique.
+    // # Uniqueness is a property of a manifest, not of the deployment
     //
-    // Counting first and then emitting only what turned out unique is also
-    // order-independent by construction, unlike dropping the later
-    // duplicate.
+    // The question this census answers is which of two readings of
+    // "unique" the projection enforces:
+    //
+    // * **Global** — a name claimed anywhere is claimed everywhere, so
+    //   counting runs over every opted-in endpoint regardless of who asked.
+    // * **Per-manifest** — a name is unique if it is unambiguous *in the
+    //   document this caller receives*, so counting runs over the endpoints
+    //   this caller may invoke.
+    //
+    // This counts per manifest, because global counting leaks. An
+    // admin-only endpoint that collides with a public one suppresses the
+    // public tool for everyone, so an anonymous caller who knows the public
+    // block — its source is not a secret — fetches the manifest, finds
+    // `get_thing` missing, and has learned that some endpoint they cannot
+    // reach claims that name. The auth filter four lines below exists
+    // precisely so that a name an agent cannot use never reaches the page;
+    // under global counting the *absence* of a name leaks the same fact.
+    // Nothing about a caller's manifest may depend on an endpoint that
+    // caller cannot see, and this is the last place it did.
+    //
+    // # What per-manifest counting does not cost
+    //
+    // The review that introduced global counting worried that a name could
+    // then mean different things to different callers. It cannot, and the
+    // reason is that the auth filter is monotone in the caller's rank: a
+    // higher tier sees a superset of a lower tier's endpoints. If a name is
+    // unique at some tier, its one claimant is visible there; at any lower
+    // tier the candidate set only shrinks, so that name is either still
+    // claimed by the same endpoint or claimed by nobody. A name therefore
+    // never denotes two different endpoints across two manifests — it is
+    // present or absent, never ambiguous.
+    //
+    // Order-independence is unchanged: counting first and emitting only what
+    // turned out unique cannot depend on declaration order, unlike dropping
+    // the later duplicate.
+    //
+    // Laundering is unchanged too, and is the reason this census is scoped
+    // by auth *only*. It runs before every structural verdict below, so an
+    // endpoint that will be refused for a malformed path or an
+    // unrepresentable body still spends its claim on the name. Otherwise
+    // dropping the broken side would let the survivor silently inherit the
+    // name as though it had always been unique, and repairing the broken
+    // endpoint later would silently change what the name means.
+    //
+    // # What it does cost
+    //
+    // Cross-tier monotonicity of the tool set. A public caller can now
+    // receive a `get_thing` that an admin — who sees both claimants — does
+    // not. That reads backwards, and it is the honest answer: at the admin's
+    // tier the name really is ambiguous, and at the anonymous visitor's tier
+    // it really is not. The cost also lands in the right place, on the
+    // operator who can see the refusal log and fix the collision, rather
+    // than on the visitor who can do neither. Because the filter is
+    // monotone, an `Admin` census sees every collision that exists anywhere,
+    // so boot-time diagnostics generated at that ceiling lose nothing.
     //
     // Names that are not legal MCP tool names are excluded from the count.
     // They are refused on their own terms below, and counting them would let
@@ -1783,7 +1846,9 @@ pub fn generate_webmcp_report(
     for block in blocks {
         for ep in &block.endpoints {
             if let Some(tool) = ep.agent_tool.as_ref() {
-                if AgentTool::is_valid_name(&tool.name) {
+                if AgentTool::is_valid_name(&tool.name)
+                    && auth_rank(effective_auth(block, ep)) <= ceiling
+                {
                     *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
                 }
             }
@@ -1816,12 +1881,6 @@ pub fn generate_webmcp_report(
             // would swallow — out of the manifest.
             if !AgentTool::is_valid_name(&tool.name) {
                 refuse(Scope::Tool, WebMcpRefusal::InvalidToolName);
-                continue;
-            }
-
-            let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
-            if count != 1 {
-                refuse(Scope::Tool, WebMcpRefusal::DuplicateToolName { count });
                 continue;
             }
 
@@ -2003,6 +2062,20 @@ pub fn generate_webmcp_report(
             // design. See the "Refusals are the same for every caller"
             // section.
             if auth_rank(effective_auth(block, ep)) > ceiling {
+                continue;
+            }
+
+            // Uniqueness is scoped to this manifest, so the check belongs
+            // after the auth filter that defines it — see the census above.
+            // The count is over endpoints this caller may invoke, so a
+            // filtered-out endpoint has no count and must not be asked for
+            // one; and running the structural checks first means an endpoint
+            // that is both broken and duplicated is reported by the defect
+            // its author can actually fix, keeping every caller-independent
+            // verdict ahead of the one caller-scoped verdict there is.
+            let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
+            if count != 1 {
+                refuse(Scope::Tool, WebMcpRefusal::DuplicateToolName { count });
                 continue;
             }
 
@@ -4500,17 +4573,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // duplicate names are counted before any filtering
+    // duplicate names are counted per manifest, before every structural
+    // verdict
     // -----------------------------------------------------------------
 
     #[test]
-    fn webmcp_duplicate_name_across_auth_levels_is_dropped_for_every_caller() {
-        // A name shared by a Public and an Admin endpoint. Counting names
-        // after the auth filter would hand a public caller one unambiguous
-        // `get_thing` and an admin caller none — privilege would strictly
-        // *reduce* the tool set, and the name's meaning would depend on who
-        // asked. The name is ambiguous in the declarations, so it is
-        // ambiguous for everyone.
+    fn webmcp_a_duplicate_in_a_higher_tier_does_not_reach_a_lower_manifest() {
+        // The existence oracle this census is scoped to close. A public and
+        // an admin endpoint both claim `get_thing`. Counting names globally
+        // would drop the public tool for the anonymous caller — who, knowing
+        // the public block (its source is not a secret), would infer from the
+        // gap that an endpoint they cannot reach claims that name. The
+        // anonymous manifest must be a function of the anonymous surface and
+        // nothing else.
         let block =
             BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
                 BlockEndpoint::get("/b/x/public")
@@ -4525,19 +4600,90 @@ mod tests {
             ]);
         let blocks = [block];
 
+        for caller in [AuthLevel::Public, AuthLevel::Authenticated] {
+            let doc = generate_webmcp(&blocks, caller);
+            assert_eq!(
+                tool_names(&doc),
+                vec!["get_thing".to_string(), "get_other_thing".to_string()],
+                "`get_thing` is unambiguous in {caller}'s manifest, and whether an \
+                 admin endpoint also claims the name is not {caller}'s business: {doc}"
+            );
+            let rendered = doc.to_string();
+            assert!(
+                !rendered.contains("/b/x/admin") && !rendered.contains("Admin get_thing"),
+                "the published tool must be the one this caller can invoke: {rendered}"
+            );
+        }
+
+        // At the admin's own tier the name really is ambiguous, so neither
+        // claimant may have it — and the collision is reported, to the one
+        // caller who can do something about it.
+        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_other_thing".to_string()],
+            "{doc}"
+        );
+        let duplicates = refused
+            .iter()
+            .filter(|r| {
+                r.tool_name == "get_thing"
+                    && r.reason == WebMcpRefusal::DuplicateToolName { count: 2 }
+            })
+            .count();
+        assert_eq!(
+            duplicates, 2,
+            "both claimants must be named in the operator's diagnostic: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn webmcp_a_tool_name_never_denotes_two_endpoints_across_manifests() {
+        // The property per-manifest uniqueness has to keep, and the one the
+        // global census was introduced to protect. The auth filter is
+        // monotone in the caller's rank, so a lower tier's candidate set is a
+        // subset of a higher tier's: a name that is unique somewhere is
+        // either claimed by that same endpoint at every tier that can see it,
+        // or claimed by nobody. Present or absent, never ambiguous.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/public_thing")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Public get_thing."),
+                BlockEndpoint::get("/b/x/admin_thing")
+                    .auth(AuthLevel::Admin)
+                    .agent_tool("get_thing", "Admin get_thing."),
+                BlockEndpoint::get("/b/x/authed_only")
+                    .auth(AuthLevel::Authenticated)
+                    .agent_tool("get_authed_thing", "Authenticated-only tool."),
+            ]);
+        let blocks = [block];
+
+        let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
         for caller in [
             AuthLevel::Public,
             AuthLevel::Authenticated,
             AuthLevel::Admin,
         ] {
             let doc = generate_webmcp(&blocks, caller);
-            assert_eq!(
-                tool_names(&doc),
-                vec!["get_other_thing".to_string()],
-                "`get_thing` is duplicated in the declarations, so no caller — \
-                 {caller} included — may receive it: {doc}"
-            );
+            for tool in doc["tools"].as_array().expect("tools array") {
+                let name = tool["name"].as_str().expect("tool name").to_string();
+                if let Some(previous) = seen.get(&name) {
+                    assert_eq!(
+                        previous, &tool["invocation"],
+                        "tool '{name}' points at a different endpoint for {caller} \
+                         than it did for a lower tier"
+                    );
+                } else {
+                    seen.insert(name, tool["invocation"].clone());
+                }
+            }
         }
+        assert!(
+            seen.contains_key("get_thing") && seen.contains_key("get_authed_thing"),
+            "the fixture must actually exercise both a duplicated and a \
+             tier-restricted name: {seen:?}"
+        );
     }
 
     #[test]
@@ -4564,12 +4710,32 @@ mod tests {
                     .agent_tool("get_thing", "Colliding endpoint."),
             ]);
 
-        let doc = generate_webmcp(&[block], AuthLevel::Admin);
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
         assert_eq!(
             doc["tools"],
             json!([]),
             "a duplicated name must stay duplicated even when the other side is \
              dropped for an unrelated reason: {doc}"
+        );
+        // Scoping the census by auth did not scope it by structural verdict:
+        // the broken endpoint still spends its claim on the name, so the
+        // clean one is refused as a duplicate rather than inheriting it. The
+        // broken one is reported by the defect its author can fix.
+        assert_eq!(
+            refused
+                .iter()
+                .map(|r| (r.path.as_str(), r.reason.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/b/x/a", WebMcpRefusal::DuplicateToolName { count: 2 }),
+                (
+                    "/b/x/{id}",
+                    WebMcpRefusal::CollidingParameterNames {
+                        names: vec!["id".to_string()]
+                    }
+                ),
+            ],
+            "{refused:?}"
         );
     }
 
