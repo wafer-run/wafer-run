@@ -69,7 +69,56 @@ fn path_to_slug(path: &str) -> String {
 /// `$defs` stripping is suspended inside them for the same reason: a literal
 /// value may legitimately have a `$defs` key, and deleting it would corrupt
 /// the data.
+///
+/// These names are keywords only in a position where the surrounding
+/// object's keys are *read* as keywords. Inside one of the
+/// [`SCHEMA_MAP_KEYWORDS`] maps the keys are names the author chose, and the
+/// rule must not apply — see that constant.
 const LITERAL_VALUE_KEYWORDS: &[&str] = &["default", "const", "examples", "enum"];
+
+/// JSON Schema keywords whose value is a *map from author-chosen names to
+/// schemas*, rather than a schema object.
+///
+/// Which of the two a member sits in decides whether its key is a keyword at
+/// all. In a schema object, `default` is the default-value keyword. In a
+/// `properties` map, `default` is a field literally named `default` —
+/// `struct S { default: Status }` emits
+/// `{"properties": {"default": {"$ref": "#/$defs/Status"}}}` — and its value
+/// is a schema that must be resolved like any other.
+///
+/// Deciding by key name alone copied that `$ref` through verbatim, stripped
+/// `$defs` out from under it, and set no flag, so the tool shipped an
+/// argument pointing at a definition no longer in the document. That is the
+/// silent lie about a tool's own arguments the rest of this module exists to
+/// refuse, so the walk tracks position instead of guessing from the name.
+///
+/// `$defs` is deliberately absent: it never reaches the member walk, because
+/// a schema object drops it outright as the reference table. A *property*
+/// named `$defs` is a member of a `properties` map and is never read as that
+/// table.
+const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "dependentSchemas"];
+
+/// The most JSON nodes — objects, arrays, and scalars counted individually —
+/// one schema source may expand into while its `$ref`s are inlined.
+///
+/// Cycle detection bounds the *depth* of an expansion but not its *size*.
+/// Inlining copies a definition in full at every place it is referenced, so a
+/// finite, acyclic type whose definitions each reference the next one twice
+/// doubles the output per level: 22 such levels turn a 2 KB schema into
+/// 247 MB. Nothing about that schema is malformed — it is neither recursive
+/// nor missing a definition — so neither of the other two refusals describes
+/// it, and with no size bound the generator runs until it exhausts memory
+/// while the manifest request hangs.
+///
+/// 100 000 is picked to be unreachable by a real type tree and unmissable by
+/// a runaway one. An inlined property costs roughly three to six nodes (its
+/// schema object, its `type`, its `description`), so the budget is on the
+/// order of twenty thousand inlined properties — a few megabytes of
+/// `inputSchema`, orders of magnitude past the largest schema any block here
+/// declares and past what an MCP client would accept in a manifest. The
+/// doubling case crosses it before level twenty, in milliseconds, long
+/// before any memory is at risk.
+const MAX_INLINED_NODES: usize = 100_000;
 
 /// Decode a `#/$defs/` pointer segment back into the key it names in the
 /// `$defs` table.
@@ -98,6 +147,21 @@ fn decode_ref_name(encoded: &str) -> Option<String> {
     Some(decoded.replace("~1", "/").replace("~0", "~"))
 }
 
+/// Count the JSON nodes in a value.
+///
+/// Used to charge a verbatim-copied literal ([`LITERAL_VALUE_KEYWORDS`]) to
+/// the same [`MAX_INLINED_NODES`] budget the resolved nodes pay into. A
+/// literal is small on its own, but it is copied again at every place its
+/// enclosing definition is inlined, so leaving it uncharged would leave a
+/// hole in the bound.
+fn count_nodes(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => 1 + map.values().map(count_nodes).sum::<usize>(),
+        Value::Array(items) => 1 + items.iter().map(count_nodes).sum::<usize>(),
+        _ => 1,
+    }
+}
+
 /// Rewrite a schemars-generated schema into a self-contained one: every
 /// `#/$defs/*` reference is replaced by its target, and the `$defs` block is
 /// removed.
@@ -107,28 +171,34 @@ fn decode_ref_name(encoded: &str) -> Option<String> {
 /// hand over schemas that stand alone.
 ///
 /// Returns the rewritten schema together with the ways the rewrite could not
-/// be done honestly — see [`RefIssues`]. Both of them leave `{}` behind: an
+/// be done honestly — see [`RefIssues`]. All three leave `{}` behind: an
 /// unconstrained schema standing where the server requires a concrete type.
 /// At the top level that shows up as a missing `properties` object and is
 /// caught by the `unrepresentable` check, but below the top level —
 /// `properties.children.items` for a `struct Node { children: Vec<Node> }` —
 /// nothing else would notice. So the report travels out of here and callers
-/// refuse to build a tool from a schema that sets either flag.
+/// refuse to build a tool from a schema that sets any of them.
 fn inline_refs(schema: &Value) -> (Value, RefIssues) {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
-    let mut issues = RefIssues::default();
-    let mut active: Vec<String> = Vec::new();
-    let resolved = resolve_refs(schema, &defs, &mut active, &mut issues);
-    (resolved, issues)
+    let mut walk = RefWalk {
+        defs: &defs,
+        active: Vec::new(),
+        issues: RefIssues::default(),
+        emitted: 0,
+    };
+    let resolved = walk.resolve(schema);
+    (resolved, walk.issues)
 }
 
-/// The two distinct ways [`inline_refs`] can fail to produce a self-contained
-/// schema. They are reported separately because the fix is different and the
-/// author is sent to a different place: a dangling reference means a missing
-/// or misspelled `$defs` entry, while a cycle means the type genuinely has no
-/// finite inlining and the endpoint needs a different shape. Collapsing them
-/// into one flag — as a depth cap does — sends the author of a recursive type
-/// hunting for a `$defs` entry that is not missing.
+/// The three distinct ways [`inline_refs`] can fail to produce a
+/// self-contained schema. They are reported separately because the fix is
+/// different and the author is sent to a different place: a dangling
+/// reference means a missing or misspelled `$defs` entry, a cycle means the
+/// type genuinely has no finite inlining and the endpoint needs a different
+/// shape, and an over-budget expansion means a well-formed type whose
+/// definitions multiply out. Collapsing any two into one flag — as a depth
+/// cap did — sends the author of a recursive type hunting for a `$defs`
+/// entry that is not missing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RefIssues {
     /// A `$ref` named a target that does not exist, or took a form this
@@ -141,123 +211,181 @@ struct RefIssues {
     /// child `Condition`s) is legitimate and has no finite inlining, so the
     /// cycle is cut and reported rather than expanded.
     recursive: bool,
+    /// The inlining passed [`MAX_INLINED_NODES`], so the walk stopped and
+    /// the rest of the schema is missing. Not a defect in any one reference:
+    /// the type is finite and every reference resolves, but definitions
+    /// referenced from several levels multiply out.
+    oversized: bool,
 }
 
-/// Resolve one `$ref` target, tracking the chain of definitions currently
-/// being expanded so a cycle is cut where it closes rather than after an
-/// arbitrary number of hops.
-///
-/// `active` is a stack, not a set of everything ever seen: a definition
-/// referenced twice from *different* branches of a finite type tree is not a
-/// cycle, and must inline both times.
-fn resolve_ref_target(
-    reference: &str,
-    defs: &Value,
-    active: &mut Vec<String>,
-    issues: &mut RefIssues,
-) -> Value {
-    // schemars' root-recursion marker: the document root contains itself, so
-    // there is no finite inlining of it.
-    if reference == "#" {
-        issues.recursive = true;
-        return json!({});
-    }
-
-    let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) else {
-        issues.unresolved = true;
-        return json!({});
-    };
-    let Some(target) = defs.get(name.as_str()) else {
-        issues.unresolved = true;
-        return json!({});
-    };
-    if active.contains(&name) {
-        issues.recursive = true;
-        return json!({});
-    }
-
-    let target = target.clone();
-    active.push(name);
-    let resolved = resolve_refs(&target, defs, active, issues);
-    active.pop();
-    resolved
+/// One pass of [`inline_refs`]: the reference table it resolves against, the
+/// chain of definitions currently open, what went wrong, and how much output
+/// has been produced so far.
+struct RefWalk<'a> {
+    /// The document's `$defs` table — the only thing a `#/$defs/*` pointer
+    /// can name.
+    defs: &'a Value,
+    /// The definitions currently being expanded, innermost last.
+    ///
+    /// A stack, not a set of everything ever seen: a definition referenced
+    /// twice from *different* branches of a finite type tree is not a cycle,
+    /// and must inline both times.
+    active: Vec<String>,
+    issues: RefIssues,
+    /// JSON nodes emitted so far, charged against [`MAX_INLINED_NODES`].
+    emitted: usize,
 }
 
-/// Walk one node, resolving references — except under a keyword whose value
-/// is instance data rather than a subschema, which is copied verbatim. See
-/// [`LITERAL_VALUE_KEYWORDS`].
-fn resolve_member(
-    key: &str,
-    value: &Value,
-    defs: &Value,
-    active: &mut Vec<String>,
-    issues: &mut RefIssues,
-) -> Value {
-    if LITERAL_VALUE_KEYWORDS.contains(&key) {
-        value.clone()
-    } else {
-        resolve_refs(value, defs, active, issues)
-    }
-}
-
-fn resolve_refs(
-    node: &Value,
-    defs: &Value,
-    active: &mut Vec<String>,
-    issues: &mut RefIssues,
-) -> Value {
-    match node {
-        Value::Object(map) => {
-            if let Some(Value::String(reference)) = map.get("$ref") {
-                let mut resolved = resolve_ref_target(reference, defs, active, issues);
-
-                // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and
-                // schemars uses exactly that: a doc-commented field of a
-                // named type emits `{"description": "...", "$ref": "#/$defs/Status"}`.
-                // Returning only the resolved target would silently delete
-                // every such field description. Siblings win over the
-                // target's own keys, since they are the more specific
-                // annotation. `$defs` is excluded here too — it is the
-                // reference table itself, not a schema keyword, and must
-                // never survive into the output (it can appear as a literal
-                // sibling of `$ref` when the ref sits at the schema root).
-                // A literal-value sibling (`default`, `const`, ...) is copied
-                // untouched, exactly as in the plain-object walk below.
-                if let Some(out) = resolved.as_object_mut() {
-                    for (key, value) in map {
-                        if key == "$ref" || key == "$defs" {
-                            continue;
-                        }
-                        out.insert(
-                            key.clone(),
-                            resolve_member(key, value, defs, active, issues),
-                        );
-                    }
-                }
-                return resolved;
-            }
-
-            let mut out = serde_json::Map::new();
-            for (key, value) in map {
-                // `$defs` is the reference table itself, never part of the
-                // resulting schema.
-                if key == "$defs" {
-                    continue;
-                }
-                out.insert(
-                    key.clone(),
-                    resolve_member(key, value, defs, active, issues),
-                );
-            }
-            Value::Object(out)
+impl RefWalk<'_> {
+    /// Charge `nodes` to the output budget.
+    ///
+    /// Returns `false` once the budget is spent, at which point the caller
+    /// emits `{}` and stops descending. Every frame still on the stack then
+    /// returns immediately, so a runaway expansion costs the budget and not
+    /// much more.
+    fn spend(&mut self, nodes: usize) -> bool {
+        self.emitted = self.emitted.saturating_add(nodes);
+        if self.emitted > MAX_INLINED_NODES {
+            self.issues.oversized = true;
+            return false;
         }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| resolve_refs(item, defs, active, issues))
-                .collect(),
-        ),
-        other => other.clone(),
+        true
+    }
+
+    /// Resolve one `$ref` target, tracking the chain of definitions currently
+    /// being expanded so a cycle is cut where it closes rather than after an
+    /// arbitrary number of hops.
+    fn resolve_ref_target(&mut self, reference: &str) -> Value {
+        // schemars' root-recursion marker: the document root contains
+        // itself, so there is no finite inlining of it.
+        if reference == "#" {
+            self.issues.recursive = true;
+            return json!({});
+        }
+
+        let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) else {
+            self.issues.unresolved = true;
+            return json!({});
+        };
+        let Some(target) = self.defs.get(name.as_str()) else {
+            self.issues.unresolved = true;
+            return json!({});
+        };
+        if self.active.contains(&name) {
+            self.issues.recursive = true;
+            return json!({});
+        }
+
+        let target = target.clone();
+        self.active.push(name);
+        let resolved = self.resolve(&target);
+        self.active.pop();
+        resolved
+    }
+
+    /// Walk one member of a *schema object*, whose keys are JSON Schema
+    /// keywords.
+    ///
+    /// Only here is a key read as a keyword: a literal-value keyword's data
+    /// is copied verbatim ([`LITERAL_VALUE_KEYWORDS`]), and a schema-map
+    /// keyword's members are walked as author-named schemas
+    /// ([`SCHEMA_MAP_KEYWORDS`]). Everything else is a subschema.
+    fn resolve_member(&mut self, key: &str, value: &Value) -> Value {
+        if LITERAL_VALUE_KEYWORDS.contains(&key) {
+            if !self.spend(count_nodes(value)) {
+                return json!({});
+            }
+            value.clone()
+        } else if SCHEMA_MAP_KEYWORDS.contains(&key) {
+            self.resolve_schema_map(value)
+        } else {
+            self.resolve(value)
+        }
+    }
+
+    /// Walk a map whose keys are names the author chose and whose values are
+    /// schemas — the value of a [`SCHEMA_MAP_KEYWORDS`] keyword.
+    ///
+    /// No key here is a keyword. A body field really can be named `default`,
+    /// `const`, `enum`, `examples`, or `$defs`, and every one of those names
+    /// carries an ordinary schema that must be resolved.
+    fn resolve_schema_map(&mut self, node: &Value) -> Value {
+        let Value::Object(map) = node else {
+            // Not a map at all. Only a hand-written schema can produce this,
+            // and reading it as a subschema is the one interpretation that
+            // does not invent structure that is not there.
+            return self.resolve(node);
+        };
+        if !self.spend(1) {
+            return json!({});
+        }
+        let mut out = serde_json::Map::new();
+        for (key, value) in map {
+            let resolved = self.resolve(value);
+            out.insert(key.clone(), resolved);
+        }
+        Value::Object(out)
+    }
+
+    /// Walk one node as a schema.
+    fn resolve(&mut self, node: &Value) -> Value {
+        if !self.spend(1) {
+            return json!({});
+        }
+        match node {
+            Value::Object(map) => {
+                if let Some(Value::String(reference)) = map.get("$ref") {
+                    let mut resolved = self.resolve_ref_target(reference);
+
+                    // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`,
+                    // and schemars uses exactly that: a doc-commented field
+                    // of a named type emits
+                    // `{"description": "...", "$ref": "#/$defs/Status"}`.
+                    // Returning only the resolved target would silently
+                    // delete every such field description. Siblings win over
+                    // the target's own keys, since they are the more specific
+                    // annotation. `$defs` is excluded here too — it is the
+                    // reference table itself, not a schema keyword, and must
+                    // never survive into the output (it can appear as a
+                    // literal sibling of `$ref` when the ref sits at the
+                    // schema root). The siblings are members of a schema
+                    // object, so they go through exactly the keyword-position
+                    // rules the plain-object walk below uses.
+                    if let Some(out) = resolved.as_object_mut() {
+                        for (key, value) in map {
+                            if key == "$ref" || key == "$defs" {
+                                continue;
+                            }
+                            let member = self.resolve_member(key, value);
+                            out.insert(key.clone(), member);
+                        }
+                    }
+                    return resolved;
+                }
+
+                let mut out = serde_json::Map::new();
+                for (key, value) in map {
+                    // `$defs` is the reference table itself, never part of
+                    // the resulting schema. This is a schema object, so the
+                    // key means that table; a *property* named `$defs` is a
+                    // member of a `properties` map and never reaches here.
+                    if key == "$defs" {
+                        continue;
+                    }
+                    let member = self.resolve_member(key, value);
+                    out.insert(key.clone(), member);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.resolve(item));
+                }
+                Value::Array(out)
+            }
+            other => other.clone(),
+        }
     }
 }
 
@@ -279,6 +407,9 @@ struct MergedSource {
     unresolved_ref: bool,
     /// Inlining hit a `$ref` cycle, at any depth — see [`inline_refs`].
     recursive_ref: bool,
+    /// Inlining ran past [`MAX_INLINED_NODES`] and stopped, so the schema
+    /// below is truncated — see [`inline_refs`].
+    oversized: bool,
     /// The source declared `additionalProperties: false`. The merged object
     /// can only repeat that claim when *every* present source makes it —
     /// see [`agent_input_schema`].
@@ -493,6 +624,7 @@ fn merge_schema_source(
             unrepresentable: true,
             unresolved_ref: ref_issues.unresolved,
             recursive_ref: ref_issues.recursive,
+            oversized: ref_issues.oversized,
             closed: false,
         };
     }
@@ -523,6 +655,7 @@ fn merge_schema_source(
         unrepresentable: false,
         unresolved_ref: ref_issues.unresolved,
         recursive_ref: ref_issues.recursive,
+        oversized: ref_issues.oversized,
         closed,
     }
 }
@@ -562,6 +695,14 @@ pub(crate) struct AgentInputSchema {
     /// different: nothing is missing from `$defs`, the type simply has no
     /// finite flat representation.
     pub recursive_refs: Vec<String>,
+    /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining ran past
+    /// [`MAX_INLINED_NODES`] — see [`inline_refs`]. Non-empty means this
+    /// endpoint MUST NOT be exposed as a tool, and that nothing else read
+    /// off the schema can be trusted either: the walk stopped partway, so
+    /// every verdict below is drawn from a truncated document. Reported
+    /// separately from the other two because the type is neither recursive
+    /// nor missing a definition — its definitions simply multiply out.
+    pub oversized_schemas: Vec<String>,
     /// Names present in the merged `required` list that no source
     /// contributed a property for, sorted. Non-empty means this endpoint
     /// MUST NOT be exposed as a tool: `invocation` routes arguments by name
@@ -707,6 +848,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut unrepresentable = Vec::new();
     let mut unresolved_refs = Vec::new();
     let mut recursive_refs = Vec::new();
+    let mut oversized_schemas = Vec::new();
     for (label, merged) in [("path", &path), ("query", &query), ("body", &body)] {
         if merged.unrepresentable {
             unrepresentable.push(label.to_string());
@@ -717,10 +859,14 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         if merged.recursive_ref {
             recursive_refs.push(label.to_string());
         }
+        if merged.oversized {
+            oversized_schemas.push(label.to_string());
+        }
     }
     unrepresentable.sort();
     unresolved_refs.sort();
     recursive_refs.sort();
+    oversized_schemas.sort();
 
     // A `required` entry naming a property no source contributed. Only a
     // hand-written schema can produce it — schemars never emits a `required`
@@ -805,6 +951,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         unrepresentable,
         unresolved_refs,
         recursive_refs,
+        oversized_schemas,
         undeclared_required,
         non_scalar_params,
     }
@@ -844,13 +991,17 @@ enum PathTemplateError {
 ///   router sees one placeholder, named `a}{b`, so neither `req.param.a` nor
 ///   `req.param.b` is ever set and the handler reads nothing.
 /// * **Wildcards.** `/b/x/**` has no braces at all, so a brace scan calls it
-///   parameterless and publishes `**` as a literal path. `match_path`'s
-///   `/**`-prefix rule then *matches* it, and the handler runs against a
-///   garbage `**` subpath — a silent wrong answer rather than a 404. A `*`
-///   segment is literal to this router, but it is the shape every author
-///   writes when they mean a wildcard, so it is refused on the same terms
-///   rather than published as a path that only works if it was meant
-///   literally.
+///   parameterless and publishes `**` as a literal path. `match_path`
+///   special-cases a trailing `/**`, stripping it and matching every path
+///   under the prefix, so the published URL *does* reach the handler — which
+///   then runs against a garbage `**` subpath, a silent wrong answer rather
+///   than a 404. A `**` that is not the final segment (`/b/x/**/y`) misses
+///   that suffix rule and is compared literally, so the tool's URL only
+///   matches a request whose segment really is `**`: a route that answers
+///   nothing. Both are refused. A `*` segment is literal to this router too,
+///   but it is the shape every author writes when they mean a wildcard, so
+///   it is refused on the same terms rather than published as a path that
+///   only works if it was meant literally.
 ///
 /// Refusing these costs nothing worth keeping. Every one of them is already
 /// broken at runtime, with the single exception of a lone `*` segment, which
@@ -1168,6 +1319,13 @@ pub enum WebMcpRefusal {
         /// The offending source labels, sorted.
         sources: Vec<String>,
     },
+    /// Schema sources whose inlining expanded past [`MAX_INLINED_NODES`].
+    /// The type is finite and every reference resolves; its definitions
+    /// simply multiply out — see [`MAX_INLINED_NODES`].
+    SchemaTooLarge {
+        /// The offending source labels, sorted.
+        sources: Vec<String>,
+    },
     /// The merged schema marks names required that no source declared a
     /// property for, so the client has no way to send them.
     RequiredNotDeclared {
@@ -1236,6 +1394,11 @@ impl std::fmt::Display for WebMcpRefusal {
             Self::RecursiveSchema { sources } => write!(
                 f,
                 "schema source(s) {} are recursive, so they cannot be inlined into a self-contained inputSchema",
+                sources.join(", ")
+            ),
+            Self::SchemaTooLarge { sources } => write!(
+                f,
+                "schema source(s) {} expand past {MAX_INLINED_NODES} JSON nodes when their $refs are inlined — nothing is missing and nothing is recursive, but a definition reached from several levels is copied out once per path, so the self-contained inputSchema has no workable size",
                 sources.join(", ")
             ),
             Self::RequiredNotDeclared { names } => write!(
@@ -1470,6 +1633,21 @@ pub fn generate_webmcp_report(
             if !input.collisions.is_empty() {
                 refuse(WebMcpRefusal::CollidingParameterNames {
                     names: input.collisions.clone(),
+                });
+                continue;
+            }
+
+            // Inlining ran past its node budget and stopped partway, so the
+            // schema in hand is a truncated document. This is checked before
+            // every schema-shaped verdict below because those all read the
+            // inlined schema, and a truncated one produces verdicts about a
+            // schema the endpoint never declared — `{}` where a whole
+            // subtree was cut, which `source_is_flattenable` would report as
+            // an unrepresentable source and send the author looking at the
+            // wrong thing. See `MAX_INLINED_NODES`.
+            if !input.oversized_schemas.is_empty() {
+                refuse(WebMcpRefusal::SchemaTooLarge {
+                    sources: input.oversized_schemas.clone(),
                 });
                 continue;
             }
@@ -2138,6 +2316,273 @@ mod tests {
             out["properties"]["status"],
             json!({ "type": "string", "default": { "$ref": "https://example.com/x" } }),
             "a literal sibling of $ref must survive verbatim: {out}"
+        );
+    }
+
+    /// A schema whose definitions each reference the next one twice is
+    /// finite, acyclic, and fully resolvable — and doubles in size per level.
+    /// `levels` of it expand to `2^levels` copies of the leaf.
+    fn doubling_schema(levels: usize) -> Value {
+        let mut defs = serde_json::Map::new();
+        for level in 0..levels {
+            let next = json!({ "$ref": format!("#/$defs/L{}", level + 1) });
+            defs.insert(
+                format!("L{level}"),
+                json!({
+                    "type": "object",
+                    "properties": { "a": next.clone(), "b": next }
+                }),
+            );
+        }
+        defs.insert(
+            format!("L{levels}"),
+            json!({ "type": "string", "description": "leaf" }),
+        );
+        json!({
+            "type": "object",
+            "properties": { "root": { "$ref": "#/$defs/L0" } },
+            "$defs": defs
+        })
+    }
+
+    /// The keyword rule is about *position*, not spelling. A body field
+    /// literally named `default` is a member of the `properties` map, so its
+    /// value is a schema and its `$ref` must resolve. Reading the name as the
+    /// `default` keyword copied the reference through verbatim, stripped
+    /// `$defs` out from under it, and set no flag — a published tool whose
+    /// argument points at a definition that is no longer in the document.
+    #[test]
+    fn inline_refs_resolves_a_property_named_like_a_literal_keyword() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "default": { "$ref": "#/$defs/Status" },
+                "const": { "$ref": "#/$defs/Status" },
+                "enum": { "$ref": "#/$defs/Status" },
+                "examples": { "$ref": "#/$defs/Status" },
+                "normal": { "$ref": "#/$defs/Status" }
+            },
+            "$defs": { "Status": { "type": "string", "enum": ["draft", "active"] } }
+        });
+
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive && !issues.oversized,
+            "every reference here resolves: {issues:?}"
+        );
+        let status = json!({ "type": "string", "enum": ["draft", "active"] });
+        for name in ["default", "const", "enum", "examples", "normal"] {
+            assert_eq!(
+                out["properties"][name], status,
+                "a property named `{name}` carries a schema, not instance data: {out}"
+            );
+        }
+        assert!(
+            !out.to_string().contains("$ref"),
+            "no reference may survive into the published schema: {out}"
+        );
+    }
+
+    /// The same property, pointing at a definition that does not exist, must
+    /// be *reported*. The name-based rule published it silently, which is the
+    /// exact failure the refusal wall exists to prevent.
+    #[test]
+    fn inline_refs_reports_a_dangling_ref_under_a_keyword_named_property() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "default": { "$ref": "#/$defs/Missing" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(out["properties"]["default"], json!({}));
+        assert!(
+            issues.unresolved,
+            "a dangling ref under a keyword-named property is still dangling: {out}"
+        );
+    }
+
+    /// Position decides in both directions, inside one schema: the `default`
+    /// *keyword* of the `settings` property holds instance data and is copied
+    /// verbatim, while the `default` *property* beside it holds a schema and
+    /// is resolved.
+    #[test]
+    fn inline_refs_separates_a_default_keyword_from_a_default_property() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "default": { "$ref": "#/$defs/Status" },
+                "settings": {
+                    "type": "object",
+                    "default": { "$ref": "#/$defs/Status", "note": "literal data" }
+                }
+            },
+            "$defs": { "Status": { "type": "string" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive && !issues.oversized,
+            "{issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["default"],
+            json!({ "type": "string" }),
+            "the property is a schema and resolves: {out}"
+        );
+        assert_eq!(
+            out["properties"]["settings"]["default"],
+            json!({ "$ref": "#/$defs/Status", "note": "literal data" }),
+            "the keyword is instance data and is copied verbatim: {out}"
+        );
+    }
+
+    /// The `$ref`-sibling copy path walks a schema object too, so it applies
+    /// the same position rule: a `properties` map merged in beside a `$ref`
+    /// carries author-chosen names, while a `default` sibling of that `$ref`
+    /// is instance data.
+    #[test]
+    fn inline_refs_applies_the_position_rule_on_the_ref_sibling_path() {
+        let schema = json!({
+            "$ref": "#/$defs/Base",
+            "default": { "$ref": "#/$defs/Status", "note": "literal data" },
+            "properties": {
+                "default": { "$ref": "#/$defs/Status" },
+                "missing": { "$ref": "#/$defs/Absent" }
+            },
+            "$defs": {
+                "Base": { "type": "object" },
+                "Status": { "type": "string" }
+            }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(
+            out["properties"]["default"],
+            json!({ "type": "string" }),
+            "a sibling `properties` map holds schemas, keyword-spelled or not: {out}"
+        );
+        assert_eq!(
+            out["default"],
+            json!({ "$ref": "#/$defs/Status", "note": "literal data" }),
+            "a `default` sibling of `$ref` is still instance data: {out}"
+        );
+        assert!(
+            issues.unresolved,
+            "the dangling ref under the keyword-named property must be reported: {out}"
+        );
+        assert!(!issues.recursive && !issues.oversized, "{issues:?}");
+    }
+
+    /// Names the author chose also appear under `patternProperties` and
+    /// `dependentSchemas`, and are schemas there for the same reason.
+    #[test]
+    fn inline_refs_resolves_schemas_under_the_other_author_named_maps() {
+        let schema = json!({
+            "type": "object",
+            "patternProperties": { "^const$": { "$ref": "#/$defs/Status" } },
+            "dependentSchemas": {
+                "enum": {
+                    "type": "object",
+                    "properties": { "examples": { "$ref": "#/$defs/Status" } }
+                }
+            },
+            "$defs": { "Status": { "type": "string" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive && !issues.oversized,
+            "{issues:?}"
+        );
+        assert_eq!(
+            out["patternProperties"]["^const$"],
+            json!({ "type": "string" }),
+            "a pattern is an author-chosen key: {out}"
+        );
+        assert_eq!(
+            out["dependentSchemas"]["enum"]["properties"]["examples"],
+            json!({ "type": "string" }),
+            "a dependent schema is keyed by property name: {out}"
+        );
+    }
+
+    /// `$defs` is the reference table only where a schema object's keys are
+    /// read as keywords. A *property* named `$defs` is an author-chosen key
+    /// in a `properties` map, and dropping it deletes a field the endpoint
+    /// really accepts. Tracking position rather than the spelling of the key
+    /// is what tells the two apart.
+    #[test]
+    fn inline_refs_keeps_a_property_named_defs() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "$defs": { "$ref": "#/$defs/Status" } },
+            "$defs": { "Status": { "type": "string" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive && !issues.oversized,
+            "{issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["$defs"],
+            json!({ "type": "string" }),
+            "a field named `$defs` is a field, not the reference table: {out}"
+        );
+        assert!(
+            out.get("$defs").is_none(),
+            "the real table is still stripped: {out}"
+        );
+    }
+
+    /// Cycle detection bounds an expansion's depth, not its size. A finite,
+    /// acyclic type whose definitions multiply out has no honest inlining
+    /// either, and must be reported as its own defect: nothing is missing
+    /// from `$defs` and nothing is recursive, so either of the other two
+    /// verdicts would send the author hunting for a defect that is not there.
+    #[test]
+    fn inline_refs_stops_and_reports_an_expansion_past_the_node_budget() {
+        let (_, issues) = inline_refs(&doubling_schema(22));
+        assert!(
+            issues.oversized,
+            "2^22 copies of the leaf must break the budget: {issues:?}"
+        );
+        assert!(
+            !issues.unresolved,
+            "every `$defs` entry it names exists: {issues:?}"
+        );
+        assert!(
+            !issues.recursive,
+            "each level references the *next* definition, so there is no cycle: {issues:?}"
+        );
+    }
+
+    /// The budget is a bound on runaway expansion, not on real schemas. A
+    /// type far larger than anything a block declares — 150 fields of a
+    /// 12-field record — inlines completely and reports nothing.
+    #[test]
+    fn inline_refs_publishes_a_large_but_realistic_type_tree() {
+        let mut record = serde_json::Map::new();
+        for field in 0..12 {
+            record.insert(
+                format!("f{field}"),
+                json!({ "type": "string", "description": "a field" }),
+            );
+        }
+        let mut properties = serde_json::Map::new();
+        for field in 0..150 {
+            properties.insert(format!("p{field}"), json!({ "$ref": "#/$defs/Record" }));
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": properties,
+            "$defs": { "Record": { "type": "object", "properties": record } }
+        });
+
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.oversized && !issues.unresolved && !issues.recursive,
+            "1800 inlined properties is well inside the budget: {issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["p149"]["properties"]["f11"],
+            json!({ "type": "string", "description": "a field" }),
+            "every reference is inlined in full: {out}"
         );
     }
 
@@ -3319,15 +3764,19 @@ mod tests {
             "the router cannot split one segment into two parameters"
         );
 
-        // Wildcards: `**` publishes as a literal path segment that
-        // `match_path`'s `/**`-prefix rule then MATCHES, so the handler runs
-        // against a garbage subpath rather than 404ing.
+        // Wildcards: a trailing `/**` publishes as a literal path segment
+        // that `match_path`'s trailing-`/**` special case then MATCHES, so
+        // the handler runs against a garbage subpath rather than 404ing.
         assert_eq!(
             path_placeholders("/b/x/**"),
             Err(PathTemplateError::Wildcard {
                 segment: "**".to_string()
             })
         );
+        // A non-final `**` misses that special case and is compared
+        // literally, so the published URL only matches a request whose
+        // segment really is `**` — a tool whose route answers nothing.
+        // Different failure, same refusal.
         assert_eq!(
             path_placeholders("/b/x/**/y"),
             Err(PathTemplateError::Wildcard {
@@ -4489,6 +4938,81 @@ mod tests {
                 WebMcpRefusal::DuplicateToolName { count: 2 }
             );
         }
+    }
+
+    /// An endpoint whose body schema multiplies out is refused with a
+    /// diagnostic that names the real cause. It is checked before every other
+    /// schema-shaped verdict because the inlined schema in hand is truncated,
+    /// so anything else read off it would describe a document the endpoint
+    /// never declared.
+    #[test]
+    fn webmcp_refuses_an_endpoint_whose_schema_expands_past_the_node_budget() {
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/wide")
+                    .input_schema(doubling_schema(22))
+                    .agent_tool("wide_body", "Wide body."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(
+            tool_names(&doc),
+            Vec::<String>::new(),
+            "a schema that cannot be inlined publishes no tool: {doc}"
+        );
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::SchemaTooLarge {
+                sources: vec!["body".to_string()]
+            },
+            "not a missing definition and not a cycle: {refused:?}"
+        );
+
+        let rendered = refused[0].to_string();
+        assert!(
+            rendered.contains(&MAX_INLINED_NODES.to_string()),
+            "the diagnostic must name the budget that was broken: {rendered}"
+        );
+        assert!(
+            rendered.contains("/b/x/wide") && rendered.contains("wide_body"),
+            "and the endpoint it was broken by: {rendered}"
+        );
+    }
+
+    /// The budget refuses runaway expansions, not large endpoints. A body far
+    /// bigger than anything a block declares still publishes, with every
+    /// reference inlined.
+    #[test]
+    fn webmcp_publishes_a_large_but_realistic_body_schema() {
+        let mut record = serde_json::Map::new();
+        for field in 0..12 {
+            record.insert(format!("f{field}"), json!({ "type": "string" }));
+        }
+        let mut properties = serde_json::Map::new();
+        for field in 0..150 {
+            properties.insert(format!("p{field}"), json!({ "$ref": "#/$defs/Record" }));
+        }
+
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/big")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": properties,
+                        "$defs": { "Record": { "type": "object", "properties": record } }
+                    }))
+                    .agent_tool("big_body", "Big body."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert!(refused.is_empty(), "nothing is wrong with it: {refused:?}");
+        assert_eq!(tool_names(&doc), vec!["big_body".to_string()], "{doc}");
+        assert_eq!(
+            doc["tools"][0]["inputSchema"]["properties"]["p149"]["properties"]["f11"],
+            json!({ "type": "string" }),
+            "and it is inlined in full: {doc}"
+        );
     }
 
     /// The refusal list is a defect report about the endpoints, not about the
