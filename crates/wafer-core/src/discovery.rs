@@ -50,12 +50,26 @@ fn path_to_slug(path: &str) -> String {
         .replace('/', "_")
 }
 
-/// Maximum `$ref` hops to follow before giving up. Self-referential schemas
-/// (a `Condition` containing child `Condition`s) are legitimate and have no
-/// finite inlining; at the limit the chain is truncated to `{}` and reported
-/// as unresolved, because a truncated chain describes "anything may go here"
-/// where the server requires a specific shape.
-const MAX_REF_DEPTH: u8 = 8;
+/// JSON Schema keywords whose value is *instance data*, not a subschema.
+///
+/// `default`, `const`, and each entry of `examples` and `enum` are literal
+/// JSON values that a validator compares against the instance; they are
+/// never interpreted as schemas. So the `$ref` rewriting below must not walk
+/// into them, in either direction:
+///
+/// * A literal `{"$ref": "https://example.com/x"}` sitting in a `default` is
+///   perfectly legal user data — an object with one key that happens to be
+///   spelled `$ref`. Treating it as a reference reports the whole endpoint
+///   as carrying an unresolvable `$ref` and deletes a working tool.
+/// * Worse, and silent: `{"$ref": "#/$defs/D", "note": "..."}` in a
+///   `default` would be *rewritten* through the sibling-merge path, so the
+///   published schema hands the agent a default value the endpoint never
+///   declared.
+///
+/// `$defs` stripping is suspended inside them for the same reason: a literal
+/// value may legitimately have a `$defs` key, and deleting it would corrupt
+/// the data.
+const LITERAL_VALUE_KEYWORDS: &[&str] = &["default", "const", "examples", "enum"];
 
 /// Decode a `#/$defs/` pointer segment back into the key it names in the
 /// `$defs` table.
@@ -92,43 +106,110 @@ fn decode_ref_name(encoded: &str) -> Option<String> {
 /// not do this. Many MCP-style clients do not, so the WebMCP projection must
 /// hand over schemas that stand alone.
 ///
-/// Returns the rewritten schema together with a flag saying whether *any*
-/// reference in it, at any depth, failed to resolve — no matching `$defs`
-/// entry, a form this function does not understand (schemars' root-recursion
-/// marker `{"$ref": "#"}`), or a chain that ran past [`MAX_REF_DEPTH`]. All
-/// three leave `{}` behind: an unconstrained schema standing where the
-/// server requires a concrete type. At the top level that shows up as a
-/// missing `properties` object and is caught by the `unrepresentable` check,
-/// but below the top level — `properties.children.items` for a
-/// `struct Node { children: Vec<Node> }` — nothing else would notice. So the
-/// flag travels out of here and callers refuse to build a tool from a schema
-/// that sets it.
-fn inline_refs(schema: &Value) -> (Value, bool) {
+/// Returns the rewritten schema together with the ways the rewrite could not
+/// be done honestly — see [`RefIssues`]. Both of them leave `{}` behind: an
+/// unconstrained schema standing where the server requires a concrete type.
+/// At the top level that shows up as a missing `properties` object and is
+/// caught by the `unrepresentable` check, but below the top level —
+/// `properties.children.items` for a `struct Node { children: Vec<Node> }` —
+/// nothing else would notice. So the report travels out of here and callers
+/// refuse to build a tool from a schema that sets either flag.
+fn inline_refs(schema: &Value) -> (Value, RefIssues) {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
-    let mut unresolved = false;
-    let resolved = resolve_refs(schema, &defs, 0, &mut unresolved);
-    (resolved, unresolved)
+    let mut issues = RefIssues::default();
+    let mut active: Vec<String> = Vec::new();
+    let resolved = resolve_refs(schema, &defs, &mut active, &mut issues);
+    (resolved, issues)
 }
 
-fn resolve_refs(node: &Value, defs: &Value, depth: u8, unresolved: &mut bool) -> Value {
+/// The two distinct ways [`inline_refs`] can fail to produce a self-contained
+/// schema. They are reported separately because the fix is different and the
+/// author is sent to a different place: a dangling reference means a missing
+/// or misspelled `$defs` entry, while a cycle means the type genuinely has no
+/// finite inlining and the endpoint needs a different shape. Collapsing them
+/// into one flag — as a depth cap does — sends the author of a recursive type
+/// hunting for a `$defs` entry that is not missing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RefIssues {
+    /// A `$ref` named a target that does not exist, or took a form this
+    /// function cannot follow (anything but `#/$defs/*`, including an
+    /// external URL).
+    unresolved: bool,
+    /// A `$ref` cycle: a chain of references that reaches a definition
+    /// already open on the current path, or schemars' root-recursion marker
+    /// `{"$ref": "#"}`. A self-referential type (a `Condition` containing
+    /// child `Condition`s) is legitimate and has no finite inlining, so the
+    /// cycle is cut and reported rather than expanded.
+    recursive: bool,
+}
+
+/// Resolve one `$ref` target, tracking the chain of definitions currently
+/// being expanded so a cycle is cut where it closes rather than after an
+/// arbitrary number of hops.
+///
+/// `active` is a stack, not a set of everything ever seen: a definition
+/// referenced twice from *different* branches of a finite type tree is not a
+/// cycle, and must inline both times.
+fn resolve_ref_target(
+    reference: &str,
+    defs: &Value,
+    active: &mut Vec<String>,
+    issues: &mut RefIssues,
+) -> Value {
+    // schemars' root-recursion marker: the document root contains itself, so
+    // there is no finite inlining of it.
+    if reference == "#" {
+        issues.recursive = true;
+        return json!({});
+    }
+
+    let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) else {
+        issues.unresolved = true;
+        return json!({});
+    };
+    let Some(target) = defs.get(name.as_str()) else {
+        issues.unresolved = true;
+        return json!({});
+    };
+    if active.contains(&name) {
+        issues.recursive = true;
+        return json!({});
+    }
+
+    let target = target.clone();
+    active.push(name);
+    let resolved = resolve_refs(&target, defs, active, issues);
+    active.pop();
+    resolved
+}
+
+/// Walk one node, resolving references — except under a keyword whose value
+/// is instance data rather than a subschema, which is copied verbatim. See
+/// [`LITERAL_VALUE_KEYWORDS`].
+fn resolve_member(
+    key: &str,
+    value: &Value,
+    defs: &Value,
+    active: &mut Vec<String>,
+    issues: &mut RefIssues,
+) -> Value {
+    if LITERAL_VALUE_KEYWORDS.contains(&key) {
+        value.clone()
+    } else {
+        resolve_refs(value, defs, active, issues)
+    }
+}
+
+fn resolve_refs(
+    node: &Value,
+    defs: &Value,
+    active: &mut Vec<String>,
+    issues: &mut RefIssues,
+) -> Value {
     match node {
         Value::Object(map) => {
             if let Some(Value::String(reference)) = map.get("$ref") {
-                if depth >= MAX_REF_DEPTH {
-                    *unresolved = true;
-                    return json!({});
-                }
-                let target = reference
-                    .strip_prefix("#/$defs/")
-                    .and_then(decode_ref_name)
-                    .and_then(|name| defs.get(name));
-                let mut resolved = match target {
-                    Some(found) => resolve_refs(found, defs, depth + 1, unresolved),
-                    None => {
-                        *unresolved = true;
-                        json!({})
-                    }
-                };
+                let mut resolved = resolve_ref_target(reference, defs, active, issues);
 
                 // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and
                 // schemars uses exactly that: a doc-commented field of a
@@ -140,12 +221,17 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8, unresolved: &mut bool) ->
                 // reference table itself, not a schema keyword, and must
                 // never survive into the output (it can appear as a literal
                 // sibling of `$ref` when the ref sits at the schema root).
+                // A literal-value sibling (`default`, `const`, ...) is copied
+                // untouched, exactly as in the plain-object walk below.
                 if let Some(out) = resolved.as_object_mut() {
                     for (key, value) in map {
                         if key == "$ref" || key == "$defs" {
                             continue;
                         }
-                        out.insert(key.clone(), resolve_refs(value, defs, depth, unresolved));
+                        out.insert(
+                            key.clone(),
+                            resolve_member(key, value, defs, active, issues),
+                        );
                     }
                 }
                 return resolved;
@@ -158,14 +244,17 @@ fn resolve_refs(node: &Value, defs: &Value, depth: u8, unresolved: &mut bool) ->
                 if key == "$defs" {
                     continue;
                 }
-                out.insert(key.clone(), resolve_refs(value, defs, depth, unresolved));
+                out.insert(
+                    key.clone(),
+                    resolve_member(key, value, defs, active, issues),
+                );
             }
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| resolve_refs(item, defs, depth, unresolved))
+                .map(|item| resolve_refs(item, defs, active, issues))
                 .collect(),
         ),
         other => other.clone(),
@@ -188,6 +277,8 @@ struct MergedSource {
     /// Inlining hit a `$ref` it could not resolve, at any depth — see
     /// [`inline_refs`].
     unresolved_ref: bool,
+    /// Inlining hit a `$ref` cycle, at any depth — see [`inline_refs`].
+    recursive_ref: bool,
     /// The source declared `additionalProperties: false`. The merged object
     /// can only repeat that claim when *every* present source makes it —
     /// see [`agent_input_schema`].
@@ -269,6 +360,14 @@ const FLATTENABLE_KEYWORDS: &[&str] = &[
 /// could not resolve. None of them is an object with named members, so a
 /// flat object schema cannot describe them at all.
 ///
+/// The structural keywords are checked by *type*, not just by name. A
+/// keyword the merge reads with a typed accessor — `properties` as an
+/// object, `required` as an array of strings, `type` as a string — that
+/// holds something else makes that accessor return `None`, and the merge
+/// would read "contributed nothing" / "required nothing" from what is really
+/// a malformed declaration. That publishes a tool advertising the wrong
+/// argument set, so it is refused instead.
+///
 /// `additionalProperties` is the one keyword that is both carried and
 /// restricted:
 ///
@@ -302,6 +401,9 @@ fn source_is_flattenable(inlined: &Value) -> bool {
         // No `type` at all is object-shaped only if it says so some other
         // way; `properties` is the only such signal the merge can act on.
         None if map.contains_key("properties") => {}
+        // Anything else, including a non-string `type` — the keyword is only
+        // ever a string or an array of strings, and neither an array-typed
+        // nor a malformed `type` names a plain object.
         _ => return false,
     }
 
@@ -310,6 +412,27 @@ fn source_is_flattenable(inlined: &Value) -> bool {
         .any(|key| !FLATTENABLE_KEYWORDS.contains(&key.as_str()))
     {
         return false;
+    }
+
+    // The keyword *names* being flattenable is not enough: the merge reads
+    // `properties` as an object and `required` as an array of strings, and
+    // `serde_json`'s accessors return `None` for anything else — which would
+    // silently mean "contributed nothing" for a `"properties": "oops"` and
+    // "required nothing" for a `"required": "a"`. Both publish a tool that
+    // misdescribes its own arguments, which is precisely what this wall
+    // exists to prevent. Only a hand-written schema can reach here; schemars
+    // never emits these shapes.
+    if map
+        .get("properties")
+        .is_some_and(|props| !props.is_object())
+    {
+        return false;
+    }
+    if let Some(required) = map.get("required") {
+        match required.as_array() {
+            Some(names) if names.iter().all(Value::is_string) => {}
+            _ => return false,
+        }
     }
 
     matches!(
@@ -361,14 +484,15 @@ fn merge_schema_source(
         return MergedSource::default();
     }
 
-    let (inlined, unresolved_ref) = inline_refs(source);
+    let (inlined, ref_issues) = inline_refs(source);
 
     if !source_is_flattenable(&inlined) {
         return MergedSource {
             contributed: Vec::new(),
             present,
             unrepresentable: true,
-            unresolved_ref,
+            unresolved_ref: ref_issues.unresolved,
+            recursive_ref: ref_issues.recursive,
             closed: false,
         };
     }
@@ -397,7 +521,8 @@ fn merge_schema_source(
         contributed,
         present,
         unrepresentable: false,
-        unresolved_ref,
+        unresolved_ref: ref_issues.unresolved,
+        recursive_ref: ref_issues.recursive,
         closed,
     }
 }
@@ -431,6 +556,105 @@ pub(crate) struct AgentInputSchema {
     /// at any depth, including the nested one that leaves the top-level
     /// `properties` object looking perfectly healthy.
     pub unresolved_refs: Vec<String>,
+    /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining hit a
+    /// `$ref` cycle — see [`inline_refs`]. Reported separately from
+    /// [`Self::unresolved_refs`] because the defect and its fix are
+    /// different: nothing is missing from `$defs`, the type simply has no
+    /// finite flat representation.
+    pub recursive_refs: Vec<String>,
+    /// Names present in the merged `required` list that no source
+    /// contributed a property for, sorted. Non-empty means this endpoint
+    /// MUST NOT be exposed as a tool: `invocation` routes arguments by name
+    /// from the three provenance lists, so an argument the agent supplies
+    /// for a name with no property behind it has nowhere to travel — while
+    /// the schema still tells a strict client the name is mandatory. Every
+    /// call is then rejected by the server for missing data.
+    pub undeclared_required: Vec<String>,
+    /// Path or query parameters whose schema is not scalar-valued, each
+    /// rendered as `"{source}.{name}"` and sorted. Non-empty means this
+    /// endpoint MUST NOT be exposed as a tool — see
+    /// [`param_is_scalar_valued`].
+    pub non_scalar_params: Vec<String>,
+}
+
+/// The JSON Schema `type` names whose instances are single scalar values —
+/// the ones that survive a trip through a URL path segment or a query-string
+/// value unambiguously.
+///
+/// `null` is included because it only ever appears here as one member of a
+/// nullable union (`["string", "null"]`, what schemars emits for an
+/// `Option<T>` field): the value is either the scalar or absent, and the
+/// WebMCP client skips `null`/`undefined` arguments rather than serializing
+/// them.
+const SCALAR_TYPE_NAMES: &[&str] = &["string", "number", "integer", "boolean", "null"];
+
+/// Whether one path or query parameter's schema describes a value the client
+/// can actually put in a URL.
+///
+/// A path or query parameter travels as text: one segment of the path, or
+/// one `?name=value` pair. `invocation` carries no OpenAPI-style
+/// serialization `style`/`explode`, and deliberately so — there is exactly
+/// one honest reading of a scalar and no honest reading of anything else. An
+/// array-typed `tags` param could mean `?tags=a&tags=b`, `?tags=a,b`, or
+/// `?tags[]=a`, and the client has no way to pick; in practice it stringifies
+/// the array and the server receives one comma-joined value it never asked
+/// for. An object-typed param stringifies to `[object Object]`. Both fail on
+/// every invocation while the manifest claims they work.
+///
+/// The check is deliberately generous about the *shapes* a scalar arrives
+/// in, because refusing a legal one deletes a working tool:
+///
+/// * A plain scalar `type`.
+/// * A union of scalars, which is how `Option<T>` reaches here
+///   (`{"type": ["string", "null"]}`).
+/// * `enum` or `const` with no `type` at all — a schemars unit-variant enum
+///   emits exactly that, and every member being a scalar settles the
+///   question without a `type` keyword.
+/// * `anyOf` / `oneOf` / `allOf` whose every branch is itself scalar-valued —
+///   `Option<SomeEnum>` inlines to `{"anyOf": [{"enum": [...]}, {"type": "null"}]}`,
+///   which is a string or nothing.
+///
+/// What is refused: `array`, `object`, and a schema that constrains the value
+/// no other way — a bare `{}`, or composition keywords this cannot read.
+/// Those either provably cannot be serialized or provably cannot be shown to
+/// be serializable, and the projection does not publish what it cannot vouch
+/// for.
+fn param_is_scalar_valued(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        // A boolean schema: `true` accepts anything, `false` accepts nothing.
+        return false;
+    };
+
+    match map.get("type") {
+        Some(Value::String(name)) => return SCALAR_TYPE_NAMES.contains(&name.as_str()),
+        Some(Value::Array(names)) => {
+            return !names.is_empty()
+                && names.iter().all(|name| {
+                    name.as_str()
+                        .is_some_and(|name| SCALAR_TYPE_NAMES.contains(&name))
+                });
+        }
+        // A `type` that is neither is malformed, not scalar.
+        Some(_) => return false,
+        None => {}
+    }
+
+    let scalar_literal = |value: &Value| !value.is_array() && !value.is_object();
+
+    if let Some(Value::Array(members)) = map.get("enum") {
+        return !members.is_empty() && members.iter().all(scalar_literal);
+    }
+    if let Some(value) = map.get("const") {
+        return scalar_literal(value);
+    }
+
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(branches)) = map.get(keyword) {
+            return !branches.is_empty() && branches.iter().all(param_is_scalar_valued);
+        }
+    }
+
+    false
 }
 
 /// Flatten an endpoint's path, query, and body schemas into the single
@@ -482,6 +706,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
 
     let mut unrepresentable = Vec::new();
     let mut unresolved_refs = Vec::new();
+    let mut recursive_refs = Vec::new();
     for (label, merged) in [("path", &path), ("query", &query), ("body", &body)] {
         if merged.unrepresentable {
             unrepresentable.push(label.to_string());
@@ -489,9 +714,45 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         if merged.unresolved_ref {
             unresolved_refs.push(label.to_string());
         }
+        if merged.recursive_ref {
+            recursive_refs.push(label.to_string());
+        }
     }
     unrepresentable.sort();
     unresolved_refs.sort();
+    recursive_refs.sort();
+
+    // A `required` entry naming a property no source contributed. Only a
+    // hand-written schema can produce it — schemars never emits a `required`
+    // name without the matching property — and the merged schema would
+    // repeat the claim while `invocation` has no provenance list to route
+    // the argument through. Reported rather than filtered out of `required`:
+    // filtering would hand the agent a tool that omits an argument the
+    // server still demands, which is the same lie one level quieter.
+    let mut undeclared_required: Vec<String> = required
+        .iter()
+        .filter(|name| !properties.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    undeclared_required.sort();
+    undeclared_required.dedup();
+
+    // Path and query values travel as URL text — see `param_is_scalar_valued`.
+    let mut non_scalar_params: Vec<String> = [("path", &path), ("query", &query)]
+        .into_iter()
+        .flat_map(|(label, merged)| {
+            merged
+                .contributed
+                .iter()
+                .filter(|name| {
+                    properties
+                        .get(name.as_str())
+                        .is_none_or(|schema| !param_is_scalar_valued(schema))
+                })
+                .map(move |name| format!("{label}.{name}"))
+        })
+        .collect();
+    non_scalar_params.sort();
 
     // `additionalProperties: false` describes the *merged* object, so it can
     // only be repeated when every source that fed that object closed itself.
@@ -543,39 +804,83 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         collisions,
         unrepresentable,
         unresolved_refs,
+        recursive_refs,
+        undeclared_required,
+        non_scalar_params,
     }
 }
 
+/// Why a URL path template cannot be turned into a fillable tool URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathTemplateError {
+    /// A segment carries braces the router will not read as a placeholder:
+    /// unmatched, empty, nested, more than one per segment, or mixed with
+    /// literal text.
+    Malformed,
+    /// A router wildcard segment, which no named argument can fill.
+    Wildcard {
+        /// The offending segment, verbatim.
+        segment: String,
+    },
+}
+
 /// Extract the `{name}` placeholders from a URL path template, in order of
-/// appearance.
+/// appearance, using exactly the rule the router applies at runtime.
 ///
-/// `None` means the template is malformed — an unmatched `{` or `}`, an
-/// empty `{}`, or a nested `{`. That is itself grounds to refuse: a path
-/// whose placeholders cannot be parsed cannot be filled in reliably either.
-fn path_placeholders(path: &str) -> Option<Vec<String>> {
+/// # The rule is the router's, not a general brace scan
+///
+/// `wafer_block::executor`'s `match_path` and `extract_path_vars` — the code
+/// that actually serves these routes — split the pattern on `/` and treat a
+/// segment as a placeholder only when it *is* one:
+/// `pp.starts_with('{') && pp.ends_with('}')`, with the name taken as
+/// `&pp[1..pp.len() - 1]`. Every other segment is compared literally. A scan
+/// that finds braces anywhere therefore disagrees with the router in three
+/// ways, each of which publishes a tool that fails on every call:
+///
+/// * **Infix.** `/b/x/v{version}/items` looks like it has a `version`
+///   parameter. The router compares the literal segment `v{version}` against
+///   `v1` and 404s.
+/// * **Two in one segment.** `/b/x/{a}{b}` looks like two parameters. The
+///   router sees one placeholder, named `a}{b`, so neither `req.param.a` nor
+///   `req.param.b` is ever set and the handler reads nothing.
+/// * **Wildcards.** `/b/x/**` has no braces at all, so a brace scan calls it
+///   parameterless and publishes `**` as a literal path. `match_path`'s
+///   `/**`-prefix rule then *matches* it, and the handler runs against a
+///   garbage `**` subpath — a silent wrong answer rather than a 404. A `*`
+///   segment is literal to this router, but it is the shape every author
+///   writes when they mean a wildcard, so it is refused on the same terms
+///   rather than published as a path that only works if it was meant
+///   literally.
+///
+/// Refusing these costs nothing worth keeping. Every one of them is already
+/// broken at runtime, with the single exception of a lone `*` segment, which
+/// this router reads literally: a tool for a route whose path genuinely
+/// contains a `*` is the one thing lost, and the refusal is logged with its
+/// reason so the author sees exactly why.
+fn path_placeholders(path: &str) -> Result<Vec<String>, PathTemplateError> {
     let mut names = Vec::new();
-    let mut rest = path;
-    loop {
-        let Some(open) = rest.find('{') else {
-            // A `}` with no `{` before it anywhere in the remainder.
-            return if rest.contains('}') {
-                None
-            } else {
-                Some(names)
-            };
-        };
-        if rest[..open].contains('}') {
-            return None;
+    for segment in path.split('/') {
+        if segment == "*" || segment == "**" {
+            return Err(PathTemplateError::Wildcard {
+                segment: segment.to_string(),
+            });
         }
-        let after = &rest[open + 1..];
-        let close = after.find('}')?;
-        let name = &after[..close];
-        if name.is_empty() || name.contains('{') {
-            return None;
+        if !segment.contains('{') && !segment.contains('}') {
+            continue;
+        }
+        // Braces are only a placeholder when they span the whole segment.
+        let Some(name) = segment
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+        else {
+            return Err(PathTemplateError::Malformed);
+        };
+        if name.is_empty() || name.contains('{') || name.contains('}') {
+            return Err(PathTemplateError::Malformed);
         }
         names.push(name.to_string());
-        rest = &after[close + 1..];
     }
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -857,8 +1162,34 @@ pub enum WebMcpRefusal {
         /// The offending source labels, sorted.
         sources: Vec<String>,
     },
-    /// The URL path template has an unmatched or empty `{}` placeholder.
+    /// Schema sources whose inlining hit a `$ref` cycle — a recursive type,
+    /// which has no finite flat representation.
+    RecursiveSchema {
+        /// The offending source labels, sorted.
+        sources: Vec<String>,
+    },
+    /// The merged schema marks names required that no source declared a
+    /// property for, so the client has no way to send them.
+    RequiredNotDeclared {
+        /// The required names with no matching property, sorted.
+        names: Vec<String>,
+    },
+    /// A path or query parameter is not scalar-valued, so the client cannot
+    /// know how to serialize it into the URL.
+    NonScalarPathOrQueryParams {
+        /// The offending parameters as `"{source}.{name}"`, sorted.
+        params: Vec<String>,
+    },
+    /// The URL path template carries braces the router will not read as a
+    /// placeholder — unmatched, empty, nested, more than one in a segment,
+    /// or mixed with literal text in a segment.
     MalformedPathTemplate,
+    /// The URL path template contains a router wildcard segment, which no
+    /// named tool argument can fill in.
+    WildcardPathSegment {
+        /// The offending segment, verbatim.
+        segment: String,
+    },
     /// The declared path parameters are not exactly the template's
     /// placeholders, so the client cannot build the URL.
     PathParamsDisagreeWithTemplate {
@@ -878,8 +1209,10 @@ pub enum WebMcpRefusal {
 impl std::fmt::Display for WebMcpRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidToolName => f.write_str(
-                "tool name is not a legal MCP tool name (1-128 characters of [A-Za-z0-9_-])",
+            Self::InvalidToolName => write!(
+                f,
+                "tool name is not a legal MCP tool name (1-{max} characters of [A-Za-z0-9_-])",
+                max = AgentTool::MAX_NAME_LEN
             ),
             Self::DuplicateToolName { count } => write!(
                 f,
@@ -900,9 +1233,28 @@ impl std::fmt::Display for WebMcpRefusal {
                 "schema source(s) {} contain a $ref that could not be resolved, leaving an unconstrained {{}} where the server requires a type",
                 sources.join(", ")
             ),
-            Self::MalformedPathTemplate => {
-                f.write_str("path template has an unmatched, empty, or nested {} placeholder")
-            }
+            Self::RecursiveSchema { sources } => write!(
+                f,
+                "schema source(s) {} are recursive, so they cannot be inlined into a self-contained inputSchema",
+                sources.join(", ")
+            ),
+            Self::RequiredNotDeclared { names } => write!(
+                f,
+                "required name(s) {} have no matching property in any of path/query/body, so the client has nowhere to send them",
+                names.join(", ")
+            ),
+            Self::NonScalarPathOrQueryParams { params } => write!(
+                f,
+                "path/query parameter(s) {} are not scalar-valued, and the invocation carries no serialization style the client could use to put them in a URL",
+                params.join(", ")
+            ),
+            Self::MalformedPathTemplate => f.write_str(
+                "path template has a {} placeholder that is unmatched, empty, nested, or does not span a whole '/'-separated segment — the router only substitutes a placeholder that is an entire segment",
+            ),
+            Self::WildcardPathSegment { segment } => write!(
+                f,
+                "path template contains the router wildcard segment '{segment}', which no named tool argument can fill in"
+            ),
             Self::PathParamsDisagreeWithTemplate {
                 placeholders,
                 declared,
@@ -1148,6 +1500,42 @@ pub fn generate_webmcp_report(
                 continue;
             }
 
+            // A recursive type leaves the same `{}` an unresolvable `$ref`
+            // does, and is refused on the same grounds — but it is reported
+            // as its own reason, because nothing is missing from `$defs` and
+            // telling the author a reference "could not be resolved" sends
+            // them hunting for an entry that is already there.
+            if !input.recursive_refs.is_empty() {
+                refuse(WebMcpRefusal::RecursiveSchema {
+                    sources: input.recursive_refs.clone(),
+                });
+                continue;
+            }
+
+            // `required` names with no property behind them. The client
+            // builds its arguments from the three provenance lists, so it
+            // has no slot to put such a name in — while a strict MCP client
+            // reads the schema and makes the model supply it anyway. Every
+            // call then reaches the server missing the data it demands.
+            // Filtering the names out of `required` instead would swap one
+            // lie for another: the server's own schema still requires them.
+            if !input.undeclared_required.is_empty() {
+                refuse(WebMcpRefusal::RequiredNotDeclared {
+                    names: input.undeclared_required.clone(),
+                });
+                continue;
+            }
+
+            // A path or query parameter that is not a single scalar has no
+            // agreed URL serialization, and `invocation` carries no
+            // `style`/`explode` to settle it. See `param_is_scalar_valued`.
+            if !input.non_scalar_params.is_empty() {
+                refuse(WebMcpRefusal::NonScalarPathOrQueryParams {
+                    params: input.non_scalar_params.clone(),
+                });
+                continue;
+            }
+
             // `invocation.path` is handed to the client verbatim, so every
             // `{placeholder}` in it must have a declared path param to fill
             // it, and every declared path param must have a placeholder to
@@ -1156,9 +1544,16 @@ pub fn generate_webmcp_report(
             // nowhere to go means an argument the agent supplies is silently
             // dropped. A tool whose URL can never be built is a lie about
             // what it does, so it is not published at all.
-            let Some(mut placeholders) = path_placeholders(&ep.path) else {
-                refuse(WebMcpRefusal::MalformedPathTemplate);
-                continue;
+            let mut placeholders = match path_placeholders(&ep.path) {
+                Ok(placeholders) => placeholders,
+                Err(PathTemplateError::Malformed) => {
+                    refuse(WebMcpRefusal::MalformedPathTemplate);
+                    continue;
+                }
+                Err(PathTemplateError::Wildcard { segment }) => {
+                    refuse(WebMcpRefusal::WildcardPathSegment { segment });
+                    continue;
+                }
             };
             placeholders.sort();
             placeholders.dedup();
@@ -1461,7 +1856,7 @@ mod tests {
             "properties": { "id": { "type": "string" } },
             "required": ["id"]
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(out, schema);
         assert!(!unresolved, "a schema with no $ref resolves cleanly");
     }
@@ -1476,7 +1871,7 @@ mod tests {
                 "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["status"],
             json!({ "type": "string", "enum": ["draft", "active"] })
@@ -1499,7 +1894,7 @@ mod tests {
                 "BillingScheme": { "type": "string", "enum": ["per_unit", "tiered"] }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["tier"]["properties"]["scheme"],
             json!({ "type": "string", "enum": ["per_unit", "tiered"] })
@@ -1517,7 +1912,7 @@ mod tests {
             },
             "$defs": { "Offer": { "type": "object" } }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["offers"]["items"],
             json!({ "type": "object" })
@@ -1530,9 +1925,11 @@ mod tests {
     fn inline_refs_terminates_on_self_referential_schema() {
         // A `Condition` that can contain child `Condition`s is a real shape in
         // products/contracts.rs. Inlining must bottom out rather than recurse
-        // forever — and must say so: the chain is cut at MAX_REF_DEPTH and the
-        // deepest `items` becomes `{}`, which accepts anything where the
-        // server requires a `Condition`.
+        // forever — and must say so, in the *right* words: the cycle is cut
+        // where it closes and the deepest `items` becomes `{}`, which accepts
+        // anything where the server requires a `Condition`. Nothing is
+        // missing from `$defs`, so this must NOT be reported as an
+        // unresolvable reference.
         let schema = json!({
             "$ref": "#/$defs/Condition",
             "$defs": {
@@ -1542,7 +1939,7 @@ mod tests {
                 }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, issues) = inline_refs(&schema);
         assert_eq!(out["type"], json!("object"));
         let rendered = out.to_string();
         assert!(
@@ -1550,9 +1947,197 @@ mod tests {
             "no unresolved $ref may survive: {rendered}"
         );
         assert!(
-            unresolved,
-            "a chain truncated at MAX_REF_DEPTH leaves `{{}}` behind and must be \
-             reported as unresolved: {rendered}"
+            issues.recursive,
+            "a cycle leaves `{{}}` behind and must be reported as recursive: {rendered}"
+        );
+        assert!(
+            !issues.unresolved,
+            "every `$defs` entry the cycle names exists, so nothing is unresolvable: {rendered}"
+        );
+    }
+
+    /// The bug a depth cap has that cycle detection does not: `depth` never
+    /// resets between nesting levels, so a cap on "ref hops" is really a cap
+    /// on *cumulative* ref nesting. A finite, fully resolvable chain deeper
+    /// than the old `MAX_REF_DEPTH = 8` was refused outright — a working tool
+    /// deleted over an implementation detail.
+    #[test]
+    fn inline_refs_resolves_a_chain_deeper_than_the_old_depth_cap() {
+        const DEPTH: usize = 20;
+
+        let mut defs = serde_json::Map::new();
+        for level in 0..DEPTH {
+            let target = json!({ "$ref": format!("#/$defs/L{}", level + 1) });
+            defs.insert(
+                format!("L{level}"),
+                json!({ "type": "object", "properties": { "next": target } }),
+            );
+        }
+        defs.insert(format!("L{DEPTH}"), json!({ "type": "string" }));
+
+        let schema = json!({
+            "type": "object",
+            "properties": { "root": { "$ref": "#/$defs/L0" } },
+            "$defs": defs
+        });
+
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive,
+            "a finite {DEPTH}-level chain resolves fully: {issues:?}"
+        );
+
+        let mut cursor = &out["properties"]["root"];
+        for _ in 0..DEPTH {
+            cursor = &cursor["properties"]["next"];
+        }
+        assert_eq!(
+            cursor,
+            &json!({ "type": "string" }),
+            "every level must be inlined, not truncated: {out}"
+        );
+    }
+
+    /// A definition referenced twice from *different* branches is a diamond,
+    /// not a cycle: the visited stack must unwind, or the second branch is
+    /// falsely reported recursive.
+    #[test]
+    fn inline_refs_resolves_a_definition_referenced_from_two_branches() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": { "$ref": "#/$defs/Shared" },
+                "right": { "$ref": "#/$defs/Shared" }
+            },
+            "$defs": { "Shared": { "type": "string", "enum": ["a", "b"] } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.recursive && !issues.unresolved,
+            "a shared definition is not a cycle: {issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["left"], out["properties"]["right"],
+            "both branches inline the same target: {out}"
+        );
+        assert_eq!(
+            out["properties"]["left"],
+            json!({ "type": "string", "enum": ["a", "b"] })
+        );
+    }
+
+    /// A cycle that closes through an intermediate definition, and schemars'
+    /// root-recursion marker, are both cycles — not missing entries.
+    #[test]
+    fn inline_refs_reports_indirect_and_root_cycles_as_recursive() {
+        let indirect = json!({
+            "$ref": "#/$defs/A",
+            "$defs": {
+                "A": { "type": "object", "properties": { "b": { "$ref": "#/$defs/B" } } },
+                "B": { "type": "object", "properties": { "a": { "$ref": "#/$defs/A" } } }
+            }
+        });
+        let (_, issues) = inline_refs(&indirect);
+        assert!(issues.recursive, "A -> B -> A is a cycle: {issues:?}");
+        assert!(!issues.unresolved, "both `$defs` entries exist: {issues:?}");
+
+        let root = json!({
+            "type": "object",
+            "properties": { "self": { "$ref": "#" } }
+        });
+        let (_, issues) = inline_refs(&root);
+        assert!(
+            issues.recursive,
+            "`$ref: \"#\"` is the document containing itself: {issues:?}"
+        );
+        assert!(
+            !issues.unresolved,
+            "the root exists; it just has no finite inlining: {issues:?}"
+        );
+    }
+
+    /// `default`, `const`, `examples`, and `enum` hold *instance data*, not
+    /// subschemas. Walking into them corrupts legal user data in two
+    /// directions: a literal `{"$ref": ...}` is reported as an unresolvable
+    /// reference (deleting a working endpoint), and a literal that happens to
+    /// name a real `$defs` entry is silently rewritten into something the
+    /// author never wrote.
+    #[test]
+    fn inline_refs_copies_literal_keyword_values_verbatim() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "external": {
+                    "type": "object",
+                    "default": { "$ref": "https://example.com/x" }
+                },
+                "rewritten": {
+                    "type": "object",
+                    "default": { "$ref": "#/$defs/D", "note": "literal data" }
+                },
+                "listed": {
+                    "type": "string",
+                    "examples": [{ "$ref": "#/$defs/D" }],
+                    "enum": ["a", "b"]
+                },
+                "fixed": {
+                    "const": { "$defs": { "not a table": true } }
+                }
+            },
+            "$defs": { "D": { "type": "string" } }
+        });
+
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive,
+            "no schema position holds a $ref here, so nothing is reported: {issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["external"]["default"],
+            json!({ "$ref": "https://example.com/x" }),
+            "a literal default is data, not a reference: {out}"
+        );
+        assert_eq!(
+            out["properties"]["rewritten"]["default"],
+            json!({ "$ref": "#/$defs/D", "note": "literal data" }),
+            "a literal default must not be rewritten through the sibling merge: {out}"
+        );
+        assert_eq!(
+            out["properties"]["listed"]["examples"],
+            json!([{ "$ref": "#/$defs/D" }]),
+            "examples entries are instance data: {out}"
+        );
+        assert_eq!(
+            out["properties"]["fixed"]["const"],
+            json!({ "$defs": { "not a table": true } }),
+            "`$defs` stripping must not reach inside a literal value: {out}"
+        );
+    }
+
+    /// The same rule on the `$ref`-sibling copy path: a `default` sitting
+    /// beside a `$ref` is merged onto the resolved target, and must arrive
+    /// untouched.
+    #[test]
+    fn inline_refs_copies_a_literal_sibling_of_a_ref_verbatim() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "$ref": "#/$defs/Status",
+                    "default": { "$ref": "https://example.com/x" }
+                }
+            },
+            "$defs": { "Status": { "type": "string" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            !issues.unresolved && !issues.recursive,
+            "the only real reference resolves: {issues:?}"
+        );
+        assert_eq!(
+            out["properties"]["status"],
+            json!({ "type": "string", "default": { "$ref": "https://example.com/x" } }),
+            "a literal sibling of $ref must survive verbatim: {out}"
         );
     }
 
@@ -1573,7 +2158,7 @@ mod tests {
                 }
             }
         });
-        let (out, _unresolved) = inline_refs(&schema);
+        let (out, _issues) = inline_refs(&schema);
         assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
     }
 
@@ -1581,7 +2166,7 @@ mod tests {
     #[test]
     fn inline_refs_reports_an_unresolvable_ref_it_had_to_drop() {
         let schema = json!({ "properties": { "x": { "$ref": "#/$defs/Missing" } } });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(out["properties"]["x"], json!({}));
         assert!(
             unresolved,
@@ -1603,7 +2188,7 @@ mod tests {
                 "Product Status": { "type": "string", "enum": ["draft", "active"] }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(
             out["properties"]["status"],
             json!({ "type": "string", "enum": ["draft", "active"] }),
@@ -1632,7 +2217,7 @@ mod tests {
                 "~1": { "type": "boolean" }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert_eq!(out["properties"]["slash"], json!({ "type": "string" }));
         assert_eq!(out["properties"]["tilde"], json!({ "type": "integer" }));
         assert_eq!(
@@ -1661,7 +2246,7 @@ mod tests {
                 "ProductStatus": { "type": "string", "enum": ["draft", "active"] }
             }
         });
-        let (out, unresolved) = inline_refs(&schema);
+        let (out, RefIssues { unresolved, .. }) = inline_refs(&schema);
         assert!(!unresolved, "the ref resolves: {out}");
         let status = &out["properties"]["status"];
 
@@ -2683,14 +3268,14 @@ mod tests {
 
     #[test]
     fn path_placeholders_extracts_names_and_rejects_malformed_templates() {
-        assert_eq!(path_placeholders("/b/x/list"), Some(Vec::new()));
+        assert_eq!(path_placeholders("/b/x/list"), Ok(Vec::new()));
         assert_eq!(
             path_placeholders("/b/products/storefront/{product_id}"),
-            Some(vec!["product_id".to_string()])
+            Ok(vec!["product_id".to_string()])
         );
         assert_eq!(
             path_placeholders("/b/x/{a}/y/{b}"),
-            Some(vec!["a".to_string(), "b".to_string()])
+            Ok(vec!["a".to_string(), "b".to_string()])
         );
 
         for malformed in [
@@ -2702,10 +3287,63 @@ mod tests {
         ] {
             assert_eq!(
                 path_placeholders(malformed),
-                None,
+                Err(PathTemplateError::Malformed),
                 "`{malformed}` is not a template this function can fill in"
             );
         }
+    }
+
+    /// The three shapes where a brace-anywhere scan disagreed with the
+    /// router. Ground truth is `wafer_block::executor`: a segment is a
+    /// placeholder only when the braces span the whole segment.
+    #[test]
+    fn path_placeholders_matches_the_routers_whole_segment_rule() {
+        // Infix: the router compares the literal segment `v{version}`
+        // against `v1` and 404s, so publishing a `version` param is a lie.
+        assert_eq!(
+            path_placeholders("/b/x/v{version}/items"),
+            Err(PathTemplateError::Malformed),
+            "an infix placeholder is not a placeholder to the router"
+        );
+        assert_eq!(
+            path_placeholders("/b/x/{id}.json"),
+            Err(PathTemplateError::Malformed),
+            "a placeholder with a literal suffix is not a placeholder either"
+        );
+
+        // Two in one segment: the router reads ONE placeholder named `a}{b`,
+        // so neither `req.param.a` nor `req.param.b` is ever set.
+        assert_eq!(
+            path_placeholders("/b/x/{a}{b}"),
+            Err(PathTemplateError::Malformed),
+            "the router cannot split one segment into two parameters"
+        );
+
+        // Wildcards: `**` publishes as a literal path segment that
+        // `match_path`'s `/**`-prefix rule then MATCHES, so the handler runs
+        // against a garbage subpath rather than 404ing.
+        assert_eq!(
+            path_placeholders("/b/x/**"),
+            Err(PathTemplateError::Wildcard {
+                segment: "**".to_string()
+            })
+        );
+        assert_eq!(
+            path_placeholders("/b/x/**/y"),
+            Err(PathTemplateError::Wildcard {
+                segment: "**".to_string()
+            })
+        );
+        assert_eq!(
+            path_placeholders("/b/x/*/y"),
+            Err(PathTemplateError::Wildcard {
+                segment: "*".to_string()
+            })
+        );
+
+        // A literal `*` inside a longer segment is not a wildcard to this
+        // router and is not treated as one here either.
+        assert_eq!(path_placeholders("/b/x/a*b"), Ok(Vec::new()));
     }
 
     /// The shape that motivated this check: no production endpoint declares a
@@ -3000,12 +3638,13 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn agent_input_schema_reports_a_nested_unresolvable_ref() {
+    fn agent_input_schema_reports_a_nested_recursive_ref() {
         // `struct Node { children: Vec<Node> }` — schemars closes the cycle
         // with the root marker `{"$ref": "#"}`, which sits at
         // `properties.children.items`. The top level still has `properties`,
         // so `unrepresentable` stays empty and only the dedicated report
-        // catches it.
+        // catches it. It is reported as *recursive*, not unresolvable:
+        // nothing is missing from `$defs`.
         let ep = BlockEndpoint::post("/b/x/tree").input_schema(json!({
             "type": "object",
             "properties": {
@@ -3019,7 +3658,13 @@ mod tests {
              properties-based check cannot see this: {:?}",
             result.unrepresentable
         );
-        assert_eq!(result.unresolved_refs, vec!["body".to_string()]);
+        assert_eq!(result.recursive_refs, vec!["body".to_string()]);
+        assert!(
+            result.unresolved_refs.is_empty(),
+            "a recursive type is not a dangling reference, and saying so sends \
+             the author hunting a `$defs` entry that is not missing: {:?}",
+            result.unresolved_refs
+        );
         assert_eq!(
             result.schema["properties"]["children"]["items"],
             json!({}),
@@ -3390,11 +4035,273 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // required names with no property behind them
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn agent_input_schema_reports_a_required_name_no_source_declared() {
+        let ep = BlockEndpoint::post("/b/x/thing").input_schema(json!({
+            "type": "object",
+            "properties": { "a": { "type": "string" } },
+            "required": ["a", "b"]
+        }));
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.body_params, vec!["a".to_string()]);
+        assert_eq!(
+            result.undeclared_required,
+            vec!["b".to_string()],
+            "`b` is required by the server and has no property, so the client \
+             has nowhere to put it: {:?}",
+            result.schema
+        );
+    }
+
+    #[test]
+    fn webmcp_refuses_a_phantom_required_name_instead_of_filtering_it() {
+        // Filtering `b` out of `required` would publish a tool the model can
+        // call without it — and the server, whose own schema still demands
+        // it, 400s every one of those calls. The lie is quieter, not smaller.
+        let (doc, refused) = report_for(
+            BlockEndpoint::post("/b/x/thing")
+                .auth(AuthLevel::Public)
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": ["a", "b"]
+                }))
+                .agent_tool("set_thing", "Should never be emitted: phantom required."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::RequiredNotDeclared {
+                names: vec!["b".to_string()],
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // structural keywords must have their structural types
+    // -----------------------------------------------------------------
+
+    /// `source_is_flattenable` used to check keyword *names* only, so a
+    /// hand-written `"properties": "oops"` sailed through and published a
+    /// tool advertising zero arguments, and `"required": "a"` published one
+    /// whose required list had silently vanished.
+    #[test]
+    fn webmcp_refuses_a_source_whose_structural_keyword_has_the_wrong_type() {
+        for (what, schema) in [
+            ("properties is a string", json!({ "properties": "oops" })),
+            (
+                "properties is an array",
+                json!({ "type": "object", "properties": [] }),
+            ),
+            (
+                "required is a string",
+                json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": "a"
+                }),
+            ),
+            (
+                "required holds a non-string",
+                json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": [1]
+                }),
+            ),
+        ] {
+            let (doc, refused) = report_for(
+                BlockEndpoint::post("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .input_schema(schema)
+                    .agent_tool("set_thing", "Should never be emitted."),
+            );
+            assert_eq!(
+                tool_names(&doc),
+                Vec::<String>::new(),
+                "{what} must not publish a tool: {doc}"
+            );
+            assert_eq!(
+                refused[0].reason,
+                WebMcpRefusal::UnrepresentableSources {
+                    sources: vec!["body".to_string()],
+                },
+                "{what}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // path and query values have to fit in a URL
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webmcp_refuses_non_scalar_path_and_query_params() {
+        // No serialization style travels in `invocation`, so an array param
+        // could mean `?tags=a&tags=b`, `?tags=a,b`, or `?tags[]=a`. The
+        // client comma-joins; an object stringifies to `[object Object]`.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/search")
+                .auth(AuthLevel::Public)
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "filter": { "type": "object" }
+                    }
+                }))
+                .agent_tool("search_things", "Search things."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::NonScalarPathOrQueryParams {
+                params: vec!["query.filter".to_string(), "query.tags".to_string()],
+            }
+        );
+
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/thing/{id}")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "array", "items": { "type": "string" } } },
+                    "required": ["id"]
+                }))
+                .agent_tool("get_thing", "Get a thing."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::NonScalarPathOrQueryParams {
+                params: vec!["path.id".to_string()],
+            }
+        );
+
+        // A param constrained no other way is refused too: nothing here says
+        // it is a scalar, so nothing here can be vouched for.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/search")
+                .auth(AuthLevel::Public)
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": { "anything": {} }
+                }))
+                .agent_tool("search_things", "Search things."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::NonScalarPathOrQueryParams {
+                params: vec!["query.anything".to_string()],
+            }
+        );
+    }
+
+    /// The other half of the scalar rule: a naive "type must be exactly one
+    /// scalar string" check would refuse `["string", "null"]` — what schemars
+    /// emits for every `Option<T>` param — and every enum-only schema, which
+    /// carries no `type` at all. Those are working tools and must survive.
+    #[test]
+    fn webmcp_emits_a_tool_whose_query_params_are_nullable_or_enum_shaped() {
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/search")
+                .auth(AuthLevel::Public)
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "cursor": { "type": ["string", "null"] },
+                        "limit": { "type": "integer" },
+                        "status": { "enum": ["draft", "active"] },
+                        "exact": { "const": "yes" },
+                        "sort": {
+                            "anyOf": [
+                                { "type": "string", "enum": ["asc", "desc"] },
+                                { "type": "null" }
+                            ]
+                        }
+                    }
+                }))
+                .agent_tool("search_things", "Search things."),
+        );
+        assert!(
+            refused.is_empty(),
+            "every one of these serializes as a single URL value: {refused:?}"
+        );
+        assert_eq!(tool_names(&doc), vec!["search_things".to_string()]);
+        assert_eq!(
+            doc["tools"][0]["invocation"]["query_params"],
+            json!(["cursor", "exact", "limit", "sort", "status"])
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // path templates the router would not read the same way
+    // -----------------------------------------------------------------
+
+    /// Each of these published a tool that failed on every call, because the
+    /// generator's brace scan and `wafer_block::executor`'s whole-segment
+    /// rule disagreed. See `path_placeholders`.
+    #[test]
+    fn webmcp_refuses_paths_the_router_would_not_read_the_same_way() {
+        let declared = |name: &str| {
+            json!({
+                "type": "object",
+                "properties": { name: { "type": "string" } },
+                "required": [name]
+            })
+        };
+
+        // Infix: the router compares the literal segment `v{version}`.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/v{version}/items")
+                .auth(AuthLevel::Public)
+                .path_params_schema(declared("version"))
+                .agent_tool("list_items", "List items."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(refused[0].reason, WebMcpRefusal::MalformedPathTemplate);
+
+        // Two placeholders in one segment: the router sees one, named `a}{b`.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/{a}{b}")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" }, "b": { "type": "string" } },
+                    "required": ["a", "b"]
+                }))
+                .agent_tool("get_pair", "Get a pair."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(refused[0].reason, WebMcpRefusal::MalformedPathTemplate);
+
+        // Wildcard: this one does NOT 404 — `match_path`'s `/**`-prefix rule
+        // matches the literal request, so the handler runs against a garbage
+        // `**` subpath. A silent wrong answer is worse than a missing tool.
+        let (doc, refused) = report_for(
+            BlockEndpoint::get("/b/x/files/**")
+                .auth(AuthLevel::Public)
+                .agent_tool("read_file", "Read a file."),
+        );
+        assert_eq!(tool_names(&doc), Vec::<String>::new(), "{doc}");
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::WildcardPathSegment {
+                segment: "**".to_string(),
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
     // refusal diagnostics
     // -----------------------------------------------------------------
 
     /// Every refusal path names the endpoint precisely enough to find in
-    /// source, and says which rule it broke. Before this, all seven were a
+    /// source, and says which rule it broke. Before this, all of them were a
     /// bare `continue` and an author who annotated an endpoint and got no
     /// tool had nothing to go on.
     #[test]
@@ -3441,6 +4348,36 @@ mod tests {
                         "properties": { "q": { "type": "string" } }
                     }))
                     .agent_tool("get_with_body", "Get with a body."),
+                // 10. recursive schema
+                BlockEndpoint::post("/b/x/node")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/Node" } },
+                        "$defs": {
+                            "Node": {
+                                "type": "object",
+                                "properties": { "child": { "$ref": "#/$defs/Node" } }
+                            }
+                        }
+                    }))
+                    .agent_tool("recursive_body", "Recursive body."),
+                // 11. required name with no property behind it
+                BlockEndpoint::post("/b/x/phantom")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "a": { "type": "string" } },
+                        "required": ["a", "b"]
+                    }))
+                    .agent_tool("phantom_required", "Phantom required."),
+                // 12. non-scalar query param
+                BlockEndpoint::get("/b/x/tagged")
+                    .query_params_schema(json!({
+                        "type": "object",
+                        "properties": { "tags": { "type": "array", "items": { "type": "string" } } }
+                    }))
+                    .agent_tool("array_query", "Array query."),
+                // 13. router wildcard segment
+                BlockEndpoint::get("/b/x/files/**").agent_tool("wildcard_path", "Wildcard path."),
             ]);
 
         let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
@@ -3494,6 +4431,34 @@ mod tests {
                 "/b/x/get_with_body",
                 WebMcpRefusal::BodyOnBodylessMethod {
                     body_params: vec!["q".to_string()],
+                },
+            ),
+            (
+                "recursive_body",
+                "/b/x/node",
+                WebMcpRefusal::RecursiveSchema {
+                    sources: vec!["body".to_string()],
+                },
+            ),
+            (
+                "phantom_required",
+                "/b/x/phantom",
+                WebMcpRefusal::RequiredNotDeclared {
+                    names: vec!["b".to_string()],
+                },
+            ),
+            (
+                "array_query",
+                "/b/x/tagged",
+                WebMcpRefusal::NonScalarPathOrQueryParams {
+                    params: vec!["query.tags".to_string()],
+                },
+            ),
+            (
+                "wildcard_path",
+                "/b/x/files/**",
+                WebMcpRefusal::WildcardPathSegment {
+                    segment: "**".to_string(),
                 },
             ),
         ];
