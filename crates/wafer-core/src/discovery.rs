@@ -957,6 +957,144 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     }
 }
 
+/// The agent-facing projection of one endpoint's declared `output_schema`,
+/// and — when there is none to publish — why.
+#[derive(Debug, Clone, PartialEq)]
+struct AgentOutputSchema {
+    /// The self-contained schema to publish as the tool's `outputSchema`,
+    /// or `None` when the endpoint declared nothing or the projection could
+    /// not vouch for what it declared.
+    schema: Option<Value>,
+    /// Set when the endpoint *did* declare an output schema and it was
+    /// dropped. `None` both when nothing was declared and when the
+    /// projection succeeded.
+    dropped: Option<WebMcpRefusal>,
+}
+
+/// Project an endpoint's declared response schema into the tool's
+/// `outputSchema`: the same self-containment treatment `inputSchema` gets —
+/// every `#/$defs/*` reference inlined, the `$defs` table removed, the root
+/// `title` dropped — under the same [`MAX_INLINED_NODES`] budget.
+///
+/// # Why a bad output schema drops the field and not the tool
+///
+/// Every other verdict in this module refuses the whole tool, on the rule
+/// that a tool that can lie about its arguments is worse than no tool. That
+/// rule still applies here; it just lands somewhere else, because **the unit
+/// of refusal is the smallest thing that can carry the lie.**
+///
+/// For `inputSchema` the smallest such unit *is* the whole tool. The field is
+/// mandatory, and there is no way to say "I don't know what this takes": an
+/// omitted or empty input schema is itself a claim — "this tool takes no
+/// arguments" — which is exactly the lie being avoided. Refusing the field
+/// and refusing the tool are the same act.
+///
+/// `outputSchema` is optional, and its absence claims nothing. That is not
+/// merely a matter of description quality, which is the tempting reading:
+/// outputs are read rather than supplied, so a missing one "only" costs the
+/// agent a guess. But a *wrong* one costs more than a missing one, in two
+/// concrete ways. A client that validates a tool's structured result against
+/// the schema fails calls that would have succeeded. And a truncated
+/// expansion can emit something that is not a schema at all — the budget
+/// bailout replaces whatever node it lands on with `{}`, so a `required`
+/// array can come out as `"required": {}` — which a client that validates
+/// tool *definitions* rejects, taking the whole tool down with it inside the
+/// consumer's per-tool `try`/`catch`, silently.
+///
+/// So: publish a schema this function can vouch for, publish none when it
+/// cannot, and never withhold the tool over it. The endpoint's arguments are
+/// unaffected by anything wrong with its response schema, and a missing tool
+/// helps no one — the same reasoning that keeps a `deprecated` endpoint
+/// published.
+///
+/// The drop is not silent: it travels back as a [`WebMcpRefusal`] and is
+/// reported under [`WebMcpRefusalScope::OutputSchema`], so an author who
+/// declared `.output::<T>()` and sees no `outputSchema` learns why.
+///
+/// # Why a non-object schema is dropped
+///
+/// A tool's `outputSchema` describes a *structured result*, and a structured
+/// result is a JSON object — MCP types the field as an object schema for
+/// that reason. An array-valued or scalar-valued response has no honest slot
+/// here: publishing `{"type": "array"}` tells a validating client to expect
+/// an object and check an array against it, which fails on every call.
+///
+/// The object test is the same one [`source_is_flattenable`] applies: an
+/// explicit `"type": "object"`, or no `type` at all alongside a `properties`
+/// map. A composition-keyword response (`oneOf` of several object shapes) is
+/// therefore dropped too. That is over-refusal, and it is the right
+/// direction: what is lost is prose about a response the endpoint's OpenAPI
+/// document still describes in full, and the alternative is vouching for a
+/// shape this function cannot actually check.
+fn agent_output_schema(ep: &BlockEndpoint) -> AgentOutputSchema {
+    let nothing = AgentOutputSchema {
+        schema: None,
+        dropped: None,
+    };
+    let drop = |reason: WebMcpRefusal| AgentOutputSchema {
+        schema: None,
+        dropped: Some(reason),
+    };
+
+    let Some(source) = ep.output_schema.as_ref() else {
+        return nothing;
+    };
+    // `null` and `{}` mean "declared nothing", exactly as they do for the
+    // input sources — see `merge_schema_source`. Nothing was declared, so
+    // nothing was dropped and there is nothing to report.
+    let declared = match source {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    if !declared {
+        return nothing;
+    }
+
+    let (inlined, issues) = inline_refs(source);
+
+    // Checked first, and for the reason the input side checks it first: past
+    // the budget the walk stopped partway, so every verdict below would be
+    // drawn from a document the endpoint never declared.
+    if issues.oversized {
+        return drop(WebMcpRefusal::SchemaTooLarge {
+            sources: vec!["output".to_string()],
+        });
+    }
+    if issues.unresolved {
+        return drop(WebMcpRefusal::UnresolvedRefs {
+            sources: vec!["output".to_string()],
+        });
+    }
+    if issues.recursive {
+        return drop(WebMcpRefusal::RecursiveSchema {
+            sources: vec!["output".to_string()],
+        });
+    }
+
+    let Some(map) = inlined.as_object() else {
+        return drop(WebMcpRefusal::OutputSchemaNotAnObject);
+    };
+    match map.get("type") {
+        Some(Value::String(name)) if name == "object" => {}
+        None if map.contains_key("properties") => {}
+        _ => return drop(WebMcpRefusal::OutputSchemaNotAnObject),
+    }
+
+    // The root `title` is the source Rust type's name. `wafer-block` keeps it
+    // in the stored schema because `/openapi.json` embeds these verbatim and
+    // client generators read it to name generated types; here it is noise
+    // for an agent, and the merged `inputSchema` drops it on the same
+    // grounds.
+    let mut published = map.clone();
+    published.remove("title");
+
+    AgentOutputSchema {
+        schema: Some(Value::Object(published)),
+        dropped: None,
+    }
+}
+
 /// Why a URL path template cannot be turned into a fillable tool URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PathTemplateError {
@@ -1362,6 +1500,36 @@ pub enum WebMcpRefusal {
         /// The body property names that have nowhere to travel, sorted.
         body_params: Vec<String>,
     },
+    /// The declared response schema does not describe a JSON *object*, so it
+    /// cannot be published as an `outputSchema` — see
+    /// [`agent_output_schema`]. Only ever reported with
+    /// [`WebMcpRefusalScope::OutputSchema`]: the tool is still published,
+    /// without the field.
+    OutputSchemaNotAnObject,
+}
+
+/// What a [`WebMcpRefusalReport`] is about: the whole tool, or one optional
+/// part of it that was dropped while the tool was published anyway.
+///
+/// The distinction exists because the two are not equally costly, and the
+/// projection should refuse the *smallest* thing that can carry the lie. See
+/// [`agent_output_schema`] for the argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WebMcpRefusalScope {
+    /// No tool was published for this endpoint.
+    Tool,
+    /// The tool was published, but without its `outputSchema`.
+    OutputSchema,
+}
+
+impl std::fmt::Display for WebMcpRefusalScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool => f.write_str("tool"),
+            Self::OutputSchema => f.write_str("outputSchema"),
+        }
+    }
 }
 
 impl std::fmt::Display for WebMcpRefusal {
@@ -1432,12 +1600,19 @@ impl std::fmt::Display for WebMcpRefusal {
                 "body parameter(s) {} are declared on a method that cannot carry a request body",
                 body_params.join(", ")
             ),
+            Self::OutputSchemaNotAnObject => f.write_str(
+                "the declared output schema does not describe a JSON object, and a tool's outputSchema describes a structured result, which is always an object",
+            ),
         }
     }
 }
 
-/// One endpoint that opted in to agent-tool exposure and was refused, named
-/// precisely enough to find in source.
+/// One thing the projection refused to publish for an endpoint that opted in
+/// to agent-tool exposure, named precisely enough to find in source.
+///
+/// [`Self::scope`] says what was refused. Most entries refuse the whole tool;
+/// an entry scoped to [`WebMcpRefusalScope::OutputSchema`] means the tool was
+/// published and only its `outputSchema` was dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebMcpRefusalReport {
     /// Name of the block declaring the endpoint.
@@ -1448,6 +1623,8 @@ pub struct WebMcpRefusalReport {
     pub path: String,
     /// The tool name the endpoint asked for.
     pub tool_name: String,
+    /// What was refused: the whole tool, or one optional part of it.
+    pub scope: WebMcpRefusalScope,
     /// Why it was refused.
     pub reason: WebMcpRefusal,
 }
@@ -1456,9 +1633,15 @@ impl std::fmt::Display for WebMcpRefusalReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "block '{}' endpoint {} {} (tool '{}'): {}",
-            self.block, self.method, self.path, self.tool_name, self.reason
-        )
+            "block '{}' endpoint {} {} (tool '{}'): ",
+            self.block, self.method, self.path, self.tool_name
+        )?;
+        match self.scope {
+            WebMcpRefusalScope::Tool => write!(f, "{}", self.reason),
+            WebMcpRefusalScope::OutputSchema => {
+                write!(f, "published without outputSchema — {}", self.reason)
+            }
+        }
     }
 }
 
@@ -1475,6 +1658,11 @@ impl std::fmt::Display for WebMcpRefusalReport {
 ///   not marked unavailable. A name an agent cannot use is recon surface, so
 ///   it never reaches the page. This mirrors the SEC-073 posture applied to
 ///   the discovery documents.
+///
+/// Each emitted tool carries `name`, `description`, `inputSchema`, and
+/// `invocation`, plus `outputSchema` when the endpoint declares a response
+/// schema this projection can vouch for (see [`agent_output_schema`]) and
+/// `deprecated` when the endpoint is.
 ///
 /// # Declared auth is not always the enforced auth
 ///
@@ -1504,8 +1692,8 @@ pub fn generate_webmcp(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
 /// describe the projection and why the auth filter matters.
 ///
 /// Every endpoint this refuses is logged at `warn!` with the block, method,
-/// path, tool name, and reason. Use [`generate_webmcp_report`] to receive the
-/// refusals as data instead.
+/// path, tool name, scope, and reason. Use [`generate_webmcp_report`] to
+/// receive the refusals as data instead.
 pub fn generate_webmcp_with(
     blocks: &[BlockInfo],
     caller: AuthLevel,
@@ -1518,6 +1706,7 @@ pub fn generate_webmcp_with(
             method = %refusal.method,
             path = %refusal.path,
             tool = %refusal.tool_name,
+            scope = %refusal.scope,
             reason = %refusal.reason,
             "webmcp: endpoint opted in to agent-tool exposure but was refused"
         );
@@ -1547,11 +1736,22 @@ pub fn generate_webmcp_with(
 /// auth filter itself is not a refusal — omitting a tool the caller may not
 /// invoke is the projection working — so it is applied last and reported
 /// nowhere.
+///
+/// # Not every refusal costs the tool
+///
+/// A report entry carries a [`WebMcpRefusalScope`]. Most say the endpoint
+/// produced no tool at all; one — [`WebMcpRefusalScope::OutputSchema`] —
+/// says the tool *was* published and only its `outputSchema` was dropped.
+/// A consumer that counts refusals as missing tools must filter on the
+/// scope. See [`agent_output_schema`] for why that case refuses a field
+/// rather than a tool.
 pub fn generate_webmcp_report(
     blocks: &[BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
+    use WebMcpRefusalScope as Scope;
+
     let ceiling = auth_rank(caller);
 
     let mut refused: Vec<WebMcpRefusalReport> = Vec::new();
@@ -1598,12 +1798,13 @@ pub fn generate_webmcp_report(
                 continue;
             };
 
-            let mut refuse = |reason: WebMcpRefusal| {
+            let mut refuse = |scope: Scope, reason: WebMcpRefusal| {
                 refused.push(WebMcpRefusalReport {
                     block: block.name.clone(),
                     method: ep.method,
                     path: ep.path.clone(),
                     tool_name: tool.name.clone(),
+                    scope,
                     reason,
                 });
             };
@@ -1614,13 +1815,13 @@ pub fn generate_webmcp_report(
             // would reject — and which the consumer's per-tool try/catch
             // would swallow — out of the manifest.
             if !AgentTool::is_valid_name(&tool.name) {
-                refuse(WebMcpRefusal::InvalidToolName);
+                refuse(Scope::Tool, WebMcpRefusal::InvalidToolName);
                 continue;
             }
 
             let count = name_counts.get(tool.name.as_str()).copied().unwrap_or(0);
             if count != 1 {
-                refuse(WebMcpRefusal::DuplicateToolName { count });
+                refuse(Scope::Tool, WebMcpRefusal::DuplicateToolName { count });
                 continue;
             }
 
@@ -1631,9 +1832,12 @@ pub fn generate_webmcp_report(
             // the value in both places. Emitting no tool is the safe, visible
             // failure; emitting a lying one is neither.
             if !input.collisions.is_empty() {
-                refuse(WebMcpRefusal::CollidingParameterNames {
-                    names: input.collisions.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::CollidingParameterNames {
+                        names: input.collisions.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1646,9 +1850,12 @@ pub fn generate_webmcp_report(
             // an unrepresentable source and send the author looking at the
             // wrong thing. See `MAX_INLINED_NODES`.
             if !input.oversized_schemas.is_empty() {
-                refuse(WebMcpRefusal::SchemaTooLarge {
-                    sources: input.oversized_schemas.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::SchemaTooLarge {
+                        sources: input.oversized_schemas.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1660,9 +1867,12 @@ pub fn generate_webmcp_report(
             // exactly the kind of lie `collisions` above already refuses to
             // tell. See `source_is_flattenable`.
             if !input.unrepresentable.is_empty() {
-                refuse(WebMcpRefusal::UnrepresentableSources {
-                    sources: input.unrepresentable.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::UnrepresentableSources {
+                        sources: input.unrepresentable.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1672,9 +1882,12 @@ pub fn generate_webmcp_report(
             // `properties` object, one entry of which now accepts garbage.
             // Same lie, quieter.
             if !input.unresolved_refs.is_empty() {
-                refuse(WebMcpRefusal::UnresolvedRefs {
-                    sources: input.unresolved_refs.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::UnresolvedRefs {
+                        sources: input.unresolved_refs.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1684,9 +1897,12 @@ pub fn generate_webmcp_report(
             // telling the author a reference "could not be resolved" sends
             // them hunting for an entry that is already there.
             if !input.recursive_refs.is_empty() {
-                refuse(WebMcpRefusal::RecursiveSchema {
-                    sources: input.recursive_refs.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::RecursiveSchema {
+                        sources: input.recursive_refs.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1698,9 +1914,12 @@ pub fn generate_webmcp_report(
             // Filtering the names out of `required` instead would swap one
             // lie for another: the server's own schema still requires them.
             if !input.undeclared_required.is_empty() {
-                refuse(WebMcpRefusal::RequiredNotDeclared {
-                    names: input.undeclared_required.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::RequiredNotDeclared {
+                        names: input.undeclared_required.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1708,9 +1927,12 @@ pub fn generate_webmcp_report(
             // agreed URL serialization, and `invocation` carries no
             // `style`/`explode` to settle it. See `param_is_scalar_valued`.
             if !input.non_scalar_params.is_empty() {
-                refuse(WebMcpRefusal::NonScalarPathOrQueryParams {
-                    params: input.non_scalar_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::NonScalarPathOrQueryParams {
+                        params: input.non_scalar_params.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1725,21 +1947,24 @@ pub fn generate_webmcp_report(
             let mut placeholders = match path_placeholders(&ep.path) {
                 Ok(placeholders) => placeholders,
                 Err(PathTemplateError::Malformed) => {
-                    refuse(WebMcpRefusal::MalformedPathTemplate);
+                    refuse(Scope::Tool, WebMcpRefusal::MalformedPathTemplate);
                     continue;
                 }
                 Err(PathTemplateError::Wildcard { segment }) => {
-                    refuse(WebMcpRefusal::WildcardPathSegment { segment });
+                    refuse(Scope::Tool, WebMcpRefusal::WildcardPathSegment { segment });
                     continue;
                 }
             };
             placeholders.sort();
             placeholders.dedup();
             if placeholders != input.path_params {
-                refuse(WebMcpRefusal::PathParamsDisagreeWithTemplate {
-                    placeholders,
-                    declared: input.path_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::PathParamsDisagreeWithTemplate {
+                        placeholders,
+                        declared: input.path_params.clone(),
+                    },
+                );
                 continue;
             }
 
@@ -1750,10 +1975,27 @@ pub fn generate_webmcp_report(
             // missing data. Either way the tool fails on every invocation, so
             // it is not published. See `method_can_carry_body`.
             if !input.body_params.is_empty() && !method_can_carry_body(ep.method) {
-                refuse(WebMcpRefusal::BodyOnBodylessMethod {
-                    body_params: input.body_params.clone(),
-                });
+                refuse(
+                    Scope::Tool,
+                    WebMcpRefusal::BodyOnBodylessMethod {
+                        body_params: input.body_params.clone(),
+                    },
+                );
                 continue;
+            }
+
+            // The last declaration-level verdict, and the only one that does
+            // not take the tool down with it: a response schema this cannot
+            // vouch for costs the `outputSchema` field and nothing else. See
+            // `agent_output_schema` for why the unit of refusal is smaller
+            // here than everywhere above.
+            //
+            // Computed here, ahead of the auth filter, so that — like every
+            // other verdict about the endpoint's own declarations — it is
+            // reported identically no matter who asked.
+            let output = agent_output_schema(ep);
+            if let Some(reason) = output.dropped {
+                refuse(Scope::OutputSchema, reason);
             }
 
             // Everything above is a defect in the endpoint. This is not: a
@@ -1783,6 +2025,9 @@ pub fn generate_webmcp_report(
                 emitted.insert("deprecated".into(), json!(true));
             }
             emitted.insert("inputSchema".into(), input.schema);
+            if let Some(schema) = output.schema {
+                emitted.insert("outputSchema".into(), schema);
+            }
             emitted.insert(
                 "invocation".into(),
                 json!({
@@ -3635,6 +3880,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/products/purchases",
@@ -3679,6 +3925,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/products/purchases",
@@ -3694,6 +3941,7 @@ mod tests {
                             "type": "object",
                             "properties": {}
                         },
+                        "outputSchema": { "type": "object" },
                         "invocation": {
                             "method": "get",
                             "path": "/b/admin/api/users",
@@ -3704,6 +3952,249 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // outputSchema
+    // -----------------------------------------------------------------
+
+    /// One block with a single opted-in endpoint carrying `output`, so the
+    /// output-schema tests differ only in the schema under test.
+    fn block_with_output_schema(output: Value) -> BlockInfo {
+        BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            BlockEndpoint::get("/b/x/thing")
+                .auth(AuthLevel::Public)
+                .output_schema(output)
+                .agent_tool("get_thing", "Fetch a thing."),
+        ])
+    }
+
+    #[test]
+    fn webmcp_publishes_a_self_contained_output_schema() {
+        // The same treatment `inputSchema` gets: references inlined, the
+        // `$defs` table gone, the root `title` (the source Rust type's name)
+        // dropped, and a `$ref` sibling annotation preserved.
+        let block = block_with_output_schema(json!({
+            "title": "Thing",
+            "type": "object",
+            "properties": {
+                "status": { "description": "Lifecycle state.", "$ref": "#/$defs/Status" }
+            },
+            "required": ["status"],
+            "$defs": { "Status": { "type": "string", "enum": ["draft", "active"] } }
+        }));
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert!(refused.is_empty(), "nothing to report: {refused:?}");
+        assert_eq!(
+            doc["tools"][0]["outputSchema"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "description": "Lifecycle state.",
+                        "type": "string",
+                        "enum": ["draft", "active"]
+                    }
+                },
+                "required": ["status"]
+            }),
+            "a client that cannot resolve $ref must still get the whole shape: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_omits_output_schema_when_the_endpoint_declares_none() {
+        // No key at all rather than `null` or `{}` — an empty schema would
+        // claim "the response can be anything", which is a claim, not a
+        // silence. And nothing is reported: nothing was dropped.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .agent_tool("get_thing", "Fetch a thing."),
+            ]);
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert!(refused.is_empty(), "nothing was declared: {refused:?}");
+        assert!(
+            doc["tools"][0].get("outputSchema").is_none(),
+            "an undeclared response shape must leave the key absent: {doc}"
+        );
+    }
+
+    #[test]
+    fn webmcp_declaring_an_empty_output_schema_is_declaring_nothing() {
+        for empty in [json!(null), json!({})] {
+            let block = block_with_output_schema(empty.clone());
+            let (doc, refused) =
+                generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+            assert!(refused.is_empty(), "{empty} is not a defect: {refused:?}");
+            assert!(
+                doc["tools"][0].get("outputSchema").is_none(),
+                "{empty} means nothing was declared, exactly as it does for the \
+                 input sources: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn webmcp_publishes_the_tool_without_an_output_schema_it_cannot_vouch_for() {
+        // The asymmetry this whole design turns on. The SAME dangling `$ref`
+        // costs the tool on the input side and costs only the field on the
+        // output side, because `inputSchema` is mandatory — omitting it is
+        // itself the false claim "takes no arguments" — while `outputSchema`
+        // is optional and its absence claims nothing.
+        let dangling = json!({
+            "type": "object",
+            "properties": { "status": { "$ref": "#/$defs/Missing" } }
+        });
+
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(dangling.clone())],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(
+            tool_names(&doc),
+            vec!["get_thing".to_string()],
+            "a defect in the response shape says nothing about the arguments, \
+             and a missing tool helps no one: {doc}"
+        );
+        assert!(
+            doc["tools"][0].get("outputSchema").is_none(),
+            "the field must be absent, not `{{}}`: {doc}"
+        );
+        assert_eq!(refused.len(), 1, "the drop must not be silent: {refused:?}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::UnresolvedRefs {
+                sources: vec!["output".to_string()]
+            }
+        );
+        assert!(
+            refused[0]
+                .to_string()
+                .contains("published without outputSchema"),
+            "the rendered report must not read as a missing tool: {}",
+            refused[0]
+        );
+
+        // Same schema, input side: the tool goes.
+        let on_input =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/thing")
+                    .auth(AuthLevel::Public)
+                    .input_schema(dangling)
+                    .agent_tool("set_thing", "Set a thing."),
+            ]);
+        let (doc, refused) = generate_webmcp_report(&[on_input], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(doc["tools"], json!([]), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::Tool);
+    }
+
+    #[test]
+    fn webmcp_drops_an_output_schema_that_does_not_describe_an_object() {
+        // A `Vec<T>` response. `outputSchema` describes a structured result,
+        // which is an object, so there is no honest slot for an array here —
+        // and telling a validating client to check an array against an object
+        // schema fails every call.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(json!({
+                "type": "array",
+                "items": { "type": "object", "properties": { "id": { "type": "string" } } }
+            }))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaNotAnObject);
+    }
+
+    #[test]
+    fn webmcp_drops_a_recursive_output_schema() {
+        // `struct Node { children: Vec<Node> }` — schemars closes the cycle
+        // with `{"$ref": "#"}`, which has no finite inlining. Reported as
+        // recursive rather than unresolvable: nothing is missing from `$defs`.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(json!({
+                "type": "object",
+                "properties": {
+                    "children": { "type": "array", "items": { "$ref": "#" } }
+                }
+            }))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::RecursiveSchema {
+                sources: vec!["output".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn webmcp_drops_an_output_schema_that_expands_past_the_node_budget() {
+        // The output side pays into the same `MAX_INLINED_NODES` budget. It
+        // matters most here: past the budget the walk emits `{}` wherever it
+        // stopped, so a `required` array can come out as `"required": {}` —
+        // not a weaker schema but a malformed one, which a client that
+        // validates tool definitions rejects, taking the tool with it.
+        let (doc, refused) = generate_webmcp_report(
+            &[block_with_output_schema(doubling_schema(22))],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+        );
+        assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
+        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
+        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::SchemaTooLarge {
+                sources: vec!["output".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn webmcp_output_schema_drops_are_reported_to_every_caller() {
+        // The representability of a response schema is a property of the
+        // declaration, not of who asked, so the diagnostic sits with the
+        // other declaration-level verdicts — ahead of the auth filter. An
+        // author debugging an admin endpoint's missing `outputSchema` must
+        // not have to authenticate to see why.
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/x/admin_thing")
+                    .auth(AuthLevel::Admin)
+                    .output_schema(json!({ "type": "array" }))
+                    .agent_tool("get_admin_thing", "Fetch an admin thing."),
+            ]);
+
+        let (public_doc, public_refusals) =
+            generate_webmcp_report(std::slice::from_ref(&block), AuthLevel::Public, |_, ep| {
+                ep.auth
+            });
+        let (_, admin_refusals) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+
+        assert_eq!(
+            tool_names(&public_doc),
+            Vec::<String>::new(),
+            "the tool itself stays hidden: {public_doc}"
+        );
+        assert_eq!(public_refusals, admin_refusals);
+        assert_eq!(
+            public_refusals[0].reason,
+            WebMcpRefusal::OutputSchemaNotAnObject
         );
     }
 
