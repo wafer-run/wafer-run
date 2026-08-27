@@ -274,9 +274,14 @@ impl BlockEndpoint {
     ///
     /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
     /// recursive. The root `title` is kept — see `self_contained_schema`.
+    ///
+    /// Generated under the **deserialize** contract: a request body is what a
+    /// client sends and the server deserializes.
     #[cfg(feature = "json-schema")]
     pub fn input<T: schemars::JsonSchema>(mut self) -> Self {
-        self.input_schema = Some(self_contained_schema::<T>());
+        self.input_schema = Some(self_contained_schema::<T>(
+            schemars::generate::Contract::Deserialize,
+        ));
         self
     }
 
@@ -284,9 +289,16 @@ impl BlockEndpoint {
     ///
     /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
     /// recursive. The root `title` is kept — see `self_contained_schema`.
+    ///
+    /// Generated under the **serialize** contract — the one builder that is.
+    /// A response body is what the server *serializes*, so the schema must
+    /// describe what the server guarantees to emit, not what it would accept.
+    /// See `self_contained_schema`'s "Which contract" section.
     #[cfg(feature = "json-schema")]
     pub fn output<T: schemars::JsonSchema>(mut self) -> Self {
-        self.output_schema = Some(self_contained_schema::<T>());
+        self.output_schema = Some(self_contained_schema::<T>(
+            schemars::generate::Contract::Serialize,
+        ));
         self
     }
 
@@ -294,9 +306,14 @@ impl BlockEndpoint {
     ///
     /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
     /// recursive. The root `title` is kept — see `self_contained_schema`.
+    ///
+    /// Generated under the **deserialize** contract: path params are what a
+    /// client sends and the server deserializes.
     #[cfg(feature = "json-schema")]
     pub fn path_params<T: schemars::JsonSchema>(mut self) -> Self {
-        self.path_params = Some(self_contained_schema::<T>());
+        self.path_params = Some(self_contained_schema::<T>(
+            schemars::generate::Contract::Deserialize,
+        ));
         self
     }
 
@@ -304,9 +321,14 @@ impl BlockEndpoint {
     ///
     /// Inlined and self-contained: no `$schema`, no `$ref` unless `T` is
     /// recursive. The root `title` is kept — see `self_contained_schema`.
+    ///
+    /// Generated under the **deserialize** contract: query params are what a
+    /// client sends and the server deserializes.
     #[cfg(feature = "json-schema")]
     pub fn query_params<T: schemars::JsonSchema>(mut self) -> Self {
-        self.query_params = Some(self_contained_schema::<T>());
+        self.query_params = Some(self_contained_schema::<T>(
+            schemars::generate::Contract::Deserialize,
+        ));
         self
     }
 }
@@ -364,8 +386,60 @@ impl BlockEndpoint {
 /// `components/schemas` and rewriting the pointers in `generate_openapi`.
 /// Until then `wafer-core`'s `inline_refs` flattens what it can for the
 /// WebMCP projection, and recursive contracts are the only shape affected.
+///
+/// # Which contract
+///
+/// schemars generates a schema under one of two *contracts*: `Deserialize`
+/// (the default) describes what a value may look like on the way *in*;
+/// `Serialize` describes what it looks like on the way *out*. They are not
+/// the same document, and picking the wrong one distorts the result in a
+/// consistent direction.
+///
+/// `input`, `path_params` and `query_params` all describe what a client
+/// sends and the server deserializes, so they take `Deserialize`. `output`
+/// describes what the server serializes and the client reads, so it takes
+/// `Serialize`. Under `Deserialize` a response schema *understates what the
+/// server guarantees* — it tells an agent or a generated client that a field
+/// may be absent when the server always emits it. Concretely, for `output`
+/// the serialize contract fixes:
+///
+/// - `#[serde(default)]` — deserialize drops the field from `required`
+///   (a client may omit it); serialize keeps it there, because the server
+///   always emits a value, defaulted or not.
+/// - a plain `Option<T>` with no `skip_serializing_if` — deserialize makes it
+///   optional; serialize makes it `required` *and* nullable, which is exactly
+///   right: serde emits the key with `null` for `None`, so the key is always
+///   present.
+/// - `#[serde(skip_deserializing)]` — a server-computed field absent from the
+///   deserialize schema entirely; serialize includes it, marked `readOnly`.
+/// - `#[serde(skip_serializing_if = "...")]` on a non-`Option` (say
+///   `Vec::is_empty`) — deserialize marks it `required`; serialize makes it
+///   optional, because the server may omit the key.
+/// - `#[serde(into = "...")]` — serialize describes the `into` type, which is
+///   what actually goes on the wire.
+///
+/// ## What it does *not* fix
+///
+/// A `#[serde(skip_serializing_if = "Option::is_none")]` `Option<T>` still
+/// renders as `"type": ["T", "null"]` under **both** contracts (schemars
+/// 1.2.1). The server never emits `null` for such a field — it emits a `T` or
+/// omits the key — so the `null` branch is spurious, but the serialize
+/// contract does not remove it; `Option<T>`'s `JsonSchema` impl calls
+/// `allow_null` unconditionally. The test
+/// `contract_narrows_a_skip_serializing_if_option_only_to_optional` pins the
+/// current behaviour, so a schemars upgrade that *does* fix it is noticed
+/// rather than absorbed silently.
+///
+/// The narrowing that *is* available today is `#[schemars(required)]` on the
+/// field, which is **not** inert: it drops the `null` branch under either
+/// contract. Under the serialize contract it does not also force the property
+/// into `required` — `skip_serializing_if` still means the server may omit
+/// the key — so the pair yields exactly the right response schema for this
+/// shape: optional, and non-null when present.
 #[cfg(feature = "json-schema")]
-fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
+fn self_contained_schema<T: schemars::JsonSchema>(
+    contract: schemars::generate::Contract,
+) -> serde_json::Value {
     // Pinned to draft 2020-12 rather than `SchemaSettings::default()`.
     // schemars documents the default as liable to change between minor
     // versions, and this draft is what produces the `#/$defs/X` reference
@@ -374,11 +448,17 @@ fn self_contained_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     // draft-07 would move every reference to `#/definitions/X`, silently
     // resolving none of them, with no compile error anywhere.
     // `$schema` is suppressed by `meta_schema = None`. `title` is kept — see
-    // "The root `title` is kept" above.
+    // "The root `title` is kept" above. `contract` is the caller's — see
+    // "Which contract" above; it changes only which of the two documents
+    // schemars generates, never the inlining, the meta-schema suppression, or
+    // the `$defs`/`$ref` form (both contracts emit identical references for a
+    // recursive type, so `recursive_types_never_reference_a_table_that_was_removed`
+    // holds under either).
     schemars::generate::SchemaSettings::draft2020_12()
         .with(|settings| {
             settings.inline_subschemas = true;
             settings.meta_schema = None;
+            settings.contract = contract;
         })
         .into_generator()
         .into_root_schema_for::<T>()
@@ -682,6 +762,235 @@ mod block_endpoint_tests {
                 "{label} schema keeps its root title for /openapi.json: {rendered}"
             );
         }
+    }
+
+    /// Does `schema` list `field` in its `required` array?
+    #[cfg(feature = "json-schema")]
+    fn is_required(schema: &serde_json::Value, field: &str) -> bool {
+        schema["required"]
+            .as_array()
+            .is_some_and(|req| req.iter().any(|v| v.as_str() == Some(field)))
+    }
+
+    /// A struct exercising the shapes where the two contracts disagree.
+    ///
+    /// Used by the `output_contract_*` tests below, which each assert the
+    /// *difference* between `.input::<T>()` and `.output::<T>()` — never one
+    /// side alone, so that flipping both builders to the same contract fails
+    /// the suite rather than passing it.
+    #[cfg(feature = "json-schema")]
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct ContractProbe {
+        /// Always sent, always emitted.
+        id: String,
+        /// Client may omit it; the server always emits a value.
+        #[serde(default)]
+        count: u32,
+        /// Client may omit it; the server emits `null` for `None`.
+        label: Option<String>,
+        /// Client may omit it; the server omits the key for `None`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    }
+
+    /// A `#[serde(default)]` field is optional to a *sender* and guaranteed by
+    /// the *server*. The deserialize contract sees only the first half, which
+    /// is why a response schema built from it understates the response.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn output_contract_makes_a_serde_default_field_required() {
+        let input = BlockEndpoint::post("/b/x")
+            .input::<ContractProbe>()
+            .input_schema
+            .expect("input schema set");
+        let output = BlockEndpoint::post("/b/x")
+            .output::<ContractProbe>()
+            .output_schema
+            .expect("output schema set");
+
+        assert!(
+            is_required(&output, "count"),
+            "the server always emits a #[serde(default)] field, so the response \
+             schema must guarantee it: {output}"
+        );
+        assert!(
+            !is_required(&input, "count"),
+            "a client may omit a #[serde(default)] field, so the request schema \
+             must not demand it: {input}"
+        );
+    }
+
+    /// A plain `Option<T>` with no `skip_serializing_if` is the case the
+    /// deserialize contract gets *most* wrong for a response: serde emits the
+    /// key with `null` for `None`, so the key is always present. The serialize
+    /// contract says `required` and nullable — both halves true.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn output_contract_requires_a_plain_option_the_input_leaves_optional() {
+        let input = BlockEndpoint::post("/b/x")
+            .input::<ContractProbe>()
+            .input_schema
+            .expect("input schema set");
+        let output = BlockEndpoint::post("/b/x")
+            .output::<ContractProbe>()
+            .output_schema
+            .expect("output schema set");
+
+        assert!(
+            is_required(&output, "label"),
+            "serde emits `\"label\": null` for None, so the key is always \
+             present in a response: {output}"
+        );
+        assert!(
+            !is_required(&input, "label"),
+            "a client may omit a plain Option field: {input}"
+        );
+        // Nullable on both sides — `null` really is a value this field takes.
+        for (label, schema) in [("input", &input), ("output", &output)] {
+            assert_eq!(
+                schema["properties"]["label"]["type"],
+                serde_json::json!(["string", "null"]),
+                "{label}: a plain Option stays nullable — None is emitted as \
+                 null: {schema}"
+            );
+        }
+    }
+
+    /// A field with no `default` and no `skip_serializing_if` is required
+    /// under both contracts. This is the control: it must *not* move, or the
+    /// tests above would be measuring something other than the contract.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn a_plain_field_is_required_under_both_contracts() {
+        let input = BlockEndpoint::post("/b/x")
+            .input::<ContractProbe>()
+            .input_schema
+            .expect("input schema set");
+        let output = BlockEndpoint::post("/b/x")
+            .output::<ContractProbe>()
+            .output_schema
+            .expect("output schema set");
+
+        assert!(is_required(&input, "id"), "request: {input}");
+        assert!(is_required(&output, "id"), "response: {output}");
+    }
+
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` on an `Option<T>`
+    /// is the one shape the serialize contract does **not** repair, and this
+    /// test exists to keep that honest rather than let anyone assume it was
+    /// fixed along with the rest.
+    ///
+    /// The server emits either a `T` or no key at all — it never emits `null`
+    /// — so `"type": ["T", "null"]` is spurious in a response. schemars 1.2.1
+    /// emits it anyway under both contracts: `Option<T>`'s `JsonSchema` impl
+    /// calls `allow_null` without consulting the contract. What the serialize
+    /// contract *does* get right is the `required` half — the key may be
+    /// absent, and it says so.
+    ///
+    /// If a schemars upgrade starts dropping the `null` branch under the
+    /// serialize contract, this test fails. That failure is good news: delete
+    /// the nullability assertion and the "What it does not fix" paragraph on
+    /// `self_contained_schema`.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn contract_narrows_a_skip_serializing_if_option_only_to_optional() {
+        let input = BlockEndpoint::post("/b/x")
+            .input::<ContractProbe>()
+            .input_schema
+            .expect("input schema set");
+        let output = BlockEndpoint::post("/b/x")
+            .output::<ContractProbe>()
+            .output_schema
+            .expect("output schema set");
+
+        // Optional under both — correctly so, for different reasons: the
+        // client may omit the key, and so may the server.
+        assert!(!is_required(&input, "note"), "request: {input}");
+        assert!(!is_required(&output, "note"), "response: {output}");
+
+        // Still nullable under both. Known gap, pinned deliberately.
+        assert_eq!(
+            output["properties"]["note"]["type"],
+            serde_json::json!(["string", "null"]),
+            "schemars 1.2.1 keeps the null branch under the serialize contract \
+             even though the server omits the key instead of emitting null — \
+             see `self_contained_schema`, \"What it does not fix\": {output}"
+        );
+
+        // The narrowing that does work today. `#[schemars(required)]` is not
+        // inert: it drops the null branch under both contracts. Combined with
+        // the serialize contract it yields the schema this shape actually
+        // wants — the key may be absent, but when present it is never null.
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Narrowed {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[schemars(required)]
+            note: Option<String>,
+        }
+        let narrowed_out = BlockEndpoint::post("/b/x")
+            .output::<Narrowed>()
+            .output_schema
+            .expect("output schema set");
+        let narrowed_in = BlockEndpoint::post("/b/x")
+            .input::<Narrowed>()
+            .input_schema
+            .expect("input schema set");
+
+        for (label, schema) in [("response", &narrowed_out), ("request", &narrowed_in)] {
+            assert_eq!(
+                schema["properties"]["note"]["type"],
+                serde_json::json!("string"),
+                "{label}: #[schemars(required)] is not inert — it drops the \
+                 null branch: {schema}"
+            );
+        }
+        assert!(
+            !is_required(&narrowed_out, "note"),
+            "the serialize contract still honours skip_serializing_if: the \
+             server may omit the key, so the response schema must not demand \
+             it even with #[schemars(required)]: {narrowed_out}"
+        );
+        assert!(
+            is_required(&narrowed_in, "note"),
+            "the deserialize contract reads #[schemars(required)] as a demand \
+             on the sender: {narrowed_in}"
+        );
+    }
+
+    /// The three request-side builders describe what a client *sends*, so all
+    /// three stay on the deserialize contract. Without this, flipping every
+    /// builder to serialize would leave the `output_contract_*` tests green
+    /// while silently over-constraining every request schema.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn only_output_moves_to_the_serialize_contract() {
+        let input = BlockEndpoint::post("/b/x")
+            .input::<ContractProbe>()
+            .input_schema
+            .expect("input schema set");
+        let path = BlockEndpoint::post("/b/x/{id}")
+            .path_params::<ContractProbe>()
+            .path_params
+            .expect("path params set");
+        let query = BlockEndpoint::get("/b/x")
+            .query_params::<ContractProbe>()
+            .query_params
+            .expect("query params set");
+        let output = BlockEndpoint::post("/b/x")
+            .output::<ContractProbe>()
+            .output_schema
+            .expect("output schema set");
+
+        assert_eq!(path, input, "path_params must match the request contract");
+        assert_eq!(query, input, "query_params must match the request contract");
+        assert_ne!(
+            output, input,
+            "the response contract must differ from the request contract — if \
+             these are equal the serialize contract is not being applied: \
+             {output}"
+        );
     }
 
     /// Walk a schema and collect every `$ref` string it contains.
