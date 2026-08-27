@@ -114,7 +114,18 @@
     font-size: 13px; line-height: 1.5; color: #92610a; background: #fef9e7;
     border: 1px solid #f0d78c; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; max-width: 900px;
   }
-  .tiers { display: grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap: 14px; align-items: start; }
+  /* One column per auth level, driven by --tier-count (set from the data, not
+     hard-coded to three — a runtime that reports two levels or four should
+     not get three columns). `minmax(0, 1fr)` rather than a 280px floor: the
+     floor made the row demand ~870px and pushed the whole page into a
+     horizontal scroll on anything narrower. Below that width the columns
+     stack instead, which keeps each one readable. */
+  .tiers {
+    display: grid;
+    grid-template-columns: repeat(var(--tier-count, 3), minmax(0, 1fr));
+    gap: 14px; align-items: start;
+  }
+  @media (max-width: 900px) { .tiers { grid-template-columns: 1fr; } }
   .tier { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   .tier-head { padding: 10px 14px; border-bottom: 1px solid var(--border-light); display: flex; align-items: baseline; gap: 8px; }
   .tier-head h3 { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
@@ -122,6 +133,9 @@
   .tier-body { padding: 10px 14px 14px; }
   .tool { border-left: 3px solid var(--border); padding: 8px 0 8px 10px; margin-bottom: 10px; }
   .tool.is-new { border-left-color: var(--wafer); }
+  .tool.is-gone { border-left-color: #fca5a5; border-left-style: dashed; }
+  .tool-name-gone { text-decoration: line-through; color: var(--text-muted); }
+  .badge-gone { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
   .tool-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; color: var(--text); word-break: break-all; }
   .tool-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin: 3px 0; }
   .tool-route { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
@@ -288,6 +302,10 @@
 
   // ── Tab switching ───────────────────────────────────
   const views = ['app', 'blocks', 'flows', 'webmcp'];
+  // Work a tab defers until it is first opened. `/webmcp` runs one full
+  // manifest projection per auth level server-side, which is wasted on every
+  // page load that never opens the tab.
+  const onFirstOpen = {};
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -296,6 +314,8 @@
       views.forEach(v => {
         document.getElementById(v + '-view').style.display = v === name ? '' : 'none';
       });
+      const deferred = onFirstOpen[name];
+      if (deferred) { delete onFirstOpen[name]; deferred(); }
     });
   });
 
@@ -967,19 +987,23 @@
   });
 
   // ── Agent tools (WebMCP) ────────────────────────────
-  fetch(base + '/webmcp')
-    .then(r => r.json())
-    .then(renderWebmcp)
-    .catch(e => {
-      document.getElementById('webmcp-tiers').innerHTML =
-        '<div class="loading">Error loading agent tools: ' + esc(e.message) + '</div>';
-    });
+  // Deferred to the first time the tab is opened: see `onFirstOpen`.
+  onFirstOpen.webmcp = () => {
+    fetch(base + '/webmcp')
+      .then(r => r.json())
+      .then(renderWebmcp)
+      .catch(e => {
+        document.getElementById('webmcp-tiers').innerHTML =
+          '<div class="loading">Error loading agent tools: ' + esc(e.message) + '</div>';
+      });
+  };
 
   /**
    * One column per auth level, left to right in increasing privilege, so the
    * growth of the tool surface reads as a diff rather than as three lists a
    * viewer has to compare by hand. A tool the previous column did not carry
-   * is marked, and every opted-in endpoint that produced no tool is named
+   * is marked, a tool the previous column carried and this one does not is
+   * marked too, and every opted-in endpoint that produced no tool is named
    * under the column it failed in, with the producer's own reason text.
    */
   function renderWebmcp(data) {
@@ -987,10 +1011,11 @@
     const caveat = document.getElementById('webmcp-caveat');
     if (data.auth_basis === 'declared') {
       caveat.innerHTML =
-        '<div class="caveat"><b>Projected from each endpoint’s declared auth level.</b> ' +
+        '<div class="caveat"><b>Projected from each endpoint’s declared auth level, ignoring feature gating.</b> ' +
         'A router that raises access by mount prefix enforces max(prefix tier, declared) and will serve a ' +
-        'narrower surface than the columns below. This block cannot see the route table, so it shows what the ' +
-        'declarations alone say.</div>';
+        'narrower surface than the columns below. A consumer that serves the manifest for only its enabled ' +
+        'blocks will serve a narrower one again — this page shows every registered block, because live ' +
+        'enablement is not something the runtime hands this block. It shows what the declarations alone say.</div>';
     }
 
     const container = document.getElementById('webmcp-tiers');
@@ -1002,18 +1027,34 @@
 
     const grid = document.createElement('div');
     grid.className = 'tiers';
+    // Drive the column count from the data rather than hard-coding three, and
+    // let the columns wrap instead of forcing a horizontal scrollbar on a
+    // narrow viewport.
+    grid.style.setProperty('--tier-count', String(levels.length));
 
     let previousNames = null;
     levels.forEach(level => {
       const tools = (level.manifest && level.manifest.tools) || [];
       const names = new Set(tools.map(t => t.name));
       const refusals = level.refusals || [];
+      // A tool the previous column had and this one does not. Cross-tier
+      // monotonicity is not guaranteed — a name claimed by two endpoints is
+      // unambiguous to the caller who can see only one of them and ambiguous
+      // to the one who can see both, so it can vanish as privilege rises.
+      // Rendering that as silence hides the case worth auditing.
+      const removed = previousNames === null
+        ? []
+        : [...previousNames].filter(n => !names.has(n));
 
       const col = document.createElement('div');
       col.className = 'tier';
 
+      // "N of M" compares like with like: M is what opted in *at this level*.
+      // A deployment-wide M would make every column below the top read as
+      // though its own endpoints had failed.
+      const optedIn = typeof level.opted_in === 'number' ? level.opted_in : tools.length;
       let html = '<div class="tier-head"><h3>' + esc(level.level) + '</h3>' +
-        '<span class="count">' + tools.length + ' of ' + (data.opted_in_endpoints || 0) + ' opted in</span></div>' +
+        '<span class="count">' + tools.length + ' of ' + optedIn + ' opted in</span></div>' +
         '<div class="tier-body">';
 
       if (!tools.length) {
@@ -1035,6 +1076,12 @@
           '<div class="tool-route">' + esc(String(inv.method || '').toUpperCase()) + ' ' + esc(inv.path) + '</div>' +
           '<div class="tool-args">' + esc(describeArgs(t)) + '</div>' +
           '<div class="tool-badges">' + badges.join('') + '</div>' +
+          '</div>';
+      });
+      removed.forEach(name => {
+        html += '<div class="tool is-gone">' +
+          '<div class="tool-name tool-name-gone">' + esc(name) + '</div>' +
+          '<div class="tool-badges"><span class="badge badge-gone">no longer offered at this level</span></div>' +
           '</div>';
       });
       html += '</div>';
