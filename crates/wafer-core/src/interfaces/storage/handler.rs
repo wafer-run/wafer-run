@@ -76,6 +76,13 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 ///   buffered whole. It authorizes identically to `STORAGE_GET`.
 /// - All other ops emit a single frame: either an empty ack (PUT, DELETE,
 ///   CREATE_FOLDER, DELETE_FOLDER) or an encoded response (LIST, LIST_FOLDERS).
+///
+/// Both GET ops emit a [`wafer_block::stream::raw_frames_marker`] `Meta` event
+/// between the header and the body: the object body is opaque application
+/// bytes, not a codec-encoded DTO, so a consumer that re-encodes frames for a
+/// guest on a different host codec must forward it verbatim. Consumers that
+/// concatenate body chunks (the native clients) skip `Meta` events already and
+/// are unaffected.
 pub async fn handle_message(
     service: &dyn StorageService,
     ctx: &dyn Context,
@@ -132,6 +139,11 @@ pub async fn handle_message(
                             }
                         };
                         if sink.send_chunk(header_bytes).await.is_err() {
+                            return;
+                        }
+                        // Everything after this marker is the object body:
+                        // raw bytes, not a wire DTO.
+                        if sink.send_meta(stream::raw_frames_marker()).await.is_err() {
                             return;
                         }
                         // Body is the second frame. Skip the chunk entirely

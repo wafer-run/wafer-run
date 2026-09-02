@@ -130,7 +130,15 @@ pub struct BlockCapabilities {
     /// `true` via `unrestricted()`.
     #[serde(default)]
     pub ddl: bool,
-    /// Allowed storage folders: `None`/`Any`/`Only([...])` (see [`Allowlist`]).
+    /// Allowed storage folders — or individual object paths:
+    /// `None`/`Any`/`Only([...])` (see [`Allowlist`]).
+    ///
+    /// The storage service authorizes each op on `"{folder}/{key}"` (folder
+    /// ops on the bare folder name), and an `Only` entry admits a resource
+    /// when it is equal to the entry or lies beneath it as a `/`-separated
+    /// path — see [`BlockCapabilities::allows_storage_folder`]. So
+    /// `"uploads"` grants every key in `uploads/`, while `"uploads/logo.png"`
+    /// grants exactly that object.
     #[serde(default)]
     pub storage_folders: Allowlist,
     /// Can use crypto service.
@@ -200,10 +208,33 @@ impl BlockCapabilities {
         self.collections.allows(collection)
     }
 
-    /// Whether this capability set permits operations on `folder` in the
-    /// storage service (matches `"*"` wildcard or an exact entry).
-    pub fn allows_storage_folder(&self, folder: &str) -> bool {
-        self.storage_folders.allows(folder)
+    /// Whether this capability set permits operations on the storage
+    /// `resource` — `"{folder}/{key}"` for object ops, the bare folder name
+    /// for folder ops.
+    ///
+    /// - [`Allowlist::None`] → denied.
+    /// - [`Allowlist::Any`] → allowed.
+    /// - [`Allowlist::Only`] → allowed iff some entry equals `resource` or is
+    ///   a prefix of it terminated by `/`. The separator is required, so
+    ///   `"site/jhg"` admits `"site/jhg/a.txt"` and `"site/jhg/sub/b"` but
+    ///   never `"site/jhgx/a.txt"`.
+    ///
+    /// Prefix matching is what makes the field usable as its name says: a
+    /// block that writes several keys declares the folder once instead of
+    /// enumerating every object path (or falling back to
+    /// [`Allowlist::Any`]).
+    pub fn allows_storage_folder(&self, resource: &str) -> bool {
+        let allow = match &self.storage_folders {
+            Allowlist::None => return false,
+            Allowlist::Any => return true,
+            Allowlist::Only(set) => set,
+        };
+        allow.iter().any(|entry| {
+            resource == entry
+                || resource
+                    .strip_prefix(entry.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
     }
 
     /// Whether outbound HTTP to `url` is permitted (SEC-06):
@@ -504,6 +535,67 @@ mod tests {
             network: Allowlist::Only(hosts.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         }
+    }
+
+    fn caps_with_storage_folders(items: &[&str]) -> BlockCapabilities {
+        BlockCapabilities {
+            storage_folders: only(items),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn storage_folder_entry_admits_keys_beneath_it() {
+        // The storage handler authorizes on `{folder}/{key}`, so a grant of a
+        // FOLDER has to admit every object path under it — otherwise a block
+        // that writes more than one key can only declare `Any`.
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(c.allows_storage_folder("site/jhg/a.txt"));
+        assert!(c.allows_storage_folder("site/jhg/sub/b"));
+    }
+
+    #[test]
+    fn storage_folder_entry_admits_itself() {
+        // Folder-level ops (list / create_folder / delete_folder) authorize on
+        // the bare folder name, and an entry that names a single object path
+        // must still admit exactly that object.
+        let folder = caps_with_storage_folders(&["site/jhg"]);
+        assert!(folder.allows_storage_folder("site/jhg"));
+        let object = caps_with_storage_folders(&["site/jhg/a.txt"]);
+        assert!(object.allows_storage_folder("site/jhg/a.txt"));
+        assert!(
+            !object.allows_storage_folder("site/jhg/a.txt.bak"),
+            "an object-path entry must not leak to a longer sibling name"
+        );
+    }
+
+    #[test]
+    fn storage_folder_prefix_stops_at_a_separator() {
+        // `site/jhg` must never admit `site/jhgx/...` — the prefix only counts
+        // when the next character is the `/` path separator.
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(!c.allows_storage_folder("site/jhgx/a.txt"));
+        assert!(!c.allows_storage_folder("site/jhg-other"));
+        assert!(!c.allows_storage_folder("other/jhg/a.txt"));
+    }
+
+    #[test]
+    fn storage_folder_any_and_none_are_unchanged() {
+        let open = BlockCapabilities {
+            storage_folders: Allowlist::Any,
+            ..Default::default()
+        };
+        assert!(open.allows_storage_folder("anything/at/all"));
+        let closed = BlockCapabilities {
+            storage_folders: Allowlist::None,
+            ..Default::default()
+        };
+        assert!(!closed.allows_storage_folder("site/jhg/a.txt"));
+        let empty = BlockCapabilities {
+            storage_folders: Allowlist::Only(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(!empty.allows_storage_folder("site/jhg/a.txt"));
     }
 
     #[test]

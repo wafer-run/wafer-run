@@ -55,6 +55,11 @@ pub const META_WRAP_RESOURCE_TYPE: &str = "wrap.resource_type";
 /// `code` field on error responses.
 pub const META_ERROR_CODE: &str = "error.code";
 
+// Stream framing meta keys. Defined in [`crate::stream`] next to
+// [`crate::StreamEvent`], because they describe the frames of one stream
+// rather than an attribute of the message: see
+// [`crate::stream::FRAME_ENCODING_META`] / [`crate::stream::FRAME_ENCODING_RAW`].
+
 // Response meta keys (set by blocks, read by bridge).
 
 /// Response HTTP status code (stringified integer).

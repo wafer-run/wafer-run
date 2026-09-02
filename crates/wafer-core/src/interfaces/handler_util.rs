@@ -5,8 +5,13 @@
 //! handling.
 
 use wafer_block::{
-    codec, common::ErrorCode, context::Context, stream::StreamEvent, streams::output::OutputStream,
-    types::ResourceType, WaferError,
+    codec,
+    common::ErrorCode,
+    context::Context,
+    stream::{self, StreamEvent},
+    streams::output::OutputStream,
+    types::ResourceType,
+    WaferError,
 };
 
 /// Serialize a value via codec (MessagePack) and return as `OutputStream::respond`,
@@ -18,8 +23,14 @@ pub fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
     }
 }
 
-/// Emit a two-frame streaming service response: a codec-encoded `header` frame
-/// followed by the body forwarded **verbatim** from `body`.
+/// Emit a two-frame streaming service response: a codec-encoded `header` frame,
+/// a [`wafer_block::stream::raw_frames_marker`] `Meta` event, then the body
+/// forwarded **verbatim** from `body`.
+///
+/// The marker is what tells a consumer that re-encodes frames (the wasmi codec
+/// bridge, for a guest on a non-MessagePack host codec) that the header is a
+/// DTO but everything after it is opaque application bytes. Consumers that just
+/// concatenate the body chunks skip `Meta` events already.
 ///
 /// This is the streaming counterpart to the buffered two-frame path (a header
 /// chunk followed by a single buffered body chunk). Instead of buffering the
@@ -59,6 +70,10 @@ where
         };
         if sink.send_chunk(header_bytes).await.is_err() {
             // Consumer already dropped — nothing more to do.
+            return;
+        }
+        // Everything after this marker is body: raw bytes, not a wire DTO.
+        if sink.send_meta(stream::raw_frames_marker()).await.is_err() {
             return;
         }
 
@@ -356,7 +371,7 @@ mod stream_with_header_tests {
     use wafer_block::{
         codec,
         common::ErrorCode,
-        stream::StreamEvent,
+        stream::{self, StreamEvent},
         streams::output::{OutputStream, TerminalNotResponse},
         WaferError,
     };
@@ -400,6 +415,42 @@ mod stream_with_header_tests {
         );
     }
 
+    /// The raw-frame marker sits between the header frame and the first body
+    /// frame — a consumer that re-encodes frames must transcode the header and
+    /// forward everything after the marker verbatim, with no sniffing.
+    #[tokio::test]
+    async fn marks_the_frames_after_the_header_as_raw() {
+        let body = OutputStream::from_producer(|sink, _cancel| async move {
+            sink.send_chunk(b"a".to_vec()).await.ok();
+            sink.complete(vec![]).await.ok();
+        });
+        let events: Vec<StreamEvent> = stream_with_header(Header { n: 7 }, body, "test.op")
+            .collect()
+            .await;
+
+        assert!(
+            matches!(events.first(), Some(StreamEvent::Chunk(_))),
+            "frame 0 is the encoded header, got: {:?}",
+            events.first()
+        );
+        assert_eq!(
+            events.get(1),
+            Some(&StreamEvent::Meta(stream::raw_frames_marker())),
+            "the marker must precede the first body frame"
+        );
+        assert_eq!(events.get(2), Some(&StreamEvent::Chunk(b"a".to_vec())));
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| matches!(e, StreamEvent::Meta(m) if m.key == stream::FRAME_ENCODING_META)
+                )
+                .count(),
+            1,
+            "exactly one marker per stream"
+        );
+    }
+
     #[tokio::test]
     async fn propagates_body_error_terminal_after_partial_chunks() {
         let body = OutputStream::from_producer(|sink, _cancel| async move {
@@ -434,6 +485,12 @@ mod stream_with_header_tests {
         assert!(
             matches!(first, StreamEvent::Chunk(_)),
             "the header frame is always emitted first"
+        );
+        let marker = out.next().await.expect("raw-frame marker");
+        assert_eq!(
+            marker,
+            StreamEvent::Meta(stream::raw_frames_marker()),
+            "the raw-frame marker follows the header, before any body event"
         );
         match out.next().await.expect("terminal event") {
             StreamEvent::Error(e) => {

@@ -13,7 +13,9 @@
 //! Operations, selected by the request `kind` (read from the JSON handle
 //! frame by substring match — the frame is `[{"kind":"…","meta":[…]}, [bytes]]`):
 //!   test.roundtrip — ensure_table, create, get; body = the `get` frame (JSON)
-//!   test.storage   — storage.put then storage.get; body = the frames read back
+//!   test.storage   — storage.put then storage.get; body = the response
+//!                    frames joined with a newline (the `ObjectInfo` header as
+//!                    JSON, then the raw object bytes)
 //!   test.config    — config.get; body = the frame
 //!   test.error     — ensure_table, then database.get of a missing id;
 //!                    body = the take_error JSON
@@ -51,15 +53,16 @@ const CONFIG: &str = "wafer-run/config";
 /// out exactly what this guest uses and nothing else (an omitted `Allowlist`
 /// deserializes as `None` = deny).
 ///
-/// Note the shape of `storage_folders`: the host authorizes a storage op on
-/// `"{folder}/{key}"` and matches the allowlist by EXACT string, so the entry
-/// is the full object path, not the folder prefix its field name suggests.
+/// `storage_folders` names the FOLDER this guest owns: the host authorizes a
+/// storage op on `"{folder}/{key}"` and an entry admits that resource when it
+/// is equal to it or is a `/`-terminated prefix of it, so one folder entry
+/// covers every key the guest writes beneath it.
 const INFO: &str = r#"{
   "name":"test/json-host-guest","version":"0.0.0","interface":"handler@v1",
   "summary":"JSON host-codec fixture",
   "requires":["wafer-run/database","wafer-run/storage","wafer-run/config"],
   "capabilities":{"collections":{"Only":["test__json_host_guest__notes"]},"ddl":true,
-    "storage_folders":{"Only":["test/json-host-guest/a.txt"]},
+    "storage_folders":{"Only":["test/json-host-guest"]},
     "config":{"Only":["TEST__JSON_HOST_GUEST__GREETING"]},
     "callable_blocks":{"Only":["wafer-run/database","wafer-run/storage","wafer-run/config"]}}
 }"#;
@@ -104,15 +107,17 @@ pub extern "C" fn __wafer_lifecycle(_p: i32, _l: i32) -> i64 {
     pack(br#"{"Ok":null}"#)
 }
 
-/// One buffered host call. Returns `(status, concatenated response frames,
-/// error json)`.
+/// One buffered host call. Returns `(status, response frames, error json)`,
+/// with the frames kept SEPARATE — `storage.get` answers with an `ObjectInfo`
+/// header frame followed by the object body verbatim, and the host-side test
+/// asserts on both, so the boundary has to survive the read loop.
 ///
 /// `status` is the `stream_finish` return (or the negative `stream_init`
 /// sentinel when the call never opened). A host-side failure that happens
 /// *after* dispatch — a WRAP denial, a NotFound from the backend — surfaces
 /// as a negative `read_chunk`, so the error JSON is the authoritative signal
 /// here, not the status.
-fn call(target: &str, kind: &str, body: &str) -> (i32, Vec<u8>, Vec<u8>) {
+fn call_frames(target: &str, kind: &str, body: &str) -> (i32, Vec<Vec<u8>>, Vec<u8>) {
     let msg = format!(r#"{{"kind":"{kind}","meta":[]}}"#);
     unsafe {
         let h = __wafer_host_stream_init(
@@ -128,7 +133,7 @@ fn call(target: &str, kind: &str, body: &str) -> (i32, Vec<u8>, Vec<u8>) {
             __wafer_host_stream_write_chunk(h, body.as_ptr() as i32, body.len() as i32);
         }
         let status = __wafer_host_stream_finish(h);
-        let mut frames = Vec::new();
+        let mut frames: Vec<Vec<u8>> = Vec::new();
         if status == 0 {
             loop {
                 let packed = __wafer_host_stream_read_chunk(h);
@@ -137,7 +142,7 @@ fn call(target: &str, kind: &str, body: &str) -> (i32, Vec<u8>, Vec<u8>) {
                 if packed <= 0 {
                     break;
                 }
-                frames.extend_from_slice(unpack(packed));
+                frames.push(unpack(packed).to_vec());
             }
         }
         let err_packed = __wafer_host_stream_take_error(h);
@@ -149,6 +154,13 @@ fn call(target: &str, kind: &str, body: &str) -> (i32, Vec<u8>, Vec<u8>) {
         __wafer_host_stream_close(h);
         (status, frames, err)
     }
+}
+
+/// [`call_frames`] with the response frames concatenated — the shape every
+/// single-frame op wants.
+fn call(target: &str, kind: &str, body: &str) -> (i32, Vec<u8>, Vec<u8>) {
+    let (status, frames, err) = call_frames(target, kind, body);
+    (status, frames.concat(), err)
 }
 
 /// Build a `GuestResult::Respond` in the v1 (JSON) core ABI. Body bytes are an
@@ -216,18 +228,28 @@ pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
         if !e1.is_empty() {
             return respond(&e1, JSON);
         }
-        // `storage.get` answers with TWO frames: a MessagePack `ObjectInfo`
-        // header and then the object body *verbatim* (raw bytes, not a wire
-        // DTO). Only the header transcodes to JSON; the body frame is
-        // rejected by the host's frame transcoder, which ends the read loop.
-        // The frames returned here are therefore the header alone — see the
-        // e2e test for the assertion and the note on the limitation.
-        let (_, frames, _) = call(
+        // `storage.get` answers with TWO frames: an `ObjectInfo` header (a
+        // wire DTO, transcoded to JSON for this guest) and then the object
+        // body *verbatim*. The handler marks the body frames raw on the
+        // stream, so the host hands them over untranscoded instead of failing
+        // to read them as MessagePack. Join the frames with a newline so the
+        // host-side test can assert on BOTH halves.
+        let (_, frames, err) = call_frames(
             STORAGE,
             "storage.get",
             r#"{"folder":"test/json-host-guest","key":"a.txt"}"#,
         );
-        return respond(&frames, JSON);
+        if !err.is_empty() {
+            return respond(&err, JSON);
+        }
+        let mut out = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            if i > 0 {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(frame);
+        }
+        return respond(&out, "text/plain");
     }
 
     if text.contains("test.config") {

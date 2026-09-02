@@ -45,6 +45,11 @@ fn network_error_to_wafer(e: NetworkError) -> WaferError {
 /// buffers the whole body first; `NETWORK_DO_REQUEST_STREAMING` forwards the
 /// service's `do_request_streaming` body chunks verbatim as they arrive,
 /// under the same two-frame shape.
+///
+/// Both ops emit a [`wafer_block::stream::raw_frames_marker`] `Meta` event
+/// between the header and the body: an HTTP response body is opaque
+/// application bytes, not a codec-encoded DTO, so a consumer that re-encodes
+/// frames for a guest on a different host codec must forward it verbatim.
 pub async fn handle_message(
     service: &dyn NetworkService,
     ctx: &dyn Context,
@@ -88,6 +93,11 @@ pub async fn handle_message(
                             }
                         };
                         if sink.send_chunk(header_bytes).await.is_err() {
+                            return;
+                        }
+                        // Everything after this marker is the response body:
+                        // raw bytes, not a wire DTO.
+                        if sink.send_meta(stream::raw_frames_marker()).await.is_err() {
                             return;
                         }
                         // Body is the second frame. Skip the chunk entirely

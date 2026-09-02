@@ -5,6 +5,33 @@
 
 use crate::core_types::{Message, MetaEntry, WaferError};
 
+/// [`MetaEntry::key`] declaring the encoding of the body frames that FOLLOW
+/// the meta event, for consumers that would otherwise have to guess.
+///
+/// Most service handlers answer with codec-encoded wire DTOs, so a host that
+/// re-encodes frames for a guest on a different codec can decode every frame.
+/// A handler whose response is a typed header followed by an opaque payload
+/// (`storage.get`, `network.do` and their streaming forms) emits this entry
+/// between the two: everything after it is application bytes, not a DTO, and
+/// must be forwarded verbatim. There is no sniffing anywhere — the producer
+/// says so explicitly or the frames are DTOs.
+///
+/// The only value currently defined is [`FRAME_ENCODING_RAW`].
+pub const FRAME_ENCODING_META: &str = "frame.encoding";
+
+/// [`FRAME_ENCODING_META`] value: the frames after this event are raw
+/// application bytes and must not be decoded, re-encoded, or transcoded.
+pub const FRAME_ENCODING_RAW: &str = "raw";
+
+/// The [`StreamEvent::Meta`] entry a handler emits immediately before its
+/// first raw body chunk. See [`FRAME_ENCODING_META`].
+pub fn raw_frames_marker() -> MetaEntry {
+    MetaEntry {
+        key: FRAME_ENCODING_META.to_string(),
+        value: FRAME_ENCODING_RAW.to_string(),
+    }
+}
+
 /// An event in an OutputStream. The stream yields zero-or-more non-terminal
 /// events followed by exactly one terminal event.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +138,15 @@ mod tests {
         }))
         .is_terminal());
         assert!(StreamEvent::Drop.is_terminal());
+    }
+
+    #[test]
+    fn raw_frames_marker_carries_the_documented_key_and_value() {
+        let m = raw_frames_marker();
+        assert_eq!(m.key, FRAME_ENCODING_META);
+        assert_eq!(m.key, "frame.encoding");
+        assert_eq!(m.value, FRAME_ENCODING_RAW);
+        assert_eq!(m.value, "raw");
     }
 
     #[test]

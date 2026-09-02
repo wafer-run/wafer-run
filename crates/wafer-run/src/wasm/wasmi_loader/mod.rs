@@ -821,20 +821,37 @@ impl WasmiBlock {
                 // negative ErrorCode sentinel (the guest can call take_error
                 // for full details).
                 let json = scope.store().data().host_codec == HostCodec::Json;
-                let next = match scope.store_mut().data_mut().streams.get_mut(handle) {
-                    Some(s) => s.next_chunk().await,
-                    None => Err(WaferError::new(
-                        ErrorCode::NotFound,
-                        "unknown stream handle",
-                    )),
+                // `raw_frames` is read AFTER the pull, because the marker that
+                // sets it arrives on the same `next_chunk` call that yields the
+                // first raw frame (Meta events are skipped as data).
+                let (next, raw_frames) = match scope.store_mut().data_mut().streams.get_mut(handle)
+                {
+                    Some(s) => {
+                        let next = s.next_chunk().await;
+                        (next, s.raw_frames())
+                    }
+                    None => (
+                        Err(WaferError::new(
+                            ErrorCode::NotFound,
+                            "unknown stream handle",
+                        )),
+                        false,
+                    ),
                 };
                 // The callee answers in MessagePack; a JSON-codec guest can
-                // only read JSON. Transcode each frame at the boundary. An
-                // *empty* frame carries no value to transcode — `ok_empty()`
-                // sends `Chunk(vec![])` — so it passes through untouched
-                // rather than failing as malformed MessagePack.
+                // only read JSON. Transcode each frame at the boundary, with
+                // two exclusions:
+                //  - an *empty* frame carries no value to transcode
+                //    (`ok_empty()` sends `Chunk(vec![])`), so it passes through
+                //    untouched rather than failing as malformed MessagePack;
+                //  - a frame the producer marked raw
+                //    (`wafer_block::stream::FRAME_ENCODING_META`) is
+                //    application bytes, not a wire DTO — `storage.get`'s object
+                //    body, `network.do`'s response body — and is forwarded
+                //    verbatim. The typed header frame ahead of the marker is
+                //    still transcoded.
                 let next = match next {
-                    Ok(Some(bytes)) if json && !bytes.is_empty() => {
+                    Ok(Some(bytes)) if json && !bytes.is_empty() && !raw_frames => {
                         match transcode::rmp_to_json(&bytes) {
                             Ok(b) => Ok(Some(b)),
                             Err(e) => {

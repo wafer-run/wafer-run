@@ -20,10 +20,10 @@
 //!   (`{value}`).
 //! - `storage.get` answers with TWO frames: a `wire::storage::ObjectInfo`
 //!   header and then the object body **verbatim**. Only the header is a wire
-//!   DTO; the raw body frame is not MessagePack, so the host's frame
-//!   transcoder rejects it and a JSON guest can read the header only. See
-//!   `json_guest_storage_round_trip` — this is a real limitation of the JSON
-//!   codec path, recorded here rather than papered over.
+//!   DTO; the handler marks the body frames raw on the stream
+//!   (`frame.encoding = raw`), so the host transcodes the header and passes
+//!   the body through untouched. See `json_guest_storage_round_trip`, which
+//!   asserts both halves.
 //! - Errors reach a JSON guest through `stream_take_error` as
 //!   `serde_json::to_vec(&WaferError)` → `{"code":"NotFound",…}` (the
 //!   `ErrorCode` variant name, not a snake_case spelling).
@@ -198,23 +198,41 @@ async fn json_guest_creates_its_table_and_reads_back_a_record() {
     assert_eq!(v["data"]["body"], "hello", "wire::Record.data (frame: {v})");
 }
 
-/// `storage.put` then `storage.get` over JSON. The readable part of the
-/// `storage.get` response is its `ObjectInfo` header frame — the second frame
-/// is the object body verbatim (raw bytes, no MessagePack envelope), which the
-/// host's per-frame transcoder cannot convert, so it terminates the guest's
-/// read loop.
+/// `storage.put` then `storage.get` over JSON, asserting BOTH frames of the
+/// two-frame response: the `ObjectInfo` header (a wire DTO, transcoded to
+/// JSON) and the object body (raw bytes, passed through verbatim because the
+/// handler marked the body frames `frame.encoding = raw`).
 ///
-/// The header still proves the whole path: the JSON `PutRequest` the guest
-/// wrote was transcoded, authorized and stored (`size`/`content_type` come
-/// from the stored object), then read back and transcoded to JSON.
+/// The guest returns them joined by a newline. Together they prove the whole
+/// path: the JSON `PutRequest` the guest wrote was transcoded, authorized
+/// against a FOLDER-level `storage_folders` grant, and stored; then read back
+/// with the header transcoded and the body left alone.
 #[tokio::test]
 async fn json_guest_storage_round_trip() {
     let out = run("test.storage").await;
-    let v: serde_json::Value = serde_json::from_slice(&out.body)
-        .unwrap_or_else(|e| panic!("storage.get header frame is not JSON ({e}): {:?}", out.body));
+    let sep = out
+        .body
+        .iter()
+        .position(|b| *b == b'\n')
+        .unwrap_or_else(|| {
+            panic!(
+                "expected `header\\nbody`, got: {:?}",
+                String::from_utf8_lossy(&out.body)
+            )
+        });
+    let (header, body) = (&out.body[..sep], &out.body[sep + 1..]);
+
+    let v: serde_json::Value = serde_json::from_slice(header)
+        .unwrap_or_else(|e| panic!("storage.get header frame is not JSON ({e}): {header:?}"));
     assert_eq!(v["key"], "a.txt", "ObjectInfo.key (frame: {v})");
     assert_eq!(v["size"], 2, "ObjectInfo.size — the guest PUT two bytes");
     assert_eq!(v["content_type"], "text/plain", "ObjectInfo.content_type");
+
+    assert_eq!(
+        body,
+        [104u8, 105],
+        "the raw body frame must reach the JSON guest verbatim (b\"hi\")"
+    );
 }
 
 #[tokio::test]
