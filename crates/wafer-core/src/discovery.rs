@@ -1449,6 +1449,106 @@ fn path_placeholders(path: &str) -> Result<Vec<String>, PathTemplateError> {
 // generate_openapi
 // ---------------------------------------------------------------------------
 
+/// Move a schema's `$defs` into `components` and rewrite `#/$defs/X` to
+/// `#/components/schemas/X`. Same-named definitions with identical bodies
+/// share one entry; different bodies get a content-hash suffix.
+///
+/// Unlike [`inline_refs`], nothing is inlined: OpenAPI clients resolve
+/// `$ref` fine, so each definition is published once under
+/// `components.schemas` and every reference to it is rewritten in place —
+/// including a cyclic one, which stays a `$ref` rather than needing the
+/// back-edge dance `inline_refs` does for the ref-free WebMCP projection.
+///
+/// Two passes: decide every name first (bodies are compared *unrewritten*,
+/// so the decision does not depend on rewrite order), then rewrite the root
+/// and every hoisted body with the final rename map.
+fn hoist_defs_into_components(
+    schema: &Value,
+    raw: &mut std::collections::BTreeMap<String, Value>, // unrewritten bodies, for comparison
+    components: &mut serde_json::Map<String, Value>,     // rewritten bodies, published
+) -> Value {
+    let table: Vec<(String, Value)> = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    // Pass 1: names. `pending` remembers the unrewritten body we compared
+    // against so a later duplicate in the same schema compares equal.
+    let mut renames: std::collections::BTreeMap<String, String> = Default::default();
+    let mut pending: Vec<(String, Value)> = Vec::new();
+    for (name, body) in &table {
+        let target = match raw
+            .get(name)
+            .or_else(|| pending.iter().find(|(n, _)| n == name).map(|(_, b)| b))
+        {
+            None => name.clone(),
+            Some(existing) if existing == body => name.clone(),
+            Some(_) => format!("{name}_{}", short_sha256(&body.to_string())),
+        };
+        renames.insert(name.clone(), target.clone());
+        pending.push((target, body.clone()));
+    }
+
+    // Pass 2: rewrite with the complete map, then publish. `entry` (rather
+    // than a `contains_key` check followed by a separate `insert`) does the
+    // vacancy check and the reservation in one lookup.
+    for (target, body) in pending {
+        if let std::collections::btree_map::Entry::Vacant(entry) = raw.entry(target.clone()) {
+            components.insert(target, rewrite_local_refs(&body, &renames));
+            entry.insert(body);
+        }
+    }
+    let mut out = rewrite_local_refs(schema, &renames);
+    if let Some(map) = out.as_object_mut() {
+        map.remove("$defs");
+    }
+    out
+}
+
+/// The first 4 bytes (8 hex chars) of the SHA-256 digest of `text`. Used to
+/// disambiguate two different definitions that share a `$defs` name once
+/// they are hoisted into the single flat `components.schemas` namespace.
+fn short_sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rewrite every `#/$defs/X` reference in `node` to `#/components/schemas/Y`,
+/// where `Y` is `X`'s entry in `renames` (or `X` itself when the name was not
+/// renamed). Walks the whole tree, not just `properties`, so a `$ref` nested
+/// under `oneOf`, `items`, or any other subschema-bearing keyword is caught
+/// too.
+fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+    match node {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    if k == "$ref" {
+                        if let Some(name) = v
+                            .as_str()
+                            .and_then(|r| r.strip_prefix("#/$defs/"))
+                            .and_then(decode_ref_name)
+                        {
+                            let target = renames.get(&name).cloned().unwrap_or(name);
+                            return (k.clone(), json!(format!("#/components/schemas/{target}")));
+                        }
+                    }
+                    (k.clone(), rewrite_local_refs(v, renames))
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| rewrite_local_refs(v, renames))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Generate a full OpenAPI 3.1 JSON document from the given blocks.
 pub fn generate_openapi(
     blocks: &[BlockInfo],
@@ -1457,6 +1557,15 @@ pub fn generate_openapi(
     server_url: &str,
 ) -> Value {
     let mut paths: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // `hoist_defs_into_components` runs once per document build: `raw` holds
+    // every hoisted definition's unrewritten body, keyed by its published
+    // name, so a same-named definition met later in the walk compares
+    // against what was actually published rather than re-deciding from
+    // scratch; `components` holds the rewritten bodies that go out under
+    // `components.schemas`.
+    let mut raw: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut components: serde_json::Map<String, Value> = serde_json::Map::new();
 
     for block in blocks {
         for ep in &block.endpoints {
@@ -1486,6 +1595,7 @@ pub fn generate_openapi(
 
             // requestBody from input_schema
             if let Some(input) = &ep.input_schema {
+                let input = hoist_defs_into_components(input, &mut raw, &mut components);
                 operation.insert(
                     "requestBody".into(),
                     json!({
@@ -1502,10 +1612,12 @@ pub fn generate_openapi(
             // parameters from path_params and query_params
             let mut parameters: Vec<Value> = Vec::new();
             if let Some(pp) = &ep.path_params {
-                parameters.extend(extract_params(pp, "path"));
+                let pp = hoist_defs_into_components(pp, &mut raw, &mut components);
+                parameters.extend(extract_params(&pp, "path"));
             }
             if let Some(qp) = &ep.query_params {
-                parameters.extend(extract_params(qp, "query"));
+                let qp = hoist_defs_into_components(qp, &mut raw, &mut components);
+                parameters.extend(extract_params(&qp, "query"));
             }
             if !parameters.is_empty() {
                 operation.insert("parameters".into(), json!(parameters));
@@ -1515,6 +1627,7 @@ pub fn generate_openapi(
             let response_200 = ep.output_schema.as_ref().map_or_else(
                 || json!({ "description": "Successful response" }),
                 |output| {
+                    let output = hoist_defs_into_components(output, &mut raw, &mut components);
                     json!({
                         "description": "Successful response",
                         "content": {
@@ -1546,6 +1659,24 @@ pub fn generate_openapi(
         }
     }
 
+    // A document with no `$defs` anywhere hoists nothing, and must come out
+    // byte-identical to before this hoist existed — so `schemas` is only
+    // added when there is something to publish under it.
+    let mut components_obj: serde_json::Map<String, Value> = serde_json::Map::new();
+    if !components.is_empty() {
+        components_obj.insert("schemas".into(), Value::Object(components));
+    }
+    components_obj.insert(
+        "securitySchemes".into(),
+        json!({
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT"
+            }
+        }),
+    );
+
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -1557,15 +1688,7 @@ pub fn generate_openapi(
             { "url": server_url }
         ],
         "paths": paths,
-        "components": {
-            "securitySchemes": {
-                "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "JWT"
-                }
-            }
-        }
+        "components": components_obj
     })
 }
 
@@ -2685,6 +2808,257 @@ mod tests {
         let bearer = &doc["components"]["securitySchemes"]["bearerAuth"];
         assert_eq!(bearer["type"], "http");
         assert_eq!(bearer["scheme"], "bearer");
+    }
+
+    // 7b. openapi_hoists_defs_into_components_and_rewrites_refs
+    #[test]
+    fn openapi_hoists_defs_into_components_and_rewrites_refs() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            BlockEndpoint::post("/b/test/offers").auth(AuthLevel::Public).input_schema(json!({
+                "type": "object",
+                "properties": { "condition": { "$ref": "#/$defs/Condition" } },
+                "$defs": { "Condition": { "type": "object", "properties": {
+                    "all": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } } } }
+            })),
+        ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let schema = &doc["paths"]["/b/test/offers"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+        assert!(schema.get("$defs").is_none(), "{schema}");
+        assert_eq!(
+            schema["properties"]["condition"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"]["properties"]["all"]["items"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+        let text = doc.to_string();
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
+    // 7c. openapi_without_defs_is_byte_identical_to_before_the_hoist
+    #[test]
+    fn openapi_without_defs_is_byte_identical_to_before_the_hoist() {
+        let block = test_block();
+        let doc = generate_openapi(&[block], "P", "d", "https://x.com");
+
+        assert_eq!(
+            doc,
+            json!({
+                "openapi": "3.1.0",
+                "info": {
+                    "title": "P",
+                    "description": "d",
+                    "version": "1.0.0"
+                },
+                "servers": [
+                    { "url": "https://x.com" }
+                ],
+                "paths": {
+                    "/b/test/api/login": {
+                        "post": {
+                            "summary": "Login",
+                            "description": "Authenticate with credentials",
+                            "tags": ["auth"],
+                            "requestBody": {
+                                "required": true,
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "email": { "type": "string" },
+                                                "password": { "type": "string" }
+                                            },
+                                            "required": ["email", "password"]
+                                        }
+                                    }
+                                }
+                            },
+                            "responses": {
+                                "200": {
+                                    "description": "Successful response",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "token": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "/b/test/api/me": {
+                        "get": {
+                            "summary": "Get current user",
+                            "tags": ["auth", "users"],
+                            "responses": {
+                                "200": {
+                                    "description": "Successful response",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": { "type": "string" },
+                                                    "email": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "security": [{ "bearerAuth": [] }]
+                        }
+                    }
+                },
+                "components": {
+                    "securitySchemes": {
+                        "bearerAuth": {
+                            "type": "http",
+                            "scheme": "bearer",
+                            "bearerFormat": "JWT"
+                        }
+                    }
+                }
+            }),
+            "hoisting $defs into components is additive: a document with no \
+             $defs anywhere must come out byte-identical to before: {doc}"
+        );
+    }
+
+    // 7d. openapi_disambiguates_same_named_defs_with_different_bodies
+    #[test]
+    fn openapi_disambiguates_same_named_defs_with_different_bodies() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/a")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "c": { "$ref": "#/$defs/Condition" } },
+                        "$defs": { "Condition": { "type": "string" } }
+                    })),
+                BlockEndpoint::post("/b/test/b")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "c": { "$ref": "#/$defs/Condition" } },
+                        "$defs": { "Condition": { "type": "integer" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+
+        // The first-seen body keeps the bare name.
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"],
+            json!({ "type": "string" })
+        );
+        let a_ref = &doc["paths"]["/b/test/a"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"]["c"];
+        assert_eq!(a_ref, &json!({ "$ref": "#/components/schemas/Condition" }));
+
+        // The differently-shaped second definition gets a content-hash suffix
+        // rather than clobbering or being dropped.
+        let b_ref = &doc["paths"]["/b/test/b"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"]["c"];
+        let b_ref_target = b_ref["$ref"].as_str().expect("a $ref string");
+        assert_ne!(b_ref_target, "#/components/schemas/Condition");
+        let prefix = "#/components/schemas/Condition_";
+        assert!(b_ref_target.starts_with(prefix), "{b_ref_target}");
+        let suffix = &b_ref_target[prefix.len()..];
+        assert_eq!(suffix.len(), 8, "8 hex chars: {b_ref_target}");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "{b_ref_target}"
+        );
+        let hashed_name = &b_ref_target["#/components/schemas/".len()..];
+        assert_eq!(
+            doc["components"]["schemas"][hashed_name],
+            json!({ "type": "integer" })
+        );
+
+        assert_eq!(doc["components"]["schemas"].as_object().unwrap().len(), 2);
+    }
+
+    // 7e. openapi_hoists_defs_from_path_query_and_output_schemas_too
+    #[test]
+    fn openapi_hoists_defs_from_path_query_and_output_schemas_too() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/test/items/{id}")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "$ref": "#/$defs/Id" } },
+                        "required": ["id"],
+                        "$defs": { "Id": { "type": "string" } }
+                    }))
+                    .query_params_schema(json!({
+                        "type": "object",
+                        "properties": { "filter": { "$ref": "#/$defs/Filter" } },
+                        "$defs": { "Filter": { "type": "string" } }
+                    }))
+                    .output_schema(json!({
+                        "type": "object",
+                        "properties": { "item": { "$ref": "#/$defs/Item" } },
+                        "$defs": { "Item": { "type": "object" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let op = &doc["paths"]["/b/test/items/{id}"]["get"];
+
+        let id_param = op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "id")
+            .expect("id path param");
+        assert_eq!(
+            id_param["schema"],
+            json!({ "$ref": "#/components/schemas/Id" })
+        );
+
+        let filter_param = op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "filter")
+            .expect("filter query param");
+        assert_eq!(
+            filter_param["schema"],
+            json!({ "$ref": "#/components/schemas/Filter" })
+        );
+
+        let output_schema = &op["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(
+            output_schema["properties"]["item"],
+            json!({ "$ref": "#/components/schemas/Item" })
+        );
+
+        assert_eq!(
+            doc["components"]["schemas"]["Id"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Filter"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Item"],
+            json!({ "type": "object" })
+        );
+        let text = doc.to_string();
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
     }
 
     // 8. agent_card_basic_structure
