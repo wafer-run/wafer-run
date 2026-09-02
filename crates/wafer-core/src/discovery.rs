@@ -118,6 +118,25 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "depen
 /// declares and past what an MCP client would accept in a manifest. The
 /// doubling case crosses it before level twenty, in milliseconds, long
 /// before any memory is at risk.
+///
+/// # What the budget bounds, exactly
+///
+/// It bounds the nodes the *walk emits*, which is not quite the size of the
+/// returned document. [`inline_refs`] keeps a cyclic definition by cloning
+/// the body its frame already produced, so a kept definition's nodes are
+/// charged once (when they were walked) and appear twice (in the output tree
+/// and in the `$defs` table). With `d` definitions kept — `d` is the number
+/// of *distinct* definitions some back-edge names, one for almost every real
+/// recursive type — the returned document holds at most `(d + 1) ×
+/// MAX_INLINED_NODES` nodes.
+///
+/// The clone is deliberately not charged. Charging it would push a
+/// legitimately-sized recursive schema over a budget that exists for runaway
+/// *expansion*, and there is no runaway here: `d` is bounded by the number of
+/// definitions the source declares, and each kept body is a subtree of output
+/// the walk already paid for. A factor of `d + 1` on a bound chosen to be
+/// orders of magnitude larger than any real schema is not the failure this
+/// constant guards against.
 const MAX_INLINED_NODES: usize = 100_000;
 
 /// Decode a `#/$defs/` pointer segment back into the key it names in the
@@ -3076,6 +3095,37 @@ mod tests {
         );
     }
 
+    /// A cycle reached from a document whose root is not a schema object has
+    /// nowhere to put the definitions table, so the back-edges it emitted
+    /// would name nothing. That is the same defect as a `$ref` with no
+    /// referent and is reported the same way, rather than the table being
+    /// dropped and the dangling pointers shipped.
+    ///
+    /// Only a hand-written source reaches this — a JSON array where a schema
+    /// belongs — and it is refused as unrepresentable on top, since an array
+    /// is not object-shaped. Both verdicts are asserted: the point is that
+    /// neither depends on the other noticing.
+    #[test]
+    fn inline_refs_reports_a_cycle_it_cannot_attach_a_table_to() {
+        let schema = json!([{ "$ref": "#" }]);
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            issues.unresolved,
+            "the back-edge names a table that could not be written: {out}"
+        );
+        assert!(!issues.oversized, "{issues:?}");
+        assert_eq!(
+            out,
+            json!([{ "$ref": "#/$defs/Root" }]),
+            "no table is invented on a non-object root: {out}"
+        );
+
+        let ep = BlockEndpoint::post("/b/x/array").input_schema(schema);
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+        assert_eq!(result.unresolved_refs, vec!["body".to_string()]);
+    }
+
     /// With no `title` to name it by, the rebased root is `Root`. The name
     /// matters: it is what every back-edge in the published schema points
     /// at, and it is the name a second source's table can collide with.
@@ -4402,6 +4452,69 @@ mod tests {
         assert_eq!(
             tool["invocation"]["body_params"],
             json!(["condition", "name"])
+        );
+    }
+
+    /// The other half of the collision rule: two sources that keep a
+    /// definition of the same name with the *same* body are describing one
+    /// type, and one table entry describes both. Merging them is not a
+    /// conflict and must not be reported as one — refusing here would delete
+    /// every endpoint that takes the same recursive type in two places.
+    ///
+    /// Asserted on `agent_input_schema` rather than on a published manifest
+    /// because the shape cannot reach one: a cyclic definition is an object,
+    /// so whichever of path/query references it is a non-scalar URL
+    /// parameter and the tool is refused for *that*. The second half of the
+    /// test pins exactly this — the endpoint is refused, and not for a
+    /// definition collision.
+    #[test]
+    fn agent_input_schema_merges_two_sources_that_keep_the_same_definition() {
+        let shared = |field: &str| {
+            json!({
+                "type": "object",
+                "properties": { field: { "$ref": "#/$defs/T" } },
+                "$defs": {
+                    "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } }
+                }
+            })
+        };
+        let ep = BlockEndpoint::post("/b/x/shared")
+            .query_params_schema(shared("q"))
+            .input_schema(shared("b"));
+
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.colliding_defs.is_empty(),
+            "the same type declared twice is one type: {:?}",
+            result.colliding_defs
+        );
+        assert_eq!(
+            result.schema["$defs"],
+            json!({ "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } } }),
+            "one entry, not two and not a duplicate: {:?}",
+            result.schema
+        );
+        for (source, field) in [("query", "q"), ("body", "b")] {
+            assert_eq!(
+                result.schema["properties"][field]["properties"]["n"],
+                json!({ "$ref": "#/$defs/T" }),
+                "the {source} source's back-edge resolves against the merged table: {:?}",
+                result.schema
+            );
+        }
+
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![ep
+                .auth(AuthLevel::Public)
+                .agent_tool("shared", "Shared definition.")]),
+        ];
+        let (_, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, e| e.auth);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::NonScalarPathOrQueryParams {
+                params: vec!["query.q".to_string()],
+            },
+            "refused for the object-valued query param, never for the shared definition: {refused:?}"
         );
     }
 
@@ -6203,8 +6316,8 @@ mod tests {
             "required": ["id"]
         });
 
-        let block = BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test")
-            .endpoints(vec![
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
             // 1. invalid name
             BlockEndpoint::get("/b/x/invalid").agent_tool("get thing", "Space in the name."),
             // 2 + 3. duplicate name (both sides)
