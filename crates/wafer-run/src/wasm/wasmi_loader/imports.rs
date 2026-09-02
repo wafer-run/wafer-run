@@ -328,7 +328,9 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
     // Returns:
     //   - Negative ErrorCode sentinel (NotFound) if the current call frame has
     //     no attachment under id.
-    //   - Negative ErrorCode sentinel (InvalidArgument) if id is not valid UTF-8.
+    //   - Negative ErrorCode sentinel (InvalidArgument) if id is not valid UTF-8,
+    //     or if the guest negotiated the JSON host codec (attachments are
+    //     rmp-only, so there is nothing this guest could decode).
     //   - Negative ErrorCode sentinel (Internal) if encoding fails or guest-memory
     //     allocation/write fails.
     //   - Otherwise, positive packed (ptr, len) of an rmp-encoded Attachment,
@@ -353,6 +355,15 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     Ok(s) => s.to_string(),
                     Err(_) => return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument)),
                 };
+
+                // A JSON-codec guest has no MessagePack decoder, and the reply
+                // to this call is an rmp-encoded `Attachment`. Attachments stay
+                // a v2/rmp feature (see `__wafer_host_stream_attach`), so refuse
+                // before consulting the map — the answer must not depend on
+                // whether the id happens to be present.
+                if caller.data().host_codec == HostCodec::Json {
+                    return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument));
+                }
 
                 // Clone the attachment before any mutable borrow of caller.
                 let att = match caller

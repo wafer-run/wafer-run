@@ -829,20 +829,27 @@ impl WasmiBlock {
                     )),
                 };
                 // The callee answers in MessagePack; a JSON-codec guest can
-                // only read JSON. Transcode each frame at the boundary.
+                // only read JSON. Transcode each frame at the boundary. An
+                // *empty* frame carries no value to transcode — `ok_empty()`
+                // sends `Chunk(vec![])` — so it passes through untouched
+                // rather than failing as malformed MessagePack.
                 let next = match next {
-                    Ok(Some(bytes)) if json => match transcode::rmp_to_json(&bytes) {
-                        Ok(b) => Ok(Some(b)),
-                        Err(e) => {
-                            // A frame the callee wrote is not a wire DTO. Fail
-                            // the stream rather than hand the guest bytes it
-                            // cannot read.
-                            if let Some(s) = scope.store_mut().data_mut().streams.get_mut(handle) {
-                                s.record_error_and_close(e.clone());
+                    Ok(Some(bytes)) if json && !bytes.is_empty() => {
+                        match transcode::rmp_to_json(&bytes) {
+                            Ok(b) => Ok(Some(b)),
+                            Err(e) => {
+                                // A frame the callee wrote is not a wire DTO.
+                                // Fail the stream rather than hand the guest
+                                // bytes it cannot read.
+                                if let Some(s) =
+                                    scope.store_mut().data_mut().streams.get_mut(handle)
+                                {
+                                    s.record_error_and_close(e.clone());
+                                }
+                                Err(e)
                             }
-                            Err(e)
                         }
-                    },
+                    }
                     other => other,
                 };
 
@@ -1377,6 +1384,182 @@ mod capabilities_update_tests {
             run_attach_probe(&attach_probe_module("")),
             0,
             "an rmp guest must be unaffected"
+        );
+    }
+
+    /// A guest that looks up the inbound attachment `"a"` and stores the packed
+    /// `i64` the host returned at linear-memory offset 64.
+    fn lookup_probe_module(host_codec_export: &str) -> Vec<u8> {
+        let wat = format!(
+            r#"(module
+            (import "wafer" "__wafer_host_lookup_attachment"
+                (func $lookup (param i32 i32) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "a")
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            {host_codec_export}
+            (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (i64.store (i32.const 64)
+                    (call $lookup (i32.const 0) (i32.const 1)))
+                i64.const 0)
+        )"#
+        );
+        wat::parse_str(&wat).expect("WAT should parse")
+    }
+
+    #[test]
+    fn json_guest_lookup_attachment_is_refused() {
+        let att = wafer_block::Attachment {
+            mime: "text/plain".to_string(),
+            bytes: b"hi".to_vec(),
+            filename: None,
+        };
+
+        let run = |wasm: &[u8]| -> i64 {
+            let block = WasmiBlock::load_from_bytes(wasm).expect("probe module should load");
+            let (mut store, instance) = block
+                .instantiate_for_test()
+                .expect("probe module should instantiate");
+            // Seed the call frame the way the runtime does before __wafer_handle.
+            store.data_mut().current_attachments = Some(
+                [("a".to_string(), att.clone())]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            );
+            let memory = instance
+                .get_memory(&store, "memory")
+                .expect("probe module exports memory");
+            instance
+                .get_typed_func::<(i32, i32), i64>(&store, "__wafer_handle")
+                .expect("__wafer_handle export")
+                .call(&mut store, (0, 0))
+                .expect("the probe never traps");
+            let mut packed = [0u8; 8];
+            memory
+                .read(&store, 64, &mut packed)
+                .expect("reading the lookup result back");
+            i64::from_le_bytes(packed)
+        };
+
+        // Attachments are rmp-only: a JSON guest is refused even though the
+        // attachment is present.
+        assert_eq!(
+            run(&lookup_probe_module(
+                r#"(func (export "__wafer_host_codec") (result i32) i32.const 1)"#
+            )),
+            error_code_to_neg_i64(ErrorCode::InvalidArgument),
+            "a JSON-codec guest must be refused"
+        );
+        // The same module without the export negotiates rmp and gets the
+        // attachment, rmp-encoded, at the packed (ptr, len).
+        let packed = run(&lookup_probe_module(""));
+        assert!(packed > 0, "an rmp guest must get a packed pointer");
+        assert_eq!(
+            unpack_ptr_len(packed).expect("packed pointer").1 as usize,
+            wafer_block::codec::encode(&att).unwrap().len(),
+            "an rmp guest must get the whole encoded Attachment"
+        );
+    }
+
+    /// Context whose `call_block` answers with an empty 200 — `ok_empty()`
+    /// sends `StreamEvent::Chunk(vec![])`, the frame the read arm must pass
+    /// through instead of transcoding.
+    #[derive(Clone)]
+    struct EmptyResponseContext;
+
+    #[wafer_async_trait]
+    impl Context for EmptyResponseContext {
+        async fn call_block(
+            &self,
+            _name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            wafer_block::response::ok_empty()
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
+        }
+    }
+
+    /// An empty response frame must reach a JSON-codec guest as an empty frame,
+    /// not as an `InvalidArgument` that kills the stream. Zero bytes are not
+    /// malformed MessagePack — they are a successful empty body.
+    #[tokio::test]
+    async fn json_guest_reads_an_empty_response_frame() {
+        let wat = r#"(module
+            (import "wafer" "__wafer_host_stream_init"
+                (func $init (param i32 i32 i32 i32) (result i64)))
+            (import "wafer" "__wafer_host_stream_finish" (func $finish (param i64) (result i32)))
+            (import "wafer" "__wafer_host_stream_read_chunk" (func $read (param i64) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "wafer-run/config")
+            (data (i32.const 32) "{\"kind\":\"config.get\",\"meta\":[]}")
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 1)
+            (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (local $h i64)
+                (local.set $h
+                    (call $init (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 31)))
+                (i32.store (i32.const 64) (call $finish (local.get $h)))
+                (i64.store (i32.const 72) (call $read (local.get $h)))
+                i64.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).expect("WAT should parse");
+        let block = WasmiBlock::load_from_bytes(&wasm).expect("probe module should load");
+        let (mut store, instance) = block
+            .instantiate_for_test()
+            .expect("probe module should instantiate");
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+
+        // Drive the resume loop directly so the store — and with it the guest's
+        // record of what the host returned — survives the call.
+        block
+            .run_guest_call(
+                &mut store,
+                instance,
+                &EmptyResponseContext,
+                None,
+                Vec::new(),
+                |store, instance| {
+                    let f = instance
+                        .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
+                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+                    Ok((f, 0, 0))
+                },
+            )
+            .await
+            .expect("the guest call completes");
+
+        let memory = instance
+            .get_memory(&store, "memory")
+            .expect("probe module exports memory");
+        let mut finish = [0u8; 4];
+        memory.read(&store, 64, &mut finish).expect("finish status");
+        assert_eq!(i32::from_le_bytes(finish), 0, "stream_finish must succeed");
+
+        let mut read = [0u8; 8];
+        memory.read(&store, 72, &mut read).expect("read status");
+        let packed = i64::from_le_bytes(read);
+        assert!(
+            packed >= 0,
+            "an empty response frame must not fail the read (got {packed})"
+        );
+        assert_eq!(
+            unpack_ptr_len(packed).expect("packed pointer").1,
+            0,
+            "the empty frame must arrive empty"
         );
     }
 
