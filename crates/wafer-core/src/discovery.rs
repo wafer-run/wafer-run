@@ -1515,28 +1515,28 @@ fn short_sha256(text: &str) -> String {
     digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Rewrite every `#/$defs/X` reference in `node` to `#/components/schemas/Y`,
-/// where `Y` is `X`'s entry in `renames` (or `X` itself when the name was not
-/// renamed). Walks the whole tree, not just `properties`, so a `$ref` nested
-/// under `oneOf`, `items`, or any other subschema-bearing keyword is caught
-/// too.
+/// Rewrite every `#/$defs/X` reference under `node` — read as a *schema
+/// object*, whose keys are JSON Schema keywords — to
+/// `#/components/schemas/Y`, where `Y` is `X`'s entry in `renames` (or `X`
+/// itself when the name was not renamed).
+///
+/// Mirrors [`RefWalk::resolve`]/[`RefWalk::resolve_member`]'s position
+/// tracking exactly, and for the same reason ([`LITERAL_VALUE_KEYWORDS`]'s
+/// doc comment): a plain object-recursion that rewrites any `$ref`-named key
+/// it meets cannot tell a real reference from a `$ref`-shaped *literal*
+/// sitting in a `default`/`const`/`examples`/`enum` value, or from a
+/// `properties` entry that is itself named `$ref`. Both would be corrupted —
+/// the first silently, the second by pointing a field's own name-lookup at
+/// `components/schemas` instead of leaving it alone. So a member's key is
+/// only ever read as a keyword here, in the schema-object walk; a
+/// `SCHEMA_MAP_KEYWORDS` value hands its members to [`rewrite_schema_map`],
+/// which walks the *values* as schemas and leaves the author-chosen *keys*
+/// untouched, and a `LITERAL_VALUE_KEYWORDS` value is copied verbatim.
 fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
     match node {
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| {
-                    if k == "$ref" {
-                        if let Some(name) = v
-                            .as_str()
-                            .and_then(|r| r.strip_prefix("#/$defs/"))
-                            .and_then(decode_ref_name)
-                        {
-                            let target = renames.get(&name).cloned().unwrap_or(name);
-                            return (k.clone(), json!(format!("#/components/schemas/{target}")));
-                        }
-                    }
-                    (k.clone(), rewrite_local_refs(v, renames))
-                })
+                .map(|(k, v)| (k.clone(), rewrite_schema_member(k, v, renames)))
                 .collect(),
         ),
         Value::Array(items) => Value::Array(
@@ -1547,6 +1547,51 @@ fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String,
         ),
         other => other.clone(),
     }
+}
+
+/// Rewrite one member of a *schema object*, whose key is read as a keyword —
+/// see [`rewrite_local_refs`].
+fn rewrite_schema_member(
+    key: &str,
+    value: &Value,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    if LITERAL_VALUE_KEYWORDS.contains(&key) {
+        return value.clone();
+    }
+    if SCHEMA_MAP_KEYWORDS.contains(&key) {
+        return rewrite_schema_map(value, renames);
+    }
+    if key == "$ref" {
+        if let Some(name) = value
+            .as_str()
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(decode_ref_name)
+        {
+            let target = renames.get(&name).cloned().unwrap_or(name);
+            return json!(format!("#/components/schemas/{target}"));
+        }
+    }
+    rewrite_local_refs(value, renames)
+}
+
+/// Rewrite a map whose keys are author-chosen names and whose values are
+/// schemas — the value of a [`SCHEMA_MAP_KEYWORDS`] keyword. No key here is
+/// read as a keyword, so a property literally named `$ref` or `default`
+/// passes its key through unexamined; only its value is walked as a schema.
+fn rewrite_schema_map(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+    let Value::Object(map) = node else {
+        // Not a map at all. Only a hand-written schema can produce this;
+        // walking it as a schema object is the one interpretation that does
+        // not invent structure that is not there (mirrors
+        // `RefWalk::resolve_schema_map`).
+        return rewrite_local_refs(node, renames);
+    };
+    Value::Object(
+        map.iter()
+            .map(|(k, v)| (k.clone(), rewrite_local_refs(v, renames)))
+            .collect(),
+    )
 }
 
 /// Generate a full OpenAPI 3.1 JSON document from the given blocks.
@@ -3059,6 +3104,55 @@ mod tests {
         );
         let text = doc.to_string();
         assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
+    // 7f. openapi_hoist_skips_literal_value_keywords_and_a_property_named_ref
+    #[test]
+    fn openapi_hoist_skips_literal_value_keywords_and_a_property_named_ref() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/literal")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "condition": { "$ref": "#/$defs/Condition" },
+                            "$ref": { "type": "string" }
+                        },
+                        "default": { "$ref": "#/$defs/Condition" },
+                        "$defs": { "Condition": { "type": "string" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let schema = &doc["paths"]["/b/test/literal"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+
+        // A real $ref sibling of `default`/`properties` is rewritten.
+        assert_eq!(
+            schema["properties"]["condition"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+
+        // A property literally named `$ref` is a `properties`-map *key* —
+        // author-chosen data, never read as the reference keyword — so it
+        // passes through unrenamed; its value is still walked as a schema
+        // (unchanged here, since it holds no `$ref` itself).
+        assert_eq!(schema["properties"]["$ref"], json!({ "type": "string" }));
+
+        // `default` is instance data, not a schema: a `$ref`-shaped literal
+        // sitting inside it must survive the hoist byte-identical rather
+        // than being reinterpreted as a schema reference and rewritten.
+        assert_eq!(
+            schema["default"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "a literal default carrying a $ref-shaped value must not be rewritten: {schema}"
+        );
+
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"],
+            json!({ "type": "string" })
+        );
     }
 
     // 8. agent_card_basic_structure
