@@ -19,6 +19,30 @@ use wafer_block::*;
 /// weaken `default-src` to `*` or re-enable `unsafe-eval`.
 const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
+/// Who may frame this site's documents. Drives both `frame-ancestors` in
+/// the CSP and the legacy `X-Frame-Options` header, so the two can never
+/// disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameAncestors {
+    None,
+    SelfOrigin,
+}
+
+impl FrameAncestors {
+    fn csp_source(self) -> &'static str {
+        match self {
+            Self::None => "'none'",
+            Self::SelfOrigin => "'self'",
+        }
+    }
+    fn x_frame_options(self) -> &'static str {
+        match self {
+            Self::None => "DENY",
+            Self::SelfOrigin => "SAMEORIGIN",
+        }
+    }
+}
+
 /// SecurityHeadersBlock adds standard security headers to responses.
 ///
 /// CSP is configurable via `block_config` — the runtime serializes the
@@ -35,6 +59,10 @@ const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'
 /// regardless of what the operator puts in `cfg.csp`. See `merge_csp`.
 pub struct SecurityHeadersBlock {
     csp: OnceLock<String>,
+    /// Init-resolved `frame_ancestors` policy. Unset until Init parses the
+    /// `frame_ancestors` config key; `effective_frame_ancestors` falls back
+    /// to `FrameAncestors::None` (today's default) until then.
+    frame_ancestors: OnceLock<FrameAncestors>,
 }
 
 impl Default for SecurityHeadersBlock {
@@ -53,6 +81,7 @@ impl SecurityHeadersBlock {
     pub fn new() -> Self {
         Self {
             csp: OnceLock::new(),
+            frame_ancestors: OnceLock::new(),
         }
     }
 
@@ -60,6 +89,16 @@ impl SecurityHeadersBlock {
     /// [`DEFAULT_CSP`] when Init has not (yet) supplied one.
     fn effective_csp(&self) -> &str {
         self.csp.get().map_or(DEFAULT_CSP, String::as_str)
+    }
+
+    /// The frame-ancestors policy applied to responses: the Init-set value,
+    /// or [`FrameAncestors::None`] (today's restrictive default) when Init
+    /// has not (yet) supplied one.
+    fn effective_frame_ancestors(&self) -> FrameAncestors {
+        self.frame_ancestors
+            .get()
+            .copied()
+            .unwrap_or(FrameAncestors::None)
     }
 }
 
@@ -73,21 +112,34 @@ impl Block for SecurityHeadersBlock {
             "Adds standard security headers to HTTP responses",
         )
         .infrastructure()
-        .flow_config(vec![ConfigVar::new(
-            "csp",
-            "Operator-supplied Content-Security-Policy directives, merged \
-             on top of the block's restrictive baseline (see merge_csp).",
-            "",
-        )
-        .name("CSP")])
+        .flow_config(vec![
+            ConfigVar::new(
+                "csp",
+                "Operator-supplied Content-Security-Policy directives, merged \
+                 on top of the block's restrictive baseline (see merge_csp).",
+                "",
+            )
+            .name("CSP"),
+            ConfigVar::new(
+                "frame_ancestors",
+                "`none` (default: frame-ancestors 'none' + X-Frame-Options DENY) or `self` \
+                 (same-origin framing allowed: frame-ancestors 'self' + SAMEORIGIN).",
+                "none",
+            )
+            .name("Frame ancestors"),
+        ])
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
-        let csp = self.effective_csp();
+        let frame_ancestors = self.effective_frame_ancestors();
+        let csp = with_frame_ancestors(self.effective_csp(), frame_ancestors);
 
         let mut out_msg = msg;
         out_msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
-        out_msg.set_meta("resp.header.X-Frame-Options", "DENY");
+        out_msg.set_meta(
+            "resp.header.X-Frame-Options",
+            frame_ancestors.x_frame_options(),
+        );
         // SEC-085: X-XSS-Protection is deprecated. The legacy IE filter it
         // toggled was removed from modern browsers and can introduce XSS
         // in some configurations; CSP is the modern replacement. Header
@@ -124,6 +176,14 @@ impl Block for SecurityHeadersBlock {
                 let merged = merge_csp(DEFAULT_CSP, custom_csp);
                 // Write-once: Init fires a single time per registration.
                 let _ = self.csp.set(merged);
+            }
+            match config.str_or("frame_ancestors", "none") {
+                "self" => {
+                    let _ = self.frame_ancestors.set(FrameAncestors::SelfOrigin);
+                }
+                _ => {
+                    let _ = self.frame_ancestors.set(FrameAncestors::None);
+                }
             }
         }
         Ok(())
@@ -163,6 +223,25 @@ pub(crate) fn is_broad_source(src: &str) -> bool {
         }
     }
     false
+}
+
+/// Rewrite `csp`'s `frame-ancestors` directive to `fa`'s source, leaving
+/// every other directive untouched. `frame_ancestors` is the only knob that
+/// can change this directive — the operator `csp` config key cannot (see
+/// `merge_csp`).
+fn with_frame_ancestors(csp: &str, fa: FrameAncestors) -> String {
+    csp.split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            if d.starts_with("frame-ancestors") {
+                format!("frame-ancestors {}", fa.csp_source())
+            } else {
+                d.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Merge `custom` into `baseline` directive-by-directive.
@@ -348,5 +427,104 @@ mod tests {
         assert!(merged.contains("worker-src 'self' blob:"));
         // Baseline still intact.
         assert!(merged.contains("frame-ancestors 'none'"));
+    }
+
+    // --- frame_ancestors -----------------------------------------------
+
+    fn init_event(json: &str) -> LifecycleEvent {
+        LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: json.as_bytes().to_vec(),
+        }
+    }
+
+    /// Minimal Context shim — SecurityHeadersBlock never reads `ctx` in
+    /// `handle`/`lifecycle`, so every method is a stub.
+    #[derive(Clone)]
+    struct NoopCtx;
+
+    #[wafer_async_trait]
+    impl Context for NoopCtx {
+        async fn call_block(
+            &self,
+            _block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(b"unused".to_vec())
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+        fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+            std::sync::Arc::new(self.clone())
+        }
+    }
+
+    /// Test-only accessor for reading the `Message` out of an `OutputStream`
+    /// that terminated with `Continue` — the shape a middleware's `handle`
+    /// returns. Not part of `OutputStream`'s public API; local to this
+    /// crate's tests only.
+    trait OutputStreamTestExt {
+        async fn into_continue_message(self) -> Option<Message>;
+    }
+
+    impl OutputStreamTestExt for OutputStream {
+        async fn into_continue_message(self) -> Option<Message> {
+            match self.collect_buffered().await {
+                Err(TerminalNotResponse::Continue(msg)) => Some(msg),
+                _ => None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_ancestors_self_relaxes_both_headers() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(&NoopCtx, init_event(r#"{"frame_ancestors":"self"}"#))
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(msg.get_meta("resp.header.X-Frame-Options"), "SAMEORIGIN");
+        let csp = msg.get_meta("resp.header.Content-Security-Policy");
+        assert!(csp.contains("frame-ancestors 'self'"), "{csp}");
+        assert!(!csp.contains("frame-ancestors 'none'"), "{csp}");
+    }
+
+    #[tokio::test]
+    async fn frame_ancestors_defaults_to_none_and_deny() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(&NoopCtx, init_event(r#"{}"#))
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(msg.get_meta("resp.header.X-Frame-Options"), "DENY");
+        assert!(msg
+            .get_meta("resp.header.Content-Security-Policy")
+            .contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn merge_csp_cannot_relax_frame_ancestors_through_the_csp_key() {
+        // The knob is `frame_ancestors`, never the operator CSP string.
+        let merged = merge_csp(DEFAULT_CSP, "frame-ancestors 'self'");
+        assert!(merged.contains("frame-ancestors 'none'"), "{merged}");
     }
 }

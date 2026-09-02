@@ -6381,6 +6381,7 @@ name = "wafer-block-security-headers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "tokio",
  "wafer-block",
  "wafer-block-macro",
 ]

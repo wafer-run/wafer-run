@@ -10,5 +10,8 @@ wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true
