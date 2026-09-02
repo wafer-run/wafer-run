@@ -48,8 +48,9 @@ pub(super) fn rmp_to_json(rmp: &[u8]) -> Result<Vec<u8>, WaferError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wafer_block::wire::database as wire;
+
+    use super::*;
 
     #[test]
     fn json_request_decodes_as_the_named_map_dto() {

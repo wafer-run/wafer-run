@@ -14,8 +14,10 @@ use wafer_block::{
 };
 use wafer_schema::Table;
 
-use super::schema_wire;
-use super::service::{self, DatabaseError, DatabaseService};
+use super::{
+    schema_wire,
+    service::{self, DatabaseError, DatabaseService},
+};
 use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
