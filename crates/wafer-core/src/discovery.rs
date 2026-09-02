@@ -1988,6 +1988,10 @@ pub enum WebMcpRefusal {
     /// [`MAX_INLINED_NODES`] and stopped partway, so what is in hand is a
     /// truncated document rather than a weaker one.
     OutputSchemaTooLarge,
+    /// A [`ToolSelection`] named a block/method/path that the block set
+    /// declares no endpoint for, so [`generate_webmcp_selected`] has nothing
+    /// to project it onto.
+    SelectionNotFound,
 }
 
 /// What a [`WebMcpRefusalReport`] is about: the whole tool, or one optional
@@ -2094,6 +2098,9 @@ impl std::fmt::Display for WebMcpRefusal {
             Self::OutputSchemaTooLarge => write!(
                 f,
                 "the declared output schema expands past {MAX_INLINED_NODES} JSON nodes when its $refs are inlined — nothing is missing and every reference resolves, but a definition reached from several levels is copied out once per path, so the self-contained outputSchema has no workable size"
+            ),
+            Self::SelectionNotFound => f.write_str(
+                "this selection names no endpoint the block set declares at that method and path",
             ),
         }
     }
@@ -2707,6 +2714,102 @@ pub fn generate_webmcp_report(
         }),
         refused,
     )
+}
+
+/// One endpoint a consumer wants projected as a tool even though the
+/// block did not annotate it with `agent_tool`.
+///
+/// [`generate_webmcp_selected`] uses this to build a page-scoped WebMCP
+/// manifest — e.g. an admin page that wants to expose a curated allowlist of
+/// endpoints to an in-page agent, rather than every endpoint a block's
+/// author opted in globally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSelection {
+    /// Name of the block declaring the endpoint.
+    pub block: String,
+    /// HTTP method of the selected endpoint.
+    pub method: HttpMethod,
+    /// URL path of the selected endpoint, exactly as the block declared it.
+    pub path: String,
+    /// Tool name to publish for this endpoint, in place of any `agent_tool`
+    /// name the endpoint itself carries.
+    pub name: String,
+    /// Tool description to publish for this endpoint, in place of any
+    /// `agent_tool` description the endpoint itself carries.
+    pub description: String,
+}
+
+/// Project a caller-chosen allowlist of endpoints into a WebMCP tool
+/// manifest, ignoring whatever `agent_tool` annotations the blocks carry.
+///
+/// This is [`generate_webmcp_report`] with the roles of "opted in" and
+/// "named" reversed: instead of publishing every endpoint the block's author
+/// annotated, it publishes exactly the endpoints named in `selections`,
+/// under the name and description each selection supplies. Everything else
+/// about the projection — auth filtering via `effective_auth`, per-manifest
+/// duplicate-name detection, schema walls, the deprecated-tool prefix — is
+/// unchanged, because this builds a shadow copy of `blocks` with every
+/// endpoint's own `agent_tool` cleared and only the selected endpoints
+/// annotated, then delegates to [`generate_webmcp_report`]. There is no
+/// second projection code path to keep in sync with the first.
+///
+/// A [`ToolSelection`] naming a block/method/path the block set declares no
+/// endpoint for cannot be projected onto anything, and is reported as
+/// [`WebMcpRefusal::SelectionNotFound`] (scoped to
+/// [`WebMcpRefusalScope::Tool`], and always `visible_to_caller: true` since
+/// it is a defect in the selection itself, not a property of what the
+/// caller may see).
+pub fn generate_webmcp_selected(
+    blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    selections: &[ToolSelection],
+) -> (Value, Vec<WebMcpRefusalReport>) {
+    // Build a shadow block set: every endpoint loses its own annotation and
+    // only selected endpoints gain one. `generate_webmcp_report` then does
+    // exactly what it does for the global manifest — name validation,
+    // per-manifest duplicate detection, auth filtering, schema walls.
+    let mut shadow: Vec<BlockInfo> = blocks
+        .iter()
+        .map(|b| {
+            let mut b = b.clone();
+            for ep in &mut b.endpoints {
+                ep.agent_tool = None;
+            }
+            b
+        })
+        .collect();
+    let mut not_found = Vec::new();
+    for sel in selections {
+        let hit = shadow
+            .iter_mut()
+            .find(|b| b.name == sel.block)
+            .and_then(|b| {
+                b.endpoints
+                    .iter_mut()
+                    .find(|ep| ep.method == sel.method && ep.path == sel.path)
+            });
+        match hit {
+            Some(ep) => {
+                ep.agent_tool = Some(AgentTool {
+                    name: sel.name.clone(),
+                    description: sel.description.clone(),
+                });
+            }
+            None => not_found.push(WebMcpRefusalReport {
+                block: sel.block.clone(),
+                method: sel.method,
+                path: sel.path.clone(),
+                tool_name: sel.name.clone(),
+                scope: WebMcpRefusalScope::Tool,
+                reason: WebMcpRefusal::SelectionNotFound,
+                visible_to_caller: true,
+            }),
+        }
+    }
+    let (doc, mut refused) = generate_webmcp_report(&shadow, caller, effective_auth);
+    refused.extend(not_found);
+    (doc, refused)
 }
 
 // ---------------------------------------------------------------------------
@@ -6856,12 +6959,31 @@ mod tests {
             BlockEndpoint::get("/b/x/files/**").agent_tool("wildcard_path", "Wildcard path."),
         ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let blocks = vec![block];
+        let (doc, mut refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
         assert_eq!(
             tool_names(&doc),
             Vec::<String>::new(),
             "every endpoint here is broken: {doc}"
         );
+
+        // A selection naming no declared endpoint is refused the same way —
+        // named precisely enough to find, and scoped to the tool it would
+        // have been.
+        let (selected_doc, selected_refused) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            &[ToolSelection {
+                block: "test/block".to_string(),
+                method: HttpMethod::Get,
+                path: "/b/x/no_such_selection".to_string(),
+                name: "selection_missing".to_string(),
+                description: "Selection missing.".to_string(),
+            }],
+        );
+        assert_eq!(selected_doc["tools"], json!([]));
+        refused.extend(selected_refused);
 
         let by_tool: std::collections::HashMap<&str, &WebMcpRefusalReport> =
             refused.iter().map(|r| (r.tool_name.as_str(), r)).collect();
@@ -6936,6 +7058,11 @@ mod tests {
                 WebMcpRefusal::WildcardPathSegment {
                     segment: "**".to_string(),
                 },
+            ),
+            (
+                "selection_missing",
+                "/b/x/no_such_selection",
+                WebMcpRefusal::SelectionNotFound,
             ),
         ];
 
@@ -7114,6 +7241,88 @@ mod tests {
         assert_eq!(
             generate_webmcp_declared_auth(&blocks, AuthLevel::Admin),
             reported
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // generate_webmcp_selected
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn selected_projection_names_and_describes_unannotated_endpoints() {
+        let blocks = webmcp_fixture_blocks();
+        // Pick an endpoint from the fixture that is NOT an agent tool.
+        let (block, ep) = blocks
+            .iter()
+            .flat_map(|b| b.endpoints.iter().map(move |e| (b, e)))
+            .find(|(_, e)| !e.is_agent_tool() && e.input_schema.is_some())
+            .expect("fixture has an unannotated typed endpoint");
+        let selections = vec![ToolSelection {
+            block: block.name.clone(),
+            method: ep.method,
+            path: ep.path.clone(),
+            name: "shop_do_thing".into(),
+            description: "Do the thing.".into(),
+        }];
+        let (doc, refused) =
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(tool_names(&doc), vec!["shop_do_thing".to_string()]);
+        assert_eq!(doc["tools"][0]["description"], "Do the thing.");
+        assert_eq!(doc["tools"][0]["invocation"]["path"], json!(ep.path));
+    }
+
+    #[test]
+    fn selected_projection_ignores_the_blocks_own_annotations() {
+        let blocks = webmcp_fixture_blocks();
+        let (doc, _) = generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &[]);
+        assert!(
+            doc["tools"].as_array().unwrap().is_empty(),
+            "nothing selected, nothing published: {doc}"
+        );
+    }
+
+    #[test]
+    fn selected_projection_reports_a_missing_endpoint() {
+        let blocks = webmcp_fixture_blocks();
+        let selections = vec![ToolSelection {
+            block: "impresspress/products".into(),
+            method: HttpMethod::Delete,
+            path: "/b/products/no/such/path".into(),
+            name: "x".into(),
+            description: "x".into(),
+        }];
+        let (doc, refused) =
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+        assert!(doc["tools"].as_array().unwrap().is_empty());
+        assert_eq!(refused.len(), 1);
+        assert!(matches!(
+            refused[0].reason,
+            WebMcpRefusal::SelectionNotFound
+        ));
+        assert_eq!(refused[0].tool_name, "x");
+    }
+
+    #[test]
+    fn selected_projection_still_filters_by_caller_level() {
+        let blocks = webmcp_fixture_blocks();
+        let (block, ep) = blocks
+            .iter()
+            .flat_map(|b| b.endpoints.iter().map(move |e| (b, e)))
+            .find(|(_, e)| e.auth == AuthLevel::Admin)
+            .expect("fixture has an admin endpoint");
+        let selections = vec![ToolSelection {
+            block: block.name.clone(),
+            method: ep.method,
+            path: ep.path.clone(),
+            name: "admin_thing".into(),
+            description: "x".into(),
+        }];
+        let (doc, _) =
+            generate_webmcp_selected(&blocks, AuthLevel::Public, |_b, e| e.auth, &selections);
+        assert!(
+            doc["tools"].as_array().unwrap().is_empty(),
+            "a Public caller sees no Admin tool"
         );
     }
 }
