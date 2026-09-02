@@ -23,6 +23,7 @@ mod imports;
 mod instance;
 mod meta;
 mod pool;
+mod transcode;
 
 use abi::*;
 #[cfg(test)]
