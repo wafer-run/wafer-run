@@ -12,6 +12,7 @@ use wasmi::{Engine, Linker, Module, Store};
 use super::{
     super::{capabilities::BlockCapabilities, stream::StreamRegistry},
     abi::{ProcExitTrap, WasmiHostState},
+    codec::{negotiate_host_codec, HostCodec},
 };
 use crate::{
     context::Context,
@@ -68,6 +69,7 @@ pub(super) fn instantiate(
         pending_stream_take_error: None,
         pending_load_asset: None,
         current_attachments: None,
+        host_codec: HostCodec::Rmp,
     };
     let mut store = Store::new(engine, host_state);
 
@@ -106,6 +108,9 @@ pub(super) fn instantiate(
         // Re-fill fuel so the subsequent guest call has a full budget.
         apply_fuel(&mut store, limits.fuel, "refilling fuel after _start")?;
     }
+
+    let codec = negotiate_host_codec(&mut store, instance)?;
+    store.data_mut().host_codec = codec;
 
     Ok((store, instance))
 }

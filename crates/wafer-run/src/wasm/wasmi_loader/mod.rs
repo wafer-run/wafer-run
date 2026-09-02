@@ -25,6 +25,8 @@ mod meta;
 mod pool;
 
 use abi::*;
+#[cfg(test)]
+use codec::HostCodec;
 use codec::{abi_codec_of, verify_abi_version, AbiCodec};
 use imports::*;
 use instance::{apply_fuel, instantiate, ContextScope};
@@ -244,6 +246,23 @@ impl WasmiBlock {
     #[cfg(test)]
     pub fn asset_loader_for_test(&self) -> Arc<dyn crate::asset_loader::LoadAssetCallback> {
         self.asset_loader.read().clone()
+    }
+
+    /// Build a fresh store + instance from this block's engine/linker/module,
+    /// exercising the same [`instantiate`] path used at call time. Used by
+    /// tests that need to inspect post-instantiation host state (e.g.
+    /// negotiated [`HostCodec`]) without going through `handle`/`info`.
+    #[cfg(test)]
+    fn instantiate_for_test(
+        &self,
+    ) -> Result<(Store<WasmiHostState>, wasmi::Instance), RuntimeError> {
+        instantiate(
+            &self.engine,
+            &self.linker,
+            &self.module,
+            &self.capabilities.read(),
+            self.limits,
+        )
     }
 
     /// Variant of `Block::handle` that seeds inbound attachments visible to
@@ -1178,5 +1197,49 @@ mod capabilities_update_tests {
         info_fn
             .call(&mut store, ())
             .expect("calling a guest fn that uses sched_yield should succeed");
+    }
+
+    #[test]
+    fn host_codec_defaults_to_rmp_without_the_export() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Rmp);
+    }
+
+    #[test]
+    fn host_codec_json_is_negotiated_by_export() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 1)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+    }
+
+    #[test]
+    fn host_codec_unknown_value_fails_instantiation() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 7)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let err = block.instantiate_for_test().err().expect("must refuse");
+        assert!(err.to_string().contains("__wafer_host_codec"), "{err}");
     }
 }

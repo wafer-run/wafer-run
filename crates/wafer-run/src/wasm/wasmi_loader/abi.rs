@@ -8,6 +8,7 @@ use std::sync::Arc;
 use wafer_block::{core_types::*, error::RuntimeError};
 use wasmi::Store;
 
+use super::codec::HostCodec;
 use crate::{
     context::Context,
     wasm::{capabilities::BlockCapabilities, stream::StreamRegistry},
@@ -102,6 +103,10 @@ pub(super) struct WasmiHostState {
     /// the slot has not yet been seeded.
     pub(crate) current_attachments:
         Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
+    /// Codec of host-call payloads for this instance, negotiated once via
+    /// `__wafer_host_codec` in [`instantiate`](super::instantiate). See
+    /// `wafer_block::abi::HOST_CODEC_EXPORT`.
+    pub(super) host_codec: HostCodec,
 }
 
 impl wasmi::ResourceLimiter for WasmiHostState {
@@ -365,6 +370,7 @@ mod tests {
             pending_stream_take_error: None,
             pending_load_asset: None,
             current_attachments: None,
+            host_codec: HostCodec::Rmp,
         }
     }
 
