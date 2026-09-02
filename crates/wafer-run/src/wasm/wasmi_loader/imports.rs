@@ -7,7 +7,7 @@ use tracing::warn;
 use wafer_block::{core_types::*, error::RuntimeError};
 use wasmi::{Caller, Engine, Error as WasmiError, Linker};
 
-use super::abi::*;
+use super::{abi::*, codec::HostCodec};
 use crate::wasm::stream::StreamState;
 
 // ---------------------------------------------------------------------------
@@ -207,7 +207,8 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
     // Returns 0 on success, negative ErrorCode sentinel on error:
     //   - NotFound: stream handle invalid
     //   - FailedPrecondition: stream not in WritingRequest phase
-    //   - InvalidArgument: payload undecodable
+    //   - InvalidArgument: payload undecodable, or the guest negotiated the
+    //     JSON host codec (attachments are rmp-only)
     //   - Internal: unrecoverable host-side error
     linker
         .func_wrap(
@@ -224,6 +225,12 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .ok_or_else(|| WasmiError::new("guest has no exported memory".to_string()))?;
                 let buf = read_guest_slice(&caller, memory, payload_ptr, payload_len)
                     .map_err(|e| WasmiError::new(format!("reading attach payload: {e}")))?;
+
+                // A JSON-codec guest has no MessagePack encoder; attachments
+                // stay a v2/rmp feature. Refuse rather than mis-decode.
+                if caller.data().host_codec == HostCodec::Json {
+                    return Ok(error_code_to_neg_i32(ErrorCode::InvalidArgument));
+                }
 
                 let (id, att): (String, wafer_block::Attachment) =
                     match wafer_block::codec::decode(&buf) {

@@ -8,23 +8,21 @@
 
 use wafer_block::{ErrorCode, WaferError};
 
-#[allow(dead_code)]
 fn invalid(what: &str, e: impl std::fmt::Display) -> WaferError {
     WaferError::new(ErrorCode::InvalidArgument, format!("{what}: {e}"))
 }
 
-/// Transcodes JSON to MessagePack named-map format for wire protocol compatibility.
-/// Used by Task 7 to handle JSON-negotiated guest host-calls.
-#[allow(dead_code)]
+/// Transcode a JSON host-call body into the MessagePack named-map form the
+/// callee's wire DTOs decode from. Applied to the request body of a
+/// `HostCodec::Json` guest at `stream_finish`.
 pub(super) fn json_to_rmp(json: &[u8]) -> Result<Vec<u8>, WaferError> {
     let value: serde_json::Value =
         serde_json::from_slice(json).map_err(|e| invalid("host-call body is not JSON", e))?;
     rmp_serde::to_vec_named(&value).map_err(|e| invalid("encoding host-call body", e))
 }
 
-/// Transcodes MessagePack to JSON for wire protocol compatibility.
-/// Used by Task 7 to handle JSON-negotiated guest host-call responses.
-#[allow(dead_code)]
+/// Transcode a MessagePack response frame into JSON. Applied to every frame
+/// read back by a `HostCodec::Json` guest at `stream_read_chunk`.
 pub(super) fn rmp_to_json(rmp: &[u8]) -> Result<Vec<u8>, WaferError> {
     let mut de = rmp_serde::Deserializer::from_read_ref(rmp);
     de.set_max_depth(wafer_block::codec::WIRE_MAX_DEPTH);
