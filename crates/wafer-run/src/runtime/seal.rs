@@ -421,6 +421,7 @@ fn log_widening_attempts(
     for (label, over, eff) in [
         ("raw_sql", overrides.raw_sql, effective.raw_sql),
         ("ddl", overrides.ddl, effective.ddl),
+        ("schema", overrides.schema, effective.schema),
         ("crypto", overrides.crypto, effective.crypto),
     ] {
         if let Some(true) = over {
@@ -664,6 +665,38 @@ mod widening_tests {
             widened_allowlist_entries(&only(&["a", "b"]), &Allowlist::None),
             vec!["a", "b"]
         );
+    }
+
+    /// The boolean half of `log_widening_attempts` (`raw_sql`/`ddl`/`schema`/
+    /// `crypto`) warns whenever an operator override sets a field `true` but
+    /// the block's declaration keeps the effective capability `false` — one
+    /// warning line per field. Exercises the loop directly so a field
+    /// dropped from it (as `schema` once was) shows up as a test failure
+    /// rather than a silent logging gap.
+    #[test]
+    #[tracing_test::traced_test]
+    fn boolean_capability_widening_warns_for_every_field() {
+        use wafer_block::{capabilities::ConfigCapabilityOverrides, BlockCapabilities};
+
+        let overrides = ConfigCapabilityOverrides {
+            raw_sql: Some(true),
+            ddl: Some(true),
+            schema: Some(true),
+            crypto: Some(true),
+            ..Default::default()
+        };
+        let effective = BlockCapabilities::none();
+
+        super::log_widening_attempts("test/widen-bools", &overrides, &effective);
+
+        logs_assert(|lines: &[&str]| {
+            for field in ["raw_sql", "ddl", "schema", "crypto"] {
+                if !lines.iter().any(|l| l.contains(field)) {
+                    return Err(format!("expected a widening warning for `{field}`"));
+                }
+            }
+            Ok(())
+        });
     }
 }
 

@@ -108,8 +108,18 @@ impl WebBlock {
             });
         }
 
-        // Storage key: strip leading slash
+        // Storage key: strip leading slash. A cleaned path that collapsed to
+        // nothing (e.g. `/..`, `//`, `/./`) is equivalent to the root path —
+        // serve the index file the same way `/` already does, rather than
+        // asking storage for an empty key (which it rejects as
+        // `InvalidArgument`, not `NotFound`, so it would never reach the SPA
+        // fallback below).
         let key = clean.trim_start_matches('/');
+        let key = if key.is_empty() {
+            config.index_file.as_str()
+        } else {
+            key
+        };
 
         // Three-attempt fallback chain: bare key -> `<key>.html` -> `<key>/<index>`.
         // The helper retries only on `ErrorCode::NotFound`; any other storage
@@ -632,6 +642,45 @@ mod tests {
         // Only one storage round-trip — the helper did not retry on
         // non-`NotFound`, and the SPA fallthrough did not fire a second one.
         assert_eq!(ctx.calls(), vec!["private/page".to_string()]);
+    }
+
+    /// `clean_path` collapses `//` (and `/..`, `/./`) down to `/`, which
+    /// strips to an EMPTY storage key. The storage handler rejects an empty
+    /// path component with `InvalidArgument` (not `NotFound`), so before the
+    /// root-cause fix this key never reached the `NotFound && config.spa`
+    /// fallthrough and surfaced as a 400 instead of the SPA index. `//` must
+    /// resolve exactly like `/` — straight to `config.index_file` — without
+    /// even going through the storage layer's own NotFound-driven fallback.
+    #[tokio::test]
+    async fn handle_serves_index_for_cleaned_empty_key_with_spa() {
+        let block = WebBlock::new();
+        let init_data = br#"{"web_spa":"true"}"#.to_vec();
+        block
+            .lifecycle(
+                &ScriptedStorageCtx::new(vec![]),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: init_data,
+                },
+            )
+            .await
+            .expect("Init lifecycle should succeed");
+
+        // A single scripted success — if the key resolved straight to
+        // `index.html` (which has an extension, so `try_serve_static` never
+        // retries) this is the only storage round-trip needed.
+        let ctx = ScriptedStorageCtx::new(vec![Ok(())]);
+        let mut msg = Message::new("retrieve");
+        msg.set_meta(crate::meta::META_REQ_RESOURCE, "//");
+        msg.set_meta(crate::meta::META_REQ_ACTION, "retrieve");
+
+        let out = block.handle(&ctx, msg, InputStream::empty()).await;
+        let response = out
+            .collect_buffered()
+            .await
+            .expect("a cleaned-empty key must serve the index, not error");
+        assert_eq!(response.body, b"file contents");
+        assert_eq!(ctx.calls(), vec!["index.html".to_string()]);
     }
 
     // NOTE: today's `is_hashed_asset` heuristic matches a hashed-asset
