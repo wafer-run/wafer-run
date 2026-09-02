@@ -106,6 +106,22 @@ mod tests {
         );
     }
 
+    /// A JSON guest has no raw request-body path: `json_to_rmp` runs over the
+    /// WHOLE body, so opaque application bytes (what a streaming upload would
+    /// write) are `InvalidArgument` rather than being passed through. See
+    /// `wafer_block::abi::HOST_CODEC_EXPORT`.
+    #[test]
+    fn raw_request_body_bytes_are_invalid_argument() {
+        // A PNG header — perfectly valid upload bytes, not valid JSON.
+        let err = json_to_rmp(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap_err();
+        assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);
+        assert!(
+            err.message.contains("host-call body is not JSON"),
+            "the refusal must say the body could not be read, got: {}",
+            err.message
+        );
+    }
+
     #[test]
     fn malformed_rmp_is_invalid_argument() {
         let err = rmp_to_json(&[0xc1]).unwrap_err();

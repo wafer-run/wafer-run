@@ -111,6 +111,15 @@ pub(super) fn instantiate(
 
     let codec = negotiate_host_codec(&mut store, instance)?;
     store.data_mut().host_codec = codec;
+    // `negotiate_host_codec` CALLS a guest export, so it spends fuel from the
+    // budget set above. Refill afterwards for the same reason the `_start`
+    // branch does: the first real guest call must start from a full budget,
+    // not from whatever the negotiation left behind.
+    apply_fuel(
+        &mut store,
+        limits.fuel,
+        "refilling fuel after codec negotiation",
+    )?;
 
     Ok((store, instance))
 }

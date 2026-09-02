@@ -1311,6 +1311,42 @@ mod capabilities_update_tests {
         assert_eq!(store.data().host_codec, HostCodec::Json);
     }
 
+    /// Codec negotiation CALLS a guest export, so it spends fuel from the
+    /// budget the loader just set. The store must be refilled afterwards —
+    /// otherwise the first real dispatch starts short by however much the
+    /// guest's `__wafer_host_codec` happened to burn (an unbounded amount:
+    /// the guest chooses the body).
+    #[test]
+    fn fuel_is_refilled_after_codec_negotiation() {
+        // `__wafer_host_codec` burns a visible amount of fuel before
+        // answering, so a missing refill is measurable rather than a
+        // one-instruction rounding difference.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32)
+                (local $n i32)
+                (local.set $n (i32.const 100000))
+                (block $done
+                    (loop $l
+                        (br_if $done (i32.eqz (local.get $n)))
+                        (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                        (br $l)))
+                (i32.const 1))
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+        assert_eq!(
+            store.get_fuel().expect("the default limits are metered"),
+            crate::runtime::wasm_state::DEFAULT_FUEL,
+            "the first guest call must start from a full fuel budget"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Host-call codec: attachments stay rmp-only
     // -----------------------------------------------------------------------

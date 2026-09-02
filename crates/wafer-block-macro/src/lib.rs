@@ -38,6 +38,7 @@ struct CapabilitiesArgs {
     network: bool,
     raw_sql: bool,
     ddl: bool,
+    schema: bool,
     config: bool,
     collections: Vec<String>,
     storage_folders: Vec<String>,
@@ -71,6 +72,7 @@ fn parse_capabilities(meta: &syn::MetaList) -> syn::Result<CapabilitiesArgs> {
                     "network" => out.network = true,
                     "raw_sql" => out.raw_sql = true,
                     "ddl" => out.ddl = true,
+                    "schema" => out.schema = true,
                     "config" => out.config = true,
                     other => {
                         return Err(syn::Error::new(
@@ -577,7 +579,12 @@ pub fn wafer_async_trait(
 /// uses any service MUST declare it here. Providing an empty group sets an
 /// explicit zero-capabilities declaration.
 ///
-/// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `config`
+/// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `schema`, `config`
+///
+/// `ddl` opens the raw `database.ddl` statement channel; `schema` opens only
+/// the structured `database.ensure_table` / `add_column` / `drop_table` ops.
+/// They are independent — declare `schema` alone for a block that just needs
+/// its own tables.
 ///
 /// List fields: `collections = [...]`, `storage_folders = [...]`,
 /// `network_allow = [...]`, `config_keys = [...]`, `vector_indexes = [...]`,
@@ -748,6 +755,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         let crypto = c.crypto;
         let raw_sql = c.raw_sql;
         let ddl = c.ddl;
+        let schema = c.schema;
         let collections_expr = wildcard_list_tokens(&c.collections);
         let storage_folders_expr = wildcard_list_tokens(&c.storage_folders);
         let vector_indexes_expr = wildcard_list_tokens(&c.vector_indexes);
@@ -770,6 +778,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 network: #network_expr,
                 raw_sql: #raw_sql,
                 ddl: #ddl,
+                schema: #schema,
                 config: #config_expr,
                 collections: #collections_expr,
                 storage_folders: #storage_folders_expr,

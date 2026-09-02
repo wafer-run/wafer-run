@@ -259,14 +259,16 @@ pub struct TableDef {
 }
 
 /// Request for `database.ensure_table` — create the table and its indexes
-/// if they do not exist. Authorized on `table.name` and on `__ddl__`.
+/// if they do not exist. Authorized on `table.name` and on `__schema__`
+/// (the `schema` capability); it does NOT require raw `__ddl__`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsureTableRequest {
     /// The table to ensure exists.
     pub table: TableDef,
 }
 
-/// Request for `database.add_column`. Authorized on `table` and `__ddl__`.
+/// Request for `database.add_column`. Authorized on `table` and `__schema__`
+/// (the `schema` capability); it does NOT require raw `__ddl__`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddColumnRequest {
     /// Table (collection) name.
@@ -275,7 +277,8 @@ pub struct AddColumnRequest {
     pub column: ColumnDef,
 }
 
-/// Request for `database.drop_table`. Authorized on `table` and `__ddl__`.
+/// Request for `database.drop_table`. Authorized on `table` and `__schema__`
+/// (the `schema` capability); it does NOT require raw `__ddl__`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropTableRequest {
     /// Table (collection) name.

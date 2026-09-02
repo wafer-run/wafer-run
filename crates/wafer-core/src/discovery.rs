@@ -1506,13 +1506,19 @@ fn hoist_defs_into_components(
     out
 }
 
-/// The first 4 bytes (8 hex chars) of the SHA-256 digest of `text`. Used to
+/// The first 8 bytes (16 hex chars) of the SHA-256 digest of `text`. Used to
 /// disambiguate two different definitions that share a `$defs` name once
 /// they are hoisted into the single flat `components.schemas` namespace.
+///
+/// 8 bytes, not 4: the suffix is what keeps two *different* definitions from
+/// landing on the same `components.schemas` key, and a 32-bit truncation
+/// reaches a 50% collision chance at ~77k distinct definitions (and ~1-in-a-
+/// million at only ~93). A 64-bit truncation puts that far beyond any document
+/// size, at the cost of eight more characters in a name nobody reads by hand.
 fn short_sha256(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(text.as_bytes());
-    digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Rewrite every `#/$defs/X` reference under `node` — read as a *schema
@@ -3123,7 +3129,12 @@ mod tests {
         let prefix = "#/components/schemas/Condition_";
         assert!(b_ref_target.starts_with(prefix), "{b_ref_target}");
         let suffix = &b_ref_target[prefix.len()..];
-        assert_eq!(suffix.len(), 8, "8 hex chars: {b_ref_target}");
+        assert_eq!(
+            suffix.len(),
+            16,
+            "16 hex chars — 8 bytes of the digest, so the disambiguating \
+             suffix does not itself become a collision source: {b_ref_target}"
+        );
         assert!(
             suffix.chars().all(|c| c.is_ascii_hexdigit()),
             "{b_ref_target}"

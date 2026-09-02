@@ -135,24 +135,29 @@ pub fn aggregate(request: &AggregateRequest) -> Result<Vec<Record>, WaferError> 
     call(BLOCK, ServiceOp::DATABASE_AGGREGATE, request)
 }
 
-/// Buffered: execute a DDL statement (`CREATE TABLE`, `CREATE INDEX`, …),
+/// Buffered: execute a RAW DDL statement (`CREATE TABLE`, `CREATE INDEX`, …),
 /// returning the number of affected rows. Routes through the permissive
-/// `__ddl__` WRAP resource — blocks DDL their own `{org}__{block}__*`
-/// tables at init.
+/// `__ddl__` WRAP resource and needs the `ddl` capability — blocks DDL their
+/// own `{org}__{block}__*` tables at init. For an ordinary "create my table"
+/// the structured ops below are the narrower choice: they need `schema`, not
+/// `ddl`.
 pub fn ddl(request: &ExecRawRequest) -> Result<ExecRawResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_DDL, request)
 }
 
-/// Buffered: create a table and its indexes if absent (structured DDL,
-/// authorized on the table name and `__ddl__`).
+/// Buffered: create a table and its indexes if absent (structured schema op,
+/// authorized on the table name and `__schema__` — the `schema` capability,
+/// not raw `ddl`).
 pub fn ensure_table(request: &EnsureTableRequest) -> Result<SchemaOpResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_ENSURE_TABLE, request)
 }
-/// Buffered: add one column to a table.
+/// Buffered: add one column to a table (structured schema op, authorized on
+/// the table name and `__schema__`).
 pub fn add_column(request: &AddColumnRequest) -> Result<SchemaOpResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_ADD_COLUMN, request)
 }
-/// Buffered: drop a table if present.
+/// Buffered: drop a table if present (structured schema op, authorized on the
+/// table name and `__schema__`).
 pub fn drop_table(request: &DropTableRequest) -> Result<SchemaOpResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_DROP_TABLE, request)
 }

@@ -187,6 +187,34 @@ pub fn decode_and_authorize<T>(
 where
     T: serde::de::DeserializeOwned,
 {
+    decode_and_authorize_checked(ctx, body, op_name, |req| Ok(resource(req)))
+}
+
+/// [`decode_and_authorize`] for ops whose resource name has to be VALIDATED
+/// before it can be authorized against.
+///
+/// Same guarantee — an arm cannot obtain its typed request without the
+/// resource-access check — with one addition: `resource` may reject the
+/// request instead of naming a resource, and the rejection is returned
+/// BEFORE `ctx.check_resource_access` runs and before the service is
+/// touched.
+///
+/// Storage is the case that needs it. Its resources are `/`-separated paths
+/// composed from caller-supplied `folder` / `key`, matched by prefix and
+/// never normalized, so a `..` segment has to be refused as a malformed
+/// request (`InvalidArgument`) rather than silently authorized against a
+/// path that escapes the grant it appears to sit under. Rejecting before the
+/// WRAP check also keeps the error honest: the request is malformed whether
+/// or not the caller holds a grant.
+pub fn decode_and_authorize_checked<T>(
+    ctx: &dyn Context,
+    body: &[u8],
+    op_name: &str,
+    resource: impl FnOnce(&T) -> Result<(String, ResourceType, bool), WaferError>,
+) -> Result<T, OutputStream>
+where
+    T: serde::de::DeserializeOwned,
+{
     let req = match codec::decode::<T>(body) {
         Ok(r) => r,
         Err(e) => {
@@ -196,7 +224,7 @@ where
             )))
         }
     };
-    let (res, rt, is_write) = resource(&req);
+    let (res, rt, is_write) = resource(&req).map_err(OutputStream::error)?;
     ctx.check_resource_access(&res, rt, is_write)
         .map_err(OutputStream::error)?;
     Ok(req)

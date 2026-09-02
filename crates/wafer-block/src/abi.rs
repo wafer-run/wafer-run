@@ -39,6 +39,20 @@ pub const ABI_VERSION_EXPORT: &str = "__wafer_abi_version";
 /// `HOST_CODEC_JSON` = the guest writes JSON request bodies and reads JSON
 /// response frames and errors, and the host transcodes. Independent of
 /// `__wafer_abi_version`, which negotiates only the handle/lifecycle frames.
+///
+/// # What a JSON guest cannot do
+///
+/// The host transcodes the WHOLE request body of a host call, so a JSON guest
+/// has **no raw request-body path**: every byte it writes with
+/// `__wafer_host_stream_write_chunk` must parse as JSON. That rules out the
+/// streaming-upload ops whose request frames are opaque application bytes
+/// (`storage.put_streaming`'s body chunks) — the transcode fails and the call
+/// resumes with the `InvalidArgument` sentinel. Response direction is
+/// different: a handler can mark frames raw
+/// (`wafer_block::stream::raw_frames_marker`) and the host forwards them
+/// verbatim, which is how `storage.get` returns an object body to a JSON
+/// guest. Attachments (`__wafer_host_stream_attach`) and attachment lookup
+/// stay MessagePack-only and likewise answer `InvalidArgument`.
 pub const HOST_CODEC_EXPORT: &str = "__wafer_host_codec";
 /// `__wafer_host_codec` return value meaning the guest speaks JSON host-call payloads.
 pub const HOST_CODEC_JSON: i32 = 1;

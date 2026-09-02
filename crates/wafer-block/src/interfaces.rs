@@ -456,7 +456,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_ENSURE_TABLE => ActionSpec {
-            description: "Create a table and its indexes if absent (structured DDL; authorized on the table name and __ddl__).".into(),
+            description: "Create a table and its indexes if absent (structured schema op; authorized on the table name and __schema__, not raw __ddl__).".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": { "table": { "type": "object" } },
@@ -468,7 +468,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_ADD_COLUMN => ActionSpec {
-            description: "Add a column to an existing table (structured DDL; authorized on the table name and __ddl__).".into(),
+            description: "Add a column to an existing table (structured schema op; authorized on the table name and __schema__, not raw __ddl__).".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": { "table": { "type": "string" }, "column": { "type": "object" } },
@@ -480,7 +480,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_DROP_TABLE => ActionSpec {
-            description: "Drop a table if present (structured DDL; authorized on the table name and __ddl__).".into(),
+            description: "Drop a table if present (structured schema op; authorized on the table name and __schema__, not raw __ddl__).".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": { "table": { "type": "string" } },

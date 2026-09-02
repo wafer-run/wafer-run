@@ -235,6 +235,29 @@ async fn json_guest_storage_round_trip() {
     );
 }
 
+/// C1 regression, end to end: the guest holds the FOLDER
+/// `test/json-host-guest` and asks `storage.get` for key `../../other`. The
+/// composed resource (`test/json-host-guest/../../other`) sits textually
+/// beneath the grant, so nothing in the capability match would stop it — the
+/// storage handler refuses the unnormalized path outright, before
+/// authorization, and the JSON guest sees `InvalidArgument`.
+#[tokio::test]
+async fn json_guest_cannot_escape_its_storage_folder() {
+    let out = run("test.storage_escape").await;
+    let v: serde_json::Value = serde_json::from_slice(&out.body)
+        .unwrap_or_else(|e| panic!("refusal is not JSON ({e}): {:?}", out.body));
+    assert_eq!(
+        v["code"], "InvalidArgument",
+        "a `..` key must be refused as a malformed request (error: {v})"
+    );
+    assert!(
+        v["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("storage.get")),
+        "the refusal must name the op it rejected (error: {v})"
+    );
+}
+
 #[tokio::test]
 async fn json_guest_reads_config() {
     let out = run("test.config").await;

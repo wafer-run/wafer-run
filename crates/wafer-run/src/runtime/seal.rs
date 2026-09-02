@@ -508,32 +508,50 @@ fn log_allowlist_widening(
     over: &wafer_block::capabilities::Allowlist,
     eff: &wafer_block::capabilities::Allowlist,
 ) {
-    use wafer_block::capabilities::Allowlist::{Any, None, Only};
-    let warn = |item: &str| {
+    for item in widened_allowlist_entries(over, eff) {
         tracing::warn!(
             block = %name,
             field = %label,
             item = %item,
             "config widened capability beyond declared — narrower declaration wins"
         );
-    };
+    }
+}
+
+/// The override entries that did NOT survive into `eff`, i.e. the ones the
+/// operator asked for and the declaration refused. `"*"` stands for an `Any`
+/// override that a narrower declaration cut down.
+///
+/// # Why one comparison serves both matching modes
+///
+/// This logger is GENERIC over the allowlist fields, and `storage_folders`
+/// narrows by path prefix
+/// ([`Allowlist::intersect_path_prefix`](wafer_block::capabilities::Allowlist::intersect_path_prefix))
+/// rather than by set intersection — but the membership test below stays
+/// correct for it, so no prefix-aware variant is needed. Under the prefix
+/// intersection an override entry `x` survives VERBATIM whenever some declared
+/// entry covers it (`site` declared, `site/jhg` overridden → `site/jhg`
+/// survives). It fails to survive in exactly two cases: `x` is broader than a
+/// declared entry (only the declared, narrower entry survives) or `x` is
+/// unrelated to every declared entry — and both of those ARE widenings worth
+/// warning about. So "not present in `eff`" means the same thing under either
+/// mode. `storage_folder_override_nested_under_declared_does_not_warn` pins
+/// the case that would regress if the intersection ever went back to an exact
+/// set operation.
+fn widened_allowlist_entries(
+    over: &wafer_block::capabilities::Allowlist,
+    eff: &wafer_block::capabilities::Allowlist,
+) -> Vec<String> {
+    use wafer_block::capabilities::Allowlist::{Any, None, Only};
     match (over, eff) {
         // Override asked for everything but the declaration is narrower.
-        (Any, Any) => {}
-        (Any, _) => warn("*"),
+        (Any, Any) => Vec::new(),
+        (Any, _) => vec!["*".to_string()],
         // Override listed specifics; any not surviving the intersection widened.
-        (Only(over_set), Only(eff_set)) => {
-            for item in over_set.difference(eff_set) {
-                warn(item);
-            }
-        }
-        (Only(over_set), None) => {
-            for item in over_set {
-                warn(item);
-            }
-        }
+        (Only(over_set), Only(eff_set)) => over_set.difference(eff_set).cloned().collect(),
+        (Only(over_set), None) => over_set.iter().cloned().collect(),
         // Effective is Any (≥ override), or override is None → no widening.
-        (Only(_), Any) | (None, _) => {}
+        (Only(_), Any) | (None, _) => Vec::new(),
     }
 }
 
@@ -573,6 +591,79 @@ fn collect_flow_step_refs(
                 collect_flow_step_refs(wafer, flow_id, &branch.steps, &nested, references);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod widening_tests {
+    //! `widened_allowlist_entries` is the pure core of the widening warning.
+    //! `storage_folders` narrows by path prefix while every other allowlist
+    //! narrows by set intersection, so these pin that ONE comparison stays
+    //! honest for both.
+
+    use std::collections::BTreeSet;
+
+    use wafer_block::capabilities::Allowlist;
+
+    use super::widened_allowlist_entries;
+
+    fn only(items: &[&str]) -> Allowlist {
+        Allowlist::Only(items.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>())
+    }
+
+    /// The M4 case: the operator narrowed a declared folder to a subfolder.
+    /// The override entry survives the prefix intersection verbatim, so
+    /// nothing widened and nothing may be warned about.
+    #[test]
+    fn storage_folder_override_nested_under_declared_does_not_warn() {
+        let declared = only(&["site"]);
+        let over = only(&["site/jhg"]);
+        let eff = declared.intersect_path_prefix(&over);
+        assert_eq!(eff, only(&["site/jhg"]));
+        assert!(
+            widened_allowlist_entries(&over, &eff).is_empty(),
+            "narrowing to a subfolder is not a widening"
+        );
+    }
+
+    /// The reverse nesting IS a widening: the operator asked for the parent
+    /// folder and only the block's narrower declaration survived.
+    #[test]
+    fn storage_folder_override_broader_than_declared_warns() {
+        let declared = only(&["site/jhg"]);
+        let over = only(&["site"]);
+        let eff = declared.intersect_path_prefix(&over);
+        assert_eq!(eff, only(&["site/jhg"]));
+        assert_eq!(widened_allowlist_entries(&over, &eff), vec!["site"]);
+    }
+
+    #[test]
+    fn unrelated_override_entries_warn() {
+        let declared = only(&["site/jhg"]);
+        let over = only(&["site/jhg/sub", "other"]);
+        let eff = declared.intersect_path_prefix(&over);
+        assert_eq!(
+            widened_allowlist_entries(&over, &eff),
+            vec!["other"],
+            "only the entry with no covering relationship widened"
+        );
+    }
+
+    #[test]
+    fn any_override_against_a_narrower_declaration_warns_once() {
+        let eff = only(&["users"]);
+        assert_eq!(widened_allowlist_entries(&Allowlist::Any, &eff), vec!["*"]);
+        assert!(widened_allowlist_entries(&Allowlist::Any, &Allowlist::Any).is_empty());
+        assert!(widened_allowlist_entries(&Allowlist::None, &Allowlist::None).is_empty());
+        assert!(widened_allowlist_entries(&only(&["users"]), &Allowlist::Any).is_empty());
+    }
+
+    #[test]
+    fn every_entry_warns_when_the_declaration_denied_the_field() {
+        assert_eq!(
+            widened_allowlist_entries(&only(&["a", "b"]), &Allowlist::None),
+            vec!["a", "b"]
+        );
     }
 }
 

@@ -9,7 +9,7 @@ use wafer_block::{
     streams::output::OutputStream,
     types::ResourceType,
     wire::database as wire,
-    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
+    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE, SCHEMA_RESOURCE},
     *,
 };
 use wafer_schema::Table;
@@ -819,7 +819,10 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if let Err(e) = ctx.check_resource_access(DDL_RESOURCE, ResourceType::Db, true) {
+            // `SCHEMA_RESOURCE`, not `DDL_RESOURCE`: the statement is built
+            // host-side from the validated `TableDef`, so this op does not
+            // imply the arbitrary-statement `database.ddl` channel.
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
                 return OutputStream::error(e);
             }
             let table = match schema_wire::table_from_def(&req.table) {
@@ -843,7 +846,7 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if let Err(e) = ctx.check_resource_access(DDL_RESOURCE, ResourceType::Db, true) {
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
                 return OutputStream::error(e);
             }
             let column = match schema_wire::column_from_def(&req.column) {
@@ -865,7 +868,7 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if let Err(e) = ctx.check_resource_access(DDL_RESOURCE, ResourceType::Db, true) {
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
                 return OutputStream::error(e);
             }
             match service.schema_drop_table(&req.table).await {

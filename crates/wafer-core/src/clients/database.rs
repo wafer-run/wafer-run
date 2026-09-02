@@ -275,6 +275,10 @@ dual_api! {
     /// Use `exec_raw` for raw DML/DDL that legitimately requires the admin
     /// block (the SQL explorer, ad-hoc operator queries). `exec_raw` stays
     /// admin-gated under WRAP.
+    ///
+    /// Gated by the `ddl` capability. A block that only needs its own tables
+    /// created should declare `schema` instead and call `ensure_table` /
+    /// `add_column` / `drop_table`, which never open this channel.
     pub fn ddl(ctx, statement: &str) -> Result<i64, WaferError> {
         let req = ExecRawRequest { query: statement.to_string(), args: vec![] };
         let data = svc!(
@@ -290,22 +294,25 @@ dual_api! {
     }
 
     /// Create `table` (and its indexes) if absent. Authorized on the table
-    /// name and on `__ddl__`; a block may only ensure its own
-    /// `{org}__{block}__*` tables.
+    /// name and on `__schema__` (the `schema` capability), NOT on raw
+    /// `__ddl__` — the host builds the statement from `table`. A block may
+    /// only ensure its own `{org}__{block}__*` tables.
     pub fn ensure_table(ctx, table: &TableDef) -> Result<SchemaOpResponse, WaferError> {
         let req = EnsureTableRequest { table: table.clone() };
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_ENSURE_TABLE, &req, Some(&table.name), true, Some("db"))?;
         decode(&data)
     }
 
-    /// Add `column` to `table`. Authorized on the table name and `__ddl__`.
+    /// Add `column` to `table`. Authorized on the table name and `__schema__`
+    /// (the `schema` capability), not on raw `__ddl__`.
     pub fn add_column(ctx, table: &str, column: &ColumnDef) -> Result<SchemaOpResponse, WaferError> {
         let req = AddColumnRequest { table: table.to_string(), column: column.clone() };
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_ADD_COLUMN, &req, Some(table), true, Some("db"))?;
         decode(&data)
     }
 
-    /// Drop `table` if present. Authorized on the table name and `__ddl__`.
+    /// Drop `table` if present. Authorized on the table name and `__schema__`
+    /// (the `schema` capability), not on raw `__ddl__`.
     pub fn drop_table(ctx, table: &str) -> Result<SchemaOpResponse, WaferError> {
         let req = DropTableRequest { table: table.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_DROP_TABLE, &req, Some(table), true, Some("db"))?;

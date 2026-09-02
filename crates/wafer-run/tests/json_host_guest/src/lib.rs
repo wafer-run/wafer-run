@@ -16,6 +16,8 @@
 //!   test.storage   — storage.put then storage.get; body = the response
 //!                    frames joined with a newline (the `ObjectInfo` header as
 //!                    JSON, then the raw object bytes)
+//!   test.storage_escape — storage.get with a `..` key that would climb out of
+//!                    the granted folder; body = the take_error JSON
 //!   test.config    — config.get; body = the frame
 //!   test.error     — ensure_table, then database.get of a missing id;
 //!                    body = the take_error JSON
@@ -56,12 +58,18 @@ const CONFIG: &str = "wafer-run/config";
 /// `storage_folders` names the FOLDER this guest owns: the host authorizes a
 /// storage op on `"{folder}/{key}"` and an entry admits that resource when it
 /// is equal to it or is a `/`-terminated prefix of it, so one folder entry
-/// covers every key the guest writes beneath it.
+/// covers every key the guest writes beneath it. A key with a `..` segment is
+/// refused by the handler regardless — see the `test.storage_escape` arm.
+///
+/// `schema: true, ddl: false` is the sandbox shape: the guest creates its own
+/// table through the structured `database.ensure_table` op and has no access
+/// to the raw `database.ddl` statement channel.
 const INFO: &str = r#"{
   "name":"test/json-host-guest","version":"0.0.0","interface":"handler@v1",
   "summary":"JSON host-codec fixture",
   "requires":["wafer-run/database","wafer-run/storage","wafer-run/config"],
-  "capabilities":{"collections":{"Only":["test__json_host_guest__notes"]},"ddl":true,
+  "capabilities":{"collections":{"Only":["test__json_host_guest__notes"]},
+    "schema":true,"ddl":false,
     "storage_folders":{"Only":["test/json-host-guest"]},
     "config":{"Only":["TEST__JSON_HOST_GUEST__GREETING"]},
     "callable_blocks":{"Only":["wafer-run/database","wafer-run/storage","wafer-run/config"]}}
@@ -217,6 +225,22 @@ pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
             return respond(&e3, JSON);
         }
         return respond(&frames, JSON);
+    }
+
+    // Checked BEFORE `test.storage`: the kinds are substrings of one another
+    // and this guest dispatches by substring match.
+    if text.contains("test.storage_escape") {
+        // The C1 shape: the guest holds the folder `test/json-host-guest` and
+        // asks for a key that climbs out of it. `{folder}/{key}` would be
+        // `test/json-host-guest/../../other` — textually beneath the grant, so
+        // the refusal has to come from the handler's path validation, not from
+        // the capability set.
+        let (_, _, err) = call(
+            STORAGE,
+            "storage.get",
+            r#"{"folder":"test/json-host-guest","key":"../../other"}"#,
+        );
+        return respond(&err, JSON);
     }
 
     if text.contains("test.storage") {

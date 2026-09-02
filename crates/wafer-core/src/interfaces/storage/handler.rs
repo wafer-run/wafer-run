@@ -13,7 +13,9 @@ use wafer_block::{
 };
 
 use super::service::{StorageError, StorageService};
-use crate::interfaces::handler_util::{decode_and_authorize, stream_with_header, to_output};
+use crate::interfaces::handler_util::{
+    decode_and_authorize_checked, stream_with_header, to_output,
+};
 
 // --- Helpers ---
 
@@ -57,13 +59,54 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
     }
 }
 
+// --- Path validation (C1) ---------------------------------------------------
+
+/// Validate one caller-supplied path component (`folder`, `key` or a folder
+/// `name`) and return it, or an `InvalidArgument` naming the offender.
+///
+/// Storage resources are `/`-separated paths that the WRAP capability check
+/// matches by PREFIX and that nothing anywhere normalizes, so a component
+/// carrying an empty, `.` or `..` segment must never reach
+/// `check_resource_access`: `folder = "site/jhg"`, `key = "../../other/secret"`
+/// composes to `site/jhg/../../other/secret`, which sits textually under a
+/// `site/jhg` grant while naming a folder the caller was never given.
+///
+/// Refused here, at the earliest point the components exist, rather than
+/// normalized: a request that says `..` is malformed, and silently rewriting
+/// it to something else would store or return an object the caller did not
+/// ask for. `BlockCapabilities::allows_storage_folder` refuses the same shape
+/// independently, so neither layer relies on the other.
+fn check_path_component(op: &str, what: &str, value: &str) -> Result<(), WaferError> {
+    if wafer_block::wrap::is_traversal_safe_path(value) {
+        return Ok(());
+    }
+    Err(WaferError::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "invalid {op} request: `{what}` must be a plain `/`-separated path \
+             with no empty, `.` or `..` segment (got {value:?})"
+        ),
+    ))
+}
+
+/// The `"{folder}/{key}"` resource an object op authorizes on, with both
+/// components validated by [`check_path_component`] first.
+fn object_resource(op: &str, folder: &str, key: &str) -> Result<String, WaferError> {
+    check_path_component(op, "folder", folder)?;
+    check_path_component(op, "key", key)?;
+    Ok(format!("{folder}/{key}"))
+}
+
 /// Handle a storage message using the given service.
 ///
 /// `ctx` is the trusted host-side authorization surface: every op arm that
 /// touches a WRAP-governed resource authorizes via
-/// [`decode_and_authorize`], which bundles the codec decode with a call to
-/// `ctx.check_resource_access` so an arm cannot obtain its typed request
-/// without also being checked.
+/// [`decode_and_authorize_checked`], which bundles the codec decode with a
+/// call to `ctx.check_resource_access` so an arm cannot obtain its typed
+/// request without also being checked — and, for storage, validates the
+/// caller-supplied path components first (see [`check_path_component`]), so a
+/// traversal shape is `InvalidArgument` before authorization rather than a
+/// grant-relative path that escapes its own grant.
 ///
 /// Wire protocol:
 /// - `STORAGE_GET` emits **two frames**: a [`wire::ObjectInfo`] header chunk
@@ -91,17 +134,21 @@ pub async fn handle_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::STORAGE_PUT => {
-            let req =
-                match decode_and_authorize::<wire::PutRequest>(ctx, body, "storage.put", |r| {
-                    (
-                        format!("{}/{}", r.folder, r.key),
+            let req = match decode_and_authorize_checked::<wire::PutRequest>(
+                ctx,
+                body,
+                "storage.put",
+                |r| {
+                    Ok((
+                        object_resource("storage.put", &r.folder, &r.key)?,
                         ResourceType::Storage,
                         true,
-                    )
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+                    ))
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service
                 .put(&req.folder, &req.key, &req.data, &req.content_type)
                 .await
@@ -111,17 +158,21 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_GET => {
-            let req =
-                match decode_and_authorize::<wire::GetRequest>(ctx, body, "storage.get", |r| {
-                    (
-                        format!("{}/{}", r.folder, r.key),
+            let req = match decode_and_authorize_checked::<wire::GetRequest>(
+                ctx,
+                body,
+                "storage.get",
+                |r| {
+                    Ok((
+                        object_resource("storage.get", &r.folder, &r.key)?,
                         ResourceType::Storage,
                         false,
-                    )
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+                    ))
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.get(&req.folder, &req.key).await {
                 Ok((data, info)) => {
                     let header = service_object_info_to_wire(info);
@@ -162,16 +213,16 @@ pub async fn handle_message(
             // Same request shape and WRAP authorization as `STORAGE_GET` — a
             // read of `{folder}/{key}` — so the streaming download can never be
             // reached with a weaker grant than the buffered download.
-            let req = match decode_and_authorize::<wire::GetRequest>(
+            let req = match decode_and_authorize_checked::<wire::GetRequest>(
                 ctx,
                 body,
                 "storage.get_streaming",
                 |r| {
-                    (
-                        format!("{}/{}", r.folder, r.key),
+                    Ok((
+                        object_resource("storage.get_streaming", &r.folder, &r.key)?,
                         ResourceType::Storage,
                         false,
-                    )
+                    ))
                 },
             ) {
                 Ok(r) => r,
@@ -189,16 +240,16 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_DELETE => {
-            let req = match decode_and_authorize::<wire::DeleteRequest>(
+            let req = match decode_and_authorize_checked::<wire::DeleteRequest>(
                 ctx,
                 body,
                 "storage.delete",
                 |r| {
-                    (
-                        format!("{}/{}", r.folder, r.key),
+                    Ok((
+                        object_resource("storage.delete", &r.folder, &r.key)?,
                         ResourceType::Storage,
                         true,
-                    )
+                    ))
                 },
             ) {
                 Ok(r) => r,
@@ -210,13 +261,18 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_LIST => {
-            let req =
-                match decode_and_authorize::<wire::ListRequest>(ctx, body, "storage.list", |r| {
-                    (r.folder.clone(), ResourceType::Storage, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+            let req = match decode_and_authorize_checked::<wire::ListRequest>(
+                ctx,
+                body,
+                "storage.list",
+                |r| {
+                    check_path_component("storage.list", "folder", &r.folder)?;
+                    Ok((r.folder.clone(), ResourceType::Storage, false))
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             let opts = super::service::ListOptions {
                 prefix: req.prefix,
                 limit: req.limit,
@@ -229,11 +285,14 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_CREATE_FOLDER => {
-            let req = match decode_and_authorize::<wire::CreateFolderRequest>(
+            let req = match decode_and_authorize_checked::<wire::CreateFolderRequest>(
                 ctx,
                 body,
                 "storage.create_folder",
-                |r| (r.name.clone(), ResourceType::Storage, true),
+                |r| {
+                    check_path_component("storage.create_folder", "name", &r.name)?;
+                    Ok((r.name.clone(), ResourceType::Storage, true))
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -244,11 +303,14 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_DELETE_FOLDER => {
-            let req = match decode_and_authorize::<wire::DeleteFolderRequest>(
+            let req = match decode_and_authorize_checked::<wire::DeleteFolderRequest>(
                 ctx,
                 body,
                 "storage.delete_folder",
-                |r| (r.name.clone(), ResourceType::Storage, true),
+                |r| {
+                    check_path_component("storage.delete_folder", "name", &r.name)?;
+                    Ok((r.name.clone(), ResourceType::Storage, true))
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -323,16 +385,16 @@ pub async fn handle_put_streaming(
     // Decode + authorize the header BEFORE consuming any body frame. Same
     // resource tuple as the buffered `storage.put` write, so the check can't
     // be forgotten and can't be weaker than the buffered path.
-    let header = match decode_and_authorize::<wire::PutStreamingHeader>(
+    let header = match decode_and_authorize_checked::<wire::PutStreamingHeader>(
         ctx,
         &header_bytes,
         "storage.put_streaming",
         |h| {
-            (
-                format!("{}/{}", h.folder, h.key),
+            Ok((
+                object_resource("storage.put_streaming", &h.folder, &h.key)?,
                 ResourceType::Storage,
                 true,
-            )
+            ))
         },
     ) {
         Ok(h) => h,
