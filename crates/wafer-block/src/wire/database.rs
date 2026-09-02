@@ -183,6 +183,128 @@ pub struct ExecRawRequest {
     pub args: Vec<serde_json::Value>,
 }
 
+/// One column of a [`TableDef`] / [`AddColumnRequest`].
+///
+/// `kind` is one of `string`, `text`, `int`, `int64`, `float`, `bool`,
+/// `datetime`, `json`, `blob` — the names of `wafer_schema::DataType`,
+/// lower-cased. The host maps them; an unknown kind is `InvalidArgument`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnDef {
+    /// Column name.
+    pub name: String,
+    /// Data type: `string`, `text`, `int`, `int64`, `float`, `bool`,
+    /// `datetime`, `json`, or `blob`.
+    pub kind: String,
+    /// Whether the column allows `NULL`.
+    #[serde(default)]
+    pub nullable: bool,
+    /// Whether this column is (part of) the table's primary key.
+    #[serde(default)]
+    pub primary_key: bool,
+    /// Whether this column auto-increments (integer primary keys only).
+    #[serde(default)]
+    pub auto_increment: bool,
+    /// Whether this column carries a `UNIQUE` constraint.
+    #[serde(default)]
+    pub unique: bool,
+    /// Default value applied when the column is omitted on insert.
+    #[serde(default)]
+    pub default: Option<DefaultDef>,
+}
+
+/// A column default. `kind` is `null`, `now`, or `value` (with `value` a
+/// JSON string, integer, float or boolean). There is deliberately no raw
+/// SQL kind: a schema op never carries a SQL fragment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefaultDef {
+    /// Default kind: `null`, `now`, or `value`.
+    pub kind: String,
+    /// The literal default value when `kind` is `value`; ignored otherwise.
+    #[serde(default)]
+    pub value: serde_json::Value,
+}
+
+/// A secondary index of a [`TableDef`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexDef {
+    /// Index name. Empty lets the host derive one from `columns`.
+    #[serde(default)]
+    pub name: String,
+    /// Indexed columns, in order.
+    pub columns: Vec<String>,
+    /// Whether the index enforces uniqueness.
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// A table definition for `database.ensure_table`. Mirrors
+/// `wafer_schema::Table` field for field; the host converts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableDef {
+    /// Table name.
+    pub name: String,
+    /// Column definitions.
+    pub columns: Vec<ColumnDef>,
+    /// Secondary indexes to create alongside the table.
+    #[serde(default)]
+    pub indexes: Vec<IndexDef>,
+    /// Composite primary-key columns, when the primary key spans more than
+    /// one column (single-column primary keys are declared on the column
+    /// itself via `ColumnDef::primary_key`).
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+    /// Composite `UNIQUE` constraints, each a set of columns.
+    #[serde(default)]
+    pub unique_keys: Vec<Vec<String>>,
+}
+
+/// Request for `database.ensure_table` — create the table and its indexes
+/// if they do not exist. Authorized on `table.name` and on `__ddl__`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsureTableRequest {
+    /// The table to ensure exists.
+    pub table: TableDef,
+}
+
+/// Request for `database.add_column`. Authorized on `table` and `__ddl__`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddColumnRequest {
+    /// Table (collection) name.
+    pub table: String,
+    /// Column to add.
+    pub column: ColumnDef,
+}
+
+/// Request for `database.drop_table`. Authorized on `table` and `__ddl__`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropTableRequest {
+    /// Table (collection) name.
+    pub table: String,
+}
+
+/// Request for `database.table_exists` — a read, authorized on `table` only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableExistsRequest {
+    /// Table (collection) name.
+    pub table: String,
+}
+
+/// Response for `ensure_table`, `add_column` and `drop_table`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaOpResponse {
+    /// Table (collection) name the op was applied to.
+    pub table: String,
+}
+
+/// Response for `database.table_exists`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableExistsResponse {
+    /// Table (collection) name that was checked.
+    pub table: String,
+    /// Whether the table exists.
+    pub exists: bool,
+}
+
 /// Request for `database.delete_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereRequest {

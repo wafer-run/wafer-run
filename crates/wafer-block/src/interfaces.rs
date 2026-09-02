@@ -455,6 +455,54 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 }
             })),
         },
+        ServiceOp::DATABASE_ENSURE_TABLE => ActionSpec {
+            description: "Create a table and its indexes if absent (structured DDL; authorized on the table name and __ddl__).".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "object" } },
+                "required": ["table"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } }
+            })),
+        },
+        ServiceOp::DATABASE_ADD_COLUMN => ActionSpec {
+            description: "Add a column to an existing table (structured DDL; authorized on the table name and __ddl__).".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" }, "column": { "type": "object" } },
+                "required": ["table", "column"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } }
+            })),
+        },
+        ServiceOp::DATABASE_DROP_TABLE => ActionSpec {
+            description: "Drop a table if present (structured DDL; authorized on the table name and __ddl__).".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } },
+                "required": ["table"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } }
+            })),
+        },
+        ServiceOp::DATABASE_TABLE_EXISTS => ActionSpec {
+            description: "Whether a table exists (read; authorized on the table name).".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } },
+                "required": ["table"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" }, "exists": { "type": "boolean" } }
+            })),
+        },
         other => panic!(
             "BUG: no ActionSpec for database op '{other}' — update database_action_spec alongside ServiceOp::DATABASE_OPS"
         ),
