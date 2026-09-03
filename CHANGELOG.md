@@ -98,6 +98,18 @@
 - `frame_ancestors` config key on `wafer-run/security-headers`: `"none"`
   (default) or `"self"`, which relaxes both the CSP `frame-ancestors`
   directive and `X-Frame-Options` for same-origin framing.
+- `cross_origin_isolation` config key on `wafer-run/security-headers`:
+  `"none"` (default: no `Cross-Origin-Opener-Policy` /
+  `Cross-Origin-Embedder-Policy` headers, a true no-op) or `"credentialless"`
+  / `"require-corp"`, both of which set `Cross-Origin-Opener-Policy:
+  same-origin` and make the document `crossOriginIsolated`.
+  `credentialless` keeps cross-origin no-cors subresources loadable — fetched
+  without credentials — without the third party opting in; `require-corp`
+  requires every cross-origin subresource to opt in via CORP or CORS. Lets a
+  deployment that needs isolation (e.g. a threaded in-browser compiler) opt
+  in per-response from the block that already owns response security
+  headers; per the HTML spec, a document sending either value can only embed
+  nested documents that also carry a compatible COEP.
 
 - `ConfigSource` trait + `EnvBlockConfig` + `ConfigError` + `StaticConfigSource`
   (`wafer_run::runtime::config_source`).

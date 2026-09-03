@@ -43,6 +43,47 @@ impl FrameAncestors {
     }
 }
 
+/// Cross-origin-isolation posture for this deployment's responses. Drives
+/// `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`, the pair
+/// that together make a document `crossOriginIsolated` (required for
+/// `SharedArrayBuffer`, high-resolution timers, and similar APIs gated behind
+/// isolation).
+///
+/// This is opt-in per deployment, not a new baseline default: per the HTML
+/// spec, a document that sends a COEP other than `unsafe-none` can only embed
+/// nested documents (`<iframe>`) that also carry a compatible COEP, so
+/// turning this on can break framing of cross-origin content that hasn't
+/// opted in itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossOriginIsolation {
+    /// Neither header is emitted (default). A no-op — this block never sent
+    /// COOP/COEP before this knob existed, and `none` must stay that way
+    /// rather than emitting an explicit `unsafe-none`.
+    None,
+    /// `Cross-Origin-Opener-Policy: same-origin` +
+    /// `Cross-Origin-Embedder-Policy: credentialless`. Cross-origin `no-cors`
+    /// subresources still load — they're fetched without credentials —
+    /// without the third party needing to opt in via CORP/CORS.
+    Credentialless,
+    /// `Cross-Origin-Opener-Policy: same-origin` +
+    /// `Cross-Origin-Embedder-Policy: require-corp`. Every cross-origin
+    /// subresource must opt in via `Cross-Origin-Resource-Policy` or CORS, or
+    /// it fails to load.
+    RequireCorp,
+}
+
+impl CrossOriginIsolation {
+    /// The `Cross-Origin-Embedder-Policy` value to emit, or `None` when the
+    /// posture is [`Self::None`] and no isolation headers should be sent.
+    fn coep_value(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Credentialless => Some("credentialless"),
+            Self::RequireCorp => Some("require-corp"),
+        }
+    }
+}
+
 /// SecurityHeadersBlock adds standard security headers to responses.
 ///
 /// CSP is configurable via `block_config` — the runtime serializes the
@@ -63,6 +104,11 @@ pub struct SecurityHeadersBlock {
     /// `frame_ancestors` config key; `effective_frame_ancestors` falls back
     /// to `FrameAncestors::None` (today's default) until then.
     frame_ancestors: OnceLock<FrameAncestors>,
+    /// Init-resolved `cross_origin_isolation` policy. Unset until Init parses
+    /// the `cross_origin_isolation` config key; `effective_cross_origin_isolation`
+    /// falls back to `CrossOriginIsolation::None` (today's default — no
+    /// COOP/COEP headers) until then.
+    cross_origin_isolation: OnceLock<CrossOriginIsolation>,
 }
 
 impl Default for SecurityHeadersBlock {
@@ -82,6 +128,7 @@ impl SecurityHeadersBlock {
         Self {
             csp: OnceLock::new(),
             frame_ancestors: OnceLock::new(),
+            cross_origin_isolation: OnceLock::new(),
         }
     }
 
@@ -99,6 +146,16 @@ impl SecurityHeadersBlock {
             .get()
             .copied()
             .unwrap_or(FrameAncestors::None)
+    }
+
+    /// The cross-origin-isolation posture applied to responses: the
+    /// Init-set value, or [`CrossOriginIsolation::None`] (today's default —
+    /// no COOP/COEP headers) when Init has not (yet) supplied one.
+    fn effective_cross_origin_isolation(&self) -> CrossOriginIsolation {
+        self.cross_origin_isolation
+            .get()
+            .copied()
+            .unwrap_or(CrossOriginIsolation::None)
     }
 }
 
@@ -127,12 +184,28 @@ impl Block for SecurityHeadersBlock {
                 "none",
             )
             .name("Frame ancestors"),
+            ConfigVar::new(
+                "cross_origin_isolation",
+                "`none` (default: no Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy \
+                 headers) or `credentialless` / `require-corp`, both of which set \
+                 Cross-Origin-Opener-Policy: same-origin and make the document \
+                 crossOriginIsolated. `credentialless` keeps cross-origin no-cors \
+                 subresources loadable — they're fetched without credentials — without the \
+                 third party opting in; `require-corp` requires every cross-origin \
+                 subresource to opt in via CORP or CORS. Per the HTML spec, a document \
+                 sending either value can only embed nested documents that also carry a \
+                 compatible COEP, so this is opt-in per deployment rather than a new \
+                 baseline default.",
+                "none",
+            )
+            .name("Cross-origin isolation"),
         ])
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let frame_ancestors = self.effective_frame_ancestors();
         let csp = with_frame_ancestors(self.effective_csp(), frame_ancestors);
+        let cross_origin_isolation = self.effective_cross_origin_isolation();
 
         let mut out_msg = msg;
         out_msg.set_meta("resp.header.X-Content-Type-Options", "nosniff");
@@ -161,6 +234,13 @@ impl Block for SecurityHeadersBlock {
             "resp.header.Permissions-Policy",
             "camera=(), microphone=(), geolocation=()",
         );
+        // `none` stays a true no-op: this block never emitted COOP/COEP
+        // before this knob existed, so the default must not start sending
+        // `unsafe-none` (or any other value) on every response.
+        if let Some(coep) = cross_origin_isolation.coep_value() {
+            out_msg.set_meta("resp.header.Cross-Origin-Opener-Policy", "same-origin");
+            out_msg.set_meta("resp.header.Cross-Origin-Embedder-Policy", coep);
+        }
 
         OutputStream::continue_with(out_msg)
     }
@@ -183,6 +263,21 @@ impl Block for SecurityHeadersBlock {
                 }
                 _ => {
                     let _ = self.frame_ancestors.set(FrameAncestors::None);
+                }
+            }
+            match config.str_or("cross_origin_isolation", "none") {
+                "credentialless" => {
+                    let _ = self
+                        .cross_origin_isolation
+                        .set(CrossOriginIsolation::Credentialless);
+                }
+                "require-corp" => {
+                    let _ = self
+                        .cross_origin_isolation
+                        .set(CrossOriginIsolation::RequireCorp);
+                }
+                _ => {
+                    let _ = self.cross_origin_isolation.set(CrossOriginIsolation::None);
                 }
             }
         }
@@ -526,5 +621,139 @@ mod tests {
         // The knob is `frame_ancestors`, never the operator CSP string.
         let merged = merge_csp(DEFAULT_CSP, "frame-ancestors 'self'");
         assert!(merged.contains("frame-ancestors 'none'"), "{merged}");
+    }
+
+    // --- cross_origin_isolation ------------------------------------------
+
+    #[tokio::test]
+    async fn cross_origin_isolation_defaults_to_none_and_omits_headers() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(&NoopCtx, init_event(r#"{}"#))
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(msg.get_meta("resp.header.Cross-Origin-Opener-Policy"), "");
+        assert_eq!(msg.get_meta("resp.header.Cross-Origin-Embedder-Policy"), "");
+    }
+
+    #[tokio::test]
+    async fn cross_origin_isolation_credentialless_sets_coop_and_coep() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(
+                &NoopCtx,
+                init_event(r#"{"cross_origin_isolation":"credentialless"}"#),
+            )
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(
+            msg.get_meta("resp.header.Cross-Origin-Opener-Policy"),
+            "same-origin"
+        );
+        assert_eq!(
+            msg.get_meta("resp.header.Cross-Origin-Embedder-Policy"),
+            "credentialless"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_origin_isolation_require_corp_sets_coop_and_coep() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(
+                &NoopCtx,
+                init_event(r#"{"cross_origin_isolation":"require-corp"}"#),
+            )
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(
+            msg.get_meta("resp.header.Cross-Origin-Opener-Policy"),
+            "same-origin"
+        );
+        assert_eq!(
+            msg.get_meta("resp.header.Cross-Origin-Embedder-Policy"),
+            "require-corp"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_origin_isolation_unknown_value_treated_as_none() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(
+                &NoopCtx,
+                init_event(r#"{"cross_origin_isolation":"bogus"}"#),
+            )
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(msg.get_meta("resp.header.Cross-Origin-Opener-Policy"), "");
+        assert_eq!(msg.get_meta("resp.header.Cross-Origin-Embedder-Policy"), "");
+    }
+
+    #[tokio::test]
+    async fn cross_origin_isolation_does_not_affect_other_headers() {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(
+                &NoopCtx,
+                init_event(r#"{"cross_origin_isolation":"require-corp"}"#),
+            )
+            .await
+            .unwrap();
+        let out = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await;
+        let msg = out
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        assert_eq!(
+            msg.get_meta("resp.header.X-Content-Type-Options"),
+            "nosniff"
+        );
+        assert_eq!(msg.get_meta("resp.header.X-Frame-Options"), "DENY");
+        assert_eq!(
+            msg.get_meta("resp.header.Referrer-Policy"),
+            "strict-origin-when-cross-origin"
+        );
+        assert!(msg
+            .get_meta("resp.header.Content-Security-Policy")
+            .contains("frame-ancestors 'none'"));
+        assert_eq!(
+            msg.get_meta("resp.header.Strict-Transport-Security"),
+            "max-age=31536000; includeSubDomains; preload"
+        );
+        assert_eq!(
+            msg.get_meta("resp.header.Permissions-Policy"),
+            "camera=(), microphone=(), geolocation=()"
+        );
     }
 }
