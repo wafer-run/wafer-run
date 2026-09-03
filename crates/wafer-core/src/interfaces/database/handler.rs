@@ -9,12 +9,15 @@ use wafer_block::{
     streams::output::OutputStream,
     types::ResourceType,
     wire::database as wire,
-    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
+    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE, SCHEMA_RESOURCE},
     *,
 };
 use wafer_schema::Table;
 
-use super::service::{self, DatabaseError, DatabaseService};
+use super::{
+    schema_wire,
+    service::{self, DatabaseError, DatabaseService},
+};
 use crate::interfaces::handler_util::{decode_and_authorize, to_output};
 
 // --- Helpers ---
@@ -803,6 +806,91 @@ pub async fn handle_message(
                         records.into_iter().map(service_record_to_wire).collect();
                     to_output(&wire_records)
                 }
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_ENSURE_TABLE => {
+            let req = match decode_and_authorize::<wire::EnsureTableRequest>(
+                ctx,
+                body,
+                "database.ensure_table",
+                |r| (r.table.name.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            // `SCHEMA_RESOURCE`, not `DDL_RESOURCE`: the statement is built
+            // host-side from the validated `TableDef`, so this op does not
+            // imply the arbitrary-statement `database.ddl` channel.
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+                return OutputStream::error(e);
+            }
+            let table = match schema_wire::table_from_def(&req.table) {
+                Ok(t) => t,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service.ensure_schema_table(&table).await {
+                Ok(()) => to_output(&wire::SchemaOpResponse {
+                    table: req.table.name,
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_ADD_COLUMN => {
+            let req = match decode_and_authorize::<wire::AddColumnRequest>(
+                ctx,
+                body,
+                "database.add_column",
+                |r| (r.table.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+                return OutputStream::error(e);
+            }
+            let column = match schema_wire::column_from_def(&req.column) {
+                Ok(c) => c,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service.schema_add_column(&req.table, &column).await {
+                Ok(()) => to_output(&wire::SchemaOpResponse { table: req.table }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_DROP_TABLE => {
+            let req = match decode_and_authorize::<wire::DropTableRequest>(
+                ctx,
+                body,
+                "database.drop_table",
+                |r| (r.table.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+                return OutputStream::error(e);
+            }
+            match service.schema_drop_table(&req.table).await {
+                Ok(()) => to_output(&wire::SchemaOpResponse { table: req.table }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_TABLE_EXISTS => {
+            let req = match decode_and_authorize::<wire::TableExistsRequest>(
+                ctx,
+                body,
+                "database.table_exists",
+                |r| (r.table.clone(), ResourceType::Db, false),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.schema_table_exists(&req.table).await {
+                Ok(exists) => to_output(&wire::TableExistsResponse {
+                    table: req.table,
+                    exists,
+                }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

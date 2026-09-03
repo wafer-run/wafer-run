@@ -65,3 +65,31 @@ pub(super) fn verify_abi_version(
     }
     Ok(())
 }
+
+/// Codec of host-call payloads, per instance. See `wafer_block::abi::HOST_CODEC_EXPORT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostCodec {
+    Rmp,
+    Json,
+}
+
+/// Call the guest's `__wafer_host_codec` export if present.
+pub(super) fn negotiate_host_codec(
+    store: &mut Store<WasmiHostState>,
+    instance: wasmi::Instance,
+) -> Result<HostCodec, RuntimeError> {
+    let Ok(f) = instance.get_typed_func::<(), i32>(&*store, wafer_block::abi::HOST_CODEC_EXPORT)
+    else {
+        return Ok(HostCodec::Rmp);
+    };
+    match f.call(&mut *store, ()) {
+        Ok(v) if v == wafer_block::abi::HOST_CODEC_JSON => Ok(HostCodec::Json),
+        Ok(v) if v == wafer_block::abi::HOST_CODEC_RMP => Ok(HostCodec::Rmp),
+        Ok(v) => Err(RuntimeError::Wasm(format!(
+            "__wafer_host_codec returned unsupported value {v}"
+        ))),
+        Err(e) => Err(RuntimeError::Wasm(format!(
+            "calling __wafer_host_codec: {e}"
+        ))),
+    }
+}

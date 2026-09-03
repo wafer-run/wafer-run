@@ -57,6 +57,14 @@ impl ServiceOp {
     /// `DATABASE_EXEC_RAW` so the DDL sentinel is host-authoritative — set by
     /// the op arm the host dispatches on, not a forgeable request meta.
     pub const DATABASE_DDL: &str = "database.ddl";
+    /// Create a table (and its indexes) if absent — structured, table-scoped DDL.
+    pub const DATABASE_ENSURE_TABLE: &str = "database.ensure_table";
+    /// Add one column to an existing table — structured, table-scoped DDL.
+    pub const DATABASE_ADD_COLUMN: &str = "database.add_column";
+    /// Drop a table if present — structured, table-scoped DDL.
+    pub const DATABASE_DROP_TABLE: &str = "database.drop_table";
+    /// Whether a table exists — a read.
+    pub const DATABASE_TABLE_EXISTS: &str = "database.table_exists";
     /// Delete every row matching a filter.
     pub const DATABASE_DELETE_WHERE: &str = "database.delete_where";
     /// Delete every row matching a filter and return the affected count.
@@ -215,6 +223,10 @@ impl ServiceOp {
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXEC_RAW,
         Self::DATABASE_DDL,
+        Self::DATABASE_ENSURE_TABLE,
+        Self::DATABASE_ADD_COLUMN,
+        Self::DATABASE_DROP_TABLE,
+        Self::DATABASE_TABLE_EXISTS,
     ];
 
     /// Every `vector.*` op — drives the `vector@v1` action catalog in

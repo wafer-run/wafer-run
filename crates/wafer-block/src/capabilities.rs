@@ -64,13 +64,19 @@ impl Allowlist {
         }
     }
 
-    /// Narrowing intersection (declared ∩ operator-override): the result
-    /// permits a value only if BOTH sides do. Symmetric.
+    /// Narrowing intersection (declared ∩ operator-override) for allowlists
+    /// whose `Only` entries match values EXACTLY: the result permits a value
+    /// only if BOTH sides do. Symmetric.
     ///
     /// - `None` on either side → `None` (disabled wins).
     /// - `Any` ∩ x → x (the more specific side).
     /// - `Only(a)` ∩ `Only(b)` → `Only(a ∩ b)` (may be empty = deny-all, which
     ///   is unambiguous here — no "empty means any" to invert).
+    ///
+    /// `storage_folders` matches by path PREFIX, not exactly, so it narrows
+    /// through [`Allowlist::intersect_path_prefix`] instead; a plain set
+    /// intersection would silently drop a nested entry that both sides do in
+    /// fact permit.
     pub fn intersect(&self, other: &Allowlist) -> Allowlist {
         match (self, other) {
             (Allowlist::None, _) | (_, Allowlist::None) => Allowlist::None,
@@ -80,6 +86,62 @@ impl Allowlist {
             }
         }
     }
+
+    /// Narrowing intersection for a PATH-PREFIX allowlist — the shape
+    /// `BlockCapabilities::storage_folders` uses, where an entry admits every
+    /// resource beneath it (`site/jhg` admits `site/jhg/a.txt`).
+    ///
+    /// `None`/`Any` behave exactly as in [`Allowlist::intersect`]. For
+    /// `Only(a)` ∩ `Only(b)`, a pair of entries survives as the NARROWER of
+    /// the two whenever one lies beneath the other, so:
+    ///
+    /// - an override entry nested under a declared entry survives (the
+    ///   operator narrowed `site` to `site/jhg`), and
+    /// - a declared entry nested under an override entry survives too (the
+    ///   operator's broader `site` cannot widen the block's `site/jhg`).
+    ///
+    /// Entries with no covering relationship drop out, so the result still
+    /// permits only what BOTH sides permit — a plain set intersection would
+    /// have collapsed both nesting cases to deny-all.
+    pub fn intersect_path_prefix(&self, other: &Allowlist) -> Allowlist {
+        match (self, other) {
+            (Allowlist::None, _) | (_, Allowlist::None) => Allowlist::None,
+            (Allowlist::Any, x) | (x, Allowlist::Any) => x.clone(),
+            (Allowlist::Only(a), Allowlist::Only(b)) => {
+                let mut out = BTreeSet::new();
+                for x in a {
+                    for y in b {
+                        if path_prefix_covers(y, x) {
+                            out.insert(x.clone());
+                        } else if path_prefix_covers(x, y) {
+                            out.insert(y.clone());
+                        }
+                    }
+                }
+                Allowlist::Only(out)
+            }
+        }
+    }
+}
+
+/// Whether the allowlist entry `entry` covers the storage resource
+/// `resource`: they are equal, or `resource` lies beneath `entry` as a
+/// `/`-separated path (`site/jhg` covers `site/jhg/a.txt` and
+/// `site/jhg/sub/b`, but never `site/jhgx/a.txt`).
+///
+/// Degenerate entries cover NOTHING: an empty entry, or one ending in `/`,
+/// would otherwise prefix-match by accident rather than by intent. Together
+/// with the traversal-safety rule on the resource side (see
+/// [`BlockCapabilities::allows_storage_folder`]) this keeps prefix matching a
+/// statement about whole path segments only.
+fn path_prefix_covers(entry: &str, resource: &str) -> bool {
+    if entry.is_empty() || entry.ends_with('/') {
+        return false;
+    }
+    entry == resource
+        || resource
+            .strip_prefix(entry)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Policy for which headers a block may read, write, or which should be masked.
@@ -123,14 +185,48 @@ pub struct BlockCapabilities {
     /// Can use query_raw/exec_raw.
     #[serde(default)]
     pub raw_sql: bool,
-    /// Can issue DDL via `db::ddl()` (CREATE TABLE / INDEX / DROP / etc).
+    /// Can issue RAW DDL via `db::ddl()` (an arbitrary `CREATE TABLE` /
+    /// `CREATE INDEX` / `DROP` statement).
     /// Convention: blocks only DDL their own (`{org}__{block}__*`) tables; this
     /// is enforced by code review + the WRAP-grant audit script, not by parsing
     /// SQL. Default `false` to keep `none()` fully sandboxed; native blocks get
     /// `true` via `unrestricted()`.
+    ///
+    /// Does NOT gate the structured schema ops — see [`Self::schema`].
     #[serde(default)]
     pub ddl: bool,
-    /// Allowed storage folders: `None`/`Any`/`Only([...])` (see [`Allowlist`]).
+    /// Structured schema operations — `database.ensure_table` /
+    /// `database.add_column` / `database.drop_table` — on collections this
+    /// block may access; does NOT grant raw `database.ddl`.
+    ///
+    /// The ops take a validated `TableDef`/`ColumnDef` and the host builds the
+    /// statement, so a block that only needs its own tables created gets this
+    /// instead of the arbitrary-statement channel [`Self::ddl`] opens. They are
+    /// authorized twice: on the table name (so `collections` still scopes
+    /// *which* tables) and on `wrap::SCHEMA_RESOURCE`, which this field maps
+    /// to. Default `false`; native blocks get `true` via `unrestricted()`.
+    #[serde(default)]
+    pub schema: bool,
+    /// Allowed storage folders — or individual object paths:
+    /// `None`/`Any`/`Only([...])` (see [`Allowlist`]).
+    ///
+    /// The storage service authorizes each op on `"{folder}/{key}"` (folder
+    /// ops on the bare folder name), and an `Only` entry admits a resource
+    /// when it is equal to the entry or lies beneath it as a `/`-separated
+    /// path — see [`BlockCapabilities::allows_storage_folder`]. So
+    /// `"uploads"` grants every key in `uploads/`, while `"uploads/logo.png"`
+    /// grants exactly that object.
+    ///
+    /// Two rules keep prefix matching from over-admitting:
+    ///
+    /// - A resource with any EMPTY, `.` or `..` segment is refused outright,
+    ///   whatever the allowlist says. Nothing normalizes the path, so
+    ///   `site/jhg/../other` textually sits under a `site/jhg` grant while
+    ///   naming a sibling folder.
+    /// - An `Only` entry that is empty or ends in `/` matches NOTHING. Both
+    ///   shapes would prefix-match by accident rather than by intent; a
+    ///   folder is named without its trailing separator (`"uploads"`, not
+    ///   `"uploads/"`).
     #[serde(default)]
     pub storage_folders: Allowlist,
     /// Can use crypto service.
@@ -168,6 +264,7 @@ impl BlockCapabilities {
             collections: Allowlist::Any,
             raw_sql: true,
             ddl: true,
+            schema: true,
             storage_folders: Allowlist::Any,
             crypto: true,
             network: Allowlist::Any,
@@ -184,6 +281,7 @@ impl BlockCapabilities {
             collections: Allowlist::None,
             raw_sql: false,
             ddl: false,
+            schema: false,
             storage_folders: Allowlist::None,
             crypto: false,
             network: Allowlist::None,
@@ -200,10 +298,45 @@ impl BlockCapabilities {
         self.collections.allows(collection)
     }
 
-    /// Whether this capability set permits operations on `folder` in the
-    /// storage service (matches `"*"` wildcard or an exact entry).
-    pub fn allows_storage_folder(&self, folder: &str) -> bool {
-        self.storage_folders.allows(folder)
+    /// Whether this capability set permits operations on the storage
+    /// `resource` — `"{folder}/{key}"` for object ops, the bare folder name
+    /// for folder ops.
+    ///
+    /// - A `resource` with any EMPTY, `.` or `..` segment → denied, whatever
+    ///   the allowlist holds (including [`Allowlist::Any`]). Prefix matching
+    ///   is textual and nothing normalizes the path, so `site/jhg/../other`
+    ///   would otherwise pass a `site/jhg` grant while naming a sibling
+    ///   folder. See [`crate::wrap::is_traversal_safe_path`]; the storage
+    ///   handler refuses the same shape one layer earlier with
+    ///   `InvalidArgument`.
+    /// - [`Allowlist::None`] → denied.
+    /// - [`Allowlist::Any`] → allowed.
+    /// - [`Allowlist::Only`] → allowed iff some entry equals `resource` or is
+    ///   a prefix of it terminated by `/`. The separator is required, so
+    ///   `"site/jhg"` admits `"site/jhg/a.txt"` and `"site/jhg/sub/b"` but
+    ///   never `"site/jhgx/a.txt"`. An entry that is empty or ends in `/`
+    ///   matches nothing.
+    ///
+    /// Prefix matching is what makes the field usable as its name says: a
+    /// block that writes several keys declares the folder once instead of
+    /// enumerating every object path (or falling back to
+    /// [`Allowlist::Any`]).
+    pub fn allows_storage_folder(&self, resource: &str) -> bool {
+        // Checked before the allowlist so the refusal holds for `Any` too:
+        // an unnormalized `..` is never a resource anyone legitimately asks
+        // for, and admitting it under `Any` would leave the WRAP
+        // own-namespace rules reasoning about a path that escapes itself.
+        if !crate::wrap::is_traversal_safe_path(resource) {
+            return false;
+        }
+        let allow = match &self.storage_folders {
+            Allowlist::None => return false,
+            Allowlist::Any => return true,
+            Allowlist::Only(set) => set,
+        };
+        allow
+            .iter()
+            .any(|entry| path_prefix_covers(entry, resource))
     }
 
     /// Whether outbound HTTP to `url` is permitted (SEC-06):
@@ -262,9 +395,13 @@ impl BlockCapabilities {
     /// Intersect two capability sets.
     ///
     /// Rules:
-    /// - Booleans (`raw_sql`, `ddl`, `crypto`): logical AND (both must allow).
-    /// - [`Allowlist`] fields (collections, storage_folders, network, config,
-    ///   vector_indexes, callable_blocks): [`Allowlist::intersect`].
+    /// - Booleans (`raw_sql`, `ddl`, `schema`, `crypto`): logical AND (both
+    ///   must allow).
+    /// - [`Allowlist`] fields (collections, network, config, vector_indexes,
+    ///   callable_blocks): [`Allowlist::intersect`].
+    /// - `storage_folders`: [`Allowlist::intersect_path_prefix`] — its entries
+    ///   are path prefixes, so nesting on either side narrows rather than
+    ///   denies.
     /// - HeaderPolicy readable / writable: intersection.
     /// - HeaderPolicy masked: UNION (denylists strengthen).
     pub fn intersect(&self, other: &Self) -> Self {
@@ -272,7 +409,10 @@ impl BlockCapabilities {
             collections: self.collections.intersect(&other.collections),
             raw_sql: self.raw_sql && other.raw_sql,
             ddl: self.ddl && other.ddl,
-            storage_folders: self.storage_folders.intersect(&other.storage_folders),
+            schema: self.schema && other.schema,
+            storage_folders: self
+                .storage_folders
+                .intersect_path_prefix(&other.storage_folders),
             crypto: self.crypto && other.crypto,
             network: self.network.intersect(&other.network),
             config: self.config.intersect(&other.config),
@@ -322,8 +462,9 @@ impl BlockCapabilities {
             }),
             raw_sql: narrow(&self.raw_sql, o.raw_sql.as_ref(), |a, b| *a && *b),
             ddl: narrow(&self.ddl, o.ddl.as_ref(), |a, b| *a && *b),
+            schema: narrow(&self.schema, o.schema.as_ref(), |a, b| *a && *b),
             storage_folders: narrow(&self.storage_folders, o.storage_folders.as_ref(), |a, b| {
-                a.intersect(b)
+                a.intersect_path_prefix(b)
             }),
             crypto: narrow(&self.crypto, o.crypto.as_ref(), |a, b| *a && *b),
             network: narrow(&self.network, o.network.as_ref(), |a, b| a.intersect(b)),
@@ -396,6 +537,9 @@ pub struct ConfigCapabilityOverrides {
     /// Override for [`BlockCapabilities::ddl`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl: Option<bool>,
+    /// Override for [`BlockCapabilities::schema`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<bool>,
     /// Override for [`BlockCapabilities::storage_folders`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_folders: Option<Allowlist>,
@@ -504,6 +648,221 @@ mod tests {
             network: Allowlist::Only(hosts.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         }
+    }
+
+    fn caps_with_storage_folders(items: &[&str]) -> BlockCapabilities {
+        BlockCapabilities {
+            storage_folders: only(items),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn storage_folder_entry_admits_keys_beneath_it() {
+        // The storage handler authorizes on `{folder}/{key}`, so a grant of a
+        // FOLDER has to admit every object path under it — otherwise a block
+        // that writes more than one key can only declare `Any`.
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(c.allows_storage_folder("site/jhg/a.txt"));
+        assert!(c.allows_storage_folder("site/jhg/sub/b"));
+    }
+
+    #[test]
+    fn storage_folder_entry_admits_itself() {
+        // Folder-level ops (list / create_folder / delete_folder) authorize on
+        // the bare folder name, and an entry that names a single object path
+        // must still admit exactly that object.
+        let folder = caps_with_storage_folders(&["site/jhg"]);
+        assert!(folder.allows_storage_folder("site/jhg"));
+        let object = caps_with_storage_folders(&["site/jhg/a.txt"]);
+        assert!(object.allows_storage_folder("site/jhg/a.txt"));
+        assert!(
+            !object.allows_storage_folder("site/jhg/a.txt.bak"),
+            "an object-path entry must not leak to a longer sibling name"
+        );
+    }
+
+    #[test]
+    fn storage_folder_prefix_stops_at_a_separator() {
+        // `site/jhg` must never admit `site/jhgx/...` — the prefix only counts
+        // when the next character is the `/` path separator.
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(!c.allows_storage_folder("site/jhgx/a.txt"));
+        assert!(!c.allows_storage_folder("site/jhg-other"));
+        assert!(!c.allows_storage_folder("other/jhg/a.txt"));
+    }
+
+    #[test]
+    fn storage_folder_any_and_none_are_unchanged() {
+        let open = BlockCapabilities {
+            storage_folders: Allowlist::Any,
+            ..Default::default()
+        };
+        assert!(open.allows_storage_folder("anything/at/all"));
+        let closed = BlockCapabilities {
+            storage_folders: Allowlist::None,
+            ..Default::default()
+        };
+        assert!(!closed.allows_storage_folder("site/jhg/a.txt"));
+        let empty = BlockCapabilities {
+            storage_folders: Allowlist::Only(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert!(!empty.allows_storage_folder("site/jhg/a.txt"));
+    }
+
+    // --- C1: traversal shapes and degenerate entries -----------------------
+
+    /// The C1 exploit: a guest granted the folder `site/jhg` asks for key
+    /// `../../other/secret`, so the handler authorizes on
+    /// `site/jhg/../../other/secret` — textually beneath the grant, but naming
+    /// a folder the guest was never given.
+    #[test]
+    fn storage_folder_refuses_parent_traversal_beneath_a_grant() {
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(!c.allows_storage_folder("site/jhg/../../other/secret"));
+        assert!(!c.allows_storage_folder("site/jhg/../other"));
+        assert!(!c.allows_storage_folder("site/jhg/.."));
+    }
+
+    #[test]
+    fn storage_folder_refuses_dot_and_empty_segments() {
+        let c = caps_with_storage_folders(&["site/jhg"]);
+        assert!(!c.allows_storage_folder("site/jhg/./a.txt"));
+        assert!(!c.allows_storage_folder("site/jhg//a.txt"));
+        assert!(!c.allows_storage_folder("site/jhg/"));
+        assert!(!c.allows_storage_folder(""));
+        // A leading separator is an empty first segment.
+        assert!(!c.allows_storage_folder("/site/jhg/a.txt"));
+    }
+
+    /// The refusal is a property of the RESOURCE, not of the allowlist: an
+    /// unrestricted `Any` must not admit a traversal shape either, so no
+    /// downstream rule (WRAP's own-namespace self-admit) ever reasons about a
+    /// path that escapes itself.
+    #[test]
+    fn storage_folder_refuses_traversal_even_under_any() {
+        let open = BlockCapabilities {
+            storage_folders: Allowlist::Any,
+            ..Default::default()
+        };
+        assert!(open.allows_storage_folder("site/jhg/a.txt"));
+        assert!(!open.allows_storage_folder("site/jhg/../../other/secret"));
+        assert!(!open.allows_storage_folder(""));
+    }
+
+    /// Degenerate `Only` entries match nothing rather than prefix-matching by
+    /// accident.
+    #[test]
+    fn degenerate_storage_folder_entries_match_nothing() {
+        let empty_entry = caps_with_storage_folders(&[""]);
+        assert!(!empty_entry.allows_storage_folder("site/jhg/a.txt"));
+        assert!(!empty_entry.allows_storage_folder("site"));
+
+        let trailing_slash = caps_with_storage_folders(&["site/jhg/"]);
+        assert!(!trailing_slash.allows_storage_folder("site/jhg/a.txt"));
+        assert!(!trailing_slash.allows_storage_folder("site/jhg"));
+
+        // The correctly-spelled entry still works — the rule only refuses the
+        // degenerate spellings.
+        let ok = caps_with_storage_folders(&["site/jhg"]);
+        assert!(ok.allows_storage_folder("site/jhg/a.txt"));
+    }
+
+    // --- M4: prefix-aware narrowing for storage_folders ---------------------
+
+    #[test]
+    fn storage_folder_intersect_keeps_the_narrower_nested_entry() {
+        // Override nested under the declaration: the operator narrowed.
+        let declared = only(&["site"]);
+        let over = only(&["site/jhg"]);
+        assert_eq!(declared.intersect_path_prefix(&over), only(&["site/jhg"]));
+        // Declaration nested under the override: the block is already
+        // narrower and must survive (the operator cannot widen it).
+        assert_eq!(over.intersect_path_prefix(&declared), only(&["site/jhg"]));
+        // A plain set intersection would have denied both cases outright.
+        assert_eq!(declared.intersect(&over), only(&[]));
+    }
+
+    #[test]
+    fn storage_folder_intersect_drops_unrelated_entries() {
+        let declared = only(&["site/jhg", "shared"]);
+        let over = only(&["site/jhg/sub", "other"]);
+        assert_eq!(
+            declared.intersect_path_prefix(&over),
+            only(&["site/jhg/sub"]),
+            "only entries with a covering relationship survive"
+        );
+        // `Any`/`None` behave exactly as for the exact-match intersection.
+        assert_eq!(
+            Allowlist::Any.intersect_path_prefix(&declared),
+            declared.clone()
+        );
+        assert_eq!(
+            Allowlist::None.intersect_path_prefix(&declared),
+            Allowlist::None
+        );
+    }
+
+    /// Narrowing through the capability set (not just the allowlist) uses the
+    /// prefix rule, so the effective set still admits keys under the narrower
+    /// folder.
+    #[test]
+    fn caps_intersect_narrows_storage_folders_by_prefix() {
+        let declared = caps_with_storage_folders(&["site"]);
+        let over = caps_with_storage_folders(&["site/jhg"]);
+        let eff = declared.intersect(&over);
+        assert!(eff.allows_storage_folder("site/jhg/a.txt"));
+        assert!(!eff.allows_storage_folder("site/other/a.txt"));
+    }
+
+    // --- I1: the schema capability is independent of ddl --------------------
+
+    #[test]
+    fn schema_capability_defaults_closed_and_opens_only_with_unrestricted() {
+        assert!(!BlockCapabilities::default().schema);
+        assert!(!BlockCapabilities::none().schema);
+        assert!(BlockCapabilities::unrestricted().schema);
+    }
+
+    #[test]
+    fn schema_and_ddl_narrow_independently() {
+        let declared = BlockCapabilities {
+            schema: true,
+            ddl: false,
+            ..Default::default()
+        };
+        // Intersection is a plain AND per field — `ddl` cannot be borrowed
+        // from `schema` or vice versa.
+        let eff = declared.intersect(&BlockCapabilities::unrestricted());
+        assert!(eff.schema);
+        assert!(!eff.ddl);
+
+        // An operator can drop `schema` while leaving `ddl` alone.
+        let narrowed = declared.apply_config_overrides(&ConfigCapabilityOverrides {
+            schema: Some(false),
+            ..Default::default()
+        });
+        assert!(!narrowed.schema);
+
+        // ...and cannot grant `schema` a block never declared.
+        let widened =
+            BlockCapabilities::none().apply_config_overrides(&ConfigCapabilityOverrides {
+                schema: Some(true),
+                ..Default::default()
+            });
+        assert!(!widened.schema);
+    }
+
+    #[test]
+    fn schema_override_deserializes_from_operator_json() {
+        let o: ConfigCapabilityOverrides =
+            serde_json::from_str(r#"{"schema": false, "ddl": true}"#).unwrap();
+        assert_eq!(o.schema, Some(false));
+        assert_eq!(o.ddl, Some(true));
+        // Omitted stays `None` = "keep whatever the block declared".
+        let o2: ConfigCapabilityOverrides = serde_json::from_str(r#"{"ddl": true}"#).unwrap();
+        assert_eq!(o2.schema, None);
     }
 
     #[test]

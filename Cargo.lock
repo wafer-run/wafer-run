@@ -6381,6 +6381,7 @@ name = "wafer-block-security-headers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "tokio",
  "wafer-block",
  "wafer-block-macro",
 ]
@@ -6470,6 +6471,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -6539,6 +6541,7 @@ dependencies = [
  "getrandom 0.2.17",
  "parking_lot",
  "reqwest",
+ "rmp-serde",
  "serde",
  "serde_json",
  "serial_test",

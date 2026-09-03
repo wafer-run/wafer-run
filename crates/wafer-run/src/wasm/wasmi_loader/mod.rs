@@ -23,9 +23,10 @@ mod imports;
 mod instance;
 mod meta;
 mod pool;
+mod transcode;
 
 use abi::*;
-use codec::{abi_codec_of, verify_abi_version, AbiCodec};
+use codec::{abi_codec_of, verify_abi_version, AbiCodec, HostCodec};
 use imports::*;
 use instance::{apply_fuel, instantiate, ContextScope};
 use meta::*;
@@ -244,6 +245,23 @@ impl WasmiBlock {
     #[cfg(test)]
     pub fn asset_loader_for_test(&self) -> Arc<dyn crate::asset_loader::LoadAssetCallback> {
         self.asset_loader.read().clone()
+    }
+
+    /// Build a fresh store + instance from this block's engine/linker/module,
+    /// exercising the same [`instantiate`] path used at call time. Used by
+    /// tests that need to inspect post-instantiation host state (e.g.
+    /// negotiated [`HostCodec`]) without going through `handle`/`info`.
+    #[cfg(test)]
+    fn instantiate_for_test(
+        &self,
+    ) -> Result<(Store<WasmiHostState>, wasmi::Instance), RuntimeError> {
+        instantiate(
+            &self.engine,
+            &self.linker,
+            &self.module,
+            &self.capabilities.read(),
+            self.limits,
+        )
     }
 
     /// Variant of `Block::handle` that seeds inbound attachments visible to
@@ -730,27 +748,60 @@ impl WasmiBlock {
                         if !forged.is_empty() {
                             self.warn_once_forged_identity(&forged);
                         }
-                        debug!(
-                            block = target,
-                            body_len = body.len(),
-                            attachments = attachments.len(),
-                            "resolving stream_finish from WASM guest"
-                        );
-                        let input = if body.is_empty() {
-                            InputStream::empty()
+                        // A JSON-codec guest writes its request body as JSON;
+                        // the callee's wire DTOs are MessagePack. Transcode at
+                        // the boundary so both sides keep their own codec.
+                        let json = scope.store().data().host_codec == HostCodec::Json;
+                        let body: Result<Vec<u8>, WaferError> = if json && !body.is_empty() {
+                            transcode::json_to_rmp(&body)
                         } else {
-                            InputStream::from_bytes(body)
+                            Ok(body)
                         };
-                        let out = if attachments.is_empty() {
-                            ctx.call_block(&target, msg, input).await
-                        } else {
-                            ctx.call_block_with_attachments(&target, msg, input, attachments)
-                                .await
-                        };
-                        if let Some(state) = scope.store_mut().data_mut().streams.get_mut(handle) {
-                            state.finish_with_stream(out);
+                        match body {
+                            Err(e) => {
+                                // The guest sent a body its declared codec
+                                // cannot carry. Record it so take_error
+                                // explains, and resume with the negative code
+                                // like any other dispatch failure.
+                                let code = e.code;
+                                if let Some(state) =
+                                    scope.store_mut().data_mut().streams.get_mut(handle)
+                                {
+                                    state.record_error_and_close(e);
+                                }
+                                error_code_to_neg_i32(code)
+                            }
+                            Ok(body) => {
+                                debug!(
+                                    block = target,
+                                    body_len = body.len(),
+                                    attachments = attachments.len(),
+                                    "resolving stream_finish from WASM guest"
+                                );
+                                let input = if body.is_empty() {
+                                    InputStream::empty()
+                                } else {
+                                    InputStream::from_bytes(body)
+                                };
+                                let out = if attachments.is_empty() {
+                                    ctx.call_block(&target, msg, input).await
+                                } else {
+                                    ctx.call_block_with_attachments(
+                                        &target,
+                                        msg,
+                                        input,
+                                        attachments,
+                                    )
+                                    .await
+                                };
+                                if let Some(state) =
+                                    scope.store_mut().data_mut().streams.get_mut(handle)
+                                {
+                                    state.finish_with_stream(out);
+                                }
+                                0
+                            }
                         }
-                        0
                     }
                     Some((Err(e), _attachments)) => {
                         let code = e.code;
@@ -769,12 +820,54 @@ impl WasmiBlock {
                 // On end-of-stream: resume with 0. On error: resume with
                 // negative ErrorCode sentinel (the guest can call take_error
                 // for full details).
-                let next = match scope.store_mut().data_mut().streams.get_mut(handle) {
-                    Some(s) => s.next_chunk().await,
-                    None => Err(WaferError::new(
-                        ErrorCode::NotFound,
-                        "unknown stream handle",
-                    )),
+                let json = scope.store().data().host_codec == HostCodec::Json;
+                // `raw_frames` is read AFTER the pull, because the marker that
+                // sets it arrives on the same `next_chunk` call that yields the
+                // first raw frame (Meta events are skipped as data).
+                let (next, raw_frames) = match scope.store_mut().data_mut().streams.get_mut(handle)
+                {
+                    Some(s) => {
+                        let next = s.next_chunk().await;
+                        (next, s.raw_frames())
+                    }
+                    None => (
+                        Err(WaferError::new(
+                            ErrorCode::NotFound,
+                            "unknown stream handle",
+                        )),
+                        false,
+                    ),
+                };
+                // The callee answers in MessagePack; a JSON-codec guest can
+                // only read JSON. Transcode each frame at the boundary, with
+                // two exclusions:
+                //  - an *empty* frame carries no value to transcode
+                //    (`ok_empty()` sends `Chunk(vec![])`), so it passes through
+                //    untouched rather than failing as malformed MessagePack;
+                //  - a frame the producer marked raw
+                //    (`wafer_block::stream::FRAME_ENCODING_META`) is
+                //    application bytes, not a wire DTO — `storage.get`'s object
+                //    body, `network.do`'s response body — and is forwarded
+                //    verbatim. The typed header frame ahead of the marker is
+                //    still transcoded.
+                let next = match next {
+                    Ok(Some(bytes)) if json && !bytes.is_empty() && !raw_frames => {
+                        match transcode::rmp_to_json(&bytes) {
+                            Ok(b) => Ok(Some(b)),
+                            Err(e) => {
+                                // A frame the callee wrote is not a wire DTO.
+                                // Fail the stream rather than hand the guest
+                                // bytes it cannot read.
+                                if let Some(s) =
+                                    scope.store_mut().data_mut().streams.get_mut(handle)
+                                {
+                                    s.record_error_and_close(e.clone());
+                                }
+                                Err(e)
+                            }
+                        }
+                    }
+                    other => other,
                 };
 
                 let resume_packed: i64 = match next {
@@ -812,11 +905,20 @@ impl WasmiBlock {
 
                 let resume_packed: i64 = match err_opt {
                     Some(err) => {
-                        let bytes = wafer_block::codec::encode(&err).map_err(|e| {
-                            RuntimeError::Wasm(format!(
-                                "encoding WaferError for stream_take_error: {e}"
-                            ))
-                        })?;
+                        // Encode in whichever codec the guest negotiated —
+                        // an error it cannot decode is no error at all.
+                        let bytes = match scope.store().data().host_codec {
+                            HostCodec::Rmp => wafer_block::codec::encode(&err).map_err(|e| {
+                                RuntimeError::Wasm(format!(
+                                    "encoding WaferError for stream_take_error: {e}"
+                                ))
+                            })?,
+                            HostCodec::Json => serde_json::to_vec(&err).map_err(|e| {
+                                RuntimeError::Wasm(format!(
+                                    "encoding WaferError as JSON for stream_take_error: {e}"
+                                ))
+                            })?,
+                        };
                         let alloc_fn = instance
                             .get_typed_func::<i32, i32>(scope.store(), "__wafer_alloc")
                             .map_err(|e| {
@@ -1178,5 +1280,354 @@ mod capabilities_update_tests {
         info_fn
             .call(&mut store, ())
             .expect("calling a guest fn that uses sched_yield should succeed");
+    }
+
+    #[test]
+    fn host_codec_defaults_to_rmp_without_the_export() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Rmp);
+    }
+
+    #[test]
+    fn host_codec_json_is_negotiated_by_export() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 1)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+    }
+
+    /// Codec negotiation CALLS a guest export, so it spends fuel from the
+    /// budget the loader just set. The store must be refilled afterwards —
+    /// otherwise the first real dispatch starts short by however much the
+    /// guest's `__wafer_host_codec` happened to burn (an unbounded amount:
+    /// the guest chooses the body).
+    #[test]
+    fn fuel_is_refilled_after_codec_negotiation() {
+        // `__wafer_host_codec` burns a visible amount of fuel before
+        // answering, so a missing refill is measurable rather than a
+        // one-instruction rounding difference.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32)
+                (local $n i32)
+                (local.set $n (i32.const 100000))
+                (block $done
+                    (loop $l
+                        (br_if $done (i32.eqz (local.get $n)))
+                        (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                        (br $l)))
+                (i32.const 1))
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let (store, _inst) = block.instantiate_for_test().unwrap();
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+        assert_eq!(
+            store.get_fuel().expect("the default limits are metered"),
+            crate::runtime::wasm_state::DEFAULT_FUEL,
+            "the first guest call must start from a full fuel budget"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Host-call codec: attachments stay rmp-only
+    // -----------------------------------------------------------------------
+
+    /// The payload the attach probe hands to `__wafer_host_stream_attach`: a
+    /// well-formed rmp `(id, Attachment)` tuple, so the only thing that can
+    /// make the attach fail is the codec refusal itself.
+    fn attach_probe_payload() -> Vec<u8> {
+        wafer_block::codec::encode(&(
+            "a".to_string(),
+            wafer_block::Attachment {
+                mime: "text/plain".to_string(),
+                bytes: b"hi".to_vec(),
+                filename: None,
+            },
+        ))
+        .expect("encoding the attach payload")
+    }
+
+    /// A guest that opens a stream and immediately attaches to it, storing the
+    /// attach status code at linear-memory offset 64. `__wafer_handle`'s two
+    /// params carry the (ptr, len) of the attach payload the host wrote into
+    /// guest memory, so the same WAT serves both codecs.
+    fn attach_probe_module(host_codec_export: &str) -> Vec<u8> {
+        let wat = format!(
+            r#"(module
+            (import "wafer" "__wafer_host_stream_init"
+                (func $init (param i32 i32 i32 i32) (result i64)))
+            (import "wafer" "__wafer_host_stream_attach"
+                (func $attach (param i64 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "wafer-run/config")
+            (data (i32.const 32) "{{\"kind\":\"config.get\",\"meta\":[]}}")
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            {host_codec_export}
+            (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (local $h i64)
+                (local.set $h
+                    (call $init (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 31)))
+                (i32.store (i32.const 64)
+                    (call $attach (local.get $h) (local.get 0) (local.get 1)))
+                i64.const 0)
+        )"#
+        );
+        wat::parse_str(&wat).expect("WAT should parse")
+    }
+
+    /// Run the attach probe and return the status code the guest observed.
+    fn run_attach_probe(wasm: &[u8]) -> i32 {
+        let block = WasmiBlock::load_from_bytes(wasm).expect("probe module should load");
+        let (mut store, instance) = block
+            .instantiate_for_test()
+            .expect("probe module should instantiate");
+        let memory = instance
+            .get_memory(&store, "memory")
+            .expect("probe module exports memory");
+        let payload = attach_probe_payload();
+        memory
+            .write(&mut store, 128, &payload)
+            .expect("writing the attach payload into guest memory");
+        let handle_fn = instance
+            .get_typed_func::<(i32, i32), i64>(&store, "__wafer_handle")
+            .expect("__wafer_handle export");
+        handle_fn
+            .call(&mut store, (128, payload.len() as i32))
+            .expect("the probe never traps");
+        let mut status = [0u8; 4];
+        memory
+            .read(&store, 64, &mut status)
+            .expect("reading the attach status back");
+        i32::from_le_bytes(status)
+    }
+
+    #[test]
+    fn json_guest_attach_is_refused() {
+        // A JSON-codec guest has no MessagePack encoder, so an attach payload
+        // could only be mis-decoded: the host refuses instead.
+        assert_eq!(
+            run_attach_probe(&attach_probe_module(
+                r#"(func (export "__wafer_host_codec") (result i32) i32.const 1)"#
+            )),
+            error_code_to_neg_i32(ErrorCode::InvalidArgument),
+            "a JSON-codec guest must be refused"
+        );
+        // The same module without the export negotiates rmp — attach works.
+        assert_eq!(
+            run_attach_probe(&attach_probe_module("")),
+            0,
+            "an rmp guest must be unaffected"
+        );
+    }
+
+    /// A guest that looks up the inbound attachment `"a"` and stores the packed
+    /// `i64` the host returned at linear-memory offset 64.
+    fn lookup_probe_module(host_codec_export: &str) -> Vec<u8> {
+        let wat = format!(
+            r#"(module
+            (import "wafer" "__wafer_host_lookup_attachment"
+                (func $lookup (param i32 i32) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "a")
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            {host_codec_export}
+            (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (i64.store (i32.const 64)
+                    (call $lookup (i32.const 0) (i32.const 1)))
+                i64.const 0)
+        )"#
+        );
+        wat::parse_str(&wat).expect("WAT should parse")
+    }
+
+    #[test]
+    fn json_guest_lookup_attachment_is_refused() {
+        let att = wafer_block::Attachment {
+            mime: "text/plain".to_string(),
+            bytes: b"hi".to_vec(),
+            filename: None,
+        };
+
+        let run = |wasm: &[u8]| -> i64 {
+            let block = WasmiBlock::load_from_bytes(wasm).expect("probe module should load");
+            let (mut store, instance) = block
+                .instantiate_for_test()
+                .expect("probe module should instantiate");
+            // Seed the call frame the way the runtime does before __wafer_handle.
+            store.data_mut().current_attachments = Some(
+                [("a".to_string(), att.clone())]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            );
+            let memory = instance
+                .get_memory(&store, "memory")
+                .expect("probe module exports memory");
+            instance
+                .get_typed_func::<(i32, i32), i64>(&store, "__wafer_handle")
+                .expect("__wafer_handle export")
+                .call(&mut store, (0, 0))
+                .expect("the probe never traps");
+            let mut packed = [0u8; 8];
+            memory
+                .read(&store, 64, &mut packed)
+                .expect("reading the lookup result back");
+            i64::from_le_bytes(packed)
+        };
+
+        // Attachments are rmp-only: a JSON guest is refused even though the
+        // attachment is present.
+        assert_eq!(
+            run(&lookup_probe_module(
+                r#"(func (export "__wafer_host_codec") (result i32) i32.const 1)"#
+            )),
+            error_code_to_neg_i64(ErrorCode::InvalidArgument),
+            "a JSON-codec guest must be refused"
+        );
+        // The same module without the export negotiates rmp and gets the
+        // attachment, rmp-encoded, at the packed (ptr, len).
+        let packed = run(&lookup_probe_module(""));
+        assert!(packed > 0, "an rmp guest must get a packed pointer");
+        assert_eq!(
+            unpack_ptr_len(packed).expect("packed pointer").1 as usize,
+            wafer_block::codec::encode(&att).unwrap().len(),
+            "an rmp guest must get the whole encoded Attachment"
+        );
+    }
+
+    /// Context whose `call_block` answers with an empty 200 — `ok_empty()`
+    /// sends `StreamEvent::Chunk(vec![])`, the frame the read arm must pass
+    /// through instead of transcoding.
+    #[derive(Clone)]
+    struct EmptyResponseContext;
+
+    #[wafer_async_trait]
+    impl Context for EmptyResponseContext {
+        async fn call_block(
+            &self,
+            _name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            wafer_block::response::ok_empty()
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
+        }
+    }
+
+    /// An empty response frame must reach a JSON-codec guest as an empty frame,
+    /// not as an `InvalidArgument` that kills the stream. Zero bytes are not
+    /// malformed MessagePack — they are a successful empty body.
+    #[tokio::test]
+    async fn json_guest_reads_an_empty_response_frame() {
+        let wat = r#"(module
+            (import "wafer" "__wafer_host_stream_init"
+                (func $init (param i32 i32 i32 i32) (result i64)))
+            (import "wafer" "__wafer_host_stream_finish" (func $finish (param i64) (result i32)))
+            (import "wafer" "__wafer_host_stream_read_chunk" (func $read (param i64) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "wafer-run/config")
+            (data (i32.const 32) "{\"kind\":\"config.get\",\"meta\":[]}")
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 1)
+            (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (local $h i64)
+                (local.set $h
+                    (call $init (i32.const 0) (i32.const 16) (i32.const 32) (i32.const 31)))
+                (i32.store (i32.const 64) (call $finish (local.get $h)))
+                (i64.store (i32.const 72) (call $read (local.get $h)))
+                i64.const 0)
+        )"#;
+        let wasm = wat::parse_str(wat).expect("WAT should parse");
+        let block = WasmiBlock::load_from_bytes(&wasm).expect("probe module should load");
+        let (mut store, instance) = block
+            .instantiate_for_test()
+            .expect("probe module should instantiate");
+        assert_eq!(store.data().host_codec, HostCodec::Json);
+
+        // Drive the resume loop directly so the store — and with it the guest's
+        // record of what the host returned — survives the call.
+        block
+            .run_guest_call(
+                &mut store,
+                instance,
+                &EmptyResponseContext,
+                None,
+                Vec::new(),
+                |store, instance| {
+                    let f = instance
+                        .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")
+                        .map_err(|e| RuntimeError::Wasm(format!("getting __wafer_handle: {e}")))?;
+                    Ok((f, 0, 0))
+                },
+            )
+            .await
+            .expect("the guest call completes");
+
+        let memory = instance
+            .get_memory(&store, "memory")
+            .expect("probe module exports memory");
+        let mut finish = [0u8; 4];
+        memory.read(&store, 64, &mut finish).expect("finish status");
+        assert_eq!(i32::from_le_bytes(finish), 0, "stream_finish must succeed");
+
+        let mut read = [0u8; 8];
+        memory.read(&store, 72, &mut read).expect("read status");
+        let packed = i64::from_le_bytes(read);
+        assert!(
+            packed >= 0,
+            "an empty response frame must not fail the read (got {packed})"
+        );
+        assert_eq!(
+            unpack_ptr_len(packed).expect("packed pointer").1,
+            0,
+            "the empty frame must arrive empty"
+        );
+    }
+
+    #[test]
+    fn host_codec_unknown_value_fails_instantiation() {
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "__wafer_host_codec") (result i32) i32.const 7)
+        )"#;
+        let wasm = wat::parse_str(wat).unwrap();
+        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let err = block.instantiate_for_test().err().expect("must refuse");
+        assert!(err.to_string().contains("__wafer_host_codec"), "{err}");
     }
 }

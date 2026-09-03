@@ -219,6 +219,22 @@ async fn expect_permission_denied(out: OutputStream) -> WaferError {
     }
 }
 
+async fn expect_invalid_argument(out: OutputStream) -> WaferError {
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => {
+            assert_eq!(
+                e.code,
+                ErrorCode::InvalidArgument,
+                "expected INVALID_ARGUMENT, got {:?}: {}",
+                e.code,
+                e.message
+            );
+            e
+        }
+        other => panic!("expected an InvalidArgument error terminal, got {other:?}"),
+    }
+}
+
 async fn expect_success(out: OutputStream) {
     if let Err(TerminalNotResponse::Error(e)) = out.collect_buffered().await {
         panic!("expected success, got error {:?}: {}", e.code, e.message);
@@ -414,4 +430,182 @@ async fn granted_ctx_allows_put_get_and_list() {
         vec!["put", "get", "list"],
         "every op should have reached the service exactly once, in order"
     );
+}
+
+// ---------------------------------------------------------------------------
+// C1 — path traversal. `{folder}/{key}` is matched by PREFIX and never
+// normalized, so a `..` segment must be refused as a malformed request before
+// authorization runs at all: under an ALLOWING ctx (the shape a real grant
+// produces) the op must still fail, and the service must never see it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_with_parent_traversal_key_is_invalid_argument() {
+    let calls = new_calls();
+    let svc = storage_fakes::RecordingStorage::new(calls.clone());
+    let req = wire::storage::GetRequest {
+        folder: "site/jhg".into(),
+        // Composes to `site/jhg/../x` — textually beneath the folder grant.
+        key: "../x".into(),
+    };
+    let body = codec::encode(&req).unwrap();
+    let msg = msg_without_wrap_meta(ServiceOp::STORAGE_GET);
+
+    let out =
+        wafer_core::interfaces::storage::handler::handle_message(&svc, &AllowCtx, &msg, &body)
+            .await;
+    let err = expect_invalid_argument(out).await;
+    assert!(
+        err.message.contains("storage.get") && err.message.contains("key"),
+        "the refusal must name the op and the offending component, got: {}",
+        err.message
+    );
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a traversal key must never reach the service; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn traversal_is_refused_for_every_folder_and_key_op() {
+    // Every op that takes a folder/key pair, plus the folder-only ops. Each
+    // runs under the ALLOWING ctx, so an InvalidArgument here can only come
+    // from the path validation.
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            ServiceOp::STORAGE_PUT,
+            codec::encode(&wire::storage::PutRequest {
+                folder: "site/jhg".into(),
+                key: "../evil.png".into(),
+                data: vec![1],
+                content_type: "image/png".into(),
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::STORAGE_GET_STREAMING,
+            codec::encode(&wire::storage::GetRequest {
+                folder: "site/jhg".into(),
+                key: "../secret".into(),
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::STORAGE_DELETE,
+            codec::encode(&wire::storage::DeleteRequest {
+                folder: "site/jhg".into(),
+                key: "..".into(),
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::STORAGE_LIST,
+            codec::encode(&wire::storage::ListRequest {
+                folder: "site/jhg/../other".into(),
+                prefix: String::new(),
+                limit: 10,
+                offset: 0,
+                cursor: None,
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::STORAGE_CREATE_FOLDER,
+            codec::encode(&wire::storage::CreateFolderRequest {
+                name: "site/../other".into(),
+                public: false,
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::STORAGE_DELETE_FOLDER,
+            codec::encode(&wire::storage::DeleteFolderRequest {
+                name: "site/jhg/..".into(),
+            })
+            .unwrap(),
+        ),
+        // An empty component is the same class of malformed path.
+        (
+            ServiceOp::STORAGE_GET,
+            codec::encode(&wire::storage::GetRequest {
+                folder: "site/jhg".into(),
+                key: String::new(),
+            })
+            .unwrap(),
+        ),
+    ];
+
+    for (op, body) in cases {
+        let calls = new_calls();
+        let svc = storage_fakes::RecordingStorage::new(calls.clone());
+        let out = wafer_core::interfaces::storage::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            &msg_without_wrap_meta(op),
+            &body,
+        )
+        .await;
+        expect_invalid_argument(out).await;
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "{op} must not reach the service on a traversal path; calls = {:?}",
+            calls.lock().unwrap()
+        );
+    }
+}
+
+/// The streaming upload authorizes off a header FRAME rather than a request
+/// body, so it needs its own proof that the same validation runs before any
+/// body frame is consumed.
+#[tokio::test]
+async fn put_streaming_with_traversal_key_is_invalid_argument() {
+    let calls = new_calls();
+    let svc = storage_fakes::RecordingStorage::new(calls.clone());
+    let header = codec::encode(&wire::storage::PutStreamingHeader {
+        folder: "site/jhg".into(),
+        key: "../../other/secret".into(),
+        content_type: "text/plain".into(),
+    })
+    .unwrap();
+    let input = InputStream::from_stream(futures::stream::iter(vec![header, b"body".to_vec()]));
+
+    let out = wafer_core::interfaces::storage::handler::handle_put_streaming(
+        &svc,
+        &AllowCtx,
+        &msg_without_wrap_meta(ServiceOp::STORAGE_PUT_STREAMING),
+        input,
+    )
+    .await;
+    expect_invalid_argument(out).await;
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a traversal key must never reach put_streaming; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+/// The legitimate shape still works: an ordinary nested key under an allowing
+/// ctx reaches the service untouched.
+#[tokio::test]
+async fn nested_keys_without_traversal_still_reach_the_service() {
+    let calls = new_calls();
+    let svc = storage_fakes::RecordingStorage::new(calls.clone());
+    let body = codec::encode(&wire::storage::GetRequest {
+        folder: "site/jhg".into(),
+        key: "sub/dir/a.txt".into(),
+    })
+    .unwrap();
+    expect_success(
+        wafer_core::interfaces::storage::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            &msg_without_wrap_meta(ServiceOp::STORAGE_GET),
+            &body,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec!["get"]);
 }

@@ -105,10 +105,10 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "depen
 /// Inlining copies a definition in full at every place it is referenced, so a
 /// finite, acyclic type whose definitions each reference the next one twice
 /// doubles the output per level: 22 such levels turn a 2 KB schema into
-/// 247 MB. Nothing about that schema is malformed — it is neither recursive
-/// nor missing a definition — so neither of the other two refusals describes
-/// it, and with no size bound the generator runs until it exhausts memory
-/// while the manifest request hangs.
+/// 247 MB. Nothing about that schema is malformed — every reference resolves
+/// and no reference closes a cycle — so the unresolved-reference verdict does
+/// not describe it, and with no size bound the generator runs until it
+/// exhausts memory while the manifest request hangs.
 ///
 /// 100 000 is picked to be unreachable by a real type tree and unmissable by
 /// a runaway one. An inlined property costs roughly three to six nodes (its
@@ -118,6 +118,25 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "depen
 /// declares and past what an MCP client would accept in a manifest. The
 /// doubling case crosses it before level twenty, in milliseconds, long
 /// before any memory is at risk.
+///
+/// # What the budget bounds, exactly
+///
+/// It bounds the nodes the *walk emits*, which is not quite the size of the
+/// returned document. [`inline_refs`] keeps a cyclic definition by cloning
+/// the body its frame already produced, so a kept definition's nodes are
+/// charged once (when they were walked) and appear twice (in the output tree
+/// and in the `$defs` table). With `d` definitions kept — `d` is the number
+/// of *distinct* definitions some back-edge names, one for almost every real
+/// recursive type — the returned document holds at most `(d + 1) ×
+/// MAX_INLINED_NODES` nodes.
+///
+/// The clone is deliberately not charged. Charging it would push a
+/// legitimately-sized recursive schema over a budget that exists for runaway
+/// *expansion*, and there is no runaway here: `d` is bounded by the number of
+/// definitions the source declares, and each kept body is a subtree of output
+/// the walk already paid for. A factor of `d + 1` on a bound chosen to be
+/// orders of magnitude larger than any real schema is not the failure this
+/// constant guards against.
 const MAX_INLINED_NODES: usize = 100_000;
 
 /// Decode a `#/$defs/` pointer segment back into the key it names in the
@@ -147,6 +166,33 @@ fn decode_ref_name(encoded: &str) -> Option<String> {
     Some(decoded.replace("~1", "/").replace("~0", "~"))
 }
 
+/// The bytes a `#/$defs/` pointer segment may carry unencoded: the RFC 3986
+/// unreserved set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Everything else
+/// is percent-encoded, including every non-ASCII byte —
+/// `percent_encoding` escapes those regardless of the set.
+const REF_NAME_ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Encode a `$defs` key into the pointer segment that names it — the exact
+/// inverse of [`decode_ref_name`], and the encoding schemars itself writes.
+///
+/// Used for the back-edges [`inline_refs`] emits for a cycle. The `$defs`
+/// keys it writes are the *unencoded* names, exactly as schemars leaves them,
+/// so a definition named `Product Status` is keyed `Product Status` and
+/// referred to as `#/$defs/Product%20Status`.
+///
+/// Order is load-bearing and mirrors the decoder's. JSON-Pointer escaping
+/// comes first (`~` → `~0`, then `/` → `~1`, in that order, so the `~` that
+/// `~1` introduces is not escaped a second time), then percent-encoding —
+/// which leaves the escapes alone, since `~`, `0` and `1` are all unreserved.
+fn encode_ref_name(name: &str) -> String {
+    let escaped = name.replace('~', "~0").replace('/', "~1");
+    percent_encoding::utf8_percent_encode(&escaped, REF_NAME_ESCAPE).to_string()
+}
+
 /// Count the JSON nodes in a value.
 ///
 /// Used to charge a verbatim-copied literal ([`LITERAL_VALUE_KEYWORDS`]) to
@@ -162,55 +208,135 @@ fn count_nodes(value: &Value) -> usize {
     }
 }
 
-/// Rewrite a schemars-generated schema into a self-contained one: every
-/// `#/$defs/*` reference is replaced by its target, and the `$defs` block is
-/// removed.
+/// Rewrite a schemars-generated schema into a *self-contained* one: every
+/// `#/$defs/*` reference is replaced by its target, and the incoming `$defs`
+/// block is dropped.
 ///
 /// OpenAPI clients resolve `$ref` fine, which is why `generate_openapi` does
 /// not do this. Many MCP-style clients do not, so the WebMCP projection must
 /// hand over schemas that stand alone.
 ///
+/// # Self-contained is not reference-free
+///
+/// A recursive type — a `Condition` that nests `Condition`s, a
+/// `struct Node { children: Vec<Node> }` — has no finite inlining, and for a
+/// long time this function said so and the endpoint was refused. That threw
+/// away a legal, describable schema: JSON Schema 2020-12 expresses recursion
+/// with a reference to a definition the *same document* carries, which is
+/// self-contained in the only sense that matters here — a client needs
+/// nothing but the document it was handed to resolve it.
+///
+/// So the cycle is not cut; it is rebased. The first reference to a
+/// definition is still inlined in full, and only the reference that closes
+/// the cycle becomes a `$ref` back to that definition, which the output then
+/// carries under its own `$defs`. Exactly the definitions some back-edge
+/// names are kept — every other one is inlined and named by nothing.
+/// schemars' root-recursion marker `{"$ref": "#"}` is rebased the same way,
+/// onto a definition named after the document's `title` (see
+/// [`root_definition_name`]), because a bare `#` would point at whatever
+/// document the schema is later embedded in — the merged `inputSchema`,
+/// which is a different document.
+///
 /// Returns the rewritten schema together with the ways the rewrite could not
-/// be done honestly — see [`RefIssues`]. All three leave `{}` behind: an
+/// be done honestly — see [`RefIssues`]. Both leave `{}` behind: an
 /// unconstrained schema standing where the server requires a concrete type.
 /// At the top level that shows up as a missing `properties` object and is
-/// caught by the `unrepresentable` check, but below the top level —
-/// `properties.children.items` for a `struct Node { children: Vec<Node> }` —
-/// nothing else would notice. So the report travels out of here and callers
-/// refuse to build a tool from a schema that sets any of them.
+/// caught by the `unrepresentable` check, but below the top level nothing
+/// else would notice. So the report travels out of here and callers refuse
+/// to build a tool from a schema that sets either of them.
 fn inline_refs(schema: &Value) -> (Value, RefIssues) {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
+    let root_name = root_definition_name(schema, &defs);
     let mut walk = RefWalk {
         defs: &defs,
         active: Vec::new(),
         issues: RefIssues::default(),
         emitted: 0,
+        kept: std::collections::BTreeMap::new(),
+        cyclic: std::collections::BTreeSet::new(),
+        root_name: root_name.clone(),
+        root_recursive: false,
     };
-    let resolved = walk.resolve(schema);
-    (resolved, walk.issues)
+    let mut resolved = walk.resolve(schema);
+    let mut issues = walk.issues;
+    let mut kept = walk.kept;
+
+    // The root's definition *is* the finished document, so it can only be
+    // taken once the walk is over — and with the table this is about to add
+    // stripped back off, because a kept definition never nests one. (`resolve`
+    // has already dropped the incoming table, so the removal only guards the
+    // invariant rather than doing work.)
+    if walk.root_recursive {
+        let mut body = resolved.clone();
+        if let Some(map) = body.as_object_mut() {
+            map.remove("$defs");
+        }
+        kept.insert(root_name, body);
+    }
+
+    if !kept.is_empty() {
+        match resolved.as_object_mut() {
+            Some(map) => {
+                map.insert("$defs".into(), Value::Object(kept.into_iter().collect()));
+            }
+            // Only a hand-written source reaches this: a document whose root
+            // is not a schema object at all — a bare JSON array — that still
+            // reached a cycle through one of its members. There is nowhere to
+            // put the table, so the back-edges would dangle. Saying so is the
+            // same verdict a `$ref` with no referent gets, and for the same
+            // reason. (Such a source cannot be published anyway: it is not
+            // object-shaped, so `source_is_flattenable` refuses it.)
+            None => issues.unresolved = true,
+        }
+    }
+
+    (resolved, issues)
 }
 
-/// The three distinct ways [`inline_refs`] can fail to produce a
+/// The name a document's root is published under when it references itself.
+///
+/// schemars closes a cycle on the *root* type with the marker
+/// `{"$ref": "#"}` and puts nothing in `$defs` for it, so the retained form
+/// has to name it something. The root's `title` is that name — on a derived
+/// schema it is the source Rust type's name, which is precisely what the
+/// definition is — and `Root` stands in when there is no title.
+///
+/// The name must not be one the incoming `$defs` table already uses, or the
+/// kept table would have to hold two different bodies under one key and half
+/// the back-edges would resolve to the wrong one. A trailing `_` is appended
+/// until the name is free. That only ever fires for a hand-written schema:
+/// schemars never puts the root type it is inlining into its own `$defs`.
+fn root_definition_name(schema: &Value, defs: &Value) -> String {
+    let mut name = schema
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Root")
+        .to_string();
+    while defs.get(name.as_str()).is_some() {
+        name.push('_');
+    }
+    name
+}
+
+/// The two distinct ways [`inline_refs`] can fail to produce a
 /// self-contained schema. They are reported separately because the fix is
 /// different and the author is sent to a different place: a dangling
-/// reference means a missing or misspelled `$defs` entry, a cycle means the
-/// type genuinely has no finite inlining and the endpoint needs a different
-/// shape, and an over-budget expansion means a well-formed type whose
-/// definitions multiply out. Collapsing any two into one flag — as a depth
-/// cap did — sends the author of a recursive type hunting for a `$defs`
-/// entry that is not missing.
+/// reference means a missing or misspelled `$defs` entry, and an
+/// over-budget expansion means a well-formed type whose definitions
+/// multiply out. Collapsing the two into one flag — as a depth cap did —
+/// sends the author of a large type hunting for a `$defs` entry that is not
+/// missing.
+///
+/// A cycle is not on this list. It used to be, on the reasoning that a
+/// recursive type has no finite inlining; it does have a finite
+/// *self-contained* form, and [`inline_refs`] now emits it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RefIssues {
     /// A `$ref` named a target that does not exist, or took a form this
     /// function cannot follow (anything but `#/$defs/*`, including an
     /// external URL).
     unresolved: bool,
-    /// A `$ref` cycle: a chain of references that reaches a definition
-    /// already open on the current path, or schemars' root-recursion marker
-    /// `{"$ref": "#"}`. A self-referential type (a `Condition` containing
-    /// child `Condition`s) is legitimate and has no finite inlining, so the
-    /// cycle is cut and reported rather than expanded.
-    recursive: bool,
     /// The inlining passed [`MAX_INLINED_NODES`], so the walk stopped and
     /// the rest of the schema is missing. Not a defect in any one reference:
     /// the type is finite and every reference resolves, but definitions
@@ -234,6 +360,23 @@ struct RefWalk<'a> {
     issues: RefIssues,
     /// JSON nodes emitted so far, charged against [`MAX_INLINED_NODES`].
     emitted: usize,
+    /// Definitions that closed a cycle and are therefore kept under the
+    /// output's `$defs` instead of inlined. Filled when a frame that is
+    /// `active` is referenced again; the body is stored when that frame
+    /// finishes resolving.
+    kept: std::collections::BTreeMap<String, Value>,
+    /// Names whose bodies must be captured when their frame completes.
+    ///
+    /// Separate from `kept` because the two are known at different moments:
+    /// a cycle is discovered at the back-edge, deep inside the frame, and
+    /// the body only exists once that frame unwinds.
+    cyclic: std::collections::BTreeSet<String>,
+    /// The name the document root is known by when it references itself —
+    /// see [`root_definition_name`].
+    root_name: String,
+    /// Whether the root-recursion marker `{"$ref": "#"}` was seen, and so
+    /// whether `root_name` names a definition the output has to carry.
+    root_recursive: bool,
 }
 
 impl RefWalk<'_> {
@@ -253,14 +396,18 @@ impl RefWalk<'_> {
     }
 
     /// Resolve one `$ref` target, tracking the chain of definitions currently
-    /// being expanded so a cycle is cut where it closes rather than after an
-    /// arbitrary number of hops.
+    /// being expanded so a cycle is rebased where it closes rather than after
+    /// an arbitrary number of hops.
     fn resolve_ref_target(&mut self, reference: &str) -> Value {
         // schemars' root-recursion marker: the document root contains
-        // itself, so there is no finite inlining of it.
+        // itself. There is no finite inlining of that, but there is a finite
+        // self-contained document — the root under a name of its own, with
+        // the marker pointing at it. A bare `#` cannot survive into the
+        // output: the schema is embedded in a larger document downstream, and
+        // `#` would then name that document instead.
         if reference == "#" {
-            self.issues.recursive = true;
-            return json!({});
+            self.root_recursive = true;
+            return json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&self.root_name)) });
         }
 
         let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) else {
@@ -272,14 +419,25 @@ impl RefWalk<'_> {
             return json!({});
         };
         if self.active.contains(&name) {
-            self.issues.recursive = true;
-            return json!({});
+            // The cycle closes here. Point back at the definition instead of
+            // expanding it a second time, and mark it so the frame that owns
+            // it leaves a body behind for this reference to resolve against.
+            let back_edge = json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&name)) });
+            self.cyclic.insert(name);
+            return back_edge;
         }
 
         let target = target.clone();
-        self.active.push(name);
+        self.active.push(name.clone());
         let resolved = self.resolve(&target);
         self.active.pop();
+        // Only a definition something referred *back* to is kept. A
+        // definition that merely appears twice in a finite tree is inlined at
+        // both sites and named by nothing, so putting it in the table would
+        // ship a definition no reference resolves against.
+        if self.cyclic.contains(&name) {
+            self.kept.entry(name).or_insert_with(|| resolved.clone());
+        }
         resolved
     }
 
@@ -405,8 +563,10 @@ struct MergedSource {
     /// Inlining hit a `$ref` it could not resolve, at any depth — see
     /// [`inline_refs`].
     unresolved_ref: bool,
-    /// Inlining hit a `$ref` cycle, at any depth — see [`inline_refs`].
-    recursive_ref: bool,
+    /// Definitions this source kept (see [`inline_refs`]) whose name is
+    /// already in the merged table with a *different* body. One flat schema
+    /// has one `$defs` table, so the two cannot both be described by it.
+    colliding_defs: Vec<String>,
     /// Inlining ran past [`MAX_INLINED_NODES`] and stopped, so the schema
     /// below is truncated — see [`inline_refs`].
     oversized: bool,
@@ -427,8 +587,18 @@ struct MergedSource {
 ///
 /// The structural entries — `type`, `properties`, `required` — are what the
 /// merge reads, plus `additionalProperties`, handled explicitly in
-/// [`source_is_flattenable`]. The rest are pure annotations with no effect
-/// on validation:
+/// [`source_is_flattenable`], and `$defs`, which is neither structure nor
+/// annotation:
+///
+/// * `$defs` — the definitions [`inline_refs`] kept because a cycle closes
+///   on them. Dropping it would strand every back-edge in `properties` on a
+///   pointer with no referent, which is exactly the unconstrained-`{}` lie
+///   the rest of this wall exists to prevent. So it is neither dropped nor
+///   carried in place: [`merge_schema_source`] *hoists* it into the one
+///   `$defs` table the merged schema has, since the three sources are being
+///   folded into a single document.
+///
+/// The rest are pure annotations with no effect on validation:
 ///
 /// * `title` — on a derived schema this is the *Rust type name* of the
 ///   source struct (or the author's `#[schemars(title = "...")]`). It names
@@ -445,6 +615,7 @@ const FLATTENABLE_KEYWORDS: &[&str] = &[
     "properties",
     "required",
     "additionalProperties",
+    "$defs",
     "title",
     "description",
     "$comment",
@@ -492,8 +663,8 @@ fn schema_is_object_shaped(map: &serde_json::Map<String, Value>) -> bool {
 ///   entry inside those branches is missing from `inputSchema`. The agent
 ///   400s forever. `allOf`, `anyOf`, `if`/`then`, `not`,
 ///   `patternProperties`, `dependentRequired`, `minProperties`, `const`, a
-///   surviving `$ref` — anything outside [`FLATTENABLE_KEYWORDS`] — has the
-///   same shape of failure.
+///   `$ref` surviving at the *top level* — anything outside
+///   [`FLATTENABLE_KEYWORDS`] — has the same shape of failure.
 /// * **It over-refuses.** A fieldless struct derives `{"type": "object"}`
 ///   with no `properties` at all, and genuinely takes no arguments.
 ///   Contributing nothing for it is the truth, not a lie, so it is
@@ -606,10 +777,31 @@ fn source_is_flattenable(inlined: &Value) -> bool {
 /// *below* the top level leaves the top level intact and hides a `{}` inside
 /// one property, so [`inline_refs`]'s own report is carried out separately
 /// in `unresolved_ref` rather than folded into `unrepresentable`.
+///
+/// # `$defs` is hoisted, not carried
+///
+/// A source that kept a cyclic definition (see [`inline_refs`]) arrives with
+/// a `$defs` table of its own, and the merged schema is one document with
+/// one such table. Its entries are therefore folded into the shared `defs`
+/// accumulator rather than left on the source, so that the back-edges in the
+/// properties this source contributes still resolve inside the merged
+/// document. Two sources naming the same definition *identically* is not a
+/// conflict — they are the same type, and one entry describes both. Two
+/// sources naming it *differently* is, and is reported in `colliding_defs`
+/// for the caller to refuse: there is no second table to put the loser in,
+/// and silently keeping the first would misdescribe the second source's
+/// arguments.
+///
+/// Only a flattenable source contributes definitions, for the same reason it
+/// contributes no properties: the caller refuses the endpoint outright, so
+/// there is no half-merged document to keep consistent — and a definition
+/// hoisted out of a source that was then refused could collide with a later
+/// source and report the wrong defect.
 fn merge_schema_source(
     source: Option<&Value>,
     properties: &mut serde_json::Map<String, Value>,
     required: &mut Vec<String>,
+    defs: &mut serde_json::Map<String, Value>,
 ) -> MergedSource {
     let Some(source) = source else {
         return MergedSource::default();
@@ -636,10 +828,23 @@ fn merge_schema_source(
             present,
             unrepresentable: true,
             unresolved_ref: ref_issues.unresolved,
-            recursive_ref: ref_issues.recursive,
+            colliding_defs: Vec::new(),
             oversized: ref_issues.oversized,
             closed: false,
         };
+    }
+
+    let mut colliding_defs = Vec::new();
+    if let Some(table) = inlined.get("$defs").and_then(Value::as_object) {
+        for (name, body) in table {
+            match defs.get(name) {
+                Some(existing) if existing != body => colliding_defs.push(name.clone()),
+                Some(_) => {}
+                None => {
+                    defs.insert(name.clone(), body.clone());
+                }
+            }
+        }
     }
 
     let mut contributed = Vec::new();
@@ -667,7 +872,7 @@ fn merge_schema_source(
         present,
         unrepresentable: false,
         unresolved_ref: ref_issues.unresolved,
-        recursive_ref: ref_issues.recursive,
+        colliding_defs,
         oversized: ref_issues.oversized,
         closed,
     }
@@ -702,19 +907,23 @@ pub(crate) struct AgentInputSchema {
     /// at any depth, including the nested one that leaves the top-level
     /// `properties` object looking perfectly healthy.
     pub unresolved_refs: Vec<String>,
-    /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining hit a
-    /// `$ref` cycle — see [`inline_refs`]. Reported separately from
-    /// [`Self::unresolved_refs`] because the defect and its fix are
-    /// different: nothing is missing from `$defs`, the type simply has no
-    /// finite flat representation.
-    pub recursive_refs: Vec<String>,
+    /// Definition names two of path/query/body both kept, with different
+    /// bodies, sorted — see [`merge_schema_source`]. Non-empty means this
+    /// endpoint MUST NOT be exposed as a tool: the merged schema has one
+    /// `$defs` table, so it can describe only one of the two, and every
+    /// back-edge in the other source's properties would then resolve to the
+    /// wrong type.
+    ///
+    /// Names, not source labels, because the name is the thing to rename —
+    /// the sources are both fine on their own.
+    pub colliding_defs: Vec<String>,
     /// Source labels (`"path"`, `"query"`, `"body"`) whose inlining ran past
     /// [`MAX_INLINED_NODES`] — see [`inline_refs`]. Non-empty means this
     /// endpoint MUST NOT be exposed as a tool, and that nothing else read
     /// off the schema can be trusted either: the walk stopped partway, so
     /// every verdict below is drawn from a truncated document. Reported
-    /// separately from the other two because the type is neither recursive
-    /// nor missing a definition — its definitions simply multiply out.
+    /// separately from [`Self::unresolved_refs`] because nothing is missing
+    /// from `$defs` — the definitions simply multiply out.
     pub oversized_schemas: Vec<String>,
     /// Names present in the merged `required` list that no source
     /// contributed a property for, sorted. Non-empty means this endpoint
@@ -847,9 +1056,29 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<String> = Vec::new();
 
-    let path = merge_schema_source(ep.path_params.as_ref(), &mut properties, &mut required);
-    let query = merge_schema_source(ep.query_params.as_ref(), &mut properties, &mut required);
-    let body = merge_schema_source(ep.input_schema.as_ref(), &mut properties, &mut required);
+    // One table for all three sources: the merged schema is a single
+    // document, so the definitions its back-edges name have exactly one
+    // place to live — see `merge_schema_source`.
+    let mut defs = serde_json::Map::new();
+
+    let path = merge_schema_source(
+        ep.path_params.as_ref(),
+        &mut properties,
+        &mut required,
+        &mut defs,
+    );
+    let query = merge_schema_source(
+        ep.query_params.as_ref(),
+        &mut properties,
+        &mut required,
+        &mut defs,
+    );
+    let body = merge_schema_source(
+        ep.input_schema.as_ref(),
+        &mut properties,
+        &mut required,
+        &mut defs,
+    );
 
     // See "Path parameters are forced required" above.
     for name in &path.contributed {
@@ -860,7 +1089,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
 
     let mut unrepresentable = Vec::new();
     let mut unresolved_refs = Vec::new();
-    let mut recursive_refs = Vec::new();
+    let mut colliding_defs = Vec::new();
     let mut oversized_schemas = Vec::new();
     for (label, merged) in [("path", &path), ("query", &query), ("body", &body)] {
         if merged.unrepresentable {
@@ -869,16 +1098,15 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         if merged.unresolved_ref {
             unresolved_refs.push(label.to_string());
         }
-        if merged.recursive_ref {
-            recursive_refs.push(label.to_string());
-        }
+        colliding_defs.extend(merged.colliding_defs.iter().cloned());
         if merged.oversized {
             oversized_schemas.push(label.to_string());
         }
     }
     unrepresentable.sort();
     unresolved_refs.sort();
-    recursive_refs.sort();
+    colliding_defs.sort();
+    colliding_defs.dedup();
     oversized_schemas.sort();
 
     // A `required` entry naming a property no source contributed. Only a
@@ -954,6 +1182,12 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     if merged_is_closed {
         schema.insert("additionalProperties".into(), json!(false));
     }
+    // Emitted only when a source actually kept something, so a schema with
+    // no cycle in it is byte-for-byte what it was before definitions were
+    // ever retained.
+    if !defs.is_empty() {
+        schema.insert("$defs".into(), Value::Object(defs));
+    }
 
     AgentInputSchema {
         schema: Value::Object(schema),
@@ -963,7 +1197,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
         collisions,
         unrepresentable,
         unresolved_refs,
-        recursive_refs,
+        colliding_defs,
         oversized_schemas,
         undeclared_required,
         non_scalar_params,
@@ -986,8 +1220,13 @@ struct AgentOutputSchema {
 
 /// Project an endpoint's declared response schema into the tool's
 /// `outputSchema`: the same self-containment treatment `inputSchema` gets —
-/// every `#/$defs/*` reference inlined, the `$defs` table removed, the root
+/// every `#/$defs/*` reference inlined except the ones a cycle closes on,
+/// whose definitions travel in the schema's own `$defs`, and the root
 /// `title` dropped — under the same [`MAX_INLINED_NODES`] budget.
+///
+/// Unlike the input side there is nothing to hoist: an output schema is one
+/// source and therefore already one document, so the table [`inline_refs`]
+/// built is published exactly as it stands and no two tables can collide.
 ///
 /// # Why a bad output schema drops the field and not the tool
 ///
@@ -1024,10 +1263,9 @@ struct AgentOutputSchema {
 /// reported under [`WebMcpRefusalScope::OutputSchema`], so an author who
 /// declared `.output::<T>()` and sees no `outputSchema` learns why. The
 /// reasons are the `OutputSchema*` variants and nothing else: the input
-/// side's `UnresolvedRefs` / `RecursiveSchema` / `SchemaTooLarge` name
-/// `inputSchema` in their own message text, so reusing them here would tell
-/// an author who declared only an output type that their arguments are at
-/// fault.
+/// side's `UnresolvedRefs` / `SchemaTooLarge` name `inputSchema` in their
+/// own message text, so reusing them here would tell an author who declared
+/// only an output type that their arguments are at fault.
 ///
 /// # Why a non-object schema is dropped
 ///
@@ -1099,9 +1337,6 @@ fn agent_output_schema(ep: &BlockEndpoint) -> AgentOutputSchema {
     }
     if issues.unresolved {
         return drop(WebMcpRefusal::OutputSchemaUnresolvedRef);
-    }
-    if issues.recursive {
-        return drop(WebMcpRefusal::OutputSchemaRecursive);
     }
 
     let Some(map) = inlined.as_object() else {
@@ -1214,6 +1449,157 @@ fn path_placeholders(path: &str) -> Result<Vec<String>, PathTemplateError> {
 // generate_openapi
 // ---------------------------------------------------------------------------
 
+/// Move a schema's `$defs` into `components` and rewrite `#/$defs/X` to
+/// `#/components/schemas/X`. Same-named definitions with identical bodies
+/// share one entry; different bodies get a content-hash suffix.
+///
+/// Unlike [`inline_refs`], nothing is inlined: OpenAPI clients resolve
+/// `$ref` fine, so each definition is published once under
+/// `components.schemas` and every reference to it is rewritten in place —
+/// including a cyclic one, which stays a `$ref` rather than needing the
+/// back-edge dance `inline_refs` does for the ref-free WebMCP projection.
+///
+/// Two passes: decide every name first (bodies are compared *unrewritten*,
+/// so the decision does not depend on rewrite order), then rewrite the root
+/// and every hoisted body with the final rename map.
+fn hoist_defs_into_components(
+    schema: &Value,
+    raw: &mut std::collections::BTreeMap<String, Value>, // unrewritten bodies, for comparison
+    components: &mut serde_json::Map<String, Value>,     // rewritten bodies, published
+) -> Value {
+    let table: Vec<(String, Value)> = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    // Pass 1: names. `pending` remembers the unrewritten body we compared
+    // against so a later duplicate in the same schema compares equal.
+    let mut renames: std::collections::BTreeMap<String, String> = Default::default();
+    let mut pending: Vec<(String, Value)> = Vec::new();
+    for (name, body) in &table {
+        let target = match raw
+            .get(name)
+            .or_else(|| pending.iter().find(|(n, _)| n == name).map(|(_, b)| b))
+        {
+            None => name.clone(),
+            Some(existing) if existing == body => name.clone(),
+            Some(_) => format!("{name}_{}", short_sha256(&body.to_string())),
+        };
+        renames.insert(name.clone(), target.clone());
+        pending.push((target, body.clone()));
+    }
+
+    // Pass 2: rewrite with the complete map, then publish. `entry` (rather
+    // than a `contains_key` check followed by a separate `insert`) does the
+    // vacancy check and the reservation in one lookup.
+    for (target, body) in pending {
+        if let std::collections::btree_map::Entry::Vacant(entry) = raw.entry(target.clone()) {
+            components.insert(target, rewrite_local_refs(&body, &renames));
+            entry.insert(body);
+        }
+    }
+    let mut out = rewrite_local_refs(schema, &renames);
+    if let Some(map) = out.as_object_mut() {
+        map.remove("$defs");
+    }
+    out
+}
+
+/// The first 8 bytes (16 hex chars) of the SHA-256 digest of `text`. Used to
+/// disambiguate two different definitions that share a `$defs` name once
+/// they are hoisted into the single flat `components.schemas` namespace.
+///
+/// 8 bytes, not 4: the suffix is what keeps two *different* definitions from
+/// landing on the same `components.schemas` key, and a 32-bit truncation
+/// reaches a 50% collision chance at ~77k distinct definitions (and ~1-in-a-
+/// million at only ~93). A 64-bit truncation puts that far beyond any document
+/// size, at the cost of eight more characters in a name nobody reads by hand.
+fn short_sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rewrite every `#/$defs/X` reference under `node` — read as a *schema
+/// object*, whose keys are JSON Schema keywords — to
+/// `#/components/schemas/Y`, where `Y` is `X`'s entry in `renames` (or `X`
+/// itself when the name was not renamed).
+///
+/// Mirrors [`RefWalk::resolve`]/[`RefWalk::resolve_member`]'s position
+/// tracking exactly, and for the same reason ([`LITERAL_VALUE_KEYWORDS`]'s
+/// doc comment): a plain object-recursion that rewrites any `$ref`-named key
+/// it meets cannot tell a real reference from a `$ref`-shaped *literal*
+/// sitting in a `default`/`const`/`examples`/`enum` value, or from a
+/// `properties` entry that is itself named `$ref`. Both would be corrupted —
+/// the first silently, the second by pointing a field's own name-lookup at
+/// `components/schemas` instead of leaving it alone. So a member's key is
+/// only ever read as a keyword here, in the schema-object walk; a
+/// `SCHEMA_MAP_KEYWORDS` value hands its members to [`rewrite_schema_map`],
+/// which walks the *values* as schemas and leaves the author-chosen *keys*
+/// untouched, and a `LITERAL_VALUE_KEYWORDS` value is copied verbatim.
+fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+    match node {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), rewrite_schema_member(k, v, renames)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| rewrite_local_refs(v, renames))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite one member of a *schema object*, whose key is read as a keyword —
+/// see [`rewrite_local_refs`].
+fn rewrite_schema_member(
+    key: &str,
+    value: &Value,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    if LITERAL_VALUE_KEYWORDS.contains(&key) {
+        return value.clone();
+    }
+    if SCHEMA_MAP_KEYWORDS.contains(&key) {
+        return rewrite_schema_map(value, renames);
+    }
+    if key == "$ref" {
+        if let Some(name) = value
+            .as_str()
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(decode_ref_name)
+        {
+            let target = renames.get(&name).cloned().unwrap_or(name);
+            return json!(format!("#/components/schemas/{target}"));
+        }
+    }
+    rewrite_local_refs(value, renames)
+}
+
+/// Rewrite a map whose keys are author-chosen names and whose values are
+/// schemas — the value of a [`SCHEMA_MAP_KEYWORDS`] keyword. No key here is
+/// read as a keyword, so a property literally named `$ref` or `default`
+/// passes its key through unexamined; only its value is walked as a schema.
+fn rewrite_schema_map(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+    let Value::Object(map) = node else {
+        // Not a map at all. Only a hand-written schema can produce this;
+        // walking it as a schema object is the one interpretation that does
+        // not invent structure that is not there (mirrors
+        // `RefWalk::resolve_schema_map`).
+        return rewrite_local_refs(node, renames);
+    };
+    Value::Object(
+        map.iter()
+            .map(|(k, v)| (k.clone(), rewrite_local_refs(v, renames)))
+            .collect(),
+    )
+}
+
 /// Generate a full OpenAPI 3.1 JSON document from the given blocks.
 pub fn generate_openapi(
     blocks: &[BlockInfo],
@@ -1222,6 +1608,15 @@ pub fn generate_openapi(
     server_url: &str,
 ) -> Value {
     let mut paths: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // `hoist_defs_into_components` runs once per document build: `raw` holds
+    // every hoisted definition's unrewritten body, keyed by its published
+    // name, so a same-named definition met later in the walk compares
+    // against what was actually published rather than re-deciding from
+    // scratch; `components` holds the rewritten bodies that go out under
+    // `components.schemas`.
+    let mut raw: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut components: serde_json::Map<String, Value> = serde_json::Map::new();
 
     for block in blocks {
         for ep in &block.endpoints {
@@ -1251,6 +1646,7 @@ pub fn generate_openapi(
 
             // requestBody from input_schema
             if let Some(input) = &ep.input_schema {
+                let input = hoist_defs_into_components(input, &mut raw, &mut components);
                 operation.insert(
                     "requestBody".into(),
                     json!({
@@ -1267,10 +1663,12 @@ pub fn generate_openapi(
             // parameters from path_params and query_params
             let mut parameters: Vec<Value> = Vec::new();
             if let Some(pp) = &ep.path_params {
-                parameters.extend(extract_params(pp, "path"));
+                let pp = hoist_defs_into_components(pp, &mut raw, &mut components);
+                parameters.extend(extract_params(&pp, "path"));
             }
             if let Some(qp) = &ep.query_params {
-                parameters.extend(extract_params(qp, "query"));
+                let qp = hoist_defs_into_components(qp, &mut raw, &mut components);
+                parameters.extend(extract_params(&qp, "query"));
             }
             if !parameters.is_empty() {
                 operation.insert("parameters".into(), json!(parameters));
@@ -1280,6 +1678,7 @@ pub fn generate_openapi(
             let response_200 = ep.output_schema.as_ref().map_or_else(
                 || json!({ "description": "Successful response" }),
                 |output| {
+                    let output = hoist_defs_into_components(output, &mut raw, &mut components);
                     json!({
                         "description": "Successful response",
                         "content": {
@@ -1311,6 +1710,24 @@ pub fn generate_openapi(
         }
     }
 
+    // A document with no `$defs` anywhere hoists nothing, and must come out
+    // byte-identical to before this hoist existed — so `schemas` is only
+    // added when there is something to publish under it.
+    let mut components_obj: serde_json::Map<String, Value> = serde_json::Map::new();
+    if !components.is_empty() {
+        components_obj.insert("schemas".into(), Value::Object(components));
+    }
+    components_obj.insert(
+        "securitySchemes".into(),
+        json!({
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT"
+            }
+        }),
+    );
+
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -1322,15 +1739,7 @@ pub fn generate_openapi(
             { "url": server_url }
         ],
         "paths": paths,
-        "components": {
-            "securitySchemes": {
-                "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "JWT"
-                }
-            }
-        }
+        "components": components_obj
     })
 }
 
@@ -1509,11 +1918,12 @@ pub enum WebMcpRefusal {
         /// The offending source labels, sorted.
         sources: Vec<String>,
     },
-    /// Schema sources whose inlining hit a `$ref` cycle — a recursive type,
-    /// which has no finite flat representation.
-    RecursiveSchema {
-        /// The offending source labels, sorted.
-        sources: Vec<String>,
+    /// Two of path/query/body carry a `$defs` entry of the same name with
+    /// different bodies. One flat schema has one `$defs` table, so the tool
+    /// could describe only one of them.
+    CollidingDefinitions {
+        /// The colliding definition names, sorted.
+        names: Vec<String>,
     },
     /// Schema sources whose inlining expanded past [`MAX_INLINED_NODES`].
     /// The type is finite and every reference resolves; its definitions
@@ -1580,13 +1990,14 @@ pub enum WebMcpRefusal {
     /// resolve, which would leave an unconstrained `{}` where the endpoint
     /// returns a specific type.
     OutputSchemaUnresolvedRef,
-    /// The declared response schema is recursive, so it has no finite
-    /// self-contained form.
-    OutputSchemaRecursive,
     /// Inlining the declared response schema expanded past
     /// [`MAX_INLINED_NODES`] and stopped partway, so what is in hand is a
     /// truncated document rather than a weaker one.
     OutputSchemaTooLarge,
+    /// A [`ToolSelection`] named a block/method/path that the block set
+    /// declares no endpoint for, so [`generate_webmcp_selected`] has nothing
+    /// to project it onto.
+    SelectionNotFound,
 }
 
 /// What a [`WebMcpRefusalReport`] is about: the whole tool, or one optional
@@ -1640,14 +2051,14 @@ impl std::fmt::Display for WebMcpRefusal {
                 "schema source(s) {} contain a $ref that could not be resolved, leaving an unconstrained {{}} where the server requires a type",
                 sources.join(", ")
             ),
-            Self::RecursiveSchema { sources } => write!(
+            Self::CollidingDefinitions { names } => write!(
                 f,
-                "schema source(s) {} are recursive, so they cannot be inlined into a self-contained inputSchema",
-                sources.join(", ")
+                "definition name(s) {} are defined differently by more than one of path/query/body, and the merged inputSchema has one $defs table, so it could describe only one of them",
+                names.join(", ")
             ),
             Self::SchemaTooLarge { sources } => write!(
                 f,
-                "schema source(s) {} expand past {MAX_INLINED_NODES} JSON nodes when their $refs are inlined — nothing is missing and nothing is recursive, but a definition reached from several levels is copied out once per path, so the self-contained inputSchema has no workable size",
+                "schema source(s) {} expand past {MAX_INLINED_NODES} JSON nodes when their $refs are inlined — nothing is missing and every reference resolves, but a definition reached from several levels is copied out once per path, so the self-contained inputSchema has no workable size",
                 sources.join(", ")
             ),
             Self::RequiredNotDeclared { names } => write!(
@@ -1690,12 +2101,12 @@ impl std::fmt::Display for WebMcpRefusal {
             Self::OutputSchemaUnresolvedRef => f.write_str(
                 "the declared output schema contains a $ref that could not be resolved, leaving an unconstrained {} in the outputSchema where the endpoint returns a specific type",
             ),
-            Self::OutputSchemaRecursive => f.write_str(
-                "the declared output schema is recursive, so it cannot be inlined into a self-contained outputSchema",
-            ),
             Self::OutputSchemaTooLarge => write!(
                 f,
-                "the declared output schema expands past {MAX_INLINED_NODES} JSON nodes when its $refs are inlined — nothing is missing and nothing is recursive, but a definition reached from several levels is copied out once per path, so the self-contained outputSchema has no workable size"
+                "the declared output schema expands past {MAX_INLINED_NODES} JSON nodes when its $refs are inlined — nothing is missing and every reference resolves, but a definition reached from several levels is copied out once per path, so the self-contained outputSchema has no workable size"
+            ),
+            Self::SelectionNotFound => f.write_str(
+                "this selection names no endpoint the block set declares at that method and path",
             ),
         }
     }
@@ -2126,16 +2537,22 @@ pub fn generate_webmcp_report(
                 continue;
             }
 
-            // A recursive type leaves the same `{}` an unresolvable `$ref`
-            // does, and is refused on the same grounds — but it is reported
-            // as its own reason, because nothing is missing from `$defs` and
-            // telling the author a reference "could not be resolved" sends
-            // them hunting for an entry that is already there.
-            if !input.recursive_refs.is_empty() {
+            // Two sources that each kept a cyclic definition of the same
+            // name, with different bodies. The merged schema is one document
+            // with one `$defs` table, so describing one of them means every
+            // back-edge the other contributed resolves to the wrong type —
+            // the same lie as a colliding parameter name, one level down.
+            //
+            // Checked here rather than beside `CollidingParameterNames`
+            // because it is read off the *inlined* schema: past the node
+            // budget the walk stopped partway, and a truncated document's
+            // partial tables would report a collision that the endpoint does
+            // not have.
+            if !input.colliding_defs.is_empty() {
                 refuse(
                     Scope::Tool,
-                    WebMcpRefusal::RecursiveSchema {
-                        sources: input.recursive_refs.clone(),
+                    WebMcpRefusal::CollidingDefinitions {
+                        names: input.colliding_defs.clone(),
                     },
                 );
                 continue;
@@ -2305,6 +2722,102 @@ pub fn generate_webmcp_report(
     )
 }
 
+/// One endpoint a consumer wants projected as a tool even though the
+/// block did not annotate it with `agent_tool`.
+///
+/// [`generate_webmcp_selected`] uses this to build a page-scoped WebMCP
+/// manifest — e.g. an admin page that wants to expose a curated allowlist of
+/// endpoints to an in-page agent, rather than every endpoint a block's
+/// author opted in globally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSelection {
+    /// Name of the block declaring the endpoint.
+    pub block: String,
+    /// HTTP method of the selected endpoint.
+    pub method: HttpMethod,
+    /// URL path of the selected endpoint, exactly as the block declared it.
+    pub path: String,
+    /// Tool name to publish for this endpoint, in place of any `agent_tool`
+    /// name the endpoint itself carries.
+    pub name: String,
+    /// Tool description to publish for this endpoint, in place of any
+    /// `agent_tool` description the endpoint itself carries.
+    pub description: String,
+}
+
+/// Project a caller-chosen allowlist of endpoints into a WebMCP tool
+/// manifest, ignoring whatever `agent_tool` annotations the blocks carry.
+///
+/// This is [`generate_webmcp_report`] with the roles of "opted in" and
+/// "named" reversed: instead of publishing every endpoint the block's author
+/// annotated, it publishes exactly the endpoints named in `selections`,
+/// under the name and description each selection supplies. Everything else
+/// about the projection — auth filtering via `effective_auth`, per-manifest
+/// duplicate-name detection, schema walls, the deprecated-tool prefix — is
+/// unchanged, because this builds a shadow copy of `blocks` with every
+/// endpoint's own `agent_tool` cleared and only the selected endpoints
+/// annotated, then delegates to [`generate_webmcp_report`]. There is no
+/// second projection code path to keep in sync with the first.
+///
+/// A [`ToolSelection`] naming a block/method/path the block set declares no
+/// endpoint for cannot be projected onto anything, and is reported as
+/// [`WebMcpRefusal::SelectionNotFound`] (scoped to
+/// [`WebMcpRefusalScope::Tool`], and always `visible_to_caller: true` since
+/// it is a defect in the selection itself, not a property of what the
+/// caller may see).
+pub fn generate_webmcp_selected(
+    blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    selections: &[ToolSelection],
+) -> (Value, Vec<WebMcpRefusalReport>) {
+    // Build a shadow block set: every endpoint loses its own annotation and
+    // only selected endpoints gain one. `generate_webmcp_report` then does
+    // exactly what it does for the global manifest — name validation,
+    // per-manifest duplicate detection, auth filtering, schema walls.
+    let mut shadow: Vec<BlockInfo> = blocks
+        .iter()
+        .map(|b| {
+            let mut b = b.clone();
+            for ep in &mut b.endpoints {
+                ep.agent_tool = None;
+            }
+            b
+        })
+        .collect();
+    let mut not_found = Vec::new();
+    for sel in selections {
+        let hit = shadow
+            .iter_mut()
+            .find(|b| b.name == sel.block)
+            .and_then(|b| {
+                b.endpoints
+                    .iter_mut()
+                    .find(|ep| ep.method == sel.method && ep.path == sel.path)
+            });
+        match hit {
+            Some(ep) => {
+                ep.agent_tool = Some(AgentTool {
+                    name: sel.name.clone(),
+                    description: sel.description.clone(),
+                });
+            }
+            None => not_found.push(WebMcpRefusalReport {
+                block: sel.block.clone(),
+                method: sel.method,
+                path: sel.path.clone(),
+                tool_name: sel.name.clone(),
+                scope: WebMcpRefusalScope::Tool,
+                reason: WebMcpRefusal::SelectionNotFound,
+                visible_to_caller: true,
+            }),
+        }
+    }
+    let (doc, mut refused) = generate_webmcp_report(&shadow, caller, effective_auth);
+    refused.extend(not_found);
+    (doc, refused)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2449,6 +2962,311 @@ mod tests {
         let bearer = &doc["components"]["securitySchemes"]["bearerAuth"];
         assert_eq!(bearer["type"], "http");
         assert_eq!(bearer["scheme"], "bearer");
+    }
+
+    // 7b. openapi_hoists_defs_into_components_and_rewrites_refs
+    #[test]
+    fn openapi_hoists_defs_into_components_and_rewrites_refs() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            BlockEndpoint::post("/b/test/offers").auth(AuthLevel::Public).input_schema(json!({
+                "type": "object",
+                "properties": { "condition": { "$ref": "#/$defs/Condition" } },
+                "$defs": { "Condition": { "type": "object", "properties": {
+                    "all": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } } } }
+            })),
+        ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let schema = &doc["paths"]["/b/test/offers"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+        assert!(schema.get("$defs").is_none(), "{schema}");
+        assert_eq!(
+            schema["properties"]["condition"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"]["properties"]["all"]["items"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+        let text = doc.to_string();
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
+    // 7c. openapi_without_defs_is_byte_identical_to_before_the_hoist
+    #[test]
+    fn openapi_without_defs_is_byte_identical_to_before_the_hoist() {
+        let block = test_block();
+        let doc = generate_openapi(&[block], "P", "d", "https://x.com");
+
+        assert_eq!(
+            doc,
+            json!({
+                "openapi": "3.1.0",
+                "info": {
+                    "title": "P",
+                    "description": "d",
+                    "version": "1.0.0"
+                },
+                "servers": [
+                    { "url": "https://x.com" }
+                ],
+                "paths": {
+                    "/b/test/api/login": {
+                        "post": {
+                            "summary": "Login",
+                            "description": "Authenticate with credentials",
+                            "tags": ["auth"],
+                            "requestBody": {
+                                "required": true,
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "email": { "type": "string" },
+                                                "password": { "type": "string" }
+                                            },
+                                            "required": ["email", "password"]
+                                        }
+                                    }
+                                }
+                            },
+                            "responses": {
+                                "200": {
+                                    "description": "Successful response",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "token": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "/b/test/api/me": {
+                        "get": {
+                            "summary": "Get current user",
+                            "tags": ["auth", "users"],
+                            "responses": {
+                                "200": {
+                                    "description": "Successful response",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": { "type": "string" },
+                                                    "email": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "security": [{ "bearerAuth": [] }]
+                        }
+                    }
+                },
+                "components": {
+                    "securitySchemes": {
+                        "bearerAuth": {
+                            "type": "http",
+                            "scheme": "bearer",
+                            "bearerFormat": "JWT"
+                        }
+                    }
+                }
+            }),
+            "hoisting $defs into components is additive: a document with no \
+             $defs anywhere must come out byte-identical to before: {doc}"
+        );
+    }
+
+    // 7d. openapi_disambiguates_same_named_defs_with_different_bodies
+    #[test]
+    fn openapi_disambiguates_same_named_defs_with_different_bodies() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/a")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "c": { "$ref": "#/$defs/Condition" } },
+                        "$defs": { "Condition": { "type": "string" } }
+                    })),
+                BlockEndpoint::post("/b/test/b")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "c": { "$ref": "#/$defs/Condition" } },
+                        "$defs": { "Condition": { "type": "integer" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+
+        // The first-seen body keeps the bare name.
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"],
+            json!({ "type": "string" })
+        );
+        let a_ref = &doc["paths"]["/b/test/a"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"]["c"];
+        assert_eq!(a_ref, &json!({ "$ref": "#/components/schemas/Condition" }));
+
+        // The differently-shaped second definition gets a content-hash suffix
+        // rather than clobbering or being dropped.
+        let b_ref = &doc["paths"]["/b/test/b"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"]["c"];
+        let b_ref_target = b_ref["$ref"].as_str().expect("a $ref string");
+        assert_ne!(b_ref_target, "#/components/schemas/Condition");
+        let prefix = "#/components/schemas/Condition_";
+        assert!(b_ref_target.starts_with(prefix), "{b_ref_target}");
+        let suffix = &b_ref_target[prefix.len()..];
+        assert_eq!(
+            suffix.len(),
+            16,
+            "16 hex chars — 8 bytes of the digest, so the disambiguating \
+             suffix does not itself become a collision source: {b_ref_target}"
+        );
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "{b_ref_target}"
+        );
+        let hashed_name = &b_ref_target["#/components/schemas/".len()..];
+        assert_eq!(
+            doc["components"]["schemas"][hashed_name],
+            json!({ "type": "integer" })
+        );
+
+        assert_eq!(doc["components"]["schemas"].as_object().unwrap().len(), 2);
+    }
+
+    // 7e. openapi_hoists_defs_from_path_query_and_output_schemas_too
+    #[test]
+    fn openapi_hoists_defs_from_path_query_and_output_schemas_too() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::get("/b/test/items/{id}")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "$ref": "#/$defs/Id" } },
+                        "required": ["id"],
+                        "$defs": { "Id": { "type": "string" } }
+                    }))
+                    .query_params_schema(json!({
+                        "type": "object",
+                        "properties": { "filter": { "$ref": "#/$defs/Filter" } },
+                        "$defs": { "Filter": { "type": "string" } }
+                    }))
+                    .output_schema(json!({
+                        "type": "object",
+                        "properties": { "item": { "$ref": "#/$defs/Item" } },
+                        "$defs": { "Item": { "type": "object" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let op = &doc["paths"]["/b/test/items/{id}"]["get"];
+
+        let id_param = op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "id")
+            .expect("id path param");
+        assert_eq!(
+            id_param["schema"],
+            json!({ "$ref": "#/components/schemas/Id" })
+        );
+
+        let filter_param = op["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "filter")
+            .expect("filter query param");
+        assert_eq!(
+            filter_param["schema"],
+            json!({ "$ref": "#/components/schemas/Filter" })
+        );
+
+        let output_schema = &op["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(
+            output_schema["properties"]["item"],
+            json!({ "$ref": "#/components/schemas/Item" })
+        );
+
+        assert_eq!(
+            doc["components"]["schemas"]["Id"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Filter"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Item"],
+            json!({ "type": "object" })
+        );
+        let text = doc.to_string();
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
+    // 7f. openapi_hoist_skips_literal_value_keywords_and_a_property_named_ref
+    #[test]
+    fn openapi_hoist_skips_literal_value_keywords_and_a_property_named_ref() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/literal")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "condition": { "$ref": "#/$defs/Condition" },
+                            "$ref": { "type": "string" }
+                        },
+                        "default": { "$ref": "#/$defs/Condition" },
+                        "$defs": { "Condition": { "type": "string" } }
+                    })),
+            ]),
+        ];
+        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let schema = &doc["paths"]["/b/test/literal"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+
+        // A real $ref sibling of `default`/`properties` is rewritten.
+        assert_eq!(
+            schema["properties"]["condition"],
+            json!({ "$ref": "#/components/schemas/Condition" })
+        );
+
+        // A property literally named `$ref` is a `properties`-map *key* —
+        // author-chosen data, never read as the reference keyword — so it
+        // passes through unrenamed; its value is still walked as a schema
+        // (unchanged here, since it holds no `$ref` itself).
+        assert_eq!(schema["properties"]["$ref"], json!({ "type": "string" }));
+
+        // `default` is instance data, not a schema: a `$ref`-shaped literal
+        // sitting inside it must survive the hoist byte-identical rather
+        // than being reinterpreted as a schema reference and rewritten.
+        assert_eq!(
+            schema["default"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "a literal default carrying a $ref-shaped value must not be rewritten: {schema}"
+        );
+
+        assert_eq!(
+            doc["components"]["schemas"]["Condition"],
+            json!({ "type": "string" })
+        );
     }
 
     // 8. agent_card_basic_structure
@@ -2597,16 +3415,43 @@ mod tests {
         assert!(!unresolved, "a ref inside an array resolves: {out}");
     }
 
-    // 16. inline_refs_terminates_on_self_referential_schema
+    // 16. inline_refs_keeps_a_self_referential_definition_under_defs
+    #[test]
+    fn inline_refs_keeps_a_self_referential_definition_under_defs() {
+        let schema = json!({
+            "$defs": { "Node": { "type": "object", "properties": {
+                "children": { "type": "array", "items": { "$ref": "#/$defs/Node" } } } } },
+            "type": "object",
+            "properties": { "root": { "$ref": "#/$defs/Node" } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
+        // The first reference is inlined; the cycle inside it is a `$ref`
+        // back to the kept definition.
+        assert_eq!(out["properties"]["root"]["type"], "object");
+        assert_eq!(
+            out["properties"]["root"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert_eq!(
+            out["$defs"]["Node"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert!(
+            out["$defs"].as_object().unwrap().len() == 1,
+            "only the cyclic def is kept: {out}"
+        );
+    }
+
+    /// A `Condition` that can contain child `Condition`s is a real shape in
+    /// products/contracts.rs, and it arrives with the `$ref` at the schema
+    /// root. Inlining must bottom out rather than recurse forever, and the
+    /// way it bottoms out is a `$ref` back to a definition the output
+    /// carries — not a `{}` that accepts anything where the server requires
+    /// a `Condition`. Nothing is missing from `$defs`, so nothing is
+    /// unresolvable either.
     #[test]
     fn inline_refs_terminates_on_self_referential_schema() {
-        // A `Condition` that can contain child `Condition`s is a real shape in
-        // products/contracts.rs. Inlining must bottom out rather than recurse
-        // forever — and must say so, in the *right* words: the cycle is cut
-        // where it closes and the deepest `items` becomes `{}`, which accepts
-        // anything where the server requires a `Condition`. Nothing is
-        // missing from `$defs`, so this must NOT be reported as an
-        // unresolvable reference.
         let schema = json!({
             "$ref": "#/$defs/Condition",
             "$defs": {
@@ -2617,19 +3462,17 @@ mod tests {
             }
         });
         let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
         assert_eq!(out["type"], json!("object"));
-        let rendered = out.to_string();
-        assert!(
-            !rendered.contains("$ref"),
-            "no unresolved $ref may survive: {rendered}"
+        assert_eq!(
+            out["properties"]["all_of"]["items"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "the cycle closes on the kept definition: {out}"
         );
-        assert!(
-            issues.recursive,
-            "a cycle leaves `{{}}` behind and must be reported as recursive: {rendered}"
-        );
-        assert!(
-            !issues.unresolved,
-            "every `$defs` entry the cycle names exists, so nothing is unresolvable: {rendered}"
+        assert_eq!(
+            out["$defs"]["Condition"]["properties"]["all_of"]["items"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "and the definition it names travels with the schema: {out}"
         );
     }
 
@@ -2660,7 +3503,7 @@ mod tests {
 
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.unresolved && !issues.recursive,
+            !issues.unresolved,
             "a finite {DEPTH}-level chain resolves fully: {issues:?}"
         );
 
@@ -2677,7 +3520,8 @@ mod tests {
 
     /// A definition referenced twice from *different* branches is a diamond,
     /// not a cycle: the visited stack must unwind, or the second branch is
-    /// falsely reported recursive.
+    /// falsely read as closing a cycle — inlined once and then left as a
+    /// back-edge to a definition that is in no way recursive.
     #[test]
     fn inline_refs_resolves_a_definition_referenced_from_two_branches() {
         let schema = json!({
@@ -2690,7 +3534,7 @@ mod tests {
         });
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.recursive && !issues.unresolved,
+            !issues.unresolved,
             "a shared definition is not a cycle: {issues:?}"
         );
         assert_eq!(
@@ -2701,12 +3545,20 @@ mod tests {
             out["properties"]["left"],
             json!({ "type": "string", "enum": ["a", "b"] })
         );
+        assert!(
+            out.get("$defs").is_none(),
+            "nothing refers back to `Shared`, so keeping it would ship a \
+             definition no reference resolves against: {out}"
+        );
     }
 
-    /// A cycle that closes through an intermediate definition, and schemars'
-    /// root-recursion marker, are both cycles — not missing entries.
+    /// A cycle that closes through an intermediate definition keeps exactly
+    /// the definition the back-edge names — `A`, whose body carries `B`
+    /// inlined — and nothing else. `B` is not part of any cycle on its own,
+    /// so keeping it too would put a definition in the table that nothing
+    /// refers to.
     #[test]
-    fn inline_refs_reports_indirect_and_root_cycles_as_recursive() {
+    fn inline_refs_keeps_the_definition_an_indirect_cycle_closes_on() {
         let indirect = json!({
             "$ref": "#/$defs/A",
             "$defs": {
@@ -2714,22 +3566,167 @@ mod tests {
                 "B": { "type": "object", "properties": { "a": { "$ref": "#/$defs/A" } } }
             }
         });
-        let (_, issues) = inline_refs(&indirect);
-        assert!(issues.recursive, "A -> B -> A is a cycle: {issues:?}");
-        assert!(!issues.unresolved, "both `$defs` entries exist: {issues:?}");
+        let (out, issues) = inline_refs(&indirect);
+        assert_eq!(issues, RefIssues::default());
+        assert_eq!(
+            out["properties"]["b"]["properties"]["a"],
+            json!({ "$ref": "#/$defs/A" }),
+            "A -> B -> A closes on A: {out}"
+        );
+        assert_eq!(
+            out["$defs"]["A"]["properties"]["b"]["properties"]["a"],
+            json!({ "$ref": "#/$defs/A" }),
+            "and the kept body is the one the back-edge names: {out}"
+        );
+        assert_eq!(
+            out["$defs"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["A"],
+            "B is inlined inside A and is referred to by nothing: {out}"
+        );
+    }
 
-        let root = json!({
+    #[test]
+    fn inline_refs_rebases_root_recursion_to_a_named_definition() {
+        let schema = json!({
+            "title": "Condition",
+            "type": "object",
+            "properties": { "all": { "type": "array", "items": { "$ref": "#" } } }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
+        assert_eq!(
+            out["properties"]["all"]["items"],
+            json!({ "$ref": "#/$defs/Condition" })
+        );
+        assert_eq!(
+            out["$defs"]["Condition"]["properties"]["all"]["items"],
+            json!({ "$ref": "#/$defs/Condition" })
+        );
+        assert!(
+            out["$defs"]["Condition"].get("$defs").is_none(),
+            "kept defs carry no nested table"
+        );
+    }
+
+    /// The back-edge is a JSON pointer, so it carries the *encoded* name
+    /// while the `$defs` key stays raw — the same split `decode_ref_name`
+    /// exists for, now written in the other direction. Getting this wrong is
+    /// invisible until a client tries to resolve the pointer and finds
+    /// nothing, or finds a fragment that is not a legal URI at all.
+    #[test]
+    fn inline_refs_encodes_the_back_edge_of_an_awkwardly_named_definition() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "status": { "$ref": "#/$defs/Product%20Status" } },
+            "$defs": {
+                "Product Status": {
+                    "type": "object",
+                    "properties": { "next": { "$ref": "#/$defs/Product%20Status" } }
+                }
+            }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
+        assert_eq!(
+            out["properties"]["status"]["properties"]["next"],
+            json!({ "$ref": "#/$defs/Product%20Status" }),
+            "the pointer is encoded: {out}"
+        );
+        assert!(
+            out["$defs"].get("Product Status").is_some(),
+            "the table key is not: {out}"
+        );
+    }
+
+    /// A hand-written schema whose root `title` is also a `$defs` key. Both
+    /// are cyclic, so both have to be kept, and one table cannot hold two
+    /// different bodies under one name — the root takes a free name instead
+    /// of overwriting the definition every other back-edge resolves to.
+    #[test]
+    fn inline_refs_does_not_let_a_recursive_root_overwrite_a_kept_definition() {
+        let schema = json!({
+            "title": "Node",
+            "type": "object",
+            "properties": {
+                "parent": { "$ref": "#" },
+                "child": { "$ref": "#/$defs/Node" }
+            },
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": { "next": { "$ref": "#/$defs/Node" } }
+                }
+            }
+        });
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
+        assert_eq!(
+            out["properties"]["parent"],
+            json!({ "$ref": "#/$defs/Node_" }),
+            "the root cannot claim a name the table already uses: {out}"
+        );
+        assert_eq!(
+            out["$defs"]["Node"],
+            json!({ "type": "object", "properties": { "next": { "$ref": "#/$defs/Node" } } }),
+            "and the definition it would have overwritten is intact: {out}"
+        );
+        assert_eq!(
+            out["$defs"]["Node_"]["properties"]["parent"],
+            json!({ "$ref": "#/$defs/Node_" }),
+            "{out}"
+        );
+    }
+
+    /// A cycle reached from a document whose root is not a schema object has
+    /// nowhere to put the definitions table, so the back-edges it emitted
+    /// would name nothing. That is the same defect as a `$ref` with no
+    /// referent and is reported the same way, rather than the table being
+    /// dropped and the dangling pointers shipped.
+    ///
+    /// Only a hand-written source reaches this — a JSON array where a schema
+    /// belongs — and it is refused as unrepresentable on top, since an array
+    /// is not object-shaped. Both verdicts are asserted: the point is that
+    /// neither depends on the other noticing.
+    #[test]
+    fn inline_refs_reports_a_cycle_it_cannot_attach_a_table_to() {
+        let schema = json!([{ "$ref": "#" }]);
+        let (out, issues) = inline_refs(&schema);
+        assert!(
+            issues.unresolved,
+            "the back-edge names a table that could not be written: {out}"
+        );
+        assert!(!issues.oversized, "{issues:?}");
+        assert_eq!(
+            out,
+            json!([{ "$ref": "#/$defs/Root" }]),
+            "no table is invented on a non-object root: {out}"
+        );
+
+        let ep = BlockEndpoint::post("/b/x/array").input_schema(schema);
+        let result = agent_input_schema(&ep);
+        assert_eq!(result.unrepresentable, vec!["body".to_string()]);
+        assert_eq!(result.unresolved_refs, vec!["body".to_string()]);
+    }
+
+    /// With no `title` to name it by, the rebased root is `Root`. The name
+    /// matters: it is what every back-edge in the published schema points
+    /// at, and it is the name a second source's table can collide with.
+    #[test]
+    fn inline_refs_names_an_untitled_recursive_root_root() {
+        let schema = json!({
             "type": "object",
             "properties": { "self": { "$ref": "#" } }
         });
-        let (_, issues) = inline_refs(&root);
-        assert!(
-            issues.recursive,
-            "`$ref: \"#\"` is the document containing itself: {issues:?}"
+        let (out, issues) = inline_refs(&schema);
+        assert_eq!(issues, RefIssues::default());
+        assert_eq!(
+            out["properties"]["self"],
+            json!({ "$ref": "#/$defs/Root" }),
+            "the root exists, so it is named rather than cut: {out}"
         );
-        assert!(
-            !issues.unresolved,
-            "the root exists; it just has no finite inlining: {issues:?}"
+        assert_eq!(
+            out["$defs"]["Root"]["properties"]["self"],
+            json!({ "$ref": "#/$defs/Root" })
         );
     }
 
@@ -2766,7 +3763,7 @@ mod tests {
 
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.unresolved && !issues.recursive,
+            !issues.unresolved,
             "no schema position holds a $ref here, so nothing is reported: {issues:?}"
         );
         assert_eq!(
@@ -2808,7 +3805,7 @@ mod tests {
         });
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.unresolved && !issues.recursive,
+            !issues.unresolved,
             "the only real reference resolves: {issues:?}"
         );
         assert_eq!(
@@ -2866,7 +3863,7 @@ mod tests {
 
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.unresolved && !issues.recursive && !issues.oversized,
+            !issues.unresolved && !issues.oversized,
             "every reference here resolves: {issues:?}"
         );
         let status = json!({ "type": "string", "enum": ["draft", "active"] });
@@ -2917,10 +3914,7 @@ mod tests {
             "$defs": { "Status": { "type": "string" } }
         });
         let (out, issues) = inline_refs(&schema);
-        assert!(
-            !issues.unresolved && !issues.recursive && !issues.oversized,
-            "{issues:?}"
-        );
+        assert!(!issues.unresolved && !issues.oversized, "{issues:?}");
         assert_eq!(
             out["properties"]["default"],
             json!({ "type": "string" }),
@@ -2966,7 +3960,7 @@ mod tests {
             issues.unresolved,
             "the dangling ref under the keyword-named property must be reported: {out}"
         );
-        assert!(!issues.recursive && !issues.oversized, "{issues:?}");
+        assert!(!issues.oversized, "{issues:?}");
     }
 
     /// Names the author chose also appear under `patternProperties` and
@@ -2985,10 +3979,7 @@ mod tests {
             "$defs": { "Status": { "type": "string" } }
         });
         let (out, issues) = inline_refs(&schema);
-        assert!(
-            !issues.unresolved && !issues.recursive && !issues.oversized,
-            "{issues:?}"
-        );
+        assert!(!issues.unresolved && !issues.oversized, "{issues:?}");
         assert_eq!(
             out["patternProperties"]["^const$"],
             json!({ "type": "string" }),
@@ -3014,10 +4005,7 @@ mod tests {
             "$defs": { "Status": { "type": "string" } }
         });
         let (out, issues) = inline_refs(&schema);
-        assert!(
-            !issues.unresolved && !issues.recursive && !issues.oversized,
-            "{issues:?}"
-        );
+        assert!(!issues.unresolved && !issues.oversized, "{issues:?}");
         assert_eq!(
             out["properties"]["$defs"],
             json!({ "type": "string" }),
@@ -3032,8 +4020,8 @@ mod tests {
     /// Cycle detection bounds an expansion's depth, not its size. A finite,
     /// acyclic type whose definitions multiply out has no honest inlining
     /// either, and must be reported as its own defect: nothing is missing
-    /// from `$defs` and nothing is recursive, so either of the other two
-    /// verdicts would send the author hunting for a defect that is not there.
+    /// from `$defs`, so the unresolvable-reference verdict would send the
+    /// author hunting for a defect that is not there.
     #[test]
     fn inline_refs_stops_and_reports_an_expansion_past_the_node_budget() {
         let (_, issues) = inline_refs(&doubling_schema(22));
@@ -3044,10 +4032,6 @@ mod tests {
         assert!(
             !issues.unresolved,
             "every `$defs` entry it names exists: {issues:?}"
-        );
-        assert!(
-            !issues.recursive,
-            "each level references the *next* definition, so there is no cycle: {issues:?}"
         );
     }
 
@@ -3075,7 +4059,7 @@ mod tests {
 
         let (out, issues) = inline_refs(&schema);
         assert!(
-            !issues.oversized && !issues.unresolved && !issues.recursive,
+            !issues.oversized && !issues.unresolved,
             "1800 inlined properties is well inside the budget: {issues:?}"
         );
         assert_eq!(
@@ -3092,18 +4076,30 @@ mod tests {
         // of it in the same JSON object — the same shape that carries a
         // legitimate sibling like `description` in the test above. Unlike
         // `description`, `$defs` is the reference table itself and must
-        // never be merged back into the output.
+        // never be merged back into the output. The output can carry a
+        // `$defs` table of its own, but only one `inline_refs` built from
+        // the definitions a cycle closed on — nothing here is cyclic, so
+        // there is none.
         let schema = json!({
             "$ref": "#/$defs/Condition",
             "$defs": {
                 "Condition": {
                     "type": "object",
-                    "properties": { "all_of": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } }
+                    "properties": { "all_of": { "type": "array", "items": { "type": "string" } } }
                 }
             }
         });
         let (out, _issues) = inline_refs(&schema);
         assert!(out.get("$defs").is_none(), "$defs must be stripped: {out}");
+        assert_eq!(
+            out,
+            json!({
+                "type": "object",
+                "properties": { "all_of": { "type": "array", "items": { "type": "string" } } }
+            }),
+            "an acyclic schema inlines to exactly what it did before kept \
+             definitions existed: {out}"
+        );
     }
 
     // 18. inline_refs_reports_an_unresolvable_ref_it_had_to_drop
@@ -3280,6 +4276,18 @@ mod tests {
             json!({ "type": "string", "enum": ["hosted", "embedded"] })
         );
         assert!(result.schema.get("$defs").is_none());
+        assert_eq!(
+            result.schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "presentation": { "type": "string", "enum": ["hosted", "embedded"] }
+                }
+            }),
+            "keeping cyclic definitions is additive: a source with no cycle \
+             merges to exactly the document it did before: {:?}",
+            result.schema
+        );
         assert_eq!(result.body_params, vec!["presentation".to_string()]);
     }
 
@@ -3425,10 +4433,13 @@ mod tests {
     // 30. agent_input_schema_flags_root_recursive_ref_as_unrepresentable
     #[test]
     fn agent_input_schema_flags_root_recursive_ref_as_unrepresentable() {
-        // schemars closes a cycle on the root type with a bare `{"$ref": "#"}`
-        // and no `$defs` table at all. `inline_refs` only resolves
-        // `#/$defs/*` pointers, so this survives inlining unresolved and
-        // collapses to `{}` — no top-level `properties`.
+        // A body that is *only* the root-recursion marker describes nothing
+        // an agent could fill in: inlining rebases it to
+        // `{"$ref": "#/$defs/Root"}` and keeps a `Root` definition whose
+        // whole body is that same back-edge. The top level is then a bare
+        // `$ref`, which is not an object with named members, so no flat
+        // `inputSchema` can describe it. Keeping cyclic definitions changes
+        // how this is refused, not whether it is.
         let ep = BlockEndpoint::post("/b/products/condition").input_schema(json!({ "$ref": "#" }));
         let result = agent_input_schema(&ep);
         assert_eq!(result.unrepresentable, vec!["body".to_string()]);
@@ -3961,6 +4972,12 @@ mod tests {
         );
     }
 
+    /// A body that is nothing but the root-recursion marker: the rebased
+    /// `{"$ref": "#/$defs/Root"}` top level has no named members, so there
+    /// is no flat `inputSchema` to publish. Contrast
+    /// `webmcp_publishes_an_endpoint_with_a_recursive_body_and_keeps_defs`,
+    /// where the recursion sits *inside* an object body and the tool is
+    /// published with the definition alongside it.
     #[test]
     fn webmcp_skips_an_endpoint_whose_body_is_a_root_recursive_ref() {
         let block =
@@ -3980,6 +4997,131 @@ mod tests {
             doc["tools"],
             json!([]),
             "a root-recursive $ref body must produce no tool: {doc}"
+        );
+    }
+
+    /// The recursion a real block declares: a `Condition` that nests
+    /// `Condition`s inside an otherwise ordinary object body. The tool is
+    /// published, the first reference is inlined, and the back-edge points
+    /// at the definition the schema now carries.
+    #[test]
+    fn webmcp_publishes_an_endpoint_with_a_recursive_body_and_keeps_defs() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/offers")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "name": { "type": "string" }, "condition": { "$ref": "#/$defs/Condition" } },
+                        "$defs": { "Condition": { "type": "object", "properties": {
+                            "all": { "type": "array", "items": { "$ref": "#/$defs/Condition" } } } } }
+                    }))
+                    .agent_tool("create_offer", "Create an offer."),
+            ]),
+        ];
+        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| ep.auth);
+        assert!(refused.is_empty(), "{refused:?}");
+        let tool = &doc["tools"][0];
+        assert_eq!(tool["name"], "create_offer");
+        assert_eq!(
+            tool["inputSchema"]["properties"]["condition"]["type"],
+            "object"
+        );
+        assert_eq!(
+            tool["inputSchema"]["$defs"]["Condition"]["properties"]["all"]["items"],
+            json!({ "$ref": "#/$defs/Condition" })
+        );
+        assert_eq!(
+            tool["invocation"]["body_params"],
+            json!(["condition", "name"])
+        );
+    }
+
+    /// The other half of the collision rule: two sources that keep a
+    /// definition of the same name with the *same* body are describing one
+    /// type, and one table entry describes both. Merging them is not a
+    /// conflict and must not be reported as one — refusing here would delete
+    /// every endpoint that takes the same recursive type in two places.
+    ///
+    /// Asserted on `agent_input_schema` rather than on a published manifest
+    /// because the shape cannot reach one: a cyclic definition is an object,
+    /// so whichever of path/query references it is a non-scalar URL
+    /// parameter and the tool is refused for *that*. The second half of the
+    /// test pins exactly this — the endpoint is refused, and not for a
+    /// definition collision.
+    #[test]
+    fn agent_input_schema_merges_two_sources_that_keep_the_same_definition() {
+        let shared = |field: &str| {
+            json!({
+                "type": "object",
+                "properties": { field: { "$ref": "#/$defs/T" } },
+                "$defs": {
+                    "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } }
+                }
+            })
+        };
+        let ep = BlockEndpoint::post("/b/x/shared")
+            .query_params_schema(shared("q"))
+            .input_schema(shared("b"));
+
+        let result = agent_input_schema(&ep);
+        assert!(
+            result.colliding_defs.is_empty(),
+            "the same type declared twice is one type: {:?}",
+            result.colliding_defs
+        );
+        assert_eq!(
+            result.schema["$defs"],
+            json!({ "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } } }),
+            "one entry, not two and not a duplicate: {:?}",
+            result.schema
+        );
+        for (source, field) in [("query", "q"), ("body", "b")] {
+            assert_eq!(
+                result.schema["properties"][field]["properties"]["n"],
+                json!({ "$ref": "#/$defs/T" }),
+                "the {source} source's back-edge resolves against the merged table: {:?}",
+                result.schema
+            );
+        }
+
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![ep
+                .auth(AuthLevel::Public)
+                .agent_tool("shared", "Shared definition.")]),
+        ];
+        let (_, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, e| e.auth);
+        assert_eq!(
+            refused[0].reason,
+            WebMcpRefusal::NonScalarPathOrQueryParams {
+                params: vec!["query.q".to_string()],
+            },
+            "refused for the object-valued query param, never for the shared definition: {refused:?}"
+        );
+    }
+
+    /// One flat `inputSchema` has one `$defs` table, so two sources that
+    /// each keep a definition of the same name with a different body cannot
+    /// both be described by it. Picking a winner would misdescribe whichever
+    /// source lost, so the tool is refused instead.
+    #[test]
+    fn webmcp_refuses_two_sources_defining_the_same_name_differently() {
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/x")
+                    .auth(AuthLevel::Public)
+                    .query_params_schema(json!({ "type": "object", "properties": { "q": { "$ref": "#/$defs/T" } },
+                        "$defs": { "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } } } }))
+                    .input_schema(json!({ "type": "object", "properties": { "b": { "$ref": "#/$defs/T" } },
+                        "$defs": { "T": { "type": "object", "properties": { "m": { "$ref": "#/$defs/T" } } } } }))
+                    .agent_tool("x", "x"),
+            ]),
+        ];
+        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| ep.auth);
+        assert!(doc["tools"].as_array().unwrap().is_empty());
+        assert!(
+            matches!(refused[0].reason, WebMcpRefusal::CollidingDefinitions { ref names } if names == &["T".to_string()]),
+            "{refused:?}"
         );
     }
 
@@ -4446,10 +5588,13 @@ mod tests {
     }
 
     #[test]
-    fn webmcp_drops_a_recursive_output_schema() {
+    fn webmcp_publishes_a_recursive_output_schema_with_its_defs() {
         // `struct Node { children: Vec<Node> }` — schemars closes the cycle
-        // with `{"$ref": "#"}`, which has no finite inlining. Reported as
-        // recursive rather than unresolvable: nothing is missing from `$defs`.
+        // with `{"$ref": "#"}`. There is no finite *inlining* of it, but
+        // there is a finite self-contained document: the recursion is
+        // rebased onto a named definition the schema carries with it. An
+        // output schema is a single source, so its table needs no hoisting
+        // and travels exactly as `inline_refs` built it.
         let (doc, refused) = generate_webmcp_report(
             &[block_with_output_schema(json!({
                 "type": "object",
@@ -4461,13 +5606,24 @@ mod tests {
             |_, ep| ep.auth,
         );
         assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
-        assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
-        assert_eq!(refused[0].scope, WebMcpRefusalScope::OutputSchema);
-        assert_eq!(refused[0].reason, WebMcpRefusal::OutputSchemaRecursive);
-        let rendered = refused[0].to_string();
-        assert!(
-            rendered.contains("output schema") && !rendered.contains("inputSchema"),
-            "the output drop must not borrow the input side's wording: {rendered}"
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["outputSchema"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "children": { "type": "array", "items": { "$ref": "#/$defs/Root" } }
+                },
+                "$defs": {
+                    "Root": {
+                        "type": "object",
+                        "properties": {
+                            "children": { "type": "array", "items": { "$ref": "#/$defs/Root" } }
+                        }
+                    }
+                }
+            }),
+            "{doc}"
         );
     }
 
@@ -5052,13 +6208,13 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn agent_input_schema_reports_a_nested_recursive_ref() {
+    fn agent_input_schema_keeps_a_nested_recursive_body_definition() {
         // `struct Node { children: Vec<Node> }` — schemars closes the cycle
         // with the root marker `{"$ref": "#"}`, which sits at
-        // `properties.children.items`. The top level still has `properties`,
-        // so `unrepresentable` stays empty and only the dedicated report
-        // catches it. It is reported as *recursive*, not unresolvable:
-        // nothing is missing from `$defs`.
+        // `properties.children.items`. The body source's root is rebased
+        // onto a named definition, and that definition is hoisted into the
+        // merged schema's single `$defs` table so the back-edge resolves
+        // inside the document the agent receives.
         let ep = BlockEndpoint::post("/b/x/tree").input_schema(json!({
             "type": "object",
             "properties": {
@@ -5068,27 +6224,37 @@ mod tests {
         let result = agent_input_schema(&ep);
         assert!(
             result.unrepresentable.is_empty(),
-            "the top level is a healthy object, which is exactly why the \
-             properties-based check cannot see this: {:?}",
+            "the top level is a healthy object: {:?}",
             result.unrepresentable
         );
-        assert_eq!(result.recursive_refs, vec!["body".to_string()]);
         assert!(
             result.unresolved_refs.is_empty(),
-            "a recursive type is not a dangling reference, and saying so sends \
-             the author hunting a `$defs` entry that is not missing: {:?}",
+            "{:?}",
             result.unresolved_refs
+        );
+        assert!(
+            result.colliding_defs.is_empty(),
+            "{:?}",
+            result.colliding_defs
         );
         assert_eq!(
             result.schema["properties"]["children"]["items"],
-            json!({}),
-            "and this is what would otherwise have shipped: an unconstrained \
-             schema where the server requires a Node"
+            json!({ "$ref": "#/$defs/Root" }),
+            "the cycle closes on a definition the schema carries, not on an \
+             unconstrained `{{}}`: {:?}",
+            result.schema
         );
+        assert_eq!(
+            result.schema["$defs"]["Root"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Root" }),
+            "{:?}",
+            result.schema
+        );
+        assert_eq!(result.body_params, vec!["children".to_string()]);
     }
 
     #[test]
-    fn webmcp_skips_an_endpoint_with_a_nested_root_recursive_ref() {
+    fn webmcp_publishes_an_endpoint_with_a_nested_root_recursive_ref() {
         let block =
             BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
                 BlockEndpoint::post("/b/x/tree")
@@ -5099,14 +6265,20 @@ mod tests {
                             "children": { "type": "array", "items": { "$ref": "#" } }
                         }
                     }))
-                    .agent_tool("set_tree", "Should never be emitted: nested `#` ref."),
+                    .agent_tool("set_tree", "Set a tree."),
             ]);
 
         let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["set_tree".to_string()], "{doc}");
         assert_eq!(
-            doc["tools"],
-            json!([]),
-            "a `{{}}` hidden one level down is the same lie as one at the top: {doc}"
+            doc["tools"][0]["inputSchema"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Root" }),
+            "{doc}"
+        );
+        assert_eq!(
+            doc["tools"][0]["inputSchema"]["$defs"]["Root"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Root" }),
+            "the back-edge resolves inside the published document: {doc}"
         );
     }
 
@@ -5728,78 +6900,101 @@ mod tests {
 
         let block =
             BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
-                // 1. invalid name
-                BlockEndpoint::get("/b/x/invalid").agent_tool("get thing", "Space in the name."),
-                // 2 + 3. duplicate name (both sides)
-                BlockEndpoint::get("/b/x/dup_a").agent_tool("dup", "One."),
-                BlockEndpoint::get("/b/x/dup_b").agent_tool("dup", "Two."),
-                // 4. colliding parameter names
-                BlockEndpoint::get("/b/x/collide/{id}")
-                    .path_params_schema(colliding.clone())
-                    .query_params_schema(colliding.clone())
-                    .agent_tool("collide", "Collide."),
-                // 5. unrepresentable source
-                BlockEndpoint::post("/b/x/enum")
-                    .input_schema(json!({ "oneOf": [{ "type": "object" }] }))
-                    .agent_tool("tagged_enum_body", "Tagged enum body."),
-                // 6. unresolved `$ref`
-                BlockEndpoint::post("/b/x/tree")
-                    .input_schema(json!({
-                        "type": "object",
-                        "properties": { "child": { "$ref": "#/$defs/Missing" } }
-                    }))
-                    .agent_tool("dangling_ref", "Dangling ref."),
-                // 7. malformed path template
-                BlockEndpoint::get("/b/x/broken/{id").agent_tool("malformed", "Malformed."),
-                // 8. path params disagree with the template
-                BlockEndpoint::get("/b/x/mismatch/{product_id}")
-                    .path_params_schema(colliding)
-                    .agent_tool("mismatch", "Mismatch."),
-                // 9. body on a body-less method
-                BlockEndpoint::get("/b/x/get_with_body")
-                    .input_schema(json!({
-                        "type": "object",
-                        "properties": { "q": { "type": "string" } }
-                    }))
-                    .agent_tool("get_with_body", "Get with a body."),
-                // 10. recursive schema
-                BlockEndpoint::post("/b/x/node")
-                    .input_schema(json!({
-                        "type": "object",
-                        "properties": { "child": { "$ref": "#/$defs/Node" } },
-                        "$defs": {
-                            "Node": {
-                                "type": "object",
-                                "properties": { "child": { "$ref": "#/$defs/Node" } }
-                            }
-                        }
-                    }))
-                    .agent_tool("recursive_body", "Recursive body."),
-                // 11. required name with no property behind it
-                BlockEndpoint::post("/b/x/phantom")
-                    .input_schema(json!({
-                        "type": "object",
-                        "properties": { "a": { "type": "string" } },
-                        "required": ["a", "b"]
-                    }))
-                    .agent_tool("phantom_required", "Phantom required."),
-                // 12. non-scalar query param
-                BlockEndpoint::get("/b/x/tagged")
-                    .query_params_schema(json!({
-                        "type": "object",
-                        "properties": { "tags": { "type": "array", "items": { "type": "string" } } }
-                    }))
-                    .agent_tool("array_query", "Array query."),
-                // 13. router wildcard segment
-                BlockEndpoint::get("/b/x/files/**").agent_tool("wildcard_path", "Wildcard path."),
-            ]);
+            // 1. invalid name
+            BlockEndpoint::get("/b/x/invalid").agent_tool("get thing", "Space in the name."),
+            // 2 + 3. duplicate name (both sides)
+            BlockEndpoint::get("/b/x/dup_a").agent_tool("dup", "One."),
+            BlockEndpoint::get("/b/x/dup_b").agent_tool("dup", "Two."),
+            // 4. colliding parameter names
+            BlockEndpoint::get("/b/x/collide/{id}")
+                .path_params_schema(colliding.clone())
+                .query_params_schema(colliding.clone())
+                .agent_tool("collide", "Collide."),
+            // 5. unrepresentable source
+            BlockEndpoint::post("/b/x/enum")
+                .input_schema(json!({ "oneOf": [{ "type": "object" }] }))
+                .agent_tool("tagged_enum_body", "Tagged enum body."),
+            // 6. unresolved `$ref`
+            BlockEndpoint::post("/b/x/tree")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "child": { "$ref": "#/$defs/Missing" } }
+                }))
+                .agent_tool("dangling_ref", "Dangling ref."),
+            // 7. malformed path template
+            BlockEndpoint::get("/b/x/broken/{id").agent_tool("malformed", "Malformed."),
+            // 8. path params disagree with the template
+            BlockEndpoint::get("/b/x/mismatch/{product_id}")
+                .path_params_schema(colliding)
+                .agent_tool("mismatch", "Mismatch."),
+            // 9. body on a body-less method
+            BlockEndpoint::get("/b/x/get_with_body")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "q": { "type": "string" } }
+                }))
+                .agent_tool("get_with_body", "Get with a body."),
+            // 10. two sources whose kept definitions collide
+            BlockEndpoint::post("/b/x/colliding_defs")
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": { "q": { "$ref": "#/$defs/T" } },
+                    "$defs": {
+                        "T": { "type": "object", "properties": { "n": { "$ref": "#/$defs/T" } } }
+                    }
+                }))
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "b": { "$ref": "#/$defs/T" } },
+                    "$defs": {
+                        "T": { "type": "object", "properties": { "m": { "$ref": "#/$defs/T" } } }
+                    }
+                }))
+                .agent_tool("colliding_defs", "Colliding definitions."),
+            // 11. required name with no property behind it
+            BlockEndpoint::post("/b/x/phantom")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": ["a", "b"]
+                }))
+                .agent_tool("phantom_required", "Phantom required."),
+            // 12. non-scalar query param
+            BlockEndpoint::get("/b/x/tagged")
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": { "tags": { "type": "array", "items": { "type": "string" } } }
+                }))
+                .agent_tool("array_query", "Array query."),
+            // 13. router wildcard segment
+            BlockEndpoint::get("/b/x/files/**").agent_tool("wildcard_path", "Wildcard path."),
+        ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let blocks = vec![block];
+        let (doc, mut refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
         assert_eq!(
             tool_names(&doc),
             Vec::<String>::new(),
             "every endpoint here is broken: {doc}"
         );
+
+        // A selection naming no declared endpoint is refused the same way —
+        // named precisely enough to find, and scoped to the tool it would
+        // have been.
+        let (selected_doc, selected_refused) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            &[ToolSelection {
+                block: "test/block".to_string(),
+                method: HttpMethod::Get,
+                path: "/b/x/no_such_selection".to_string(),
+                name: "selection_missing".to_string(),
+                description: "Selection missing.".to_string(),
+            }],
+        );
+        assert_eq!(selected_doc["tools"], json!([]));
+        refused.extend(selected_refused);
 
         let by_tool: std::collections::HashMap<&str, &WebMcpRefusalReport> =
             refused.iter().map(|r| (r.tool_name.as_str(), r)).collect();
@@ -5848,10 +7043,10 @@ mod tests {
                 },
             ),
             (
-                "recursive_body",
-                "/b/x/node",
-                WebMcpRefusal::RecursiveSchema {
-                    sources: vec!["body".to_string()],
+                "colliding_defs",
+                "/b/x/colliding_defs",
+                WebMcpRefusal::CollidingDefinitions {
+                    names: vec!["T".to_string()],
                 },
             ),
             (
@@ -5874,6 +7069,11 @@ mod tests {
                 WebMcpRefusal::WildcardPathSegment {
                     segment: "**".to_string(),
                 },
+            ),
+            (
+                "selection_missing",
+                "/b/x/no_such_selection",
+                WebMcpRefusal::SelectionNotFound,
             ),
         ];
 
@@ -6052,6 +7252,88 @@ mod tests {
         assert_eq!(
             generate_webmcp_declared_auth(&blocks, AuthLevel::Admin),
             reported
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // generate_webmcp_selected
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn selected_projection_names_and_describes_unannotated_endpoints() {
+        let blocks = webmcp_fixture_blocks();
+        // Pick an endpoint from the fixture that is NOT an agent tool.
+        let (block, ep) = blocks
+            .iter()
+            .flat_map(|b| b.endpoints.iter().map(move |e| (b, e)))
+            .find(|(_, e)| !e.is_agent_tool() && e.input_schema.is_some())
+            .expect("fixture has an unannotated typed endpoint");
+        let selections = vec![ToolSelection {
+            block: block.name.clone(),
+            method: ep.method,
+            path: ep.path.clone(),
+            name: "shop_do_thing".into(),
+            description: "Do the thing.".into(),
+        }];
+        let (doc, refused) =
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(tool_names(&doc), vec!["shop_do_thing".to_string()]);
+        assert_eq!(doc["tools"][0]["description"], "Do the thing.");
+        assert_eq!(doc["tools"][0]["invocation"]["path"], json!(ep.path));
+    }
+
+    #[test]
+    fn selected_projection_ignores_the_blocks_own_annotations() {
+        let blocks = webmcp_fixture_blocks();
+        let (doc, _) = generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &[]);
+        assert!(
+            doc["tools"].as_array().unwrap().is_empty(),
+            "nothing selected, nothing published: {doc}"
+        );
+    }
+
+    #[test]
+    fn selected_projection_reports_a_missing_endpoint() {
+        let blocks = webmcp_fixture_blocks();
+        let selections = vec![ToolSelection {
+            block: "impresspress/products".into(),
+            method: HttpMethod::Delete,
+            path: "/b/products/no/such/path".into(),
+            name: "x".into(),
+            description: "x".into(),
+        }];
+        let (doc, refused) =
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+        assert!(doc["tools"].as_array().unwrap().is_empty());
+        assert_eq!(refused.len(), 1);
+        assert!(matches!(
+            refused[0].reason,
+            WebMcpRefusal::SelectionNotFound
+        ));
+        assert_eq!(refused[0].tool_name, "x");
+    }
+
+    #[test]
+    fn selected_projection_still_filters_by_caller_level() {
+        let blocks = webmcp_fixture_blocks();
+        let (block, ep) = blocks
+            .iter()
+            .flat_map(|b| b.endpoints.iter().map(move |e| (b, e)))
+            .find(|(_, e)| e.auth == AuthLevel::Admin)
+            .expect("fixture has an admin endpoint");
+        let selections = vec![ToolSelection {
+            block: block.name.clone(),
+            method: ep.method,
+            path: ep.path.clone(),
+            name: "admin_thing".into(),
+            description: "x".into(),
+        }];
+        let (doc, _) =
+            generate_webmcp_selected(&blocks, AuthLevel::Public, |_b, e| e.auth, &selections);
+        assert!(
+            doc["tools"].as_array().unwrap().is_empty(),
+            "a Public caller sees no Admin tool"
         );
     }
 }

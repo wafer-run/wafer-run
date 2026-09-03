@@ -382,10 +382,11 @@ impl BlockEndpoint {
 ///
 /// A surviving `$ref` still does not *resolve* inside an OpenAPI document —
 /// both `#` and `#/$defs/X` are rooted at the OpenAPI document rather than
-/// at the embedded schema. Closing that gap means hoisting definitions into
-/// `components/schemas` and rewriting the pointers in `generate_openapi`.
-/// Until then `wafer-core`'s `inline_refs` flattens what it can for the
-/// WebMCP projection, and recursive contracts are the only shape affected.
+/// at the embedded schema, which is why `wafer_core::discovery::generate_openapi`
+/// hoists definitions into `components/schemas` and rewrites the pointers
+/// before embedding a schema in the document; `wafer-core`'s `inline_refs`
+/// instead flattens what it can for the ref-free WebMCP projection, where
+/// recursive contracts are the only shape affected.
 ///
 /// # Which contract
 ///

@@ -14,7 +14,7 @@ use std::{path::Path, sync::OnceLock};
 use wafer_block::*;
 use wafer_core::clients::storage as store;
 
-/// Default values for the block's six config keys.
+/// Default values for the block's seven config keys.
 ///
 /// Single source of truth: rendered into the [`ConfigVar`] declarations in
 /// [`Block::info`], applied by [`WebConfig::from_block_config`] when a key
@@ -31,6 +31,21 @@ const DEFAULT_WEB_INDEX: &str = "index.html";
 const DEFAULT_CACHE_MAX_AGE: u32 = 3600;
 /// Default Cache-Control max-age (seconds) for content-hashed assets.
 const DEFAULT_IMMUTABLE_MAX_AGE: u32 = 31_536_000;
+/// Default cache mode (existing per-file-type policy).
+const DEFAULT_CACHE_MODE: &str = "normal";
+
+/// How `Cache-Control` is chosen for a served file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheMode {
+    /// HTML revalidates, hashed assets are immutable, everything else
+    /// gets `cache_max_age`.
+    Normal,
+    /// Every response is `no-cache`. For a site whose files change under
+    /// the visitor's feet — a development sandbox, a local preview of an
+    /// export — where an `/assets/` file cached for a year would hide the
+    /// edit that was just made.
+    NoCache,
+}
 
 /// HTTP-handler block that serves static files from `wafer-run/storage`
 /// with caching, clean-URL resolution, and optional SPA fallback.
@@ -42,6 +57,8 @@ const DEFAULT_IMMUTABLE_MAX_AGE: u32 = 31_536_000;
 ///   - `web_index`: index file name (default: "index.html")
 ///   - `cache_max_age`: Cache-Control max-age for static assets (default: 3600)
 ///   - `immutable_max_age`: max-age for hashed assets (default: 31536000)
+///   - `cache_mode`: "normal" or "no-cache" — forces every response to
+///     `no-cache`, for sites edited live (default: "normal")
 pub struct WebBlock {
     config: OnceLock<WebConfig>,
 }
@@ -91,8 +108,18 @@ impl WebBlock {
             });
         }
 
-        // Storage key: strip leading slash
+        // Storage key: strip leading slash. A cleaned path that collapsed to
+        // nothing (e.g. `/..`, `//`, `/./`) is equivalent to the root path —
+        // serve the index file the same way `/` already does, rather than
+        // asking storage for an empty key (which it rejects as
+        // `InvalidArgument`, not `NotFound`, so it would never reach the SPA
+        // fallback below).
         let key = clean.trim_start_matches('/');
+        let key = if key.is_empty() {
+            config.index_file.as_str()
+        } else {
+            key
+        };
 
         // Three-attempt fallback chain: bare key -> `<key>.html` -> `<key>/<index>`.
         // The helper retries only on `ErrorCode::NotFound`; any other storage
@@ -140,6 +167,7 @@ struct WebConfig {
     index_file: String,
     cache_max_age: u32,
     immutable_max_age: u32,
+    cache_mode: CacheMode,
 }
 
 impl Default for WebConfig {
@@ -151,6 +179,7 @@ impl Default for WebConfig {
             index_file: DEFAULT_WEB_INDEX.to_string(),
             cache_max_age: DEFAULT_CACHE_MAX_AGE,
             immutable_max_age: DEFAULT_IMMUTABLE_MAX_AGE,
+            cache_mode: CacheMode::Normal,
         }
     }
 }
@@ -170,6 +199,10 @@ impl WebConfig {
                 .str("immutable_max_age")
                 .parse()
                 .unwrap_or(DEFAULT_IMMUTABLE_MAX_AGE),
+            cache_mode: match config.str_or("cache_mode", DEFAULT_CACHE_MODE) {
+                "no-cache" => CacheMode::NoCache,
+                _ => CacheMode::Normal,
+            },
         }
     }
 }
@@ -216,6 +249,10 @@ fn is_hashed_asset(key: &str) -> bool {
 }
 
 fn cache_control(key: &str, content_type: &str, config: &WebConfig) -> String {
+    if config.cache_mode == CacheMode::NoCache {
+        return "no-cache".to_string();
+    }
+
     // HTML: always revalidate
     if content_type.starts_with("text/html") {
         return "no-cache".to_string();
@@ -346,6 +383,13 @@ impl Block for WebBlock {
                 &DEFAULT_IMMUTABLE_MAX_AGE.to_string(),
             )
             .name("Immutable Max Age"),
+            ConfigVar::new(
+                "cache_mode",
+                "`normal` (HTML revalidates, hashed assets immutable) or `no-cache` \
+                 (every file revalidates — for sites edited live).",
+                DEFAULT_CACHE_MODE,
+            )
+            .name("Cache mode"),
         ])
     }
 
@@ -598,5 +642,104 @@ mod tests {
         // Only one storage round-trip — the helper did not retry on
         // non-`NotFound`, and the SPA fallthrough did not fire a second one.
         assert_eq!(ctx.calls(), vec!["private/page".to_string()]);
+    }
+
+    /// `clean_path` collapses `//` (and `/..`, `/./`) down to `/`, which
+    /// strips to an EMPTY storage key. The storage handler rejects an empty
+    /// path component with `InvalidArgument` (not `NotFound`), so before the
+    /// root-cause fix this key never reached the `NotFound && config.spa`
+    /// fallthrough and surfaced as a 400 instead of the SPA index. `//` must
+    /// resolve exactly like `/` — straight to `config.index_file` — without
+    /// even going through the storage layer's own NotFound-driven fallback.
+    #[tokio::test]
+    async fn handle_serves_index_for_cleaned_empty_key_with_spa() {
+        let block = WebBlock::new();
+        let init_data = br#"{"web_spa":"true"}"#.to_vec();
+        block
+            .lifecycle(
+                &ScriptedStorageCtx::new(vec![]),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: init_data,
+                },
+            )
+            .await
+            .expect("Init lifecycle should succeed");
+
+        // A single scripted success — if the key resolved straight to
+        // `index.html` (which has an extension, so `try_serve_static` never
+        // retries) this is the only storage round-trip needed.
+        let ctx = ScriptedStorageCtx::new(vec![Ok(())]);
+        let mut msg = Message::new("retrieve");
+        msg.set_meta(crate::meta::META_REQ_RESOURCE, "//");
+        msg.set_meta(crate::meta::META_REQ_ACTION, "retrieve");
+
+        let out = block.handle(&ctx, msg, InputStream::empty()).await;
+        let response = out
+            .collect_buffered()
+            .await
+            .expect("a cleaned-empty key must serve the index, not error");
+        assert_eq!(response.body, b"file contents");
+        assert_eq!(ctx.calls(), vec!["index.html".to_string()]);
+    }
+
+    // NOTE: today's `is_hashed_asset` heuristic matches a hashed-asset
+    // directory only when the key has a `/` immediately before it, so a
+    // top-level `assets/…` key is NOT treated as hashed (only a nested one
+    // like `en/assets/…` is). That is existing, unchanged behavior — do not
+    // "fix" it here.
+    #[test]
+    fn cache_control_default_mode_keeps_existing_policy() {
+        let cfg = WebConfig::default();
+        assert_eq!(
+            cache_control("index.html", "text/html; charset=utf-8", &cfg),
+            "no-cache"
+        );
+        assert_eq!(
+            cache_control("en/assets/app.js", "application/javascript", &cfg),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            cache_control("style.css", "text/css", &cfg),
+            "public, max-age=3600"
+        );
+    }
+
+    #[test]
+    fn cache_control_no_cache_mode_revalidates_everything() {
+        let cfg = WebConfig {
+            cache_mode: CacheMode::NoCache,
+            ..WebConfig::default()
+        };
+        assert_eq!(
+            cache_control("index.html", "text/html; charset=utf-8", &cfg),
+            "no-cache"
+        );
+        assert_eq!(
+            cache_control("en/assets/app.js", "application/javascript", &cfg),
+            "no-cache"
+        );
+        assert_eq!(cache_control("style.css", "text/css", &cfg), "no-cache");
+    }
+
+    #[test]
+    fn cache_mode_parses_from_block_config() {
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: br#"{"cache_mode":"no-cache"}"#.to_vec(),
+        };
+        let cfg = WebConfig::from_block_config(&BlockConfig::from_event(&event));
+        assert_eq!(cfg.cache_mode, CacheMode::NoCache);
+
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: br#"{"cache_mode":"sometimes"}"#.to_vec(),
+        };
+        let cfg = WebConfig::from_block_config(&BlockConfig::from_event(&event));
+        assert_eq!(
+            cfg.cache_mode,
+            CacheMode::Normal,
+            "unknown values fall back to the default"
+        );
     }
 }

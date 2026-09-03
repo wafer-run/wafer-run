@@ -21,6 +21,18 @@ pub const RAW_SQL_RESOURCE: &str = "__raw_sql__";
 /// here (and in the runtime's capability check). Same literal on both sides.
 pub const DDL_RESOURCE: &str = "__ddl__";
 
+/// Sentinel `wrap.resource` value for the STRUCTURED schema ops
+/// (`database.ensure_table` / `add_column` / `drop_table`). Open to any
+/// attributable caller, exactly like [`DDL_RESOURCE`] (`check_access` rule
+/// 1a) — the ops are already scoped by a second check on the table name, so
+/// the sentinel only asks "is this caller attributable at all".
+///
+/// Deliberately NOT [`DDL_RESOURCE`]: the structured ops build their own SQL
+/// from a validated `TableDef`, so a block that needs them does not thereby
+/// need `db::ddl()`'s arbitrary-statement channel. A guest can hold
+/// `schema: true, ddl: false` and still create its own tables.
+pub const SCHEMA_RESOURCE: &str = "__schema__";
+
 /// Reserved WRAP resource for `storage.list_folders`, which enumerates every
 /// folder in the backend with no per-folder scope. Gated admin-only (like
 /// [`RAW_SQL_RESOURCE`]): a global, privileged listing is not something an
@@ -98,6 +110,27 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
     Some(format!("{org}/{block}"))
 }
 
+/// Whether every `/`-separated segment of `path` is a plain name — i.e. the
+/// path has no EMPTY segment (a leading or trailing `/`, a `//` run, or the
+/// empty string itself) and no RELATIVE segment (`.` or `..`).
+///
+/// Storage authorization is textual and prefix-based: the handler authorizes
+/// on `"{folder}/{key}"` and
+/// [`BlockCapabilities::allows_storage_folder`](crate::capabilities::BlockCapabilities::allows_storage_folder)
+/// admits a resource that lies beneath a granted entry. Nothing in that path
+/// normalizes the string, so an unnormalized `..` segment would let a caller
+/// granted `site/jhg` reach `site/other` by asking for key `../other` —
+/// the resource `site/jhg/../other` textually sits under the grant. The fix
+/// is to refuse the shape outright rather than to normalize (normalizing
+/// would silently rewrite what the caller asked for): the storage handler
+/// rejects such a `folder`/`key` with `InvalidArgument` before authorizing,
+/// and the capability check refuses it as a second, independent layer.
+pub fn is_traversal_safe_path(path: &str) -> bool {
+    !path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
 /// Dispatch to the right resource-owner parser for the given resource type.
 ///
 /// `ResourceType::Storage` parses slash-separated `{org}/{block}/...` paths
@@ -121,9 +154,10 @@ pub fn typed_resource_owner(
 ///
 /// For namespace-based resources (Db, Config, Vector, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
-/// 2. `__ddl__` → any attributable caller (NOT admin-only). Convention is that
-///    blocks only DDL their own (`{org}__{block}__*`) tables; this is enforced
-///    by code review + the WRAP-grant audit script, not by parsing SQL here.
+/// 2. `__ddl__` / `__schema__` → any attributable caller (NOT admin-only).
+///    Convention is that blocks only reshape their own (`{org}__{block}__*`)
+///    tables; this is enforced by code review + the WRAP-grant audit script,
+///    not by parsing SQL here.
 /// 3. `WAFER_RUN_SHARED__*` → any block reads, admin-only writes
 /// 4. Own resource (`resource_owner(resource) == caller_id`) → Ok
 /// 5. Admin (`caller_id == admin_block`) → Ok
@@ -185,17 +219,25 @@ pub fn check_access(
             };
         }
 
-        // Rule 1a: DDL is open to any attributable caller. Each block is expected
-        // to DDL only its own tables on init (`{org}__{block}__*`); cross-block
-        // DDL is a misuse caught by code review + the WRAP-grant audit script,
-        // not by parsing SQL here. Anonymous callers (no `caller_id`) are still
-        // denied — DDL needs an attributable owner.
-        if resource == DDL_RESOURCE {
+        // Rule 1a: DDL and the structured schema ops are open to any
+        // attributable caller. Each block is expected to shape only its own
+        // tables on init (`{org}__{block}__*`); cross-block DDL is a misuse
+        // caught by code review + the WRAP-grant audit script, not by parsing
+        // SQL here. Anonymous callers (no `caller_id`) are still denied —
+        // schema changes need an attributable owner. The two sentinels are
+        // separate resources (and separate capabilities) so a block can hold
+        // the structured ops without the raw-statement channel.
+        if resource == DDL_RESOURCE || resource == SCHEMA_RESOURCE {
+            let what = if resource == DDL_RESOURCE {
+                "DDL"
+            } else {
+                "schema ops"
+            };
             return match caller_id {
                 Some(_) => Ok(()),
                 None => Err(WaferError::new(
                     ErrorCode::PermissionDenied,
-                    "WRAP: DDL requires an attributable caller (caller: None)".to_string(),
+                    format!("WRAP: {what} requires an attributable caller (caller: None)"),
                 )),
             };
         }
@@ -717,6 +759,59 @@ mod tests {
         assert!(check_access(Some(admin), "__ddl__", true, None, &grants, admin).is_ok());
         // Anonymous (no caller) is still denied — DDL needs an attributable caller.
         assert!(check_access(None, "__ddl__", true, None, &grants, admin).is_err());
+    }
+
+    /// `__schema__` follows the SAME rule 1a as `__ddl__` — any attributable
+    /// caller, anonymous denied — because the structured schema ops are
+    /// scoped a second time by the table-name check in the handler.
+    #[test]
+    fn test_schema_sentinel_permissive_for_any_attributable_block() {
+        let grants = vec![];
+        let admin = "my-org/admin";
+        assert!(check_access(
+            Some("my-org/auth"),
+            "__schema__",
+            true,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
+        assert!(check_access(
+            Some("my-org/files"),
+            "__schema__",
+            true,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
+        assert!(check_access(Some(admin), "__schema__", true, None, &grants, admin).is_ok());
+        let err = check_access(None, "__schema__", true, None, &grants, admin)
+            .expect_err("anonymous callers cannot reshape a schema");
+        assert!(
+            err.message.contains("schema ops"),
+            "the denial must name the sentinel it refused, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn traversal_safe_path_accepts_plain_segments_and_refuses_the_rest() {
+        assert!(is_traversal_safe_path("site/jhg/a.txt"));
+        assert!(is_traversal_safe_path("uploads"));
+        assert!(is_traversal_safe_path("@wafer-run/web/public/index.html"));
+        assert!(is_traversal_safe_path("__storage_list_all__"));
+        // Relative segments — the traversal shape C1 is about.
+        assert!(!is_traversal_safe_path("../other"));
+        assert!(!is_traversal_safe_path("site/jhg/../../other/secret"));
+        assert!(!is_traversal_safe_path("site/./jhg"));
+        assert!(!is_traversal_safe_path(".."));
+        // Empty segments — leading, trailing, doubled, and the empty path.
+        assert!(!is_traversal_safe_path(""));
+        assert!(!is_traversal_safe_path("/site"));
+        assert!(!is_traversal_safe_path("site/"));
+        assert!(!is_traversal_safe_path("site//jhg"));
     }
 
     #[test]

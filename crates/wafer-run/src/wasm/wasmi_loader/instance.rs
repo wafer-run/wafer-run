@@ -12,6 +12,7 @@ use wasmi::{Engine, Linker, Module, Store};
 use super::{
     super::{capabilities::BlockCapabilities, stream::StreamRegistry},
     abi::{ProcExitTrap, WasmiHostState},
+    codec::{negotiate_host_codec, HostCodec},
 };
 use crate::{
     context::Context,
@@ -68,6 +69,7 @@ pub(super) fn instantiate(
         pending_stream_take_error: None,
         pending_load_asset: None,
         current_attachments: None,
+        host_codec: HostCodec::Rmp,
     };
     let mut store = Store::new(engine, host_state);
 
@@ -106,6 +108,18 @@ pub(super) fn instantiate(
         // Re-fill fuel so the subsequent guest call has a full budget.
         apply_fuel(&mut store, limits.fuel, "refilling fuel after _start")?;
     }
+
+    let codec = negotiate_host_codec(&mut store, instance)?;
+    store.data_mut().host_codec = codec;
+    // `negotiate_host_codec` CALLS a guest export, so it spends fuel from the
+    // budget set above. Refill afterwards for the same reason the `_start`
+    // branch does: the first real guest call must start from a full budget,
+    // not from whatever the negotiation left behind.
+    apply_fuel(
+        &mut store,
+        limits.fuel,
+        "refilling fuel after codec negotiation",
+    )?;
 
     Ok((store, instance))
 }

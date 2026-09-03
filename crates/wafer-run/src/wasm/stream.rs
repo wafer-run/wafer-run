@@ -55,6 +55,11 @@ pub(crate) struct StreamState {
     /// Most recent error captured for this stream (e.g. terminal Error frame
     /// from the response, or a precondition failure). Cleared by `take_error`.
     last_error: Option<WaferError>,
+    /// Set once the response stream announces raw body frames via a
+    /// `frame.encoding = raw` [`StreamEvent::Meta`] event. Sticky: every frame
+    /// after the marker is application bytes, not a wire DTO, so the codec
+    /// bridge must forward them verbatim. See [`Self::raw_frames`].
+    raw_frames: bool,
     phase: Phase,
 }
 
@@ -67,8 +72,23 @@ impl StreamState {
             attachments: std::collections::BTreeMap::new(),
             response_stream: None,
             last_error: None,
+            raw_frames: false,
             phase: Phase::WritingRequest,
         }
+    }
+
+    /// Whether the response stream has announced raw body frames.
+    ///
+    /// The handlers that answer with a typed header followed by an opaque
+    /// payload (`storage.get`, `network.do`, and their streaming forms) emit
+    /// [`wafer_block::stream::FRAME_ENCODING_META`] = `raw` between the two.
+    /// The wasmi read arm reads this after each `next_chunk` to decide whether
+    /// a JSON-codec guest's frame may be transcoded: the header frame (before
+    /// the marker) is a MessagePack DTO and gets converted; the body frames
+    /// (after it) are handed over untouched. There is no sniffing — a frame is
+    /// raw only because its producer said so.
+    pub(crate) fn raw_frames(&self) -> bool {
+        self.raw_frames
     }
 
     #[cfg(test)]
@@ -151,9 +171,10 @@ impl StreamState {
     /// - `Err(WaferError)` for an error/drop/continue terminal — also stored
     ///   on `last_error` so `take_error` can return it.
     ///
-    /// Mid-stream `Meta` events are absorbed silently (the streaming ABI does
-    /// not currently surface them to the guest — adding a chunk-typed channel
-    /// is a separate task).
+    /// Mid-stream `Meta` events are absorbed (the streaming ABI does not
+    /// surface them to the guest as data — adding a chunk-typed channel is a
+    /// separate task), but the raw-frame marker among them is *observed*: it
+    /// sets [`Self::raw_frames`] for every frame that follows.
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, WaferError> {
         if self.phase != Phase::ReadingResponse {
             return Err(precondition_err(
@@ -172,9 +193,17 @@ impl StreamState {
         loop {
             match stream.next().await {
                 Some(StreamEvent::Chunk(bytes)) => return Ok(Some(bytes)),
-                // Mid-stream / trailing meta entries are not yet surfaced to
-                // the guest via this ABI. Skip them.
-                Some(StreamEvent::Meta(_)) => continue,
+                // Mid-stream / trailing meta entries are not surfaced to the
+                // guest via this ABI, so they are skipped as data — but the
+                // raw-frame marker is read on the way past.
+                Some(StreamEvent::Meta(entry)) => {
+                    if entry.key == wafer_block::stream::FRAME_ENCODING_META
+                        && entry.value == wafer_block::stream::FRAME_ENCODING_RAW
+                    {
+                        self.raw_frames = true;
+                    }
+                    continue;
+                }
                 Some(StreamEvent::Complete { .. }) => {
                     // Drop the stream so its cancel token doesn't fire on a
                     // Complete-terminated channel (cosmetic, but tidy).
@@ -541,6 +570,79 @@ mod tests {
         assert_eq!(chunk.as_deref(), Some(b"hi".as_ref()));
         let eos = state.next_chunk().await.unwrap();
         assert!(eos.is_none());
+    }
+
+    /// A handler that emits raw (non-DTO) body frames marks them on the
+    /// stream with a `frame.encoding = raw` Meta event before the first raw
+    /// chunk. `next_chunk` must observe that marker — the wasmi read arm reads
+    /// `raw_frames()` to decide whether a JSON-codec guest's frame gets
+    /// transcoded — while still skipping the Meta event as data.
+    #[tokio::test]
+    async fn raw_frame_marker_sets_raw_frames_and_is_not_yielded_as_data() {
+        use wafer_block::{
+            core_types::MetaEntry,
+            stream::{FRAME_ENCODING_META, FRAME_ENCODING_RAW},
+        };
+
+        let mut state = StreamState::new("test/target".into(), msg());
+        let (_, _, _) = state.take_finish_request().unwrap();
+        state.finish_with_stream(OutputStream::from_producer(|sink, _cancel| async move {
+            // Frame 1: a wire DTO header — emitted BEFORE the marker.
+            sink.send_chunk(b"header".to_vec()).await.ok();
+            sink.send_meta(MetaEntry {
+                key: FRAME_ENCODING_META.into(),
+                value: FRAME_ENCODING_RAW.into(),
+            })
+            .await
+            .ok();
+            // Frames 2..: raw body bytes.
+            sink.send_chunk(vec![104, 105]).await.ok();
+            sink.complete(vec![]).await.ok();
+        }));
+
+        let header = state.next_chunk().await.unwrap();
+        assert_eq!(header.as_deref(), Some(b"header".as_ref()));
+        assert!(
+            !state.raw_frames(),
+            "frames before the marker are still wire DTOs"
+        );
+
+        let body = state.next_chunk().await.unwrap();
+        assert_eq!(
+            body.as_deref(),
+            Some([104u8, 105].as_ref()),
+            "the raw body frame is yielded verbatim, and the Meta marker is not yielded as data"
+        );
+        assert!(
+            state.raw_frames(),
+            "the marker must flip raw_frames for every frame after it"
+        );
+
+        assert!(state.next_chunk().await.unwrap().is_none());
+        assert!(state.raw_frames(), "raw mode is sticky once set");
+    }
+
+    /// An ordinary trailing/mid-stream Meta entry (an HTTP trailer, say) must
+    /// NOT be mistaken for the raw-frame marker.
+    #[tokio::test]
+    async fn unrelated_meta_events_do_not_set_raw_frames() {
+        use wafer_block::core_types::MetaEntry;
+        let mut state = StreamState::new("test/target".into(), msg());
+        let (_, _, _) = state.take_finish_request().unwrap();
+        state.finish_with_stream(OutputStream::respond_with_meta(
+            b"hi".to_vec(),
+            vec![MetaEntry {
+                key: "X-Trailer".into(),
+                value: "1".into(),
+            }],
+        ));
+
+        assert_eq!(
+            state.next_chunk().await.unwrap().as_deref(),
+            Some(b"hi".as_ref())
+        );
+        assert!(state.next_chunk().await.unwrap().is_none());
+        assert!(!state.raw_frames());
     }
 
     #[test]

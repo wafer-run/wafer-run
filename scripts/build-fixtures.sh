@@ -99,6 +99,16 @@ build_fixture \
     crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm
 
+# json_host_guest.wasm — consumed by json_host_codec_e2e.rs at runtime via
+# Path. The std-only, ZERO-dependency guest that negotiates the JSON host-call
+# codec (`__wafer_host_codec() -> 1`) and drives database/storage/config over
+# it. Deliberately has no `[dependencies]`: it is the compatibility fixture a
+# dependency-free toolchain must be able to build. Built in place.
+build_fixture \
+    crates/wafer-run/tests/json_host_guest/target/wasm32-wasip1/release/json_host_guest.wasm \
+    crates/wafer-run/tests/json_host_guest/Cargo.toml \
+    crates/wafer-run/tests/json_host_guest/target/wasm32-wasip1/release/json_host_guest.wasm
+
 # pool_guest_{singleton,percall}.wasm — consumed by wasm_instance_pooling.rs
 # at runtime via Path. Two variant builds of one crate (PERF-01 Part B): the
 # default build declares InstanceMode::Singleton (pool-eligible); the

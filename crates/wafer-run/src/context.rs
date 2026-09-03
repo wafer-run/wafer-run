@@ -516,6 +516,11 @@ impl Context for RuntimeContext {
                             caps.raw_sql
                         } else if resource == wafer_block::wrap::DDL_RESOURCE {
                             caps.ddl
+                        } else if resource == wafer_block::wrap::SCHEMA_RESOURCE {
+                            // Structured schema ops only — deliberately NOT
+                            // `caps.ddl`, so a block can create its own tables
+                            // without the raw-statement channel.
+                            caps.schema
                         } else {
                             caps.allows_collection(resource)
                         }

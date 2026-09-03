@@ -28,6 +28,7 @@ mod fully_declared_block {
             crypto,
             network,
             ddl,
+            schema,
             collections = ["users", "sessions"],
             callable_blocks = ["wafer-run/crypto"],
             headers(
@@ -79,6 +80,7 @@ fn fully_declared_caps_present() {
     assert_eq!(caps.network, wafer_block::Allowlist::Any);
     assert!(!caps.raw_sql);
     assert!(caps.ddl);
+    assert!(caps.schema);
     assert_eq!(caps.config, wafer_block::Allowlist::None);
     assert!(caps.collections.allows("users"));
     assert!(caps.collections.allows("sessions"));
@@ -207,6 +209,10 @@ fn wildcard_list_maps_to_any() {
     use wafer_block::Allowlist;
     use wildcard_block::Wildcard;
     let caps = Wildcard::block_info().capabilities.expect("caps present");
+    // A bool capability the group never mentions stays false — `schema` is
+    // not implied by anything else in the declaration.
+    assert!(!caps.schema);
+    assert!(!caps.ddl);
     assert_eq!(caps.collections, Allowlist::Any, "[\"*\"] -> Any");
     assert_eq!(
         caps.callable_blocks,

@@ -689,6 +689,41 @@ fn database_op_body(op: &str) -> Vec<u8> {
             sort: vec![],
             limit: 0,
         }),
+        ServiceOp::DATABASE_ENSURE_TABLE => codec::encode(&wire::EnsureTableRequest {
+            table: wire::TableDef {
+                name: "my_org__auth__widgets".into(),
+                columns: vec![wire::ColumnDef {
+                    name: "id".into(),
+                    kind: "string".into(),
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                }],
+                indexes: vec![],
+                primary_key: vec![],
+                unique_keys: vec![],
+            },
+        }),
+        ServiceOp::DATABASE_ADD_COLUMN => codec::encode(&wire::AddColumnRequest {
+            table: "my_org__auth__widgets".into(),
+            column: wire::ColumnDef {
+                name: "label".into(),
+                kind: "text".into(),
+                nullable: true,
+                primary_key: false,
+                auto_increment: false,
+                unique: false,
+                default: None,
+            },
+        }),
+        ServiceOp::DATABASE_DROP_TABLE => codec::encode(&wire::DropTableRequest {
+            table: "my_org__auth__widgets".into(),
+        }),
+        ServiceOp::DATABASE_TABLE_EXISTS => codec::encode(&wire::TableExistsRequest {
+            table: "my_org__auth__widgets".into(),
+        }),
         other => panic!(
             "completeness test has no minimal-body case for database op `{other}` — \
              add a `match` arm to `database_op_body` so this op stays covered \
