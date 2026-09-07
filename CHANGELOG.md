@@ -58,6 +58,33 @@
 
 ### Added
 
+- Static block registration now works on `wasm32`. `register_static_block!`
+  used to expand to nothing there — `linkme`'s distributed slice is a linker
+  section that target does not have — so a wasm32 embedder booted with an
+  empty block registry and had to re-list every block crate by hand as
+  `register_block` calls, mirroring its own `use_static_blocks!` anchors with
+  nothing keeping the two lists in step. The `wasm32` arm now emits a
+  `pub const __WAFER_STATIC_BLOCK` per crate, and `use_static_blocks!` emits
+  `pub const WAFER_STATIC_BLOCKS: &[&StaticBlockRegistration]` into the
+  invoking module holding one entry per named crate. New
+  `Wafer::register_static_blocks(&[&StaticBlockRegistration])` takes that
+  list. `WAFER_STATIC_BLOCKS` is **empty on every target where `linkme`
+  works**, so the call site needs no `cfg`:
+
+  ```rust,ignore
+  wafer_block::use_static_blocks!(wafer_block_cors, wafer_block_router);
+  // ...
+  wafer.register_static_blocks(WAFER_STATIC_BLOCKS)?;   // no-op off wasm32
+  ```
+
+  `StaticBlockRegistration` (the record type) is now exported on every
+  target; `STATIC_BLOCK_REGISTRATIONS` (the `linkme` slice) stays
+  native-only. Two consequences worth knowing: `use_static_blocks!` now adds
+  a `WAFER_STATIC_BLOCKS` item to the module that invokes it (so
+  `wafer_flow_http_server::WAFER_STATIC_BLOCKS` exists), and on `wasm32` a
+  crate may invoke `register_static_block!` at most once, since a second
+  invocation would define `__WAFER_STATIC_BLOCK` twice. Native builds take
+  any number, as before.
 - Structured schema operations on the database interface —
   `database.ensure_table`, `database.add_column`, `database.drop_table` and
   `database.table_exists` — taking a wire `TableDef` / `ColumnDef` the host
@@ -203,6 +230,25 @@
   PBKDF2 at a shorter `dkLen` returns a prefix of the longer output, so
   deriving `stored.len()` bytes would let a truncated stored hash verify at
   reduced strength.
+
+### Fixed
+
+- Discovery documents no longer publish a rest parameter's `...` marker.
+  A route whose pattern ends in a trailing-rest placeholder
+  (`/b/storage/api/buckets/{name}/objects/{key...}`) had the raw marker
+  copied into the OpenAPI `paths` key while `parameters` declared the plain
+  name `key`, so the document disagreed with itself in both directions — an
+  expression no parameter fills and a parameter no expression consumes,
+  which OpenAPI 3.1 does not allow and which makes a generated client build
+  the literal three dots into its URL. The same template now renders through
+  one function for both projections, so the published path is
+  `.../objects/{key}` in the OpenAPI document and in a WebMCP tool's
+  `invocation.path`. As a consequence such an endpoint is no longer refused
+  from the WebMCP manifest as `PathParamsDisagreeWithTemplate`: the
+  placeholder census reads `key` too. Segments the template parser refuses
+  (`*`, `**`, malformed braces) still reach the OpenAPI `paths` map
+  unchanged — that projection has no refusal channel, and dropping a
+  documented route silently would be worse than publishing it as it was.
 
 ### Refactored
 

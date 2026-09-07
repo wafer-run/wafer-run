@@ -1,0 +1,42 @@
+# Compile fixture for the `wasm32` arms of `register_static_block!` and
+# `use_static_blocks!`.
+#
+# Those arms exist precisely because `linkme` does not work on `wasm32`, so
+# nothing in the workspace's native build ever expands them: a typo in the
+# `::$krate::__WAFER_STATIC_BLOCK` path, a type mismatch, or a block whose
+# `new()` is native-only would compile green here and break only in a
+# downstream Worker build.
+#
+# `scripts/check.sh wasm` builds this crate for `wasm32-unknown-unknown`,
+# which expands both arms for real. Excluded from the workspace (own
+# `[workspace]` table) so `cargo build --workspace` does not pick it up —
+# same pattern as the guest fixtures under `crates/wafer-run/tests/`.
+#
+# The six block crates listed are the middleware battery a browser/Worker
+# embedder registers; `wafer-block-http-listener`, `-ip-rate-limit` and
+# `-monitoring` are absent because they are native-only (tokio's net stack).
+[workspace]
+
+[package]
+name = "wasm-static-blocks-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wafer-block = { path = "../../../wafer-block" }
+wafer-block-cors = { path = "../../../wafer-block-cors" }
+wafer-block-inspector = { path = "../../../wafer-block-inspector" }
+wafer-block-readonly-guard = { path = "../../../wafer-block-readonly-guard" }
+wafer-block-router = { path = "../../../wafer-block-router" }
+wafer-block-security-headers = { path = "../../../wafer-block-security-headers" }
+wafer-block-web = { path = "../../../wafer-block-web" }
+
+# `uuid` refuses to build for wasm32-unknown-unknown without a randomness
+# source, and the choice belongs to the embedding binary, not to the library
+# crates that use it (inspector, web). This fixture is that binary's stand-in,
+# so it makes the choice here rather than forcing one on every consumer.
+uuid = { version = "1", features = ["js"] }
