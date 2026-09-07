@@ -30,7 +30,34 @@ impl std::fmt::Display for HttpMethod {
 }
 
 /// Access level required for a block endpoint.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// # Ordering is the strictness ladder
+///
+/// `Public < Authenticated < Admin`. The derived `Ord` follows **declaration
+/// order**, and the variants are declared weakest-requirement first
+/// deliberately so that the derive expresses that ladder: a caller holding
+/// level `caller` may see exactly the endpoints whose requirement satisfies
+/// `required <= caller`.
+///
+/// This makes variant order load-bearing for access decisions. Adding a
+/// variant is only safe in the position its strictness dictates — appending
+/// a level *weaker* than `Admin` at the end, or inserting one without
+/// renumbering intent, silently changes who can see what. The exhaustive
+/// ladder in `auth_level_order_tests` exists to stop that: it fails to
+/// compile when a variant is added and fails at run time when one is
+/// misplaced.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthLevel {
     /// No authentication required.
@@ -1166,5 +1193,71 @@ mod block_endpoint_tests {
             .expect("agent_tool survives round-trip");
         assert_eq!(tool.name, "start_checkout");
         assert_eq!(tool.description, "Create a Stripe Checkout Session.");
+    }
+}
+
+#[cfg(test)]
+mod auth_level_order_tests {
+    use super::*;
+
+    /// The intended strictness ladder, written out independently of the
+    /// derived `Ord`.
+    ///
+    /// This match is **exhaustive on purpose**: adding a variant to
+    /// [`AuthLevel`] stops this file compiling, which forces whoever adds it
+    /// to state where on the ladder it belongs. `Ord` is derived from
+    /// declaration order, so a variant inserted in the middle of the enum
+    /// silently renumbers everything below it — the pair assertions here are
+    /// what turn that from a silent security change into a red test.
+    fn ladder_position(level: AuthLevel) -> u8 {
+        match level {
+            AuthLevel::Public => 0,
+            AuthLevel::Authenticated => 1,
+            AuthLevel::Admin => 2,
+        }
+    }
+
+    /// Every variant, in the order the ladder claims.
+    const LADDER: [AuthLevel; 3] = [
+        AuthLevel::Public,
+        AuthLevel::Authenticated,
+        AuthLevel::Admin,
+    ];
+
+    #[test]
+    fn derived_order_matches_the_declared_ladder() {
+        for a in LADDER {
+            for b in LADDER {
+                assert_eq!(
+                    a.cmp(&b),
+                    ladder_position(a).cmp(&ladder_position(b)),
+                    "derived Ord disagrees with the strictness ladder for \
+                     ({a:?}, {b:?}) — a variant was reordered or inserted \
+                     mid-enum"
+                );
+            }
+        }
+    }
+
+    /// Pins the ladder itself, not just its agreement with `Ord`: the whole
+    /// point of the ordering is that `Public` is the weakest requirement and
+    /// `Admin` the strictest, so a caller holding level `L` may see exactly
+    /// the endpoints whose requirement is `<= L`.
+    #[test]
+    fn public_is_weakest_and_admin_is_strictest() {
+        assert!(AuthLevel::Public < AuthLevel::Authenticated);
+        assert!(AuthLevel::Authenticated < AuthLevel::Admin);
+        assert!(AuthLevel::Public < AuthLevel::Admin);
+        assert_eq!(LADDER.iter().copied().max(), Some(AuthLevel::Admin));
+        assert_eq!(LADDER.iter().copied().min(), Some(AuthLevel::Public));
+    }
+
+    /// `Default` must be the bottom of the ladder: an endpoint that declares
+    /// no `auth` gets `Public`, and a visibility ceiling built from a
+    /// defaulted `AuthLevel` must therefore admit public endpoints only.
+    #[test]
+    fn default_is_the_bottom_of_the_ladder() {
+        assert_eq!(AuthLevel::default(), AuthLevel::Public);
+        assert!(LADDER.iter().all(|l| AuthLevel::default() <= *l));
     }
 }

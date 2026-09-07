@@ -61,6 +61,12 @@ let out = wafer
 
 ## Implementing ConfigSource
 
+An implementation supplies its *storage* and nothing else:
+`wafer_run::resolve_declared` is the resolution itself — declared value →
+non-empty `ConfigVar::default` → `MissingRequired` when the key is required
+→ omitted when it is optional. Write the lookup, not the loop, so your
+source cannot drift from every other one.
+
 ```rust
 #[async_trait::async_trait]
 impl wafer_run::ConfigSource for MyEnvConfigSource {
@@ -69,22 +75,22 @@ impl wafer_run::ConfigSource for MyEnvConfigSource {
         block: &str,
         declared_keys: &[wafer_block::ConfigVar],
     ) -> Result<wafer_run::EnvBlockConfig, wafer_run::ConfigError> {
-        let mut out = std::collections::HashMap::new();
-        for var in declared_keys {
-            if let Ok(v) = std::env::var(&var.key) {
-                out.insert(var.key.clone(), v);
-            } else if !var.default.is_empty() {
-                out.insert(var.key.clone(), var.default.clone());
-            } else if !var.optional {
-                return Err(wafer_run::ConfigError::MissingRequired {
-                    block: block.to_string(),
-                    key: var.key.clone(),
-                });
-            }
-        }
-        Ok(wafer_run::EnvBlockConfig::new(out))
+        wafer_run::resolve_declared(block, declared_keys, |key| {
+            std::env::var(key).ok()
+        })
     }
 }
+```
+
+The lookup owns what "absent" means for your storage. `Some(String::new())`
+is a *value*: it beats the declared default and satisfies a required key. A
+source where an empty stored entry means "unset" — a blank column in a
+settings table, say — says so itself:
+
+```rust
+wafer_run::resolve_declared(block, declared_keys, |key| {
+    self.rows.get(key).filter(|v| !v.is_empty()).cloned()
+})
 ```
 
 ## What got faster

@@ -568,7 +568,7 @@ impl SqliteVecService {
             .filter_map(|id| {
                 let metadata = meta_map.get(&id).cloned();
                 if let Some(flt) = filter.as_ref() {
-                    if !apply_filter(&metadata, flt) {
+                    if !flt.matches(metadata.as_ref()) {
                         return None;
                     }
                 }
@@ -583,25 +583,6 @@ impl SqliteVecService {
 
         Ok(out)
     }
-}
-
-fn apply_filter(metadata: &Option<serde_json::Value>, filter: &MetadataFilter) -> bool {
-    let Some(meta) = metadata else {
-        return filter.equals.is_empty();
-    };
-    for (path, want) in &filter.equals {
-        let mut cursor = meta;
-        for segment in path.split('.') {
-            match cursor.get(segment) {
-                Some(v) => cursor = v,
-                None => return false,
-            }
-        }
-        if cursor != want {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

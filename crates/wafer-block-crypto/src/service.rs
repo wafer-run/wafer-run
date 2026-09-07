@@ -7,16 +7,23 @@ pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 // part of the shared policy) so existing `service::MIN_JWT_SECRET_LEN`
 // imports keep working.
 pub use crate::primitives::MIN_JWT_SECRET_LEN;
-use crate::primitives::{self, Argon2Cost, JwtExpPolicy};
+use crate::primitives::{self, JwtExpPolicy};
+// Re-exported so a caller configuring the service does not need a second
+// import path for the two types `with_password_scheme` takes.
+pub use crate::primitives::{Argon2Cost, PasswordScheme};
 
 /// Argon2 + JWT crypto service.
 ///
-/// Thin policy wrapper over [`crate::primitives`]: argon2id password
-/// hashing at [`Argon2Cost::Default`], HS256 JWT sign/verify with
-/// [`JwtExpPolicy::Required`], and per-block keys derived via
-/// [`primitives::derive_block_key`]. All pure Rust, wasm32-compatible.
+/// Thin policy wrapper over [`crate::primitives`]: password hashing under a
+/// selectable [`PasswordScheme`] (argon2id at [`Argon2Cost::Default`] unless
+/// told otherwise), HS256 JWT sign/verify with [`JwtExpPolicy::Required`],
+/// and per-block keys derived via [`primitives::derive_block_key`]. All pure
+/// Rust, wasm32-compatible.
 pub struct Argon2JwtCryptoService {
     jwt_secret: String,
+    /// Scheme used to WRITE new password hashes. Verification does not
+    /// consult it — see this type's [`CryptoService::compare_hash`].
+    password_scheme: PasswordScheme,
 }
 
 impl Argon2JwtCryptoService {
@@ -26,6 +33,9 @@ impl Argon2JwtCryptoService {
     /// — a weak secret here defeats the security of every token signed
     /// by the runtime, so this is a fail-fast at construction rather
     /// than an issue surfaced per-request.
+    ///
+    /// Passwords are hashed with argon2id at [`Argon2Cost::Default`]; call
+    /// [`Self::with_password_scheme`] to choose otherwise.
     pub fn new(jwt_secret: String) -> Result<Self, CryptoError> {
         if jwt_secret.len() < MIN_JWT_SECRET_LEN {
             return Err(CryptoError::Other(format!(
@@ -34,17 +44,55 @@ impl Argon2JwtCryptoService {
                 jwt_secret.len()
             )));
         }
-        Ok(Self { jwt_secret })
+        Ok(Self {
+            jwt_secret,
+            password_scheme: PasswordScheme::default(),
+        })
+    }
+
+    /// Choose the algorithm this service uses when it **writes** a new
+    /// password hash.
+    ///
+    /// This exists because argon2id's default memory cost is unaffordable on
+    /// targets this runtime ships to — minutes per hash in single-threaded
+    /// wasm, and over the memory limit inside a Cloudflare Worker — so the
+    /// deployment, not the library, has to pick. It changes nothing else:
+    /// JWT signing, per-block key derivation and randomness are unaffected.
+    ///
+    /// # It does not invalidate stored credentials
+    ///
+    /// The scheme applies to [`CryptoService::hash`] only.
+    /// [`CryptoService::compare_hash`] dispatches on the format of the hash
+    /// it is handed, so every credential already in the database keeps
+    /// verifying, whichever scheme wrote it. Selecting a scheme changes what
+    /// new and re-set passwords look like; it is not a password reset.
+    ///
+    /// Old hashes are also not upgraded: a credential keeps the scheme and
+    /// cost it was written with until something rewrites it. Re-hash on the
+    /// next successful login if you want them migrated.
+    pub fn with_password_scheme(mut self, scheme: PasswordScheme) -> Self {
+        self.password_scheme = scheme;
+        self
     }
 }
 
 impl CryptoService for Argon2JwtCryptoService {
     fn hash(&self, password: &str) -> Result<String, CryptoError> {
-        primitives::hash_password(password, Argon2Cost::Default)
+        primitives::hash_password_with(password, self.password_scheme)
     }
 
+    /// Verify against whichever scheme the **stored hash** names, not the
+    /// one this service is configured to write.
+    ///
+    /// A stored hash records how it was written; the configured scheme says
+    /// what to write next. Checking a credential against the current setting
+    /// rather than against itself would make
+    /// [`Argon2JwtCryptoService::with_password_scheme`] — or running one
+    /// database against two targets that hash differently, which is the
+    /// reason the selector exists — silently invalidate every password
+    /// already stored.
     fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
-        primitives::verify_password(password, hash)
+        primitives::verify_password_any_scheme(password, hash)
     }
 
     fn sign(
@@ -225,5 +273,131 @@ mod tests {
             Err(CryptoError::Other(_)) => {}
             Err(other) => panic!("expected CryptoError::Other, got: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod password_scheme_tests {
+    use super::*;
+    use crate::primitives::PBKDF2_SHA256_MIN_ITERATIONS;
+
+    const TEST_SECRET: &str = "test-secret-padded-to-32-bytes-or-more-for-validation-aaaaaaaaaa";
+
+    /// A PBKDF2 hash written by an independent implementation of the same
+    /// scheme (see `primitives::pbkdf2_tests`). It stands in for a
+    /// credential already stored by a deployment that hashes with PBKDF2.
+    const STORED_PBKDF2: &str =
+        "$pbkdf2-sha256$i=1000$AAECAwQFBgcICQoLDA0ODw==$/6tPyT3P0FDTAPcc3qfsdyi1rxNk5iabYJNHAbMJ8Mg=";
+    const STORED_PBKDF2_PASSWORD: &str = "correcthorsebatterystaple";
+
+    fn svc() -> Argon2JwtCryptoService {
+        Argon2JwtCryptoService::new(TEST_SECRET.to_string()).expect("long enough")
+    }
+
+    /// The default is what it always was. A service built the old way keeps
+    /// writing argon2id at the default cost, so this change is inert for
+    /// every existing caller.
+    #[test]
+    fn the_default_service_still_writes_argon2id() {
+        let hash = svc().hash("pw").expect("hash");
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+    }
+
+    #[test]
+    fn constrained_argon2_is_selectable() {
+        let s = svc().with_password_scheme(PasswordScheme::Argon2(Argon2Cost::Constrained));
+        let hash = s.hash("pw").expect("hash");
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+        assert!(
+            hash.contains("m=4096"),
+            "the constrained memory cost must reach the hash: {hash}"
+        );
+        s.compare_hash("pw", &hash).expect("round trip");
+    }
+
+    #[test]
+    fn pbkdf2_is_selectable() {
+        let s = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
+            iterations: PBKDF2_SHA256_MIN_ITERATIONS,
+        });
+        let hash = s.hash("pw").expect("hash");
+        assert!(hash.starts_with("$pbkdf2-sha256$i=10000$"), "{hash}");
+        s.compare_hash("pw", &hash).expect("round trip");
+        assert!(matches!(
+            s.compare_hash("wrong", &hash),
+            Err(CryptoError::PasswordMismatch)
+        ));
+    }
+
+    /// The property the whole design turns on: the configured scheme decides
+    /// what a *new* hash looks like and nothing else. Credentials already
+    /// stored under the other scheme keep verifying, in both directions —
+    /// otherwise selecting a scheme would be a password reset for every
+    /// existing user.
+    #[test]
+    fn switching_scheme_does_not_invalidate_stored_credentials() {
+        let argon2_svc = svc();
+        let stored_argon2 = argon2_svc.hash("pw-argon2").expect("hash");
+
+        let pbkdf2_svc = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
+            iterations: PBKDF2_SHA256_MIN_ITERATIONS,
+        });
+
+        // A service now writing PBKDF2 still reads argon2 credentials…
+        pbkdf2_svc
+            .compare_hash("pw-argon2", &stored_argon2)
+            .expect("argon2 credential survives the switch to pbkdf2");
+
+        // …and a service writing argon2 still reads PBKDF2 credentials,
+        // including one it did not produce and whose cost is below the
+        // floor it would write today.
+        argon2_svc
+            .compare_hash(STORED_PBKDF2_PASSWORD, STORED_PBKDF2)
+            .expect("pbkdf2 credential survives the switch to argon2");
+
+        // Wrong passwords stay wrong across both.
+        assert!(matches!(
+            pbkdf2_svc.compare_hash("nope", &stored_argon2),
+            Err(CryptoError::PasswordMismatch)
+        ));
+        assert!(matches!(
+            argon2_svc.compare_hash("nope", STORED_PBKDF2),
+            Err(CryptoError::PasswordMismatch)
+        ));
+    }
+
+    /// A scheme selection cannot be talked into writing a weak hash.
+    #[test]
+    fn a_below_floor_iteration_count_fails_at_hash_time() {
+        let s = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 { iterations: 1 });
+        assert!(matches!(s.hash("pw"), Err(CryptoError::HashError(_))));
+    }
+
+    /// The scheme is about passwords only; JWT signing, per-block key
+    /// derivation and randomness are untouched by it.
+    #[test]
+    fn the_scheme_does_not_affect_tokens() {
+        let plain = svc();
+        let scheme = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
+            iterations: PBKDF2_SHA256_MIN_ITERATIONS,
+        });
+
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!("user-1"));
+
+        let token = plain
+            .sign(claims.clone(), Duration::from_secs(3600))
+            .expect("sign");
+        let back = scheme
+            .verify(&token)
+            .expect("a token signed by either verifies in both");
+        assert_eq!(back.get("sub"), Some(&serde_json::json!("user-1")));
+
+        let block_token = scheme
+            .sign_for("my-org/auth", claims, Duration::from_secs(3600))
+            .expect("sign_for");
+        plain
+            .verify_for("my-org/auth", &block_token)
+            .expect("per-block derivation is unchanged");
     }
 }

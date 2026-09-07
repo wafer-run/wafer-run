@@ -87,6 +87,51 @@ pub struct MetadataFilter {
     pub equals: BTreeMap<String, serde_json::Value>,
 }
 
+impl MetadataFilter {
+    /// Whether an entry carrying `metadata` satisfies every constraint.
+    ///
+    /// This is the filter's meaning, and it lives on the wire type so every
+    /// [`VectorService`](crate::wire::vector) backend answers a query the
+    /// same way. A backend that can push the filter into its query engine
+    /// still has to agree with this predicate; one that cannot calls it.
+    ///
+    /// The rules:
+    ///
+    /// - An **empty** filter constrains nothing and matches every entry,
+    ///   metadata or not.
+    /// - Each key is a **dot-path** (`doc.rev.n`), walked segment by segment
+    ///   through JSON objects. A path that names a field the document does
+    ///   not have — including one that tries to descend through a scalar —
+    ///   is a mismatch, not an error.
+    /// - A constraint may target a whole subtree, not only a leaf; the
+    ///   comparison is JSON value equality, so it is typed (`1` never
+    ///   matches `"1"`).
+    /// - Constraints are a **conjunction**: all of them must hold.
+    /// - An entry with **no metadata** (`None`, or a JSON `null`) satisfies
+    ///   only the empty filter. Absent metadata is not a wildcard.
+    pub fn matches(&self, metadata: Option<&serde_json::Value>) -> bool {
+        if self.equals.is_empty() {
+            return true;
+        }
+        let Some(meta) = metadata else {
+            return false;
+        };
+        for (path, expected) in &self.equals {
+            let mut cursor = meta;
+            for segment in path.split('.') {
+                match cursor.get(segment) {
+                    Some(v) => cursor = v,
+                    None => return false,
+                }
+            }
+            if cursor != expected {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 // ---- Vector requests / responses ----
 
 /// Request for `vector.create_index`.
@@ -643,5 +688,103 @@ mod tests {
             hex, "81a6746f6b656e7300",
             "CountTokensResponse schema changed — review consumer impact before updating this literal"
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_filter_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn filter(pairs: &[(&str, serde_json::Value)]) -> MetadataFilter {
+        MetadataFilter {
+            equals: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// An empty filter constrains nothing, so it admits every entry —
+    /// including one that carries no metadata at all.
+    #[test]
+    fn empty_filter_matches_everything() {
+        let f = MetadataFilter::default();
+        assert!(f.matches(None));
+        assert!(f.matches(Some(&json!(null))));
+        assert!(f.matches(Some(&json!({"a": 1}))));
+    }
+
+    /// The converse, and the one asymmetric rule in this predicate: an entry
+    /// with no metadata cannot satisfy any constraint, so a non-empty filter
+    /// rejects it rather than treating "no metadata" as a wildcard.
+    #[test]
+    fn absent_metadata_fails_any_non_empty_filter() {
+        let f = filter(&[("a", json!(1))]);
+        assert!(!f.matches(None));
+    }
+
+    /// A JSON `null` metadata value is metadata that exists and has no
+    /// fields — it fails a field constraint the same way an object missing
+    /// that field does, rather than erroring.
+    #[test]
+    fn null_metadata_fails_any_non_empty_filter() {
+        let f = filter(&[("a", json!(1))]);
+        assert!(!f.matches(Some(&json!(null))));
+    }
+
+    #[test]
+    fn top_level_equality() {
+        let meta = json!({"tenant": "acme", "n": 3});
+        assert!(filter(&[("tenant", json!("acme"))]).matches(Some(&meta)));
+        assert!(!filter(&[("tenant", json!("other"))]).matches(Some(&meta)));
+        assert!(filter(&[("n", json!(3))]).matches(Some(&meta)));
+    }
+
+    /// Keys are dot-paths into the metadata document, not literal key names.
+    #[test]
+    fn dot_paths_walk_into_nested_objects() {
+        let meta = json!({"doc": {"lang": "en", "rev": {"n": 7}}});
+        assert!(filter(&[("doc.lang", json!("en"))]).matches(Some(&meta)));
+        assert!(filter(&[("doc.rev.n", json!(7))]).matches(Some(&meta)));
+        assert!(!filter(&[("doc.rev.n", json!(8))]).matches(Some(&meta)));
+    }
+
+    /// A path that runs off the end of the document is a mismatch, not a
+    /// match-anything: a filter naming a field the entry does not have must
+    /// exclude the entry.
+    #[test]
+    fn missing_path_segment_is_a_mismatch() {
+        let meta = json!({"doc": {"lang": "en"}});
+        assert!(!filter(&[("doc.missing", json!("en"))]).matches(Some(&meta)));
+        assert!(!filter(&[("nope.lang", json!("en"))]).matches(Some(&meta)));
+        // Descending through a scalar is the same failure, not a panic.
+        assert!(!filter(&[("doc.lang.deeper", json!("en"))]).matches(Some(&meta)));
+    }
+
+    /// Every constraint must hold: the filter is a conjunction.
+    #[test]
+    fn all_constraints_must_hold() {
+        let meta = json!({"a": 1, "b": 2});
+        assert!(filter(&[("a", json!(1)), ("b", json!(2))]).matches(Some(&meta)));
+        assert!(!filter(&[("a", json!(1)), ("b", json!(99))]).matches(Some(&meta)));
+    }
+
+    /// Equality is JSON equality, so a value of the right shape but the
+    /// wrong type does not match. (`1` and `"1"` are different metadata.)
+    #[test]
+    fn equality_is_typed() {
+        let meta = json!({"a": 1});
+        assert!(!filter(&[("a", json!("1"))]).matches(Some(&meta)));
+        assert!(!filter(&[("a", json!(true))]).matches(Some(&meta)));
+    }
+
+    /// A constraint may name a whole subtree, not only a leaf.
+    #[test]
+    fn a_constraint_may_target_a_subtree() {
+        let meta = json!({"doc": {"lang": "en"}});
+        assert!(filter(&[("doc", json!({"lang": "en"}))]).matches(Some(&meta)));
+        assert!(!filter(&[("doc", json!({"lang": "fr"}))]).matches(Some(&meta)));
     }
 }
