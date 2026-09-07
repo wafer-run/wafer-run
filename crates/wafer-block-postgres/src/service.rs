@@ -5,16 +5,16 @@ use std::{
 
 use base64ct::{Base64, Encoding};
 use sqlx::{postgres::PgRow, PgPool, Row};
-use wafer_block::db::{Filter, ListOptions};
 #[cfg(test)]
-use wafer_block::db::{FilterOp, SortField};
+use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
-use wafer_core::interfaces::database::{
-    exec::DbExec,
-    schema_cache::SchemaCache,
-    service::{
-        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-        UpsertSpec,
+use wafer_core::{
+    forward_database_service,
+    interfaces::database::{
+        codec,
+        exec::DbExec,
+        schema_cache::SchemaCache,
+        service::{Column, DatabaseError, Record},
     },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
@@ -56,38 +56,6 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
     // Schema DDL async helpers
     // -----------------------------------------------------------------
-
-    async fn schema_ensure_table_async(&self, table: &Table) -> Result<(), DatabaseError> {
-        let create_stmt = ddl::build_create_table(table, Backend::Postgres).map_err(|e| {
-            DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
-        })?;
-        sqlx::query(&create_stmt.sql)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(format!("create table {}: {}", table.name, e)))?;
-
-        // Ensure indexes
-        for idx in &table.indexes {
-            let idx_stmt = ddl::build_create_index(&table.name, idx, Backend::Postgres)
-                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
-            sqlx::query(&idx_stmt.sql)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
-        }
-
-        // Create indexes for columns with foreign keys
-        let fk_stmts = ddl::build_fk_indexes(table, Backend::Postgres)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
-        for stmt in fk_stmts {
-            sqlx::query(&stmt.sql)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
-        }
-
-        Ok(())
-    }
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
         let stmt = ddl::build_drop_table(name, Backend::Postgres);
@@ -222,162 +190,62 @@ impl DbExec for PostgresDatabaseService {
     }
 }
 
-#[wafer_async_trait]
-impl DatabaseService for PostgresDatabaseService {
-    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        DbExec::get(self, collection, id).await
-    }
+forward_database_service! {
+    impl DatabaseService for PostgresDatabaseService {
+        forward_to DbExec;
 
-    async fn list(
-        &self,
-        collection: &str,
-        opts: &ListOptions,
-    ) -> Result<RecordList, DatabaseError> {
-        DbExec::list(self, collection, opts).await
-    }
+        ops {
+            get: forward,
+            list: forward,
+            create: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            // The shared default is CREATE → add missing declared columns →
+            // indexes → FK indexes, and it invalidates this backend's schema
+            // cache on both the success and failure paths. The hand-written
+            // version it replaces skipped the column adds entirely, so a table
+            // that predated a schema revision never gained the new column.
+            ensure_schema_table: forward,
+            ensure_schema_tables: inherit,
+            schema_table_exists: forward,
+            // `DbExec` has no schema-mutation primitives, and STRICT_SCHEMA is
+            // per-backend state.
+            schema_drop_table: custom,
+            schema_add_column: custom,
+            set_strict_schema: custom,
+        }
 
-    async fn create(
-        &self,
-        collection: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        DbExec::create(self, collection, data).await
-    }
+        async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
+            let result = self.schema_drop_table_async(name).await;
+            self.schema_cache.invalidate(name);
+            result
+        }
 
-    async fn update(
-        &self,
-        collection: &str,
-        id: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        DbExec::update(self, collection, id, data).await
-    }
+        async fn schema_add_column(
+            &self,
+            table: &str,
+            column: &Column,
+        ) -> Result<(), DatabaseError> {
+            let result = self.schema_add_column_async(table, column).await;
+            self.schema_cache.invalidate(table);
+            result
+        }
 
-    async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        DbExec::delete(self, collection, id).await
-    }
-
-    async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        DbExec::count(self, collection, filters).await
-    }
-
-    async fn sum(
-        &self,
-        collection: &str,
-        field: &str,
-        filters: &[Filter],
-    ) -> Result<f64, DatabaseError> {
-        DbExec::sum(self, collection, field, filters).await
-    }
-
-    async fn query_raw(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::query_raw(self, query, args).await
-    }
-
-    async fn exec_raw(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::exec_raw(self, query, args).await
-    }
-
-    // --- Schema management ---
-
-    async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        let result = self.schema_ensure_table_async(table).await;
-        // Migration created the table and/or added columns (or failed
-        // partway) — drop cached facts so the next introspection is fresh.
-        self.schema_cache.invalidate(&table.name);
-        result
-    }
-
-    async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        DbExec::schema_table_exists(self, name).await
-    }
-
-    async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        let result = self.schema_drop_table_async(name).await;
-        self.schema_cache.invalidate(name);
-        result
-    }
-
-    async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        let result = self.schema_add_column_async(table, column).await;
-        self.schema_cache.invalidate(table);
-        result
-    }
-
-    fn set_strict_schema(&self, enabled: bool) {
-        self.strict_schema.store(enabled, Ordering::Relaxed);
-    }
-
-    async fn delete_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<(), DatabaseError> {
-        DbExec::delete_where(self, collection, filters).await
-    }
-
-    async fn delete_where_count(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::delete_where_count(self, collection, filters).await
-    }
-
-    async fn take_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::take_where(self, collection, filters).await
-    }
-
-    async fn update_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        DbExec::update_where(self, collection, filters, data).await
-    }
-
-    async fn update_where_count(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<i64, DatabaseError> {
-        DbExec::update_where_count(self, collection, filters, data).await
-    }
-
-    async fn increment_field_where(
-        &self,
-        collection: &str,
-        col: &str,
-        delta: i64,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::increment_field_where(self, collection, col, delta, filters).await
-    }
-
-    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
-        DbExec::upsert(self, collection, spec).await
-    }
-
-    async fn aggregate(
-        &self,
-        collection: &str,
-        spec: AggregateSpec,
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::aggregate(self, collection, spec).await
+        fn set_strict_schema(&self, enabled: bool) {
+            self.strict_schema.store(enabled, Ordering::Relaxed);
+        }
     }
 }
 
@@ -432,13 +300,15 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
         let ordinal = col.ordinal();
 
         let value: serde_json::Value = match type_name {
-            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => decode_col(
-                row,
-                ordinal,
-                &col_name,
-                type_name,
-                serde_json::Value::String,
-            )?,
+            // Text columns go through the shared codec, so a JSON object stored
+            // in a TEXT column decodes to the same `Value::Object` here as it
+            // does on SQLite, D1 and the browser. (A native `JSON`/`JSONB`
+            // column is already structured and takes its own arm below.)
+            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => {
+                decode_col(row, ordinal, &col_name, type_name, |s: String| {
+                    codec::decode_text_value(&s)
+                })?
+            }
             "INT2" | "INT4" => decode_col(row, ordinal, &col_name, type_name, |n: i32| {
                 serde_json::Value::Number(n.into())
             })?,
@@ -507,22 +377,14 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
             "UUID" => decode_col(row, ordinal, &col_name, type_name, |u: uuid::Uuid| {
                 serde_json::Value::String(u.to_string())
             })?,
-            // Fallback: try as string
-            _ => decode_col(
-                row,
-                ordinal,
-                &col_name,
-                type_name,
-                serde_json::Value::String,
-            )?,
+            // Fallback: try as string, through the same text codec.
+            _ => decode_col(row, ordinal, &col_name, type_name, |s: String| {
+                codec::decode_text_value(&s)
+            })?,
         };
 
         if col_name == "id" {
-            id = match &value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                _ => String::new(),
-            };
+            id = codec::record_id(&value);
         }
 
         data.insert(col_name, value);

@@ -1064,6 +1064,168 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
         self.dbx_table_exists(name).await
     }
+
+    /// Shared `ensure_schema_table`: `CREATE TABLE IF NOT EXISTS` → add every
+    /// declared column the table is missing → indexes → foreign-key indexes.
+    ///
+    /// Every step is fail-loud. In particular the column adds go through
+    /// [`add_column_checked`](Self::add_column_checked), which distinguishes the
+    /// two failures the check-then-`ALTER` sequence can produce: a column that
+    /// is present after the failure was added by a concurrent writer and is
+    /// benign, and a column that is still missing is a real DDL error that
+    /// propagates. Demoting the latter to a log line reports a successful
+    /// migration and then fails every write against that column with "no such
+    /// column" instead — which is what SQLite's hand-written version did.
+    ///
+    /// The whole call mutates the table's shape, so the memoized existence and
+    /// column facts are dropped on **both** paths: a failure may have applied
+    /// the DDL partway.
+    ///
+    /// A backend that needs the sequence to hold one connection/lock for its
+    /// whole duration (SQLite's single write worker) overrides this; the
+    /// override is about atomicity, not about the policy above.
+    async fn ensure_schema_table(
+        &self,
+        table: &super::service::Table,
+    ) -> Result<(), DatabaseError> {
+        let outcome = self.run_schema_table_ddl(table).await;
+        if let Some(cache) = self.schema_cache() {
+            cache.invalidate(&table.name);
+        }
+        outcome
+    }
+
+    /// The DDL sequence behind [`ensure_schema_table`](Self::ensure_schema_table),
+    /// split out only so the cache invalidation above covers the error path too.
+    /// Not a customization point — override `ensure_schema_table` instead.
+    async fn run_schema_table_ddl(
+        &self,
+        table: &super::service::Table,
+    ) -> Result<(), DatabaseError> {
+        let create = ddl::build_create_table(table, Self::BACKEND).map_err(|e| {
+            DatabaseError::Internal(format!("build create table {}: {e}", table.name))
+        })?;
+        self.run_execute(&create.sql, &[])
+            .await
+            .map_err(|e| DatabaseError::Internal(format!("create table {}: {e}", table.name)))?;
+
+        // The table may predate this schema revision, so add whatever declared
+        // column it is missing. `get_columns` is re-read rather than cached
+        // from before the CREATE — the CREATE is what made the table exist.
+        if let Some(cache) = self.schema_cache() {
+            cache.invalidate(&table.name);
+        }
+        let existing = self.get_columns(&table.name).await?;
+        for column in &table.columns {
+            if existing.contains(&column.name.to_lowercase()) {
+                continue;
+            }
+            let stmt = ddl::build_add_column(&table.name, column, Self::BACKEND);
+            self.add_column_checked(&table.name, &column.name, &stmt)
+                .await?;
+        }
+
+        for index in &table.indexes {
+            let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)
+                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
+            self.run_execute(&stmt.sql, &[])
+                .await
+                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
+        }
+
+        let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)
+            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
+        for stmt in fk_indexes {
+            self.run_execute(&stmt.sql, &[])
+                .await
+                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Insert `rows` into `collection` as **one** [`run_batch`](Self::run_batch),
+    /// applying [`create`](Self::create)'s per-row policy (a synthesized UUID
+    /// `id` when absent, `created_at`/`updated_at` stamps when absent).
+    ///
+    /// Returns the number of rows the backend reports as affected.
+    ///
+    /// This plans one INSERT *shape* for the whole batch, so every row must
+    /// resolve to the same column set after stamping. A row that does not is
+    /// rejected: silently planning per row would defeat the point, and reusing
+    /// the first row's shape would produce a misaligned INSERT. Missing columns
+    /// are added once, from the first row, which is representative for the same
+    /// reason.
+    ///
+    /// The only reason this lives beside [`create`](Self::create) rather than
+    /// being N `create` calls is the round trip: on a backend with a native
+    /// multi-statement API this is one, and on every other backend `run_batch`'s
+    /// sequential default makes it exactly the N it already was.
+    async fn create_many(
+        &self,
+        collection: &str,
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let table = sanitize_ident(collection);
+        let autogenerates_id = self.table_autogenerates_id(&table).await;
+
+        let mut prepared: Vec<Vec<(String, serde_json::Value)>> = Vec::with_capacity(rows.len());
+        let mut shape: Option<Vec<String>> = None;
+        for mut data in rows {
+            if !data.contains_key("id") && !autogenerates_id {
+                data.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                );
+            }
+            stamp_timestamps(&mut data, true);
+
+            let pairs = sorted_pairs(&data);
+            let columns: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+            match &shape {
+                None => shape = Some(columns),
+                Some(expected) if *expected == columns => {}
+                Some(expected) => {
+                    return Err(DatabaseError::Internal(format!(
+                        "create_many into {table}: every row must share one column set; \
+                         expected {expected:?}, got {columns:?}"
+                    )));
+                }
+            }
+            prepared.push(pairs);
+        }
+
+        // One lazy column-add for the batch — every row has the same shape, so
+        // the first is representative.
+        if let Some(first) = prepared.first() {
+            let sample: HashMap<String, serde_json::Value> = first.iter().cloned().collect();
+            self.ensure_data_columns(&table, &sample).await?;
+        }
+
+        let statements: Vec<(String, Vec<serde_json::Value>)> = prepared
+            .iter()
+            .map(|pairs| {
+                let stmt = wafer_sql_utils::query::build_insert(&table, pairs, Self::BACKEND);
+                (stmt.sql, sea_values_to_json(stmt.values))
+            })
+            .collect();
+        let ops: Vec<BatchOp<'_>> = statements
+            .iter()
+            .map(|(sql, params)| BatchOp::Execute { sql, params })
+            .collect();
+
+        let results = self.run_batch(&ops).await?;
+        let mut affected = 0;
+        for result in &results {
+            match result {
+                BatchResult::Execute(n) => affected += *n,
+                other => return Err(batch_shape_error("create_many insert", Some(other))),
+            }
+        }
+        Ok(affected)
+    }
 }
 
 #[cfg(test)]
@@ -1585,5 +1747,271 @@ mod tests {
         // total_count falls back to records.len() when the count is skipped.
         assert_eq!(list.records.len(), 2);
         assert_eq!(list.total_count, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_schema_table / create_many
+    // -----------------------------------------------------------------------
+
+    /// What a mock backend does when it is handed an `ALTER TABLE … ADD COLUMN`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum AddColumn {
+        /// The ALTER succeeds and the column appears.
+        Succeeds,
+        /// The ALTER fails and the column is still missing — a real DDL error.
+        Fails,
+        /// The ALTER fails because a concurrent writer already added the
+        /// column, so it is present afterwards — a benign lost race.
+        FailsButRaced,
+    }
+
+    /// Backend that models a table's column set across DDL statements, so the
+    /// shared `ensure_schema_table` can be driven through both the real-error
+    /// and lost-race paths. `run_fetch` answers only the column-list
+    /// introspection query (the sole `run_fetch` caller on this path).
+    struct DdlMock {
+        cache: SchemaCache,
+        columns: Mutex<Vec<String>>,
+        executed: Mutex<Vec<String>>,
+        add_column: AddColumn,
+    }
+
+    impl DdlMock {
+        fn new(existing: &[&str], add_column: AddColumn) -> Self {
+            Self {
+                cache: SchemaCache::new(),
+                columns: Mutex::new(existing.iter().map(|c| (*c).to_string()).collect()),
+                executed: Mutex::new(Vec::new()),
+                add_column,
+            }
+        }
+
+        fn executed(&self) -> Vec<String> {
+            self.executed.lock().unwrap().clone()
+        }
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for DdlMock {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn schema_cache(&self) -> Option<&SchemaCache> {
+            Some(&self.cache)
+        }
+
+        async fn run_fetch(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            let columns = self.columns.lock().unwrap().clone();
+            Ok(columns
+                .into_iter()
+                .map(|name| Record {
+                    id: String::new(),
+                    data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                })
+                .collect())
+        }
+
+        async fn run_fetch_one(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            Err(DatabaseError::NotFound)
+        }
+
+        async fn run_execute(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            self.executed.lock().unwrap().push(sql.to_string());
+            if !sql.contains("ADD COLUMN") {
+                return Ok(0);
+            }
+            // The declared column name is the quoted ident after ADD COLUMN.
+            let added = sql
+                .split("ADD COLUMN")
+                .nth(1)
+                .and_then(|rest| rest.split('"').nth(1))
+                .unwrap_or_default()
+                .to_string();
+            match self.add_column {
+                AddColumn::Succeeds => {
+                    self.columns.lock().unwrap().push(added);
+                    Ok(0)
+                }
+                AddColumn::Fails => Err(DatabaseError::Internal("alter refused".into())),
+                AddColumn::FailsButRaced => {
+                    self.columns.lock().unwrap().push(added);
+                    Err(DatabaseError::Internal("duplicate column name".into()))
+                }
+            }
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            Ok(0.0)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            Ok(true)
+        }
+    }
+
+    fn ddl_table() -> crate::interfaces::database::service::Table {
+        use crate::interfaces::database::service::{col_text, pk, Table};
+        Table {
+            name: "widgets".to_string(),
+            columns: vec![pk("id"), col_text("payload").null()],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_table_creates_then_adds_only_the_missing_columns() {
+        let mock = DdlMock::new(&["id"], AddColumn::Succeeds);
+        DbExec::ensure_schema_table(&mock, &ddl_table())
+            .await
+            .expect("ensure_schema_table succeeds");
+
+        let executed = mock.executed();
+        assert!(
+            executed[0].contains("CREATE TABLE"),
+            "the create comes first: {executed:?}"
+        );
+        let alters: Vec<&String> = executed
+            .iter()
+            .filter(|s| s.contains("ADD COLUMN"))
+            .collect();
+        assert_eq!(
+            alters.len(),
+            1,
+            "only the missing column is added: {alters:?}"
+        );
+        assert!(alters[0].contains("payload"), "{}", alters[0]);
+    }
+
+    /// The defect this default closes: SQLite's hand-written version demoted a
+    /// failed `ADD COLUMN` to a `warn!` and returned `Ok(())`, so a migration
+    /// that could not add a declared column reported success and every later
+    /// write failed with "no such column" instead.
+    #[tokio::test]
+    async fn ensure_schema_table_propagates_a_real_add_column_failure() {
+        let mock = DdlMock::new(&["id"], AddColumn::Fails);
+        let err = DbExec::ensure_schema_table(&mock, &ddl_table())
+            .await
+            .expect_err("a failed ADD COLUMN must not be swallowed");
+        assert!(
+            format!("{err}").contains("payload"),
+            "the error names the column: {err}"
+        );
+    }
+
+    /// A concurrent writer that added the column first is benign: the column is
+    /// there, which is all the caller asked for.
+    #[tokio::test]
+    async fn ensure_schema_table_tolerates_a_lost_add_column_race() {
+        let mock = DdlMock::new(&["id"], AddColumn::FailsButRaced);
+        DbExec::ensure_schema_table(&mock, &ddl_table())
+            .await
+            .expect("a lost ADD COLUMN race is not an error");
+    }
+
+    /// `ensure_schema_table` mutates the table's shape, so any memoized
+    /// existence/column facts must be dropped — including on the failure path,
+    /// where the DDL may have applied partway.
+    #[tokio::test]
+    async fn ensure_schema_table_invalidates_the_schema_cache_even_when_it_fails() {
+        let mock = DdlMock::new(&["id"], AddColumn::Fails);
+        mock.cache
+            .set_table_exists_if_gen("widgets", false, mock.cache.generation());
+        let _ = DbExec::ensure_schema_table(&mock, &ddl_table()).await;
+        assert_eq!(
+            mock.cache.table_exists("widgets"),
+            None,
+            "the stale not-exists fact must be gone"
+        );
+    }
+
+    /// `create_many` must reach the backend as ONE `run_batch`, which is the
+    /// only reason it exists: a batching backend collapses it into a single
+    /// round trip, and a non-batching one still gets the sequential default.
+    #[tokio::test]
+    async fn create_many_issues_exactly_one_batch_of_inserts() {
+        let mock = BatchMock::new(0);
+        let rows = vec![
+            HashMap::from([("name".to_string(), serde_json::json!("a"))]),
+            HashMap::from([("name".to_string(), serde_json::json!("b"))]),
+        ];
+        let n = DbExec::create_many(&mock, "widgets", rows)
+            .await
+            .expect("create_many succeeds");
+        assert_eq!(n, 2);
+
+        let calls = mock.batch_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one batch, not one statement per row");
+        assert_eq!(calls[0].len(), 2, "one op per row");
+        for (kind, sql) in &calls[0] {
+            assert_eq!(kind, "Execute");
+            assert!(sql.to_uppercase().contains("INSERT"), "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_many_stamps_an_id_and_timestamps_on_every_row() {
+        let mock = BatchMock::new(0);
+        let rows = vec![HashMap::from([(
+            "name".to_string(),
+            serde_json::json!("a"),
+        )])];
+        DbExec::create_many(&mock, "widgets", rows)
+            .await
+            .expect("create_many succeeds");
+        let calls = mock.batch_calls.lock().unwrap().clone();
+        let sql = &calls[0][0].1;
+        for column in ["id", "created_at", "updated_at", "name"] {
+            assert!(sql.contains(column), "{column} missing from {sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_many_refuses_rows_with_different_column_sets() {
+        let mock = BatchMock::new(0);
+        let rows = vec![
+            HashMap::from([("name".to_string(), serde_json::json!("a"))]),
+            HashMap::from([("other".to_string(), serde_json::json!("b"))]),
+        ];
+        let err = DbExec::create_many(&mock, "widgets", rows)
+            .await
+            .expect_err("a ragged batch must be refused, not silently misaligned");
+        assert!(format!("{err}").contains("column set"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn create_many_with_no_rows_issues_nothing() {
+        let mock = BatchMock::new(0);
+        assert_eq!(
+            DbExec::create_many(&mock, "widgets", Vec::new())
+                .await
+                .expect("empty create_many"),
+            0
+        );
+        assert!(mock.batch_calls.lock().unwrap().is_empty());
     }
 }

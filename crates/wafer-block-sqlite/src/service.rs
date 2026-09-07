@@ -5,16 +5,16 @@ use std::{
 
 use base64ct::{Base64, Encoding};
 use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row};
-use wafer_block::db::{Filter, ListOptions};
 use wafer_block_macro::wafer_async_trait;
 #[cfg(test)]
 use wafer_core::interfaces::database::service::{pk, DataType};
-use wafer_core::interfaces::database::{
-    exec::DbExec,
-    schema_cache::SchemaCache,
-    service::{
-        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-        UpsertSpec,
+use wafer_core::{
+    forward_database_service,
+    interfaces::database::{
+        codec,
+        exec::DbExec,
+        schema_cache::SchemaCache,
+        service::{Column, DatabaseError, Record, Table},
     },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
@@ -182,16 +182,11 @@ impl SQLiteDatabaseService {
                 Ok(rusqlite::types::ValueRef::Integer(n)) => serde_json::Value::Number(n.into()),
                 Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::Number::from_f64(f)
                     .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                // The shared codec owns the JSON-in-TEXT policy so this backend,
+                // the browser's sql.js adapter and Cloudflare D1 decode the same
+                // column the same way.
                 Ok(rusqlite::types::ValueRef::Text(s)) => {
-                    let text = String::from_utf8_lossy(s).to_string();
-                    // Try to parse as JSON if it looks like JSON
-                    if (text.starts_with('{') && text.ends_with('}'))
-                        || (text.starts_with('[') && text.ends_with(']'))
-                    {
-                        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
-                    } else {
-                        serde_json::Value::String(text)
-                    }
+                    codec::decode_text_value(&String::from_utf8_lossy(s))
                 }
                 Ok(rusqlite::types::ValueRef::Blob(b)) => {
                     serde_json::Value::String(Base64::encode_string(b))
@@ -200,11 +195,7 @@ impl SQLiteDatabaseService {
             };
 
             if col_name == "id" {
-                id = match &value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    _ => String::new(),
-                };
+                id = codec::record_id(&value);
             }
 
             data.insert(col_name, value);
@@ -427,141 +418,16 @@ impl DbExec for SQLiteDatabaseService {
     }
 }
 
-#[wafer_async_trait]
-impl DatabaseService for SQLiteDatabaseService {
-    async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        DbExec::get(self, collection, id).await
-    }
-
-    async fn list(
-        &self,
-        collection: &str,
-        opts: &ListOptions,
-    ) -> Result<RecordList, DatabaseError> {
-        DbExec::list(self, collection, opts).await
-    }
-
-    async fn create(
-        &self,
-        collection: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        DbExec::create(self, collection, data).await
-    }
-
-    async fn update(
-        &self,
-        collection: &str,
-        id: &str,
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<Record, DatabaseError> {
-        DbExec::update(self, collection, id, data).await
-    }
-
-    async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        DbExec::delete(self, collection, id).await
-    }
-
-    async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        DbExec::count(self, collection, filters).await
-    }
-
-    async fn sum(
-        &self,
-        collection: &str,
-        field: &str,
-        filters: &[Filter],
-    ) -> Result<f64, DatabaseError> {
-        DbExec::sum(self, collection, field, filters).await
-    }
-
-    async fn query_raw(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::query_raw(self, query, args).await
-    }
-
-    async fn exec_raw(
-        &self,
-        query: &str,
-        args: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::exec_raw(self, query, args).await
-    }
-
-    async fn delete_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<(), DatabaseError> {
-        DbExec::delete_where(self, collection, filters).await
-    }
-
-    async fn delete_where_count(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::delete_where_count(self, collection, filters).await
-    }
-
-    async fn take_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::take_where(self, collection, filters).await
-    }
-
-    async fn update_where(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        DbExec::update_where(self, collection, filters, data).await
-    }
-
-    async fn update_where_count(
-        &self,
-        collection: &str,
-        filters: &[Filter],
-        data: HashMap<String, serde_json::Value>,
-    ) -> Result<i64, DatabaseError> {
-        DbExec::update_where_count(self, collection, filters, data).await
-    }
-
-    async fn increment_field_where(
-        &self,
-        collection: &str,
-        col: &str,
-        delta: i64,
-        filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        DbExec::increment_field_where(self, collection, col, delta, filters).await
-    }
-
-    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
-        DbExec::upsert(self, collection, spec).await
-    }
-
-    async fn aggregate(
-        &self,
-        collection: &str,
-        spec: AggregateSpec,
-    ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::aggregate(self, collection, spec).await
-    }
-
-    // --- Schema management ---
-
-    /// One worker job spans the whole create/alter/index sequence, matching
-    /// the previous single continuous lock hold. All SQL is built on the
-    /// async side (no connection needed); only execution queues to the
-    /// write worker.
-    async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
+impl SQLiteDatabaseService {
+    /// The DDL sequence behind `ensure_schema_table`, run as ONE write-worker
+    /// job so create/alter/index share a single continuous lock hold. That
+    /// atomicity is the only reason this backend overrides the shared
+    /// [`DbExec::ensure_schema_table`] default rather than inheriting it; the
+    /// policy below is the same one.
+    ///
+    /// All SQL is built on the async side (no connection needed); only
+    /// execution queues to the write worker.
+    async fn ensure_schema_table_in_one_job(&self, table: &Table) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
         let create_sql = ddl::build_create_table(table, Backend::Sqlite)
             .map_err(|e| {
@@ -594,22 +460,32 @@ impl DatabaseService for SQLiteDatabaseService {
             .map(|stmt| stmt.sql)
             .collect();
 
-        let result = self
-            .on_write(move |db| {
-                db.execute_batch(&create_sql).map_err(|e| {
-                    DatabaseError::Internal(format!("create table {table_name}: {e}"))
-                })?;
+        self.on_write(move |db| {
+            db.execute_batch(&create_sql)
+                .map_err(|e| DatabaseError::Internal(format!("create table {table_name}: {e}")))?;
 
             // Add any missing columns. The table was just created above, so a
             // failure to read its columns is a real error, not "no columns" —
-            // propagate it (matches `table_columns`' fail-loud contract). The
-            // individual `ADD COLUMN` adds stay best-effort/warn since a
-            // duplicate column is a benign re-run.
+            // propagate it (matches `table_columns`' fail-loud contract).
             let existing = table_columns(db, &table_name)?;
             for (lower, name, alter_sql) in &column_adds {
-                if !existing.contains(lower) {
-                    if let Err(e) = db.execute_batch(alter_sql) {
-                        tracing::warn!(table = %table_name, column = %name, error = %e, "failed to add column");
+                if existing.contains(lower) {
+                    continue;
+                }
+                if let Err(e) = db.execute_batch(alter_sql) {
+                    // SQLite has no `ADD COLUMN IF NOT EXISTS`, so the read
+                    // above and this ALTER are not atomic: a concurrent writer
+                    // may have added the column in between, which is benign.
+                    // Re-read the true column set to tell the two apart. A
+                    // column that is still missing means the ALTER genuinely
+                    // failed, and reporting that as success (which this used to
+                    // do, with a `warn!`) claims a migration that did not
+                    // happen — every later write against the column then fails
+                    // with "no such column" instead.
+                    if !table_columns(db, &table_name)?.contains(lower) {
+                        return Err(DatabaseError::Internal(format!(
+                            "add column {name} to {table_name}: {e}"
+                        )));
                     }
                 }
             }
@@ -626,40 +502,82 @@ impl DatabaseService for SQLiteDatabaseService {
             }
             Ok(())
         })
-        .await?;
-        // The migration created the table and/or added columns (or failed
-        // partway) — drop any cached facts so the next introspection reads the
-        // true schema. Invalidate before propagating the inner result.
-        self.schema_cache.invalidate(&table.name);
-        result
+        .await?
     }
+}
 
-    async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        DbExec::schema_table_exists(self, name).await
-    }
+forward_database_service! {
+    impl DatabaseService for SQLiteDatabaseService {
+        forward_to DbExec;
 
-    async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_drop_table(name, Backend::Sqlite);
-        self.run_execute(&stmt.sql, &[]).await?;
-        self.schema_cache.invalidate(name);
-        Ok(())
-    }
+        ops {
+            get: forward,
+            list: forward,
+            create: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            // The four below are not `DbExec` operations: the shared executor
+            // has no schema-mutation primitives, and STRICT_SCHEMA is per-backend
+            // state.
+            ensure_schema_table: custom,
+            // The trait default loops over `ensure_schema_table`, which is
+            // exactly right here — each table already gets its own write job.
+            ensure_schema_tables: inherit,
+            schema_table_exists: forward,
+            schema_drop_table: custom,
+            schema_add_column: custom,
+            set_strict_schema: custom,
+        }
 
-    async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
-        self.run_execute(&stmt.sql, &[]).await?;
-        self.schema_cache.invalidate(table);
-        Ok(())
-    }
+        async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
+            let result = self.ensure_schema_table_in_one_job(table).await;
+            // The migration created the table and/or added columns (or failed
+            // partway) — drop any cached facts so the next introspection reads
+            // the true schema. Invalidate before propagating the inner result.
+            self.schema_cache.invalidate(&table.name);
+            result
+        }
 
-    fn set_strict_schema(&self, enabled: bool) {
-        self.strict_schema.store(enabled, Ordering::Relaxed);
+        async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
+            let stmt = ddl::build_drop_table(name, Backend::Sqlite);
+            self.run_execute(&stmt.sql, &[]).await?;
+            self.schema_cache.invalidate(name);
+            Ok(())
+        }
+
+        async fn schema_add_column(
+            &self,
+            table: &str,
+            column: &Column,
+        ) -> Result<(), DatabaseError> {
+            let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
+            self.run_execute(&stmt.sql, &[]).await?;
+            self.schema_cache.invalidate(table);
+            Ok(())
+        }
+
+        fn set_strict_schema(&self, enabled: bool) {
+            self.strict_schema.store(enabled, Ordering::Relaxed);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
+    use wafer_core::interfaces::database::service::DatabaseService;
     use wafer_sql_utils::value::sea_values_to_json;
 
     use super::*;
@@ -966,7 +884,9 @@ mod tests {
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
         };
-        svc.ensure_schema_table(&table).await.unwrap();
+        DatabaseService::ensure_schema_table(svc, &table)
+            .await
+            .unwrap();
 
         for row in rows {
             let mut data = std::collections::HashMap::new();
@@ -1138,7 +1058,9 @@ mod tests {
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
         };
-        svc.ensure_schema_table(&table).await.unwrap();
+        DatabaseService::ensure_schema_table(&svc, &table)
+            .await
+            .unwrap();
         for id in ["a", "b", "c"] {
             let mut row = std::collections::HashMap::new();
             row.insert("id".into(), serde_json::json!(id));
@@ -1208,7 +1130,9 @@ mod tests {
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
         };
-        svc.ensure_schema_table(&table).await.unwrap();
+        DatabaseService::ensure_schema_table(&svc, &table)
+            .await
+            .unwrap();
 
         // No existing row on id=w1 → the ON CONFLICT insert lands as an insert.
         let n1 = DatabaseService::upsert(
@@ -2017,7 +1941,9 @@ mod tests {
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
         };
-        svc.ensure_schema_table(&table).await.unwrap();
+        DatabaseService::ensure_schema_table(&svc, &table)
+            .await
+            .unwrap();
 
         svc.set_strict_schema(true);
         let mut row = std::collections::HashMap::new();

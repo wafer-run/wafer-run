@@ -118,6 +118,36 @@
 - `Wafer::init_block` / `init_block_with_stack` for lazy per-block init.
 - `Wafer::validate_all_block_configs` returning `ValidationReport`.
 - `WaferBuilder::config_source` setter.
+- `forward_database_service!` — writes a `DatabaseService` impl from an explicit
+  per-operation ledger, each operation stated as `forward`, `custom` or
+  `inherit`. An incomplete ledger does not compile. Eight of the trait's
+  operations carry defaults that are *not* pass-throughs (`take_where` lists
+  then deletes row by row, `delete_where_count` counts then deletes,
+  `set_strict_schema` is a silent no-op, …), so a decorator that omits one
+  quietly substitutes them for the wrapped backend's atomic statement. Two
+  forward targets: `forward_to DbExec;` for a SQL backend, and
+  `forward_to <accessor>();` for a decorator exposing
+  `fn <accessor>(&self) -> &dyn DatabaseService`. `wafer-block-sqlite` and
+  `wafer-block-postgres` now state their surface through it.
+- `interfaces::database::codec` — one decode policy for SQL result rows, so a
+  value written through `create` reads back the same shape on every backend:
+  `decode_text_value` (a serialized JSON object/array in a TEXT column parses
+  back to the structured value; everything else, malformed JSON included, stays
+  a string), `record_from_json_row`, `record_id`, `first_scalar`, `scalar_i64`,
+  `scalar_f64`. Both SQL backends decode through it, and `run_conformance` now
+  pins the round trip for every backend that runs the suite.
+- `DbExec::ensure_schema_table` (with `run_schema_table_ddl`) — `CREATE TABLE IF
+  NOT EXISTS` → add every declared column the table is missing → indexes → FK
+  indexes, invalidating the schema cache on both the success and failure paths.
+  Fail-loud throughout, including the column adds, which go through
+  `add_column_checked` so a lost race stays benign while a genuinely failed
+  `ALTER` propagates.
+- `DbExec::create_many` — inserts N rows as one `run_batch`, applying `create`'s
+  per-row id/timestamp policy. Every row must share one column set (one INSERT
+  shape is planned for the batch); a ragged batch is refused.
+- `wafer_core::wafer_async_trait` — re-export of the platform-appropriate
+  `async_trait` attribute, so `forward_database_service!`'s generated `impl`
+  needs no `wafer-block-macro` dependency in the invoking crate.
 
 ### Refactored
 
