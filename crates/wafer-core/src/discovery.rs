@@ -1,5 +1,7 @@
 //! Discovery document generation — OpenAPI 3.1 and A2A AgentCard.
 
+use std::borrow::Cow;
+
 use serde_json::{json, Value};
 use wafer_block::types::{AgentTool, AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
 
@@ -1422,27 +1424,120 @@ enum PathTemplateError {
 fn path_placeholders(path: &str) -> Result<Vec<String>, PathTemplateError> {
     let mut names = Vec::new();
     for segment in path.split('/') {
-        if segment == "*" || segment == "**" {
-            return Err(PathTemplateError::Wildcard {
-                segment: segment.to_string(),
-            });
+        if let Some(placeholder) = classify_segment(segment)? {
+            names.push(placeholder.name.to_string());
         }
-        if !segment.contains('{') && !segment.contains('}') {
-            continue;
-        }
-        // Braces are only a placeholder when they span the whole segment.
-        let Some(name) = segment
-            .strip_prefix('{')
-            .and_then(|inner| inner.strip_suffix('}'))
-        else {
-            return Err(PathTemplateError::Malformed);
-        };
-        if name.is_empty() || name.contains('{') || name.contains('}') {
-            return Err(PathTemplateError::Malformed);
-        }
-        names.push(name.to_string());
     }
     Ok(names)
+}
+
+/// The trailing marker that says a placeholder binds the rest of the path
+/// rather than one segment: `{key...}` is the parameter `key`.
+///
+/// This is a matcher convention, not a URL one — the block that serves the
+/// route reads it, and nothing outside the block does. `wafer_block`'s own
+/// `match_path` never learned it either, so to that router `{key...}` is a
+/// one-segment placeholder whose *name* happens to end in `...`. Either way
+/// the marker is a detail of the pattern, never of a URL, and no document
+/// this module emits has a place to put it.
+const REST_MARKER: &str = "...";
+
+/// A `{name}` or `{name...}` placeholder occupying a whole path segment.
+struct PathPlaceholder<'a> {
+    /// The parameter name, with any [`REST_MARKER`] removed.
+    name: &'a str,
+    /// Whether the segment carried a [`REST_MARKER`].
+    rest: bool,
+}
+
+/// Classify one `/`-separated path segment.
+///
+/// `Ok(None)` is a literal segment; `Ok(Some(_))` a placeholder. The rule is
+/// the router's — see [`path_placeholders`] for why a brace-anywhere scan is
+/// wrong — with the one addition that a placeholder's name may carry a
+/// trailing [`REST_MARKER`].
+///
+/// Every caller that reads a template goes through here, so the placeholder
+/// census and the published rendering cannot disagree about what a segment
+/// is. What they do with the verdict differs (see
+/// [`published_path_template`]); what the verdict *is* does not.
+fn classify_segment(segment: &str) -> Result<Option<PathPlaceholder<'_>>, PathTemplateError> {
+    if segment == "*" || segment == "**" {
+        return Err(PathTemplateError::Wildcard {
+            segment: segment.to_string(),
+        });
+    }
+    if !segment.contains('{') && !segment.contains('}') {
+        return Ok(None);
+    }
+    // Braces are only a placeholder when they span the whole segment.
+    let Some(inner) = segment
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+    else {
+        return Err(PathTemplateError::Malformed);
+    };
+    if inner.contains('{') || inner.contains('}') {
+        return Err(PathTemplateError::Malformed);
+    }
+    // A `...` that is not a suffix is not a marker: `{a...b}` is a parameter
+    // literally called `a...b`, which is what the router would bind.
+    let (name, rest) = match inner.strip_suffix(REST_MARKER) {
+        Some(base) => (base, true),
+        None => (inner, false),
+    };
+    if name.is_empty() {
+        return Err(PathTemplateError::Malformed);
+    }
+    Ok(Some(PathPlaceholder { name, rest }))
+}
+
+/// Render a route pattern as the path template a document publishes:
+/// identical to the pattern except that every rest placeholder loses its
+/// [`REST_MARKER`], so `{key...}` is published as `{key}`.
+///
+/// # Why the marker goes
+///
+/// Both documents this module emits pair a path template with a separate
+/// list of parameters taken from the endpoint's `path_params` schema, which
+/// spells the plain name. Publishing the marker breaks that pairing in both
+/// directions at once: `{key...}` is an expression no declared parameter
+/// fills, and `key` is a parameter no expression consumes. OpenAPI 3.1
+/// requires each template expression to correspond to a declared path
+/// parameter, so the document is not conformant; and a generated client, or
+/// a WebMCP client filling `invocation.path` by name, builds the literal
+/// three dots into the URL and calls a route that does not exist.
+///
+/// Stripping loses nothing a caller could have used: the marker says how the
+/// *server* splits the remainder of the path, which no client needs to know
+/// to build the URL. Filling `{key}` with `a/b/c` produces exactly the URL
+/// the rest matcher expects.
+///
+/// # Why this is total
+///
+/// [`classify_segment`] refuses wildcards and malformed templates, and the
+/// WebMCP projection turns those refusals into a named, reported omission.
+/// [`generate_openapi`] has no such channel: it publishes a description of
+/// the surface, and dropping an endpoint's path because the author wrote
+/// `/b/x/**` would delete a documented route silently. So a segment this
+/// cannot read is passed through byte-for-byte and the document is no worse
+/// than it was.
+fn published_path_template(path: &str) -> Cow<'_, str> {
+    let has_rest = path
+        .split('/')
+        .any(|segment| matches!(classify_segment(segment), Ok(Some(p)) if p.rest));
+    if !has_rest {
+        return Cow::Borrowed(path);
+    }
+    let rendered = path
+        .split('/')
+        .map(|segment| match classify_segment(segment) {
+            Ok(Some(p)) if p.rest => Cow::Owned(format!("{{{}}}", p.name)),
+            _ => Cow::Borrowed(segment),
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Cow::Owned(rendered)
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,7 +1797,9 @@ pub fn generate_openapi(
             }
 
             let method = method_key(ep.method);
-            let path_entry = paths.entry(ep.path.clone()).or_insert_with(|| json!({}));
+            let path_entry = paths
+                .entry(published_path_template(&ep.path).into_owned())
+                .or_insert_with(|| json!({}));
             path_entry
                 .as_object_mut()
                 .unwrap()
@@ -2689,7 +2786,7 @@ pub fn generate_webmcp_report(
                 "invocation".into(),
                 json!({
                     "method": method_key(ep.method),
-                    "path": ep.path,
+                    "path": published_path_template(&ep.path),
                     "path_params": input.path_params,
                     "query_params": input.query_params,
                     "body_params": input.body_params,
@@ -5807,6 +5904,144 @@ mod tests {
         // A literal `*` inside a longer segment is not a wildcard to this
         // router and is not treated as one here either.
         assert_eq!(path_placeholders("/b/x/a*b"), Ok(Vec::new()));
+    }
+
+    /// A trailing `...` inside an otherwise whole-segment placeholder is a
+    /// *rest marker*, not part of the parameter name: `{key...}` declares a
+    /// parameter called `key`. Both projections have to agree with the
+    /// `path_params` schema, which spells the plain name.
+    #[test]
+    fn path_placeholders_reads_a_rest_marker_as_the_bare_name() {
+        assert_eq!(
+            path_placeholders("/b/storage/api/buckets/{name}/objects/{key...}"),
+            Ok(vec!["name".to_string(), "key".to_string()])
+        );
+
+        // The marker only marks something when a name is left over.
+        assert_eq!(
+            path_placeholders("/b/x/{...}"),
+            Err(PathTemplateError::Malformed),
+            "a rest marker with no name behind it names nothing"
+        );
+
+        // Not a suffix, so not a marker — the name is taken literally, the
+        // same way the router would read it.
+        assert_eq!(
+            path_placeholders("/b/x/{a...b}"),
+            Ok(vec!["a...b".to_string()])
+        );
+    }
+
+    /// What a projection publishes for a template: the rest marker is a
+    /// routing detail of the block's own matcher, and no document format
+    /// this crate emits has a place for it.
+    #[test]
+    fn published_path_template_strips_the_rest_marker() {
+        assert_eq!(
+            published_path_template("/b/storage/api/buckets/{name}/objects/{key...}"),
+            "/b/storage/api/buckets/{name}/objects/{key}"
+        );
+        // A rest segment need not be last: `/b/storage/{bucket}/{prefix...}/`
+        // is a real shape, with an empty segment after it.
+        assert_eq!(
+            published_path_template("/b/storage/{bucket}/{prefix...}/"),
+            "/b/storage/{bucket}/{prefix}/"
+        );
+        // Nothing to strip: byte-identical, including the empty-name and
+        // literal-`...` cases the classifier refuses or reads literally.
+        for unchanged in ["/b/x/list", "/b/x/{a}/y/{b}", "/b/x/{a...b}", "/b/x/{...}"] {
+            assert_eq!(published_path_template(unchanged), unchanged);
+        }
+        // Segments the classifier refuses pass through verbatim. This
+        // function is total on purpose: `generate_openapi` has no refusal
+        // channel, so turning a wildcard or a malformed template into a
+        // dropped path would delete a documented endpoint with no signal.
+        for refused in ["/b/x/**", "/b/x/*/y", "/b/x/{id}.json", "/b/x/{a}{b}"] {
+            assert_eq!(published_path_template(refused), refused);
+        }
+    }
+
+    /// 13a. A schema-carrying rest route published the raw marker as the
+    /// path key while `parameters` declared the plain name, so the document
+    /// disagreed with itself in both directions: a `{key...}` expression no
+    /// parameter fills, and a `key` parameter no expression consumes. A
+    /// generated client built the literal marker into the URL.
+    #[test]
+    fn openapi_publishes_a_rest_parameter_without_its_marker() {
+        let block = BlockInfo::new("impresspress/files", "1.0.0", "http-handler@v1", "Files")
+            .endpoints(vec![BlockEndpoint::get(
+                "/b/storage/api/buckets/{name}/objects/{key...}",
+            )
+            .summary("Get an object")
+            .auth(AuthLevel::Authenticated)
+            .path_params_schema(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "key": { "type": "string" }
+                },
+                "required": ["name", "key"]
+            }))]);
+
+        let doc = generate_openapi(&[block], "T", "D", "https://example.test");
+        let paths = doc["paths"].as_object().expect("paths object");
+        assert_eq!(
+            paths.keys().collect::<Vec<_>>(),
+            vec!["/b/storage/api/buckets/{name}/objects/{key}"],
+            "the published path key carries no rest marker: {doc}"
+        );
+
+        let params = doc["paths"]["/b/storage/api/buckets/{name}/objects/{key}"]["get"]
+            ["parameters"]
+            .as_array()
+            .expect("path parameters");
+        let mut declared: Vec<&str> = params
+            .iter()
+            .filter(|p| p["in"] == "path")
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        declared.sort_unstable();
+        assert_eq!(
+            declared,
+            vec!["key", "name"],
+            "every path parameter has a template expression to go into"
+        );
+    }
+
+    /// The same template, in the other projection. `invocation.path` is
+    /// handed to the client verbatim, so it is rendered by the same
+    /// function — and because the placeholder census now reads `key`, the
+    /// endpoint stops being refused as disagreeing with its own schema.
+    #[test]
+    fn webmcp_publishes_a_rest_path_with_the_marker_stripped() {
+        let block =
+            BlockInfo::new("impresspress/files", "1.0.0", "http-handler@v1", "Files").endpoints(
+                vec![
+                    BlockEndpoint::get("/b/storage/api/buckets/{name}/objects/{key...}")
+                        .summary("Get an object")
+                        .auth(AuthLevel::Public)
+                        .path_params_schema(json!({
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "key": { "type": "string" }
+                            },
+                            "required": ["name", "key"]
+                        }))
+                        .agent_tool("get_object", "Fetch one stored object by bucket and key."),
+                ],
+            );
+
+        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        assert_eq!(refused, Vec::new(), "{refused:?}");
+        assert_eq!(
+            doc["tools"][0]["invocation"]["path"],
+            json!("/b/storage/api/buckets/{name}/objects/{key}")
+        );
+        assert_eq!(
+            doc["tools"][0]["invocation"]["path_params"],
+            json!(["key", "name"])
+        );
     }
 
     /// The shape that motivated this check: no production endpoint declares a

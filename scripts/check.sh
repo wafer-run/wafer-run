@@ -68,6 +68,18 @@ run_wasm() {
     # regressed silently in #234 (embed::register_path reading from disk).
     echo "==> Runtime builds on wasm32-unknown-unknown with --features wasmi (gizza combo)"
     cargo build -p wafer-run --target wasm32-unknown-unknown --no-default-features --features wasmi
+
+    # `register_static_block!` and `use_static_blocks!` each have a wasm32
+    # arm that exists precisely because `linkme` has no link section there.
+    # No native build expands either one, and no crate in the workspace both
+    # invokes `use_static_blocks!` and compiles for wasm32 (the http-server
+    # flow pulls tokio's net stack), so without this the arms are dead
+    # source: a bad path or a silently empty list would only surface in a
+    # downstream Worker build. The fixture asserts its own list length at
+    # compile time.
+    echo "==> Static block registration on wasm32 (macro arms)"
+    cargo build --target wasm32-unknown-unknown \
+        --manifest-path crates/wafer-block/tests/wasm_static_blocks/Cargo.toml
 }
 
 run_audit() {

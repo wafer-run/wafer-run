@@ -1,4 +1,5 @@
-//! Host-side static block registration collected via `linkme`.
+//! Static block registration: the record type, and the `linkme` slice that
+//! collects it where a linker section exists.
 //!
 //! `linkme` uses an ELF section that the linker preserves even when no
 //! code-level reference exists from the consumer binary, unlike `inventory`
@@ -9,6 +10,13 @@
 //! block, gated on `cfg(not(target_arch = "wasm32"))` so WASM guest builds
 //! don't carry the machinery. The collection is harvested at startup by
 //! the runtime (`wafer-run/src/builder.rs`).
+//!
+//! [`StaticBlockRegistration`] itself is target-neutral — it is a name and a
+//! constructor, nothing else. Only the *collection* is linker-shaped, so only
+//! [`STATIC_BLOCK_REGISTRATIONS`] is gated. On `wasm32` there is no section to
+//! collect into, and the entries travel explicitly instead: see
+//! [`register_static_block!`](crate::register_static_block) and
+//! [`use_static_blocks!`](crate::use_static_blocks).
 
 use std::sync::Arc;
 
@@ -32,5 +40,10 @@ pub struct StaticBlockRegistration {
 ///
 /// Consumer crates must use the `register_static_block!` macro rather than
 /// touching this slice directly.
+///
+/// Absent on `wasm32`, where `linkme`'s link sections do not exist. A wasm32
+/// embedder gets the same entries from the `WAFER_STATIC_BLOCKS` list that
+/// [`use_static_blocks!`](crate::use_static_blocks) emits.
+#[cfg(not(target_arch = "wasm32"))]
 #[linkme::distributed_slice]
 pub static STATIC_BLOCK_REGISTRATIONS: [StaticBlockRegistration] = [..];

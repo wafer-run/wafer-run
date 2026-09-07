@@ -52,7 +52,6 @@ pub mod registry;
 pub mod response;
 pub mod runtime;
 pub mod spawn;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod static_registration;
 pub mod stream;
 pub mod streams;
@@ -82,8 +81,9 @@ pub use response::{
 };
 pub use runtime::Runtime;
 pub use spawn::spawn_producer;
+pub use static_registration::StaticBlockRegistration;
 #[cfg(not(target_arch = "wasm32"))]
-pub use static_registration::{StaticBlockRegistration, STATIC_BLOCK_REGISTRATIONS};
+pub use static_registration::STATIC_BLOCK_REGISTRATIONS;
 pub use stream::StreamEvent;
 pub use streams::{
     input::InputStream,
@@ -120,7 +120,15 @@ pub use validation::{unknown_flow_config_keys, BrokenBlock, ValidationReport};
 /// That is an internal API — prefer wrapping the config in the block's
 /// `Block::setup` lifecycle instead.
 ///
-/// This macro is a no-op on `wasm32` targets.
+/// ## `wasm32`
+///
+/// `linkme` needs a linker section, and `wasm32` has none, so there the
+/// macro emits a plain `pub const __WAFER_STATIC_BLOCK` instead of a slice
+/// entry. [`use_static_blocks!`] reads those by path and hands them to
+/// `Wafer::register_static_blocks`. One consequence: on `wasm32` a crate may
+/// invoke this macro **once**, since a second invocation would define
+/// `__WAFER_STATIC_BLOCK` twice. Native builds are unaffected — the slice
+/// takes any number.
 #[cfg(not(target_arch = "wasm32"))]
 #[macro_export]
 macro_rules! register_static_block {
@@ -139,11 +147,23 @@ macro_rules! register_static_block {
     };
 }
 
-/// No-op on `wasm32` — linkme is not supported on WASM targets.
+/// `wasm32` arm — `linkme` has no link section here, so the registration is
+/// a plain item that [`use_static_blocks!`] references by path. See the
+/// native arm's docs for the one-per-crate consequence.
 #[cfg(target_arch = "wasm32")]
 #[macro_export]
 macro_rules! register_static_block {
-    ($name:expr, $ty:ty) => {};
+    ($name:expr, $ty:ty) => {
+        /// This crate's static block registration, for `use_static_blocks!`.
+        #[doc(hidden)]
+        pub const __WAFER_STATIC_BLOCK: $crate::StaticBlockRegistration =
+            $crate::StaticBlockRegistration {
+                name: $name,
+                factory: || {
+                    ::std::sync::Arc::new(<$ty>::new()) as ::std::sync::Arc<dyn $crate::Block>
+                },
+            };
+    };
 }
 
 /// Force-link a set of block crates so each crate's
@@ -160,6 +180,36 @@ macro_rules! register_static_block {
 /// machinery and works for any block crate (first- or third-party), not a
 /// hardcoded battery roster.
 ///
+/// # `WAFER_STATIC_BLOCKS`
+///
+/// Force-linking is only half the job, and on `wasm32` it does nothing at
+/// all: `linkme` writes into a linker section that target does not have, so
+/// an anchored crate's block never reaches
+/// [`STATIC_BLOCK_REGISTRATIONS`](crate::static_registration::STATIC_BLOCK_REGISTRATIONS)
+/// and the runtime comes up with an empty registry. Consumers used to paper
+/// over that with a second, hand-maintained list of `register_block` calls
+/// mirroring this one, with nothing keeping the two in step.
+///
+/// So the macro also emits, into the invoking module:
+///
+/// ```ignore
+/// pub const WAFER_STATIC_BLOCKS: &[&wafer_block::StaticBlockRegistration];
+/// ```
+///
+/// — the entries from the named crates that link-time collection cannot
+/// reach **on this target**. It is empty wherever `linkme` works and holds
+/// one entry per named crate on `wasm32`, so the call site needs no `cfg`:
+///
+/// ```ignore
+/// wafer_block::use_static_blocks!(wafer_block_cors, wafer_block_security_headers);
+/// // ...
+/// wafer.register_static_blocks(WAFER_STATIC_BLOCKS)?;  // no-op off wasm32
+/// ```
+///
+/// Every named crate must therefore invoke
+/// [`register_static_block!`] — a crate anchored for some other reason has
+/// no `__WAFER_STATIC_BLOCK` to point at and fails to compile on `wasm32`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -167,10 +217,26 @@ macro_rules! register_static_block {
 /// // expands to:
 /// // use ::wafer_block_cors as _;
 /// // use ::wafer_block_security_headers as _;
+/// // pub const WAFER_STATIC_BLOCKS: &[&StaticBlockRegistration] = ...;
 /// ```
 #[macro_export]
 macro_rules! use_static_blocks {
     ($($krate:ident),* $(,)?) => {
         $( use ::$krate as _; )*
+
+        /// Static block registrations from the crates named in
+        /// `use_static_blocks!` that link-time collection cannot reach on
+        /// this target. Empty here — `linkme` collected them already.
+        /// Pass it to `Wafer::register_static_blocks`.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub const WAFER_STATIC_BLOCKS: &[&$crate::StaticBlockRegistration] = &[];
+
+        /// Static block registrations from the crates named in
+        /// `use_static_blocks!` that link-time collection cannot reach on
+        /// this target. `wasm32` has no `linkme` section, so this is every
+        /// named crate's block. Pass it to `Wafer::register_static_blocks`.
+        #[cfg(target_arch = "wasm32")]
+        pub const WAFER_STATIC_BLOCKS: &[&$crate::StaticBlockRegistration] =
+            &[$( &::$krate::__WAFER_STATIC_BLOCK ),*];
     };
 }

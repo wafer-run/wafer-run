@@ -832,19 +832,65 @@ impl Wafer {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn load_inventory_blocks(&mut self) -> Result<(), RuntimeError> {
         for entry in wafer_block::STATIC_BLOCK_REGISTRATIONS.iter() {
-            let block = (entry.factory)();
-            self.registration
-                .register_block_inner(entry.name, block, &self.wasm.asset_loader)
-                .map_err(|e| RuntimeError::Inventory {
-                    name: entry.name.to_string(),
-                    source: Box::new(e),
-                })?;
-            tracing::debug!(
-                name = %entry.name,
-                source = "linkme",
-                "auto-registered block"
-            );
+            self.register_static_block_entry(entry, "linkme")?;
         }
+        Ok(())
+    }
+
+    /// Register an explicit list of static block registrations — the same
+    /// Path A entries, handed over by value rather than collected by the
+    /// linker.
+    ///
+    /// The list to pass is the `WAFER_STATIC_BLOCKS` that
+    /// [`use_static_blocks!`](wafer_block::use_static_blocks) emits into the
+    /// invoking module. It is **empty on every target where `linkme` works**,
+    /// because `load_inventory_blocks` has already collected those entries;
+    /// it is non-empty on `wasm32`, which has no linker section for `linkme`
+    /// to write into. So the call is unconditional and needs no `cfg`:
+    ///
+    /// ```ignore
+    /// wafer_block::use_static_blocks!(wafer_block_cors, wafer_block_router);
+    /// // ...
+    /// wafer.register_static_blocks(WAFER_STATIC_BLOCKS)?;
+    /// ```
+    ///
+    /// On collision, surfaces `RuntimeError::Inventory { name, source }`
+    /// naming the offender — the same error `load_inventory_blocks` raises,
+    /// from the same helper.
+    pub fn register_static_blocks(
+        &mut self,
+        registrations: &[&wafer_block::StaticBlockRegistration],
+    ) -> Result<(), RuntimeError> {
+        for entry in registrations {
+            self.register_static_block_entry(entry, "use_static_blocks")?;
+        }
+        Ok(())
+    }
+
+    /// Register one [`StaticBlockRegistration`](wafer_block::StaticBlockRegistration),
+    /// wherever it came from.
+    ///
+    /// `source` names the collection mechanism for the debug trace, which is
+    /// the only thing that differs between the link-time and the explicit
+    /// path — the construction, the registration, and the error the offender
+    /// is named in are shared so the two cannot drift.
+    fn register_static_block_entry(
+        &mut self,
+        entry: &wafer_block::StaticBlockRegistration,
+        source: &'static str,
+    ) -> Result<(), RuntimeError> {
+        let block = (entry.factory)();
+        self.registration
+            .register_block_inner(entry.name, block, &self.wasm.asset_loader)
+            .map_err(|e| RuntimeError::Inventory {
+                name: entry.name.to_string(),
+                source: Box::new(e),
+            })?;
+        tracing::debug!(
+            name = %entry.name,
+            source,
+            "auto-registered block"
+        );
         Ok(())
     }
 }
