@@ -96,6 +96,10 @@ sha2 = "0.10"
 hkdf = "0.12"
 base64ct = { version = "1", features = ["alloc"] }
 subtle = "2"
+# default-features off: the `simple` feature only adds a `password-hash`
+# PasswordHasher impl, and this crate formats its own PHC string (the layout
+# is a persisted credential format, see `primitives::pbkdf2_hash`).
+pbkdf2 = { version = "0.12", default-features = false }
 
 # Storage
 # default-features would enable BOTH AWS HTTP stacks: `rustls` (legacy

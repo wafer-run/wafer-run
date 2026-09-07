@@ -1831,16 +1831,6 @@ pub fn generate_agent_card(
 // generate_webmcp
 // ---------------------------------------------------------------------------
 
-/// `Public < Authenticated < Admin`, expressed explicitly because
-/// `AuthLevel` deliberately does not derive `Ord`.
-fn auth_rank(level: AuthLevel) -> u8 {
-    match level {
-        AuthLevel::Public => 0,
-        AuthLevel::Authenticated => 1,
-        AuthLevel::Admin => 2,
-    }
-}
-
 /// Whether a request with this method can carry a body an agent's arguments
 /// could travel in.
 ///
@@ -2328,8 +2318,6 @@ pub fn generate_webmcp_report(
 ) -> (Value, Vec<WebMcpRefusalReport>) {
     use WebMcpRefusalScope as Scope;
 
-    let ceiling = auth_rank(caller);
-
     let mut refused: Vec<WebMcpRefusalReport> = Vec::new();
 
     // A WebMCP client registers tools by name, so two endpoints sharing a
@@ -2424,9 +2412,7 @@ pub fn generate_webmcp_report(
     for block in blocks {
         for ep in &block.endpoints {
             if let Some(tool) = ep.agent_tool.as_ref() {
-                if AgentTool::is_valid_name(&tool.name)
-                    && auth_rank(effective_auth(block, ep)) <= ceiling
-                {
+                if AgentTool::is_valid_name(&tool.name) && effective_auth(block, ep) <= caller {
                     *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
                 }
             }
@@ -2447,7 +2433,7 @@ pub fn generate_webmcp_report(
             // entries about endpoints this caller cannot see, and it must
             // not re-derive that decision itself. The filter below still
             // decides the manifest; this only records what it will decide.
-            let visible_to_caller = auth_rank(effective_auth(block, ep)) <= ceiling;
+            let visible_to_caller = effective_auth(block, ep) <= caller;
 
             let mut refuse = |scope: Scope, reason: WebMcpRefusal| {
                 refused.push(WebMcpRefusalReport {

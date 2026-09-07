@@ -148,8 +148,66 @@
 - `wafer_core::wafer_async_trait` — re-export of the platform-appropriate
   `async_trait` attribute, so `forward_database_service!`'s generated `impl`
   needs no `wafer-block-macro` dependency in the invoking crate.
+- `AuthLevel` derives `PartialOrd` and `Ord`. The variants are declared
+  weakest-first (`Public < Authenticated < Admin`), so the derive *is* the
+  strictness ladder and a visibility ceiling is `required <= caller` rather
+  than a rank function each consumer writes for itself. Variant order is now
+  load-bearing for access decisions; an exhaustive ladder test in
+  `wafer-block` fails to compile when a variant is added and fails at run
+  time when one is misplaced. `wafer_core::discovery`'s private `auth_rank`
+  is deleted in favour of the comparison.
+- `MetadataFilter::matches(Option<&serde_json::Value>) -> bool` — the
+  equality-filter predicate on the wire type, so every vector backend answers
+  a query the same way instead of each carrying its own copy. Dot-path keys,
+  typed JSON equality, conjunction of constraints, and an entry with no
+  metadata satisfying only the empty filter. `wafer-block-sqlite` now calls
+  it.
+- `wafer_run::resolve_declared(block, declared_keys, lookup)` — the shared
+  body of a `ConfigSource`: declared value → non-empty `ConfigVar::default`
+  → `MissingRequired` if required → omitted if optional. An implementation
+  supplies only `lookup`, so the resolution rules cannot drift between
+  sources. `lookup` owns the meaning of an empty value: `Some("")` is a
+  value, and a source where an empty entry means "unset" filters it itself.
+  `StaticConfigSource` is now defined by this function.
+- `wafer_core::interfaces::vector::fuse_scored` is re-exported alongside
+  `fuse` and `DEFAULT_RRF_K`. `fuse` discards the fused RRF score, which is
+  the reason consumers were re-implementing RRF rather than calling it;
+  `fuse_scored` was already public but only under `vector::rrf`.
+- `PasswordScheme` — `Argon2(Argon2Cost)` (the default) or
+  `Pbkdf2Sha256 { iterations }` — plus
+  `Argon2JwtCryptoService::with_password_scheme`, and
+  `primitives::{pbkdf2_hash, pbkdf2_verify, hash_password_with,
+  verify_password_any_scheme}` with
+  `PBKDF2_SHA256_RECOMMENDED_ITERATIONS` (600,000, OWASP 2023) and
+  `PBKDF2_SHA256_MIN_ITERATIONS` (10,000, NIST SP 800-132 §5.2). PBKDF2
+  exists because argon2id's default memory cost is unaffordable in
+  single-threaded wasm, where it takes minutes per hash.
+
+  **What this changes for a stored credential: nothing.** The scheme selects
+  what `CryptoService::hash` *writes*; `compare_hash` dispatches on the PHC
+  identifier in the hash it is *handed*, so a credential written under either
+  scheme keeps verifying whatever the service is configured to write, and
+  selecting a scheme is not a password reset. The default service still
+  writes `$argon2id$` at the same cost as before. Old hashes are not
+  upgraded in place — a credential keeps its scheme and cost until something
+  rewrites it. The one widening: `compare_hash` used to reject a
+  `$pbkdf2-sha256$…` string as malformed and now verifies it. New hashes
+  below `PBKDF2_SHA256_MIN_ITERATIONS` are refused; *verification* enforces
+  no floor, because refusing an existing low-cost credential locks a user
+  out rather than protecting them.
+
+  Hashes are `$pbkdf2-sha256$i=N$salt$dk`, standard (not URL-safe) base64
+  with padding, 16-byte salt, 32-byte derived key — a persisted format,
+  pinned by a known-answer test against an independent implementation. The
+  derived-key length is fixed rather than read from the stored string:
+  PBKDF2 at a shorter `dkLen` returns a prefix of the longer output, so
+  deriving `stored.len()` bytes would let a truncated stored hash verify at
+  reduced strength.
 
 ### Refactored
+
+- `wafer-block-sqlite`'s private `apply_filter` and `wafer-core`'s private
+  `auth_rank` are deleted; both are now the shared APIs above.
 
 - WRAP grant collection moved from `resolve()`-time to `register_block()`-time
   (per-block validation against the admin block). Typed grants
