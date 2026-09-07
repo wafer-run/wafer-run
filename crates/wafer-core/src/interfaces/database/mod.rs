@@ -1,3 +1,7 @@
+/// One decode policy for SQL result rows (JSON-in-TEXT re-parsing, `Record`
+/// assembly, single-column scalar extraction), shared by every SQL-family
+/// backend so the same row reads the same way on every platform.
+pub mod codec;
 /// Backend-agnostic [`DatabaseService`](service::DatabaseService) conformance
 /// suite (`run_conformance`). Gated behind the `conformance` feature so it is
 /// only compiled into the test builds of crates that opt in; never into a
@@ -7,6 +11,9 @@ pub mod conformance;
 /// Shared SQL-backend execution layer (`DbExec`) behind `DatabaseService`.
 pub mod exec;
 pub use exec::{BatchOp, BatchResult};
+/// `forward_database_service!` — write a `DatabaseService` impl as an explicit
+/// ledger, so no operation can silently fall through to a trait default.
+pub mod forward;
 pub mod handler;
 /// Per-backend schema-introspection cache (`SchemaCache`) consulted by the
 /// shared executor to elide redundant table-exists / column-list round-trips.

@@ -7,6 +7,11 @@
 
 #![warn(missing_docs)]
 
+/// The platform-appropriate `async_trait` attribute, re-exported so
+/// [`forward_database_service!`] can emit it on the `impl` block it generates
+/// without the invoking crate having to depend on `wafer-block-macro`.
+pub use wafer_block_macro::wafer_async_trait;
+
 /// RPC client wrappers that let a block call into another block's service interface.
 pub mod clients;
 /// Discovery helpers that resolve aliases such as `@wafer-run/wafer-run/database` to the

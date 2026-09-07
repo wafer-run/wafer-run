@@ -217,7 +217,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `take_where`; `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
 /// `WindowedCounter`); `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
-/// `CaseWhenSum`, and `DateBucket`); and `query_raw`/`exec_raw`.
+/// `CaseWhenSum`, and `DateBucket`); `query_raw`/`exec_raw`; and the
+/// structured-value round trip that every backend's row decoder must agree on
+/// (see [`check_json_value_round_trip`]).
 pub async fn run_conformance(svc: &dyn DatabaseService) {
     // Exercise the (sync, default-no-op) strict-schema toggle and pin the
     // service into non-strict mode so the suite's explicit schemas drive the
@@ -237,6 +239,112 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_upsert_windowed_counter(svc).await;
     check_aggregate(svc).await;
     check_raw_sql(svc).await;
+    check_json_value_round_trip(svc).await;
+}
+
+// ---------------------------------------------------------------------------
+// JSON round trip
+// ---------------------------------------------------------------------------
+
+/// A structured value written through `create` must come back structured,
+/// whichever backend stored it.
+///
+/// This is the cross-platform shape agreement that
+/// [`codec`](super::codec) exists to hold. SQL backends in the SQLite family
+/// have no array/object storage class, so the write path serializes such a
+/// value to JSON text and the read path parses it back; Postgres stores it in a
+/// native `JSONB` column. Both must present block code with the same
+/// `Value::Object`. They did not: two adapters re-parsed JSON-looking TEXT and a
+/// third did not, so the same row decoded differently depending on where the
+/// block ran.
+///
+/// Two shapes are checked, because they take different paths:
+///
+/// - a **lazily added** column, whose type each backend picks from the value
+///   (`TEXT` on SQLite, `JSONB` on Postgres), and
+/// - a column **declared TEXT** in the schema and written as an
+///   already-serialized JSON *string*, which is how blocks that serialize
+///   payloads themselves store them.
+///
+/// Plain text is asserted alongside, so a backend cannot pass by parsing
+/// everything.
+async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_json".to_string(),
+        // `declared_text` is deliberately TEXT: it is the column shape that
+        // diverged. `lazy_json` is absent so the lazy column-add picks the type.
+        columns: vec![
+            pk("id"),
+            Column::new("declared_text", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+
+    let object = serde_json::json!({ "k": [1, 2], "nested": { "b": true } });
+    let array = serde_json::json!(["a", "b"]);
+    svc.create(
+        "conf_json",
+        row([
+            ("id", serde_json::json!("j1")),
+            // Already-serialized JSON in a declared TEXT column.
+            ("declared_text", serde_json::json!(object.to_string())),
+            // A structured value handed straight to the backend.
+            ("lazy_json", object.clone()),
+            ("lazy_array", array.clone()),
+            ("plain", serde_json::json!("not json")),
+        ]),
+    )
+    .await
+    .expect("create with JSON payloads must succeed");
+
+    let got = svc.get("conf_json", "j1").await.expect("get must succeed");
+    assert_eq!(
+        got.data.get("declared_text"),
+        Some(&object),
+        "a serialized JSON object in a TEXT column must decode back to the object \
+         (got {:?})",
+        got.data.get("declared_text")
+    );
+    assert_eq!(
+        got.data.get("lazy_json"),
+        Some(&object),
+        "a structured object must round-trip structured (got {:?})",
+        got.data.get("lazy_json")
+    );
+    assert_eq!(
+        got.data.get("lazy_array"),
+        Some(&array),
+        "a structured array must round-trip structured (got {:?})",
+        got.data.get("lazy_array")
+    );
+    assert_eq!(
+        got.data.get("plain"),
+        Some(&serde_json::json!("not json")),
+        "plain text must stay a string (got {:?})",
+        got.data.get("plain")
+    );
+
+    // `list` decodes rows through the same path as `get`; a backend that fixed
+    // only one of them would still be inconsistent.
+    let listed = svc
+        .list(
+            "conf_json",
+            &ListOptions {
+                filters: vec![eq("id", serde_json::json!("j1"))],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list must succeed");
+    assert_eq!(listed.records.len(), 1);
+    assert_eq!(
+        listed.records[0].data.get("declared_text"),
+        Some(&object),
+        "list must decode the same way get does"
+    );
 }
 
 // ---------------------------------------------------------------------------
