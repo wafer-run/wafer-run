@@ -357,6 +357,36 @@ impl DbExec for SQLiteDatabaseService {
         .await?
     }
 
+    /// Same decode as [`run_fetch`](Self::run_fetch), but queued on the write
+    /// worker: the statement (`… RETURNING`) has side effects, so it must run
+    /// against the single writable connection, never a read-only reader.
+    async fn run_execute_returning(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let sql = sql.to_string();
+        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        self.on_write(move |db| {
+            let mut prepared = db
+                .prepare(&sql)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            let records: Vec<Record> = prepared
+                .query_map(as_params(&sql_params).as_slice(), Self::row_to_record)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?
+                .filter_map(|r| match r {
+                    Ok(record) => Some(record),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "skipping row due to deserialization error");
+                        None
+                    }
+                })
+                .collect();
+            Ok(records)
+        })
+        .await?
+    }
+
     async fn run_scalar_i64(
         &self,
         sql: &str,
@@ -1893,6 +1923,101 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 1, "the smuggled INSERT must not have executed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `take_where` builds `DELETE … RETURNING` and must consume the rows it
+    /// returns, even on a file-backed service with dedicated read-only reader
+    /// connections. Before the fix, `take_where` ran the `DELETE … RETURNING`
+    /// through `run_fetch` — the read path. A reader connection is opened
+    /// `SQLITE_OPEN_READ_ONLY`, so the write inside `RETURNING` fails at the
+    /// first `step()` with a "readonly database" error — but `run_fetch`
+    /// decodes rows via `query_map(...).filter_map(...)`, which treats *any*
+    /// per-row `Err` (including this one) as "row failed to decode, skip it
+    /// and warn" rather than "the statement failed." So the error is
+    /// swallowed, `take_where` returns an empty `Vec` with no error at all,
+    /// and the rows are neither returned nor deleted — silent data loss with
+    /// no signal to the caller. The single-connection in-memory tests
+    /// (`take_where_returns_deleted_rows` etc.) can't catch this: they share
+    /// one connection, so there is no read/write split to get wrong.
+    #[tokio::test]
+    async fn take_where_consumes_rows_on_file_backed_service() {
+        let path = tempdb_path("take-where");
+        let svc = SQLiteDatabaseService::open(path.to_str().unwrap()).unwrap();
+        assert!(
+            !svc.readers.is_empty(),
+            "file-backed service must open reader workers"
+        );
+        seed_rows(
+            &svc,
+            "codes",
+            vec![
+                serde_json::json!({"code": "abc123", "used": false}),
+                serde_json::json!({"code": "xyz789", "used": false}),
+                serde_json::json!({"code": "def456", "used": true}),
+            ],
+        )
+        .await;
+
+        let filters = vec![Filter {
+            field: "used".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(false),
+        }];
+
+        let taken = DatabaseService::take_where(&svc, "codes", &filters)
+            .await
+            .expect("take_where");
+        let mut taken_codes: Vec<String> = taken
+            .iter()
+            .map(|r| r.data["code"].as_str().unwrap().to_string())
+            .collect();
+        taken_codes.sort();
+        assert_eq!(
+            taken_codes,
+            vec!["abc123".to_string(), "xyz789".to_string()],
+            "take_where must return the matching rows"
+        );
+
+        // The rows must actually be gone: a following list/get must not find
+        // them. This is the assertion that fails on the pre-fix code — the
+        // rows come back from `take_where` but the DELETE never applied on a
+        // file-backed service, so they are still there afterward.
+        let remaining = DatabaseService::list(&svc, "codes", &ListOptions::default())
+            .await
+            .expect("list");
+        assert_eq!(
+            remaining.total_count, 1,
+            "the two taken rows must be deleted, leaving only the used one"
+        );
+        let remaining_codes: Vec<String> = remaining
+            .records
+            .iter()
+            .map(|r| r.data["code"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(remaining_codes, vec!["def456".to_string()]);
+
+        for code in ["abc123", "xyz789"] {
+            let found = DatabaseService::list(
+                &svc,
+                "codes",
+                &ListOptions {
+                    filters: vec![Filter {
+                        field: "code".to_string(),
+                        operator: FilterOp::Equal,
+                        value: serde_json::json!(code),
+                    }],
+                    ..ListOptions::default()
+                },
+            )
+            .await
+            .expect("list by code");
+            assert!(
+                found.records.is_empty(),
+                "taken row {code} must no longer be gettable/listable"
+            );
+        }
+
         let _ = std::fs::remove_file(&path);
     }
 

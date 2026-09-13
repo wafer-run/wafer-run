@@ -150,6 +150,31 @@ impl DbExec for PostgresDatabaseService {
         Ok(result.rows_affected() as i64)
     }
 
+    /// Same decode as [`run_fetch`](Self::run_fetch): Postgres has one pool
+    /// with no read/write split, so this is behaviorally identical to
+    /// `run_fetch` today. It exists as its own primitive so the *contract*
+    /// (a write statement that returns rows) doesn't depend on this backend
+    /// never growing a read replica / reader-pool split later.
+    async fn run_execute_returning(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let mut q = sqlx::query(sql);
+        for p in params {
+            q = bind_json_value_query(q, p);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in &rows {
+            records.push(row_to_record(row)?);
+        }
+        Ok(records)
+    }
+
     async fn run_scalar_i64(
         &self,
         sql: &str,
