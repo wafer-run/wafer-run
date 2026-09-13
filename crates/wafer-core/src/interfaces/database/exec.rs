@@ -238,9 +238,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Read path: the statement must have no side effects (a plain `SELECT`).
     /// Implementors that route work along separate read/write paths (e.g.
     /// dedicated reader connections) serve this from the read path, so a
-    /// write — including a `… RETURNING` statement — passed here can silently
-    /// fail to apply. Use [`run_execute_returning`](Self::run_execute_returning)
-    /// for a statement that has side effects and also returns rows.
+    /// write — including a `… RETURNING` statement — passed here is not
+    /// applied. Implementors must surface such a statement's failure as an
+    /// `Err`, never as an empty `Ok`: a caller can never be allowed to mistake
+    /// a rejected write for a read that found nothing. Use
+    /// [`run_execute_returning`](Self::run_execute_returning) for a statement
+    /// that has side effects and also returns rows.
     async fn run_fetch(
         &self,
         sql: &str,
