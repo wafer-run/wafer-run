@@ -135,6 +135,17 @@ impl SQLiteDatabaseService {
         Ok(Self::new(conn))
     }
 
+    /// Number of dedicated read-only reader connections this service opened
+    /// (`0` for [`open_in_memory`](Self::open_in_memory) / [`new`](Self::new)).
+    /// `pub` so external tests — in particular the file-backed conformance
+    /// invocation in `tests/conformance.rs` — can assert they are actually
+    /// exercising the read/write-split configuration rather than silently
+    /// degrading to the single-connection one, which is exactly the gap that
+    /// let the `take_where` read/write-path bug through undetected.
+    pub fn reader_count(&self) -> usize {
+        self.readers.len()
+    }
+
     /// Run a job on the write worker (all statements with side effects, and
     /// anything that must observe its own prior writes in program order).
     async fn on_write<T, F>(&self, f: F) -> Result<T, DatabaseError>
@@ -202,6 +213,36 @@ impl SQLiteDatabaseService {
         }
 
         Ok(Record { id, data })
+    }
+
+    /// Prepare `sql`, bind `sql_params`, and decode every row via
+    /// [`row_to_record`](Self::row_to_record). Shared by `run_fetch` (queued
+    /// on a reader) and `run_execute_returning` (queued on the writer) — the
+    /// two primitives differ only in which worker runs this closure, never in
+    /// how rows decode, so the decode itself lives in one place.
+    ///
+    /// A statement-level failure (a mid-query `step()` error — `SQLITE_BUSY`,
+    /// `SQLITE_READONLY`, a `RETURNING` write that violates a constraint, …)
+    /// must propagate as `Err`, never be silently dropped: `row_to_record`
+    /// itself is infallible (every per-column decode failure maps to JSON
+    /// `null`, never `Err`), so an `Err` surfacing from this iterator can only
+    /// be a statement failure, not a row-decode failure. Collecting into a
+    /// `rusqlite::Result<Vec<Record>>` (instead of filter-mapping per row)
+    /// makes that propagate instead of being logged and dropped.
+    fn fetch_rows(
+        db: &mut Connection,
+        sql: &str,
+        sql_params: &[SqlValue],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let mut prepared = db
+            .prepare(sql)
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let records = prepared
+            .query_map(as_params(sql_params).as_slice(), Self::row_to_record)
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?
+            .collect::<rusqlite::Result<Vec<Record>>>()
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        Ok(records)
     }
 }
 
@@ -304,24 +345,8 @@ impl DbExec for SQLiteDatabaseService {
     ) -> Result<Vec<Record>, DatabaseError> {
         let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        self.on_read(move |db| {
-            let mut prepared = db
-                .prepare(&sql)
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-            let records: Vec<Record> = prepared
-                .query_map(as_params(&sql_params).as_slice(), Self::row_to_record)
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?
-                .filter_map(|r| match r {
-                    Ok(record) => Some(record),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "skipping row due to deserialization error");
-                        None
-                    }
-                })
-                .collect();
-            Ok(records)
-        })
-        .await?
+        self.on_read(move |db| Self::fetch_rows(db, &sql, &sql_params))
+            .await?
     }
 
     async fn run_fetch_one(
@@ -357,9 +382,10 @@ impl DbExec for SQLiteDatabaseService {
         .await?
     }
 
-    /// Same decode as [`run_fetch`](Self::run_fetch), but queued on the write
-    /// worker: the statement (`… RETURNING`) has side effects, so it must run
-    /// against the single writable connection, never a read-only reader.
+    /// Same decode as [`run_fetch`](Self::run_fetch) (via
+    /// [`fetch_rows`](Self::fetch_rows)), but queued on the write worker: the
+    /// statement (`… RETURNING`) has side effects, so it must run against the
+    /// single writable connection, never a read-only reader.
     async fn run_execute_returning(
         &self,
         sql: &str,
@@ -367,24 +393,8 @@ impl DbExec for SQLiteDatabaseService {
     ) -> Result<Vec<Record>, DatabaseError> {
         let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        self.on_write(move |db| {
-            let mut prepared = db
-                .prepare(&sql)
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-            let records: Vec<Record> = prepared
-                .query_map(as_params(&sql_params).as_slice(), Self::row_to_record)
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?
-                .filter_map(|r| match r {
-                    Ok(record) => Some(record),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "skipping row due to deserialization error");
-                        None
-                    }
-                })
-                .collect();
-            Ok(records)
-        })
-        .await?
+        self.on_write(move |db| Self::fetch_rows(db, &sql, &sql_params))
+            .await?
     }
 
     async fn run_scalar_i64(
@@ -1069,6 +1079,54 @@ mod tests {
             .await
             .unwrap();
         assert!(taken.is_empty());
+    }
+
+    /// B1 (PR #333 review): a statement-level failure on the write-returning
+    /// path (`DELETE … RETURNING` violating a `FOREIGN KEY` constraint) must
+    /// propagate as `Err`, never be swallowed into `Ok(vec![])`.
+    /// `row_to_record` is infallible (every per-column decode failure maps to
+    /// JSON `null`), so the only `Err` `query_map` can ever yield here is a
+    /// statement failure — dropping it (as the pre-fix `filter_map` swallow
+    /// did) reproduces the exact silent-data-loss shape this PR exists to
+    /// close, just via a different trigger than the original read-only-path
+    /// bug (works even on the in-memory service, no reader split needed: the
+    /// failure is in the write connection's own FK enforcement, not in
+    /// routing).
+    #[tokio::test]
+    async fn run_execute_returning_propagates_a_statement_level_failure() {
+        let svc = make_test_svc();
+        exec_batch_for_tests(
+            &svc,
+            "CREATE TABLE parent (id TEXT PRIMARY KEY);
+             CREATE TABLE child (
+                 id TEXT PRIMARY KEY,
+                 parent_id TEXT NOT NULL REFERENCES parent(id)
+             );
+             INSERT INTO parent (id) VALUES ('p1');
+             INSERT INTO child (id, parent_id) VALUES ('c1', 'p1');",
+        )
+        .await;
+
+        let err = svc
+            .run_execute_returning("DELETE FROM parent WHERE id = 'p1' RETURNING *", &[])
+            .await
+            .expect_err(
+                "a DELETE that violates a FOREIGN KEY constraint must error, not return Ok([])",
+            );
+        assert!(
+            err.to_string().to_lowercase().contains("foreign key"),
+            "expected a foreign-key-constraint error, got: {err}"
+        );
+
+        // The parent row must still be present: the FK-violating DELETE never
+        // applied. (True either way here since SQLite itself refused the
+        // write — this assertion guards against a future change that starts
+        // applying partial writes before the constraint check.)
+        let remaining = DatabaseService::count(&svc, "parent", &[]).await.unwrap();
+        assert_eq!(
+            remaining, 1,
+            "the FK-violating DELETE must not have executed"
+        );
     }
 
     #[tokio::test]
@@ -1899,6 +1957,14 @@ mod tests {
     /// The fetch/scalar paths run on read-only connections: a write
     /// statement smuggled through them errors and mutates nothing (the
     /// mutex-era code silently EXECUTED such writes).
+    ///
+    /// Covers `run_fetch_one`, `run_scalar_i64` (both `query_row`, which
+    /// already propagated) *and* `run_fetch` (`query_map` +
+    /// [`fetch_rows`](SQLiteDatabaseService::fetch_rows)'s fallible
+    /// `collect`) — before that fallible collect existed, a write smuggled
+    /// through `run_fetch` returned `Ok(vec![])` instead of erroring, the
+    /// exact swallow this test exists to rule out on every fetch path, not
+    /// just the two that happened to use `query_row`.
     #[tokio::test]
     async fn fetch_path_is_read_only_on_file_backed_service() {
         let path = tempdb_path("ro");
@@ -1918,11 +1984,23 @@ mod tests {
             "expected a readonly-database error, got: {err}"
         );
 
+        let err = svc
+            .run_fetch("INSERT INTO rows (id) VALUES ('evil2') RETURNING *", &[])
+            .await
+            .expect_err("write through run_fetch must error, not return Ok([])");
+        assert!(
+            err.to_string().to_lowercase().contains("readonly"),
+            "expected a readonly-database error, got: {err}"
+        );
+
         let count = svc
             .run_scalar_i64("SELECT COUNT(*) FROM rows", &[])
             .await
             .expect("count");
-        assert_eq!(count, 1, "the smuggled INSERT must not have executed");
+        assert_eq!(
+            count, 1,
+            "neither smuggled write (INSERT, INSERT … RETURNING) must have executed"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

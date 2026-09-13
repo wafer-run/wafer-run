@@ -1066,6 +1066,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `query_raw`: pass-through to `run_fetch`.
+    ///
+    /// Read path (see [`run_fetch`](Self::run_fetch)'s contract): `query_raw`
+    /// is the admin SQL-explorer's read entry point, so a caller must use
+    /// `exec_raw` for a statement with side effects. A write statement passed
+    /// here now errors rather than silently no-op-ing, since `run_fetch`
+    /// itself propagates a statement-level failure instead of swallowing it —
+    /// but it never applies, on any backend with a read-only path.
     async fn query_raw(
         &self,
         query: &str,
