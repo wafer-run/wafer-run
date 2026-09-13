@@ -234,6 +234,16 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // each backend binds it natively. All callers pass single-statement SQL.
 
     /// Run a row-returning query and convert rows to `Record`s.
+    ///
+    /// Read path: the statement must have no side effects (a plain `SELECT`).
+    /// Implementors that route work along separate read/write paths (e.g.
+    /// dedicated reader connections) serve this from the read path, so a
+    /// write — including a `… RETURNING` statement — passed here is not
+    /// applied. Implementors must surface such a statement's failure as an
+    /// `Err`, never as an empty `Ok`: a caller can never be allowed to mistake
+    /// a rejected write for a read that found nothing. Use
+    /// [`run_execute_returning`](Self::run_execute_returning) for a statement
+    /// that has side effects and also returns rows.
     async fn run_fetch(
         &self,
         sql: &str,
@@ -241,6 +251,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// Run a query expected to return exactly one row; no rows → `NotFound`.
+    ///
+    /// Read path: same contract as [`run_fetch`](Self::run_fetch) — no side
+    /// effects.
     async fn run_fetch_one(
         &self,
         sql: &str,
@@ -248,11 +261,28 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Record, DatabaseError>;
 
     /// Run a non-row statement; returns the affected-row count.
+    ///
+    /// Write path.
     async fn run_execute(
         &self,
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError>;
+
+    /// Run a write statement that returns rows (`… RETURNING`); runs on the
+    /// write path.
+    ///
+    /// Write path: the same path as [`run_execute`](Self::run_execute), not
+    /// [`run_fetch`](Self::run_fetch). Any statement with side effects that
+    /// also needs its rows back (`DELETE … RETURNING`, `UPDATE … RETURNING`,
+    /// `INSERT … RETURNING`) must go through this primitive rather than
+    /// `run_fetch`, so a backend with dedicated read-only connections still
+    /// applies the write.
+    async fn run_execute_returning(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError>;
 
     /// Run a query returning a single `i64` scalar (e.g. `COUNT(*)`).
     async fn run_scalar_i64(
@@ -832,6 +862,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `take_where`: DELETE ... RETURNING the deleted rows; missing
     /// table → empty.
+    ///
+    /// `DELETE … RETURNING` has side effects, so it runs through
+    /// [`run_execute_returning`](Self::run_execute_returning) (the write path)
+    /// rather than [`run_fetch`](Self::run_fetch) (the read path) — on a
+    /// backend with dedicated read-only connections, running the DELETE
+    /// through `run_fetch` would return the matching rows without deleting
+    /// them.
     async fn take_where(
         &self,
         collection: &str,
@@ -845,7 +882,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await?;
         let stmt =
             wafer_sql_utils::query::build_delete_where_returning(&table, filters, Self::BACKEND);
-        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
+        self.run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
@@ -1032,6 +1069,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `query_raw`: pass-through to `run_fetch`.
+    ///
+    /// Read path (see [`run_fetch`](Self::run_fetch)'s contract): `query_raw`
+    /// is the admin SQL-explorer's read entry point, so a caller must use
+    /// `exec_raw` for a statement with side effects. A write statement passed
+    /// here now errors rather than silently no-op-ing, since `run_fetch`
+    /// itself propagates a statement-level failure instead of swallowing it —
+    /// but it never applies, on any backend with a read-only path.
     async fn query_raw(
         &self,
         query: &str,
@@ -1279,6 +1323,14 @@ mod tests {
             Ok(0)
         }
 
+        async fn run_execute_returning(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
         async fn run_scalar_i64(
             &self,
             _sql: &str,
@@ -1414,6 +1466,15 @@ mod tests {
             Ok(7)
         }
 
+        async fn run_execute_returning(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            self.record(format!("execute_returning:{sql}"));
+            Ok(vec![Self::record_row(sql)])
+        }
+
         async fn run_scalar_i64(
             &self,
             sql: &str,
@@ -1530,6 +1591,41 @@ mod tests {
         );
     }
 
+    /// `take_where` builds `DELETE … RETURNING` and must dispatch it through
+    /// [`DbExec::run_execute_returning`] (the write path), never
+    /// [`DbExec::run_fetch`] (the read path) — on a backend with dedicated
+    /// read-only connections, running the DELETE through `run_fetch` returns
+    /// the matching rows without deleting them (the bug this primitive
+    /// exists to close).
+    #[tokio::test]
+    async fn take_where_dispatches_through_the_write_path() {
+        let mock = SeqMock::new();
+        let _ = mock.take_where("t", &[]).await.unwrap();
+
+        let calls = mock.calls.lock().unwrap().clone();
+        let delete_call = calls
+            .iter()
+            .find(|c| c.contains("DELETE") && c.contains("RETURNING"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no DELETE … RETURNING statement was dispatched at all; calls were: {calls:?}"
+                )
+            });
+        assert!(
+            delete_call.starts_with("execute_returning:"),
+            "the DELETE … RETURNING statement must be dispatched through \
+             run_execute_returning (the write path), not any read-path \
+             primitive; got: {delete_call:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("fetch:") && c.contains("DELETE")),
+            "the DELETE … RETURNING statement must not be dispatched through \
+             run_fetch (the read path); calls were: {calls:?}"
+        );
+    }
+
     #[test]
     fn batch_op_sql_params_returns_the_pair_for_every_variant() {
         let params = vec![serde_json::json!("x")];
@@ -1626,6 +1722,14 @@ mod tests {
             _params: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
             Ok(0)
+        }
+
+        async fn run_execute_returning(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
         }
 
         async fn run_scalar_i64(
@@ -1849,6 +1953,14 @@ mod tests {
                     Err(DatabaseError::Internal("duplicate column name".into()))
                 }
             }
+        }
+
+        async fn run_execute_returning(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
         }
 
         async fn run_scalar_i64(

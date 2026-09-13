@@ -150,6 +150,23 @@ impl DbExec for PostgresDatabaseService {
         Ok(result.rows_affected() as i64)
     }
 
+    /// Delegates to [`run_fetch`](Self::run_fetch): Postgres has one pool
+    /// with no read/write split, so this is behaviorally identical to
+    /// `run_fetch` today, and delegating (rather than duplicating the bind +
+    /// `fetch_all` + decode loop) keeps it that way by construction — a
+    /// future change to parameter binding or row decoding can't drift between
+    /// the two. This stays its own trait method — a distinct *contract* (a
+    /// write statement that returns rows) — so the day this backend grows a
+    /// read replica / reader-pool split, only this delegation needs to change
+    /// to point at the write pool instead of `run_fetch`.
+    async fn run_execute_returning(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        self.run_fetch(sql, params).await
+    }
+
     async fn run_scalar_i64(
         &self,
         sql: &str,
