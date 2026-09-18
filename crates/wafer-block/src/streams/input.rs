@@ -3,8 +3,31 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::stream::{self, BoxStream, Stream, StreamExt};
+use futures::stream::{self, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
+
+use crate::compat::MaybeSend;
+
+/// The boxed stream an [`InputStream`] holds.
+///
+/// Native: `BoxStream`, i.e. `Pin<Box<dyn Stream + Send>>`. A body can be
+/// produced on one task and consumed on another, so the inner stream has to
+/// cross threads.
+///
+/// `wasm32`: `LocalBoxStream`, i.e. `Pin<Box<dyn Stream>>`. Every JS-backed
+/// byte stream on that target is `!Send` — `worker::ByteStream` and
+/// `wasm_streams`' `IntoStream` both hold a `JsValue`, which belongs to the
+/// isolate that created it. A `Send` inner type therefore leaves a Cloudflare
+/// Workers or browser service-worker adapter with no way to hand a request
+/// body to a block as a stream at all: it has to buffer the whole body first
+/// and cap how big that buffer may get. wasm32 is single-threaded and the
+/// rest of the block ABI already drops `Send` there ([`crate::compat::MaybeSend`],
+/// `#[wafer_async_trait]`, [`crate::spawn::spawn_producer`]), so matching it
+/// here costs nothing that target ever had.
+#[cfg(not(target_arch = "wasm32"))]
+type BoxedByteStream = stream::BoxStream<'static, Vec<u8>>;
+#[cfg(target_arch = "wasm32")]
+type BoxedByteStream = stream::LocalBoxStream<'static, Vec<u8>>;
 
 /// A byte-chunk stream with a paired cancellation token.
 ///
@@ -13,10 +36,22 @@ use tokio_util::sync::CancellationToken;
 /// methods (`.next()`, `.collect()`, etc.). A `CancellationToken` is
 /// always present — callers that own the upstream source can cancel it;
 /// callers that only consume the stream can inspect it.
+///
+/// The type is `Send` on native and `!Send` on wasm32 — see the
+/// `BoxedByteStream` alias above for why.
 pub struct InputStream {
-    inner: BoxStream<'static, Vec<u8>>,
+    inner: BoxedByteStream,
     cancel: CancellationToken,
 }
+
+/// Native `InputStream`s cross threads, and the whole dispatch path assumes
+/// it: this pins that the wasm32 relaxation above did not leak into the
+/// native build.
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<InputStream>();
+};
 
 impl InputStream {
     /// An empty stream that yields no chunks.
@@ -38,9 +73,14 @@ impl InputStream {
     /// Wrap an arbitrary `Stream<Item = Vec<u8>>`.  A fresh
     /// `CancellationToken` is created; use [`from_stream_with_cancel`]
     /// to supply your own.
+    ///
+    /// [`MaybeSend`] is `Send` on native and vacuous on wasm32, so a JS-backed
+    /// request body (`worker::ByteStream`, `wasm_streams`' `IntoStream`) can be
+    /// wrapped as-is there instead of being buffered — see the `BoxedByteStream`
+    /// alias in this module.
     pub fn from_stream<S>(stream: S) -> Self
     where
-        S: Stream<Item = Vec<u8>> + Send + 'static,
+        S: Stream<Item = Vec<u8>> + MaybeSend + 'static,
     {
         Self {
             inner: Box::pin(stream),
@@ -49,9 +89,11 @@ impl InputStream {
     }
 
     /// Wrap a stream together with a caller-supplied cancellation token.
+    ///
+    /// Same [`MaybeSend`] bound as [`from_stream`](Self::from_stream).
     pub fn from_stream_with_cancel<S>(stream: S, cancel: CancellationToken) -> Self
     where
-        S: Stream<Item = Vec<u8>> + Send + 'static,
+        S: Stream<Item = Vec<u8>> + MaybeSend + 'static,
     {
         Self {
             inner: Box::pin(stream),

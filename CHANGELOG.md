@@ -4,6 +4,21 @@
 
 ### Breaking changes
 
+- `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
+  there instead of a `BoxStream`, so that a JS-backed request body can be
+  streamed to a block; native builds are unchanged and still hold a `Send`
+  inner stream (pinned by a static assertion). wasm32 code that required an
+  `InputStream` to cross a thread boundary has to drop that requirement. The
+  `cfg` keys on `target_arch`, so it covers every wasm32 configuration,
+  including the threaded ones (`+atomics` with shared memory) where `Send`
+  would in principle mean something — wafer-run targets neither of those, and
+  the rest of the block ABI (`MaybeSend`, `#[wafer_async_trait]`,
+  `spawn_producer`) already dropped `Send` on wasm32 unconditionally. Almost
+  every break is a compile error naming the type; the one that is silent is a
+  downstream `Send` probe built on autoref or inherent-impl specialization
+  (the pattern this PR's own fixture uses to assert `!Send`), which flips its
+  answer for `InputStream` with no diagnostic at all. See the entry under
+  **Added** for the reason.
 - `Wafer::new` now takes `Arc<dyn ConfigSource>` instead of returning
   `Result<Self, RuntimeError>` with no config arg. Embedders must implement
   `ConfigSource` (or use `StaticConfigSource` for tests). The return type is
@@ -57,6 +72,48 @@
   narrower of the two instead of collapsing to deny-all.
 
 ### Added
+
+- `InputStream::from_stream` and `from_stream_with_cancel` take
+  `S: Stream<Item = Vec<u8>> + MaybeSend + 'static` instead of requiring
+  `Send` outright, and `InputStream` boxes its inner stream as a
+  `LocalBoxStream` on `wasm32`. On native, `MaybeSend` *is* `Send` and
+  nothing changes.
+
+  On `wasm32` every byte stream a host can hand a block is `!Send`:
+  `worker::ByteStream` and `wasm_streams`' `IntoStream` both hold a `JsValue`,
+  which belongs to the isolate that created it. The old `Send` bound therefore
+  left a Cloudflare Workers or browser service-worker adapter with no way to
+  pass a request body on as a stream at all — it had to read the body to a
+  `Vec<u8>` first and cap how large that buffer could get, which is why
+  downstream adapters buffer uploads and reject anything over a few MiB while
+  the storage half of the path (`clients::storage::put_stream` through to a
+  backend that overrides `StorageService::put_streaming`) has always been able
+  to stream. An adapter can now do:
+
+  ```rust,ignore
+  // `body` is a `worker::ByteStream` — `!Send`, and no longer a problem.
+  let input = InputStream::from_stream(body.map(|chunk| chunk.unwrap_or_default()));
+  wafer.run_block("files", msg, input).await
+  ```
+
+  What a local body survives, end to end on `wasm32`: `Wafer::run_block` and
+  `RuntimeContext::call_block` (which pass the stream through untouched),
+  `clients::storage::put_stream` (which re-frames it behind a header chunk and
+  keeps its cancellation token), and the `service_block!` streaming-ingress arm
+  into `StorageService::put_streaming`. Whether the body is still a stream at
+  that last hop is the backend's choice: `put_streaming`'s trait default
+  collects it and forwards to `put`, so only an overriding backend streams —
+  in-tree, only `wafer-block-local-storage`.
+
+  Two consumers collect the whole body regardless, as they did before and on
+  every target: the WaferFlow executor (`execute` reads the flow input into
+  the accumulator, unconditionally — no flow shape avoids it) and the wasmi
+  guest bridge (the guest ABI takes a `Vec<u8>`). Streaming ingress therefore
+  means dispatching to a native block directly — not through a flow, and not
+  into a wasm guest. This change removes the type-level blocker; an embedder
+  whose every request goes through a flow needs flow-level streaming ingress
+  (or a non-flow dispatch for the streaming route) before any of this reaches
+  a block as a stream.
 
 - Static block registration now works on `wasm32`. `register_static_block!`
   used to expand to nothing there — `linkme`'s distributed slice is a linker
