@@ -1,0 +1,42 @@
+# Compile fixture for the `wasm32` arm of `InputStream`'s inner stream type.
+#
+# `InputStream` boxes a `BoxStream` (`Send`) on native and a `LocalBoxStream`
+# on `wasm32`, because every JS-backed byte stream on that target is `!Send`:
+# `worker::ByteStream` and `wasm_streams`' `IntoStream` both hold a `JsValue`.
+# Nothing in the workspace's native build can construct such a stream, so the
+# relaxation is unreachable from `cargo test` — a bound that silently went back
+# to `Send` would compile green everywhere and break only in a downstream
+# Worker or service-worker adapter, exactly the state this fixture exists to
+# prevent.
+#
+# `scripts/check.sh wasm` builds this crate for `wasm32-unknown-unknown`, where
+# the `!Send` body below is wrapped, consumed, and handed to the streaming
+# storage client for real. Excluded from the workspace (own `[workspace]`
+# table) so `cargo build --workspace` does not pick it up — same pattern as
+# `wasm_static_blocks` next door.
+[workspace]
+
+[package]
+name = "wasm-local-input-stream-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wafer-block = { path = "../../../wafer-block" }
+# The streaming-upload client (`clients::storage::put_stream`) re-frames the
+# caller's `InputStream` behind a header chunk, so it is the one in-tree place
+# that re-wraps a body stream. Building it here proves a local body survives
+# that re-wrap on wasm32.
+wafer-core = { path = "../../../wafer-core" }
+# The `Stream` impl the fixture body needs; matches the workspace dependency.
+futures = "0.3"
+
+# `uuid` refuses to build for wasm32-unknown-unknown without a randomness
+# source, and the choice belongs to the embedding binary, not to the library
+# crates that use it (wafer-core). This fixture is that binary's stand-in, so
+# it makes the choice here rather than forcing one on every consumer.
+uuid = { version = "1", features = ["js"] }

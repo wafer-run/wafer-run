@@ -28,6 +28,15 @@ run_fixtures() {
 run_fmt() {
     echo "==> Format (nightly rustfmt)"
     cargo +nightly fmt --all -- --check
+
+    # The wasm compile fixtures carry their own `[workspace]` table so
+    # `cargo build --workspace` does not pick them up — which also puts them
+    # outside `fmt --all` above. They are ordinary hand-written Rust that
+    # run_wasm builds, so format them by the same rule, named explicitly.
+    for fixture in wasm_static_blocks wasm_local_input_stream; do
+        cargo +nightly fmt --all \
+            --manifest-path "crates/wafer-block/tests/$fixture/Cargo.toml" -- --check
+    done
 }
 
 run_clippy() {
@@ -80,6 +89,17 @@ run_wasm() {
     echo "==> Static block registration on wasm32 (macro arms)"
     cargo build --target wasm32-unknown-unknown \
         --manifest-path crates/wafer-block/tests/wasm_static_blocks/Cargo.toml
+
+    # `InputStream` boxes a `LocalBoxStream` on wasm32 so a JS-backed request
+    # body (always `!Send`, it holds a `JsValue`) can be streamed to a block
+    # instead of buffered. No native build can construct such a body, so a
+    # bound that drifted back to `Send` would compile green in every other job
+    # and strand Worker/service-worker adapters. The fixture typechecks
+    # wrapping a `!Send` body, collecting it, and handing it to the streaming
+    # storage client; nothing here runs, so it proves the bounds, not bytes.
+    echo "==> Local (!Send) request bodies on wasm32 (InputStream inner type)"
+    cargo build --target wasm32-unknown-unknown \
+        --manifest-path crates/wafer-block/tests/wasm_local_input_stream/Cargo.toml
 }
 
 run_audit() {
