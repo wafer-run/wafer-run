@@ -193,8 +193,14 @@ fn list_projection_parity(backend: Backend) {
         columns: Some(columns.clone()),
     };
     let extra_direct = query::build_condition_tree(&tree_direct);
-    let direct =
-        query::build_select_columns("things", &col_refs, &opts_direct, extra_direct, backend);
+    let direct = query::build_select_columns(
+        "things",
+        &col_refs,
+        &opts_direct,
+        extra_direct,
+        &["id"],
+        backend,
+    );
 
     // (b) VIA WIRE — mirror the `DATABASE_LIST` handler arm: filters flow only
     //     through `filter_tree` (flat `opts.filters` stays empty), rendered as
@@ -244,7 +250,14 @@ fn list_projection_parity(backend: Backend) {
         .and_then(query::build_condition_tree);
     let via_cols_owned = decoded.columns.expect("columns present");
     let via_cols: Vec<&str> = via_cols_owned.iter().map(String::as_str).collect();
-    let via = query::build_select_columns("things", &via_cols, &opts_wire, extra_wire, backend);
+    let via = query::build_select_columns(
+        "things",
+        &via_cols,
+        &opts_wire,
+        extra_wire,
+        &["id"],
+        backend,
+    );
 
     assert_stmt_parity(&direct, &via, "list_projection");
 }

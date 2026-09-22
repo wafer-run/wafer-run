@@ -227,9 +227,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// When `true`, the shared orchestration skips both the per-operation
     /// table-exists guard (migrations are authoritative — the table is assumed
     /// present) and the lazy column-add `ALTER TABLE` path (the migrated schema
-    /// is trusted — no columns are synthesized), removing schema introspection
-    /// from the hot path entirely. Default `false` preserves the self-healing
-    /// lazy-schema behavior for development, tests, and other implementors.
+    /// is trusted — no columns are synthesized). The one introspection left is
+    /// the primary-key lookup a sorted or paged [`list`](Self::list) orders by
+    /// ([`get_primary_key`](Self::get_primary_key)), which a backend with a
+    /// [`schema_cache`](Self::schema_cache) issues once per table. Default
+    /// `false` preserves the self-healing lazy-schema behavior for
+    /// development, tests, and other implementors.
     fn strict_schema(&self) -> bool {
         false
     }
@@ -440,6 +443,38 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(columns)
     }
 
+    /// Primary-key columns of `table`, in key order; empty when the table has
+    /// no primary key (or does not exist).
+    ///
+    /// Consults [`schema_cache`](Self::schema_cache) first and populates it on
+    /// a miss via [`introspect::build_list_primary_key`], whose result shape
+    /// (`name` per key column) is identical in both dialects. Runs in
+    /// STRICT_SCHEMA mode too: nothing else can tell the executor which
+    /// columns identify a row.
+    async fn get_primary_key(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+        let cache = self.schema_cache();
+        if let Some(key) = cache.and_then(|c| c.primary_key(table)) {
+            return Ok(key);
+        }
+        // Generation snapshot before the probe yields, as in `get_columns`.
+        let gen0 = cache.map(SchemaCache::generation);
+        let (sql, params) = introspect::build_list_primary_key(table, Self::BACKEND);
+        let rows = self.run_fetch(&sql, &params).await?;
+        let key: Vec<String> = rows
+            .into_iter()
+            .filter_map(|r| {
+                r.data
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_primary_key_if_gen(table, key.clone(), gen0);
+        }
+        Ok(key)
+    }
+
     /// Add `column` to `table` via `stmt` unless a concurrent writer beat us
     /// to it.
     ///
@@ -555,7 +590,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `list`: table-exists guard → ensure columns → optional count → select.
+    /// Shared `list`: table-exists guard → ensure columns → primary key →
+    /// optional count → select.
+    ///
+    /// A sorted or paged select ends its `ORDER BY` with the table's primary
+    /// key ([`get_primary_key`](Self::get_primary_key), passed to the builder
+    /// as its `unique_key`), so rows that tie on every sort key come back in
+    /// the same order on every query and `limit`/`offset` pages are disjoint
+    /// and complete. A table with no primary key orders by `opts.sort` alone.
     ///
     /// `opts.filter_tree`, when `Some`, renders via
     /// [`wafer_sql_utils::query::build_condition_tree`] and is AND-ed onto
@@ -587,6 +629,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         )
         .await?;
 
+        let primary_key = if wafer_sql_utils::query::orders_rows(opts) {
+            self.get_primary_key(&table).await?
+        } else {
+            Vec::new()
+        };
+
         // Render both statements to `Statement` (plain `String` + `Vec<Value>`,
         // both `Send`) before any `.await` below, inside a nested block so
         // the intermediate `Cond` is fully dropped (its storage freed) by
@@ -600,6 +648,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // which the shared `DbExec` trait requires for the native
         // (non-wasm-component) build.
         let (count_stmt, select_stmt) = {
+            let unique_key: Vec<&str> = primary_key.iter().map(String::as_str).collect();
             let extra_cond = opts
                 .filter_tree
                 .as_deref()
@@ -622,6 +671,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                         &refs,
                         opts,
                         extra_cond,
+                        &unique_key,
                         Self::BACKEND,
                     )
                 }
@@ -629,6 +679,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     &table,
                     opts,
                     extra_cond,
+                    &unique_key,
                     Self::BACKEND,
                 ),
             };
@@ -1856,6 +1907,178 @@ mod tests {
         // total_count falls back to records.len() when the count is skipped.
         assert_eq!(list.records.len(), 2);
         assert_eq!(list.total_count, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // list ordering: the primary-key tiebreak
+    // -----------------------------------------------------------------------
+
+    /// Strict-schema backend with a schema cache whose `run_fetch` records
+    /// every statement and answers the primary-key introspection with `key`.
+    struct KeyedMock {
+        cache: SchemaCache,
+        key: Vec<&'static str>,
+        fetches: Mutex<Vec<String>>,
+    }
+
+    impl KeyedMock {
+        fn new(key: &[&'static str]) -> Self {
+            Self {
+                cache: SchemaCache::new(),
+                key: key.to_vec(),
+                fetches: Mutex::new(Vec::new()),
+            }
+        }
+        fn fetches(&self) -> Vec<String> {
+            self.fetches.lock().unwrap().clone()
+        }
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for KeyedMock {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn schema_cache(&self) -> Option<&SchemaCache> {
+            Some(&self.cache)
+        }
+
+        fn strict_schema(&self) -> bool {
+            true
+        }
+
+        async fn run_fetch(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            self.fetches.lock().unwrap().push(sql.to_string());
+            if sql.contains("pk > 0") {
+                return Ok(self
+                    .key
+                    .iter()
+                    .map(|name| Record {
+                        id: String::new(),
+                        data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                    })
+                    .collect());
+            }
+            Ok(Vec::new())
+        }
+
+        async fn run_fetch_one(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Record, DatabaseError> {
+            Err(DatabaseError::NotFound)
+        }
+
+        async fn run_execute(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_execute_returning(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            Ok(0)
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            _sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            Ok(0.0)
+        }
+
+        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
+            Ok(true)
+        }
+    }
+
+    fn newest_first(limit: i64, offset: i64) -> ListOptions {
+        ListOptions {
+            sort: vec![SortField {
+                field: "created_at".into(),
+                desc: true,
+            }],
+            limit,
+            offset,
+            skip_count: true,
+            ..Default::default()
+        }
+    }
+
+    /// A sorted list orders by the introspected primary key last — even in
+    /// STRICT_SCHEMA mode — and a warm cache answers the key without another
+    /// round-trip.
+    #[tokio::test]
+    async fn sorted_list_breaks_ties_on_the_introspected_primary_key_once_per_table() {
+        let mock = KeyedMock::new(&["token_hash"]);
+        for offset in [0, 2] {
+            DbExec::list(&mock, "sessions", &newest_first(2, offset))
+                .await
+                .expect("list");
+        }
+        let fetches = mock.fetches();
+        assert_eq!(
+            fetches.len(),
+            3,
+            "one key probe, then two selects: {fetches:?}"
+        );
+        assert!(
+            fetches[0].contains("pk > 0"),
+            "key probe first: {}",
+            fetches[0]
+        );
+        for select in &fetches[1..] {
+            assert!(
+                select.contains(r#"ORDER BY "created_at" DESC, "token_hash" DESC LIMIT"#),
+                "{select}"
+            );
+        }
+    }
+
+    /// An unsorted, unpaged list has no ORDER BY, so it looks nothing up; a
+    /// table with no primary key orders by its sort alone.
+    #[tokio::test]
+    async fn unordered_list_skips_the_key_probe_and_a_keyless_table_sorts_alone() {
+        let mock = KeyedMock::new(&["id"]);
+        DbExec::list(
+            &mock,
+            "t",
+            &ListOptions {
+                skip_count: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list");
+        assert_eq!(mock.fetches(), vec![r#"SELECT * FROM "t""#.to_string()]);
+
+        let keyless = KeyedMock::new(&[]);
+        DbExec::list(&keyless, "t", &newest_first(0, 0))
+            .await
+            .expect("list");
+        let fetches = keyless.fetches();
+        assert_eq!(
+            fetches.last().map(String::as_str),
+            Some(r#"SELECT * FROM "t" ORDER BY "created_at" DESC"#)
+        );
     }
 
     // -----------------------------------------------------------------------

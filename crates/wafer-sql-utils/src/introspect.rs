@@ -91,6 +91,42 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
     }
 }
 
+/// Build query to list the columns of a table's primary key.
+///
+/// Returns `(sql, params)`. One `name` column per key column, in key order
+/// (the order of the `PRIMARY KEY (...)` list), in both dialects. A table
+/// with no primary key, or no such table, yields zero rows.
+///
+/// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
+/// (`pk` is the column's 1-based position in the key, `0` off it).
+/// Postgres: the `PRIMARY KEY` constraint's columns from
+/// `information_schema.key_column_usage`, in `ordinal_position` order, for
+/// `table_schema='public'` — the schema [`build_list_columns`] reads.
+///
+/// Names come back as the catalog spells them (not lowercased), so a caller
+/// can quote them straight back into SQL. The table name is parameter-bound,
+/// so this builder is infallible.
+pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk".to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT kcu.column_name AS name FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+             ON kcu.constraint_schema = tc.constraint_schema \
+             AND kcu.constraint_name = tc.constraint_name \
+             AND kcu.table_name = tc.table_name \
+             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public' \
+             AND tc.table_name = $1 ORDER BY kcu.ordinal_position"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
@@ -265,5 +301,43 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_list_primary_key_postgres() {
+        let (sql, params) = build_list_primary_key("users", Backend::Postgres);
+        assert!(sql.contains("'PRIMARY KEY'"), "{sql}");
+        assert!(sql.contains("$1"), "table name must be bound: {sql}");
+        assert!(sql.contains("ORDER BY kcu.ordinal_position"), "{sql}");
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    // The key columns, in key order rather than declaration order, for a
+    // single-column key, a composite key, an INTEGER PRIMARY KEY, a table with
+    // no key, and a missing table — on a real SQLite engine.
+    #[test]
+    fn test_list_primary_key_executes_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE single (token_hash TEXT PRIMARY KEY, id TEXT);
+             CREATE TABLE composite (role_id TEXT, user_id TEXT, created_at TEXT,
+                 PRIMARY KEY (user_id, role_id));
+             CREATE TABLE rowid_key (n INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);
+             CREATE TABLE keyless (a TEXT, b TEXT);",
+        )
+        .unwrap();
+        let key = |table: &str| -> Vec<String> {
+            let (sql, params) = build_list_primary_key(table, Backend::Sqlite);
+            let mut stmt = conn.prepare(&sql).unwrap();
+            stmt.query_map([params[0].as_str().unwrap()], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(key("single"), vec!["token_hash"]);
+        assert_eq!(key("composite"), vec!["user_id", "role_id"]);
+        assert_eq!(key("rowid_key"), vec!["n"]);
+        assert!(key("keyless").is_empty());
+        assert!(key("no_such_table").is_empty());
     }
 }

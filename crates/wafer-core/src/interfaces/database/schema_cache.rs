@@ -5,8 +5,9 @@
 //! column-list introspection query, issued *before* the actual data query. On
 //! a local SQLite file those are cheap, but on Cloudflare D1 each is a network
 //! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
-//! facts per table so a warm backend issues zero introspection round-trips in
-//! steady state.
+//! facts per table — plus the table's primary key, which a sorted or paged
+//! `list` appends to its `ORDER BY` — so a warm backend issues zero
+//! introspection round-trips in steady state.
 //!
 //! # Correctness
 //!
@@ -56,13 +57,17 @@ use parking_lot::RwLock;
 
 /// Memoized introspection facts for one table. Each fact is independently
 /// populated (`dbx_table_exists` fills `exists`, the column-list introspection
-/// fills `columns`), so both are `Option` and `None` means "not yet probed".
+/// fills `columns`, the primary-key introspection fills `primary_key`), so
+/// each is an `Option` and `None` means "not yet probed".
 #[derive(Debug, Default)]
 struct TableSchema {
     /// Whether the table exists, once probed.
     exists: Option<bool>,
     /// Lowercased column names, once listed.
     columns: Option<Vec<String>>,
+    /// Primary-key column names in key order, as the catalog spells them;
+    /// empty for a table with no primary key.
+    primary_key: Option<Vec<String>>,
 }
 
 /// Lock-protected cache state: the per-table facts plus the generation counter
@@ -157,6 +162,32 @@ impl SchemaCache {
         entry.columns = Some(columns);
     }
 
+    /// Cached primary-key columns, or `None` on a miss.
+    #[must_use]
+    pub fn primary_key(&self, table: &str) -> Option<Vec<String>> {
+        self.inner
+            .read()
+            .tables
+            .get(table)
+            .and_then(|t| t.primary_key.clone())
+    }
+
+    /// Record `table`'s primary-key columns (empty: the table has none), but
+    /// only if the cache has not been mutated since `expected_gen` (see the
+    /// module docs). Unlike a column list, an empty key proves nothing about
+    /// existence, so the exists fact is left alone.
+    pub fn set_primary_key_if_gen(&self, table: &str, key: Vec<String>, expected_gen: u64) {
+        let mut inner = self.inner.write();
+        if inner.generation != expected_gen {
+            return;
+        }
+        inner
+            .tables
+            .entry(table.to_string())
+            .or_default()
+            .primary_key = Some(key);
+    }
+
     /// Invalidate every cached fact for `table` and bump the generation.
     /// Called after a targeted schema mutation (migration, drop, add-column,
     /// lazy `ALTER TABLE`): the next read re-introspects, and any write-back
@@ -226,6 +257,24 @@ mod tests {
             Some(false),
             "an empty column list must not overwrite the existence probe"
         );
+    }
+
+    #[test]
+    fn primary_key_miss_then_hit_and_dropped_by_invalidate() {
+        let c = SchemaCache::new();
+        assert_eq!(c.primary_key("t"), None);
+        c.set_primary_key_if_gen("t", vec!["id".into()], c.generation());
+        assert_eq!(c.primary_key("t"), Some(vec!["id".to_string()]));
+        // An empty key is a cached answer ("no primary key"), not a miss, and
+        // says nothing about whether the table exists.
+        c.set_primary_key_if_gen("keyless", Vec::new(), c.generation());
+        assert_eq!(c.primary_key("keyless"), Some(Vec::new()));
+        assert_eq!(c.table_exists("keyless"), None);
+        let stale = c.generation();
+        c.invalidate("t");
+        assert_eq!(c.primary_key("t"), None);
+        c.set_primary_key_if_gen("t", vec!["old".into()], stale);
+        assert_eq!(c.primary_key("t"), None, "a raced write-back is dropped");
     }
 
     #[test]

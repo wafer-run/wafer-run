@@ -78,6 +78,13 @@
   `service::AggregateColumnSpec::{Sum, Avg}` gain `cast_as`; and
   `wafer_sql_utils::aggregate::AggregateColumn::cast_as` is now
   `Option<CastType>` instead of `Option<String>`.
+- `wafer_sql_utils::query::{build_select, build_select_with_condition,
+  build_select_columns}` take a `unique_key: &[&str]` argument before
+  `backend`: the table's primary-key columns, appended to the `ORDER BY` of a
+  sorted or paged select (see the `database.list` entry under **Added**).
+  Pass the key, or `&[]` for a table without one. `database.list` results
+  change order only among rows that tie on every sort key, which previously
+  came back in whatever order the backend produced.
 
 ### Added
 
@@ -105,6 +112,22 @@
   older runtime ignores `cast_as` (the result comes back uncast) and
   `column` (the leaf compares `field` to `NULL`, which matches no row); it
   rejects `SumWhere` as an unknown variant.
+- `database.list` orders deterministically: a sorted or paged select
+  (`sort` non-empty, or `limit`/`offset` set) ends its `ORDER BY` with the
+  table's primary key, every column of it in key order, skipping any the
+  sort already names, in the direction of the last sort term (ascending with
+  no sort). Rows that tie on the sort key — a `created_at` stamped to the
+  second, a status column — therefore come back in one order on every query,
+  so `limit`/`offset` pages are disjoint and complete; before, a tie could
+  land on two pages or on none. The key is introspected
+  (`introspect::build_list_primary_key`, `DbExec::get_primary_key`) and
+  memoized in the backend's `SchemaCache`, in STRICT_SCHEMA mode too, so a
+  warm backend pays nothing; a backend without a cache pays one catalog read
+  per sorted or paged `list`. An unsorted, unpaged `list` looks nothing up
+  and has no `ORDER BY`. A table without a primary key is ordered by the
+  sort alone. `aggregate` is unchanged — `query::apply_order` still emits the
+  sort only, because a key column outside the `GROUP BY` is not a valid sort
+  key there; the row selects use `query::apply_order_with_unique_key`.
 - CI runs the shared `DatabaseService` conformance suite against a live
   PostgreSQL 16 service container (`scripts/check.sh postgres`, the
   `PostgreSQL Conformance` job). It previously ran only by hand.

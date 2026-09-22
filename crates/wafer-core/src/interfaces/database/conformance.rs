@@ -215,7 +215,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `schema_table_exists`, `schema_add_column`, `schema_drop_table`,
 /// `set_strict_schema`); `create`/`get`; `count`/`sum` across the full
 /// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
-/// OR-group `filter_tree`, `total_count`); `update`/`update_where`/
+/// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
+/// ordered by the primary key — single-column, composite, or none);
+/// `update`/`update_where`/
 /// `update_where_count`; `delete`/`delete_where`/`delete_where_count`/
 /// `take_where`; `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
@@ -236,6 +238,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_create_get(svc).await;
     check_count_and_sum(svc).await;
     check_list(svc).await;
+    check_list_tiebreak(svc).await;
     check_update_family(svc).await;
     check_delete_family(svc).await;
     check_take_where(svc).await;
@@ -749,6 +752,232 @@ async fn check_list(svc: &dyn DatabaseService) {
         .expect("list missing table");
     assert!(empty.records.is_empty());
     assert_eq!(empty.total_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// list — ties on the sort key break on the primary key
+// ---------------------------------------------------------------------------
+
+/// Page through `table` two rows at a time, sorted by `sort`, and return each
+/// page's `key` values (a composite key's columns joined with `/`).
+async fn pages(
+    svc: &dyn DatabaseService,
+    table: &str,
+    sort: &[(&str, bool)],
+    key: &[&str],
+) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for offset in [0, 2, 4] {
+        let listed = svc
+            .list(
+                table,
+                &ListOptions {
+                    sort: sort
+                        .iter()
+                        .map(|(field, desc)| SortField {
+                            field: (*field).into(),
+                            desc: *desc,
+                        })
+                        .collect(),
+                    limit: 2,
+                    offset,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("list {table} offset {offset}: {e:?}"));
+        assert_eq!(listed.total_count, 5, "{table}: total_count");
+        out.push(
+            listed
+                .records
+                .iter()
+                .map(|r| {
+                    key.iter()
+                        .map(|k| r.data[*k].as_str().expect("text key").to_string())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// Five rows share one sort-key value and are inserted out of key order.
+/// Paging through them must return every row exactly once, in primary-key
+/// order: the key breaks the tie, in the direction of the last sort term.
+/// Without it a backend returns ties in storage order — insertion order on
+/// SQLite — so the pages here would read `c a | e b | d`.
+///
+/// Covered for a table keyed by `id`, a table keyed by another column (no
+/// `id` at all), a composite key, and a table with no primary key, whose
+/// select must still be valid SQL.
+async fn check_list_tiebreak(svc: &dyn DatabaseService) {
+    let tied = |table: &str, key_cols: Vec<Column>, primary_key: Vec<String>| Table {
+        name: table.to_string(),
+        columns: key_cols
+            .into_iter()
+            .chain([Column::new("created_at", DataType::Text)])
+            .collect(),
+        indexes: Vec::new(),
+        primary_key,
+        unique_keys: Vec::new(),
+    };
+    let order = ["c", "a", "e", "b", "d"];
+
+    // Keyed by `id`.
+    reset(svc, &tied("conf_tie_id", vec![pk("id")], Vec::new())).await;
+    for id in order {
+        svc.create(
+            "conf_tie_id",
+            row([
+                ("id", serde_json::json!(id)),
+                ("created_at", serde_json::json!("2026-01-01T00:00:00Z")),
+            ]),
+        )
+        .await
+        .expect("seed conf_tie_id");
+    }
+    assert_eq!(
+        pages(svc, "conf_tie_id", &[("created_at", true)], &["id"]).await,
+        vec![vec!["e", "d"], vec!["c", "b"], vec!["a"]],
+        "newest-first ties break id-descending"
+    );
+    assert_eq!(
+        pages(svc, "conf_tie_id", &[("created_at", false)], &["id"]).await,
+        vec![vec!["a", "b"], vec!["c", "d"], vec!["e"]],
+        "oldest-first ties break id-ascending"
+    );
+    assert_eq!(
+        pages(svc, "conf_tie_id", &[], &["id"]).await,
+        vec![vec!["a", "b"], vec!["c", "d"], vec!["e"]],
+        "a paged list with no sort is in key order"
+    );
+
+    // Keyed by a column other than `id`; the upsert path writes rows without
+    // synthesizing an `id` column.
+    reset(
+        svc,
+        &tied("conf_tie_hash", vec![pk("token_hash")], Vec::new()),
+    )
+    .await;
+    for hash in order {
+        svc.upsert(
+            "conf_tie_hash",
+            UpsertSpec {
+                data: vec![
+                    ("token_hash".into(), serde_json::json!(hash)),
+                    (
+                        "created_at".into(),
+                        serde_json::json!("2026-01-01T00:00:00Z"),
+                    ),
+                ],
+                conflict_columns: vec!["token_hash".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["created_at".into()]),
+            },
+        )
+        .await
+        .expect("seed conf_tie_hash");
+    }
+    assert_eq!(
+        pages(
+            svc,
+            "conf_tie_hash",
+            &[("created_at", true)],
+            &["token_hash"]
+        )
+        .await,
+        vec![vec!["e", "d"], vec!["c", "b"], vec!["a"]],
+        "a non-`id` key breaks the tie"
+    );
+
+    // A composite key, declared (user, role) though the columns are listed
+    // role-first: the tiebreak follows key order, not column order.
+    reset(
+        svc,
+        &tied(
+            "conf_tie_pair",
+            vec![
+                Column::new("role_id", DataType::Text),
+                Column::new("user_id", DataType::Text),
+            ],
+            vec!["user_id".into(), "role_id".into()],
+        ),
+    )
+    .await;
+    for (user, role) in [
+        ("u2", "r1"),
+        ("u1", "r2"),
+        ("u3", "r1"),
+        ("u1", "r1"),
+        ("u2", "r2"),
+    ] {
+        svc.upsert(
+            "conf_tie_pair",
+            UpsertSpec {
+                data: vec![
+                    ("user_id".into(), serde_json::json!(user)),
+                    ("role_id".into(), serde_json::json!(role)),
+                    (
+                        "created_at".into(),
+                        serde_json::json!("2026-01-01T00:00:00Z"),
+                    ),
+                ],
+                conflict_columns: vec!["user_id".into(), "role_id".into()],
+                on_conflict: UpsertConflict::SetColumns(vec!["created_at".into()]),
+            },
+        )
+        .await
+        .expect("seed conf_tie_pair");
+    }
+    assert_eq!(
+        pages(
+            svc,
+            "conf_tie_pair",
+            &[("created_at", false)],
+            &["user_id", "role_id"]
+        )
+        .await,
+        vec![
+            vec!["u1/r1", "u1/r2"],
+            vec!["u2/r1", "u2/r2"],
+            vec!["u3/r1"]
+        ],
+        "a composite key breaks the tie column by column, in key order"
+    );
+
+    // No primary key: nothing to break the tie with, but the paged, sorted
+    // select must still run and cover the table.
+    reset(
+        svc,
+        &tied(
+            "conf_tie_keyless",
+            vec![Column::new("label", DataType::Text)],
+            Vec::new(),
+        ),
+    )
+    .await;
+    // `create` adds an `id` column here (lazily, not as a key), which is
+    // fine: the table still has no primary key.
+    for label in order {
+        svc.create(
+            "conf_tie_keyless",
+            row([
+                ("label", serde_json::json!(label)),
+                ("created_at", serde_json::json!("2026-01-01T00:00:00Z")),
+            ]),
+        )
+        .await
+        .expect("seed conf_tie_keyless");
+    }
+    let mut labels: Vec<String> =
+        pages(svc, "conf_tie_keyless", &[("created_at", true)], &["label"])
+            .await
+            .concat();
+    assert_eq!(labels.len(), 5, "every row is on some page: {labels:?}");
+    labels.sort();
+    labels.dedup();
+    assert_eq!(labels.len(), 5, "a keyless table still lists every row");
 }
 
 // ---------------------------------------------------------------------------
