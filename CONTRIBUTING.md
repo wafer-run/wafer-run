@@ -8,7 +8,7 @@ If you're new to wafer as a *user*, read [wafer.run/docs/core-concepts](https://
 
 ## Toolchain
 
-- **Rust stable** — install via [rustup](https://rustup.rs). No `rust-toolchain.toml`; the latest stable works.
+- **Rust stable** — install via [rustup](https://rustup.rs). `rust-toolchain.toml` pins the exact version (and its `clippy`, `rustfmt` and wasm targets); rustup installs it on first use.
 - **Rust nightly** — required for `cargo +nightly fmt --all` (CI's Format & Lint job runs nightly rustfmt to enforce `imports_granularity = "Crate"` and `group_imports = "StdExternalCrate"` from `rustfmt.toml`; stable rustfmt silently ignores those rules).
   ```
   rustup toolchain install nightly --component rustfmt
@@ -25,13 +25,19 @@ If you're new to wafer as a *user*, read [wafer.run/docs/core-concepts](https://
 (`.github/workflows/ci-jobs.yml`) invoke its named steps, and running it
 with no arguments runs the full sequence locally before a PR.
 
-The default test command **mirrors CI**:
+Its steps are `fixtures fmt clippy test postgres wasm audit`; run any of
+them by name. The test step is what CI runs:
 
 ```
-cargo test --workspace --exclude wafer-run && cargo test -p wafer-run --lib
+./scripts/check.sh fixtures test
 ```
 
-Don't use `cargo test --workspace` directly — it will compile `wafer-run`'s integration tests, including `wasmi_block_test.rs`, which depends on a WASM testdata fixture. See the gotcha below.
+`test` is `cargo test --workspace` plus the two `allow-private-network`
+SSRF e2e suites. `cargo test --workspace` compiles `wafer-run`'s integration
+tests, which need the WASM fixtures — hence `fixtures` first (see the gotcha
+below). The `postgres` step runs the database conformance suite against a
+live server named by `WAFER_CONFORMANCE_POSTGRES_URL`; the header of
+`scripts/check.sh` shows how to start one with Docker.
 
 For a quick build sanity check:
 
@@ -89,7 +95,7 @@ go/                      Go bindings.
 ## Code style
 
 - **Format with stable for local, nightly before push.** The pre-commit hook runs `cargo fmt` (stable). CI's Format & Lint runs `cargo +nightly fmt --all -- --check`. **Run `cargo +nightly fmt --all` before every push** or CI fails.
-- **Clippy clean:** `cargo clippy --workspace -- -D warnings` (CI command). Locally, `cargo clippy --all-targets` is stricter and is what the pre-commit hook runs — see the testdata gotcha above for what `--all-targets` pulls in.
+- **Clippy clean:** `./scripts/check.sh clippy` (`cargo clippy --workspace --all-targets -- -D warnings`, the CI command; the pre-commit hook runs the same lint set with `--fix`). `--all-targets` compiles the integration tests, so it needs the fixtures — see the gotcha above.
 - **No sync bridges.** No `poll_once`, no `block_on`. If something is async, callers must remain async. (See `CLAUDE.md`.)
 - **No raw SQL in block code.** Use `wafer-sql-utils` builders (`query::*`, `aggregate::*`, `upsert::*`, `ddl::*`, `introspect::*`). If a builder is missing for what you need, add it to `wafer-sql-utils` — don't fall back to `exec_raw`/`query_raw`. Exceptions: the admin SQL explorer (user-typed query), migration-file runners, and test-fixture setup.
 - **No hardcoded domain values.** Block-specific values come from `ConfigVar` declared on the block's `BlockInfo::config_keys`. (See `CLAUDE.md`.)
@@ -111,9 +117,9 @@ go/                      Go bindings.
 4. Before pushing:
    ```
    cargo +nightly fmt --all
-   cargo clippy --workspace -- -D warnings
-   cargo test --workspace --exclude wafer-run && cargo test -p wafer-run --lib
+   ./scripts/check.sh
    ```
+   With no arguments `check.sh` runs every step, skipping `postgres` (loudly) when `WAFER_CONFORMANCE_POSTGRES_URL` is unset.
 
 5. Open the PR. CI must pass before merge. Squash-merge is the default.
 

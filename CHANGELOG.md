@@ -74,7 +74,9 @@
   `wire::database::FilterDef` gains a `column` field and
   `AggregateColumnDef::{Sum, Avg}` gain `cast_as`, so struct literals need
   `column: None` / `cast_as: None`; `wafer_block::db::FilterTree` gains a
-  `ColumnCompare` variant, so exhaustive matches need an arm;
+  `ColumnCompare` variant, `wire::database::AggregateColumnDef` and
+  `service::AggregateColumnSpec` each gain a `SumWhere` variant, so
+  exhaustive matches on any of the three need an arm;
   `service::AggregateColumnSpec::{Sum, Avg}` gain `cast_as`; and
   `wafer_sql_utils::aggregate::AggregateColumn::cast_as` is now
   `Option<CastType>` instead of `Option<String>`.
@@ -126,7 +128,14 @@
   the encoding when unset, so existing requests encode exactly as before. An
   older runtime ignores `cast_as` (the result comes back uncast) and
   `column` (the leaf compares `field` to `NULL`, which matches no row); it
-  rejects `SumWhere` as an unknown variant.
+  rejects `SumWhere` as an unknown variant. Neither ignored field fails the
+  request, so a caller that sends them to an older runtime gets a wrong
+  answer, not an error: a column-compare leaf makes a read silently smaller
+  (a `list` or `count` misses the rows it should match, a `CaseWhenSum`
+  counts fewer), and makes a flat-filter write — which the newer runtime
+  rejects — report success while changing nothing (`update_where_count`
+  and `delete_where_count` return `0`, `take_where` returns no rows).
+  Upgrade the runtime before sending either field.
 - `database.list` orders deterministically: a sorted or paged select
   (`sort` non-empty, or `limit`/`offset` set) ends its `ORDER BY` with the
   table's primary key, every column of it in key order, skipping any the
