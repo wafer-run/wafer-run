@@ -135,3 +135,42 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
         "ties break id-descending for a role that can only read the table"
     );
 }
+
+/// A `PRIMARY KEY (...) INCLUDE (...)` index lists its covering columns in
+/// `indkey` after its `indnkeyatts` key columns. They do not identify a row,
+/// so the key introspection must stop at the key. (A list cannot show the
+/// difference, since the key columns are already unique, so this reads the
+/// introspection itself.) Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is
+/// set.
+#[tokio::test]
+async fn an_included_column_is_not_part_of_the_primary_key() {
+    use sqlx::postgres::PgPool;
+    use wafer_sql_utils::{introspect::build_list_primary_key, Backend};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres INCLUDE key check: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect");
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_include_key",
+        "CREATE TABLE conf_include_key (c TEXT, b TEXT, a TEXT, \
+         PRIMARY KEY (a, b) INCLUDE (c))",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let (sql, params) = build_list_primary_key("conf_include_key", Backend::Postgres);
+    let key: Vec<String> = sqlx::query_scalar(&sql)
+        .bind(params[0].as_str().expect("bound table name"))
+        .fetch_all(&admin)
+        .await
+        .expect("introspect the key");
+    sqlx::query("DROP TABLE conf_include_key")
+        .execute(&admin)
+        .await
+        .expect("drop");
+    assert_eq!(key, ["a", "b"], "the INCLUDE column c is not a key column");
+}

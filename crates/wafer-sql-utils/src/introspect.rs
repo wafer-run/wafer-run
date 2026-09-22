@@ -99,11 +99,14 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
 ///
 /// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
 /// (`pk` is the column's 1-based position in the key, `0` off it).
-/// Postgres: the columns of the table's `indisprimary` index in
+/// Postgres: the key columns of the table's `indisprimary` index in
 /// `pg_catalog.pg_index`, in `indkey` order, for the table
 /// `to_regclass('public.<table>')` names — the `public` schema
 /// [`build_list_columns`] reads. `to_regclass` is `NULL` for a missing
-/// table, so that case is zero rows rather than an error.
+/// table, so that case is zero rows rather than an error. `indkey` also lists
+/// a `PRIMARY KEY (...) INCLUDE (...)` index's non-key columns after its
+/// `indnkeyatts` key columns; those are cut off, since they do not identify
+/// a row.
 ///
 /// Postgres reads the system catalog rather than
 /// `information_schema.table_constraints`: the information schema shows a
@@ -127,7 +130,7 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
              CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
              JOIN pg_catalog.pg_attribute a \
              ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
-             WHERE i.indisprimary \
+             WHERE i.indisprimary AND k.ord <= i.indnkeyatts \
              AND i.indrelid = to_regclass(format('public.%I', $1::text)) \
              ORDER BY k.ord"
                 .to_string(),
@@ -322,6 +325,10 @@ mod tests {
         );
         assert!(sql.contains("$1"), "table name must be bound: {sql}");
         assert!(sql.contains("ORDER BY k.ord"), "{sql}");
+        assert!(
+            sql.contains("k.ord <= i.indnkeyatts"),
+            "INCLUDE columns are not key columns: {sql}"
+        );
         assert_eq!(params, vec![serde_json::json!("users")]);
     }
 

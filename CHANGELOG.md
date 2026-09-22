@@ -101,7 +101,12 @@
   `Date.now()` through uuid's `js` feature, which an embedding binary
   already enables for uuid's randomness source; a binary that picked another
   getrandom backend instead must enable `uuid/js` too, or `SystemTime` panics
-  when the first id is minted.
+  when the first id is minted. The policy is public as
+  `wafer_core::interfaces::database::mint_record_id`, for a backend that
+  inserts rows through its own path. A minted id now reveals its record's
+  creation time, carries about 74 random bits and is near-sequential with
+  ids minted in the same millisecond, so a record id must never serve as a
+  bearer secret.
 - `database.aggregate` rejects `Avg` with `cast_as: "BIGINT"` as
   `InvalidArgument`; `Avg` casts to `DOUBLE PRECISION` only. This is a
   wire-visible validation change to the `cast_as` addition under **Added**: a

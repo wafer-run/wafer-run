@@ -70,6 +70,11 @@ fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
 
 /// Mint the `id` of a record created without one: a UUIDv7.
 ///
+/// This is the record-id policy for every [`DbExec`] backend. The shared
+/// [`create`](DbExec::create) and [`create_many`](DbExec::create_many) call
+/// it, and a backend that inserts rows through its own path (a native batch
+/// API, say) must call it too, so every backend's ids sort the same way.
+///
 /// A v7 id leads with its creation time in milliseconds and, within one
 /// process, [`Uuid::now_v7`](uuid::Uuid::now_v7) keeps ids strictly
 /// increasing, so key order is creation order. That matters because `list`
@@ -85,7 +90,13 @@ fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
 /// On `wasm32-unknown-unknown` the clock is `Date.now()` through uuid's `js`
 /// feature, the same feature the embedding binary already enables for its
 /// randomness source; without it `std::time::SystemTime` panics there.
-fn mint_record_id() -> String {
+///
+/// A v7 id reveals when its record was created and carries about 74 random
+/// bits, and ids minted in one millisecond are near-sequential. A record id
+/// is therefore guessable from its neighbours and must never serve as a
+/// bearer secret (a share link, a reset token); mint those separately.
+#[must_use]
+pub fn mint_record_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
