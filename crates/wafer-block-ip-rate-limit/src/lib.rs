@@ -36,7 +36,8 @@ use std::{
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, Message, OutputStream, WaferError,
+    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, Message, MetaEntry, OutputStream,
+    WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -310,16 +311,26 @@ impl Block for RateLimitBlock {
                 .unwrap_or(Duration::ZERO);
             let retry_after = remaining.as_secs().to_string();
 
-            let mut err_msg = msg;
-            err_msg.set_meta("resp.header.Retry-After", retry_after);
-            err_msg.set_meta("resp.header.X-RateLimit-Limit", max.to_string());
-            err_msg.set_meta("resp.header.X-RateLimit-Remaining", "0");
-
-            // Emit an error with the rate-limit meta attached
+            // The error carries only the rate-limit response headers: an
+            // error's meta travels to every transport, so request meta
+            // (headers, cookies, caller identity) must never ride on it.
             let err = WaferError {
                 code: ErrorCode::ResourceExhausted,
                 message: "Too many requests".to_string(),
-                meta: err_msg.meta,
+                meta: vec![
+                    MetaEntry {
+                        key: "resp.header.Retry-After".to_string(),
+                        value: retry_after,
+                    },
+                    MetaEntry {
+                        key: "resp.header.X-RateLimit-Limit".to_string(),
+                        value: max.to_string(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.X-RateLimit-Remaining".to_string(),
+                        value: "0".to_string(),
+                    },
+                ],
             };
             return OutputStream::error(err);
         }
@@ -629,6 +640,74 @@ mod rate_limit_tests {
                 );
             }
             other => panic!("expected rate-limit error, got {other:?}"),
+        }
+    }
+
+    /// The 429 error carries only its `resp.header.*` entries — never the
+    /// request's meta — and so neither the HTTP codec nor the embedder wire
+    /// format can surface request headers, cookies or identity from it.
+    #[tokio::test]
+    async fn over_limit_error_carries_no_request_meta() {
+        let _guard = env_mutex().lock().await;
+        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
+        let clock = ControllableClock::new();
+        let wafer = build_wafer_with_clock(
+            clock.clone(),
+            json!({"max_requests": "1", "window_seconds": "60"}),
+        )
+        .await;
+        let request = || {
+            let mut msg = request_from("3.3.3.3");
+            msg.set_meta("http.header.authorization", "Bearer SECRET_TOKEN");
+            msg.set_meta("http.header.cookie", "session=SECRET_COOKIE");
+            msg.set_meta("auth.user_email", "someone@example.com");
+            msg
+        };
+        let _ = wafer
+            .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await;
+
+        match wafer
+            .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(e)) => {
+                let mut keys: Vec<&str> = e.meta.iter().map(|m| m.key.as_str()).collect();
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    vec![
+                        "resp.header.Retry-After",
+                        "resp.header.X-RateLimit-Limit",
+                        "resp.header.X-RateLimit-Remaining",
+                    ],
+                    "rate-limit error meta must hold only its response headers"
+                );
+            }
+            other => panic!("expected rate-limit error, got {other:?}"),
+        }
+
+        // The embedder wire format for the same 429 carries no request meta.
+        let json = wafer_run::embed::output_to_json(
+            wafer
+                .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+                .await,
+        )
+        .await;
+        for secret in [
+            "SECRET_TOKEN",
+            "SECRET_COOKIE",
+            "someone@example.com",
+            "3.3.3.3",
+        ] {
+            assert!(
+                !json.contains(secret),
+                "{secret} leaked into embed JSON: {json}"
+            );
         }
     }
 

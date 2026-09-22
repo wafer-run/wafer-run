@@ -21,7 +21,8 @@
 //!    [`resolve_error_status`] — status resolution: explicit
 //!    [`META_RESP_STATUS`] override wins, then error-code-derived, then the
 //!    caller's default.
-//! 5. [`collect_http_response`] / [`buffered_to_http_response`] — buffered
+//! 5. [`collect_http_response`] / [`buffered_to_http_response`] /
+//!    [`error_to_http_response`] — buffered
 //!    terminal-event mapping from an [`OutputStream`] to a transport-neutral
 //!    [`HttpResponseParts`] that thin platform glue turns into an
 //!    `axum`/`worker`/`web_sys` response.
@@ -348,6 +349,38 @@ pub fn buffered_to_http_response(buf: BufferedResponse) -> HttpResponseParts {
     }
 }
 
+/// Map a [`WaferError`] terminal to [`HttpResponseParts`].
+///
+/// This is the **single** Error code path: status from
+/// [`resolve_error_status`], headers from the error's meta, and a JSON body
+/// `{"error": <ErrorCode>, "message": <msg>, "code": <detail code>}` with
+/// `Content-Type: application/json` (the body **is** JSON, so any
+/// `resp.content_type` on the error meta is superseded). `code` is the
+/// application-level code set via [`WaferError::with_detail_code`] and is
+/// omitted when none was attached. Adapters that cannot hand the codec an
+/// [`OutputStream`] call this directly so every transport emits the same
+/// error body.
+pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
+    let status = resolve_error_status(err);
+    let mut headers = non_content_type_headers_from_meta(&err.meta);
+    headers.push((
+        "Content-Type".to_string(),
+        DEFAULT_RESPONSE_CONTENT_TYPE.to_string(),
+    ));
+    let mut body = serde_json::json!({
+        "error": err.code,
+        "message": err.message,
+    });
+    if let Some(detail) = err.detail_code() {
+        body["code"] = serde_json::Value::String(detail.to_string());
+    }
+    HttpResponseParts {
+        status,
+        headers,
+        body: body.to_string().into_bytes(),
+    }
+}
+
 /// Collect a WAFER [`OutputStream`] and map its terminal event to a
 /// transport-neutral [`HttpResponseParts`].
 ///
@@ -358,10 +391,7 @@ pub fn buffered_to_http_response(buf: BufferedResponse) -> HttpResponseParts {
 /// - `Complete` and `Halt` → **identical** handling via
 ///   [`buffered_to_http_response`] (status override or `200`, meta headers,
 ///   default `Content-Type: application/json`).
-/// - `Error(WaferError)` → status from [`resolve_error_status`], headers
-///   from the error's meta, body `{"error": <code>, "message": <msg>}` with
-///   `Content-Type: application/json` (the body **is** JSON, so any
-///   `resp.content_type` on the error meta is superseded).
+/// - `Error(WaferError)` → [`error_to_http_response`].
 /// - `Drop` → `204 No Content`, no headers, empty body.
 /// - `Continue` → empty-body `200` with the message's response meta applied
 ///   and `Content-Type: application/json` (the HTTP boundary has nowhere
@@ -373,25 +403,7 @@ pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
     match output.collect_buffered().await {
         Ok(buf) | Err(TerminalNotResponse::Halt(buf)) => buffered_to_http_response(buf),
 
-        Err(TerminalNotResponse::Error(err)) => {
-            let status = resolve_error_status(&err);
-            let mut headers = non_content_type_headers_from_meta(&err.meta);
-            headers.push((
-                "Content-Type".to_string(),
-                DEFAULT_RESPONSE_CONTENT_TYPE.to_string(),
-            ));
-            let body = serde_json::json!({
-                "error": err.code,
-                "message": err.message,
-            })
-            .to_string()
-            .into_bytes();
-            HttpResponseParts {
-                status,
-                headers,
-                body,
-            }
-        }
+        Err(TerminalNotResponse::Error(err)) => error_to_http_response(&err),
 
         Err(TerminalNotResponse::Drop) => HttpResponseParts {
             status: 204,
@@ -803,6 +815,39 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
         assert_eq!(body["error"], "NotFound");
         assert_eq!(body["message"], "no such thing");
+    }
+
+    #[tokio::test]
+    async fn error_body_carries_detail_code() {
+        let err =
+            WaferError::new(ErrorCode::InvalidArgument, "x").with_detail_code("auth.invalid_email");
+        let parts = collect_http_response(OutputStream::error(err)).await;
+        assert_eq!(parts.status, 400);
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(body["error"], "InvalidArgument");
+        assert_eq!(body["message"], "x");
+        assert_eq!(body["code"], "auth.invalid_email");
+        // The detail code travels in the body only — it is not a response
+        // header.
+        assert!(
+            parts
+                .headers
+                .iter()
+                .all(|(_, value)| value != "auth.invalid_email"),
+            "detail code leaked into headers: {:?}",
+            parts.headers
+        );
+    }
+
+    #[tokio::test]
+    async fn error_body_omits_code_without_detail_code() {
+        let err = WaferError::new(ErrorCode::InvalidArgument, "x");
+        let parts = collect_http_response(OutputStream::error(err)).await;
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "InvalidArgument", "message": "x" })
+        );
     }
 
     #[tokio::test]

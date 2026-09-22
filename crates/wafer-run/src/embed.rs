@@ -31,7 +31,13 @@ fn meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 ///   string values.
 /// - `halt` always uses `body_base64` — Halt may carry non-UTF-8 or empty
 ///   bodies. Carries `meta` like `respond`.
-/// - `error` carries `{"error":{"code":"...","message":"..."}}`.
+/// - `error` carries
+///   `{"error":{"code":"...","message":"...","detail_code":"..."}}`: `code`
+///   is the coarse [`wafer_block::ErrorCode`], `detail_code` the
+///   application-level code set via
+///   [`wafer_block::WaferError::with_detail_code`], omitted when none was
+///   set. The error's meta is never emitted — it can hold request meta
+///   (headers, cookies, caller identity), not only response meta.
 /// - `drop` carries no payload.
 /// - `continue` carries the follow-up `message` as a JSON object.
 /// - A stream that ends without a terminal event encodes as an `error` with
@@ -59,14 +65,16 @@ pub async fn output_to_json(output: OutputStream) -> String {
                 }
             }
         }
-        Err(TerminalNotResponse::Error(err)) => serde_json::json!({
-            "action": "error",
-            "error": {
+        Err(TerminalNotResponse::Error(err)) => {
+            let mut error = serde_json::json!({
                 "code": format!("{:?}", err.code),
                 "message": err.message,
+            });
+            if let Some(detail) = err.detail_code() {
+                error["detail_code"] = serde_json::Value::String(detail.to_string());
             }
-        })
-        .to_string(),
+            serde_json::json!({ "action": "error", "error": error }).to_string()
+        }
         Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
         Err(TerminalNotResponse::Halt(buf)) => {
             use base64ct::{Base64, Encoding};
@@ -193,6 +201,47 @@ mod tests {
         assert_eq!(json["action"], "error");
         assert_eq!(json["error"]["code"], "NotFound");
         assert_eq!(json["error"]["message"], "missing");
+    }
+
+    #[tokio::test]
+    async fn error_terminal_carries_detail_code() {
+        let out = OutputStream::error(
+            WaferError::new(ErrorCode::InvalidArgument, "x").with_detail_code("auth.invalid_email"),
+        );
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "action": "error",
+                "error": {
+                    "code": "InvalidArgument",
+                    "message": "x",
+                    "detail_code": "auth.invalid_email",
+                },
+            })
+        );
+    }
+
+    /// Error meta may carry request meta (a block that builds its error from
+    /// the request message); none of it reaches the embedder.
+    #[tokio::test]
+    async fn error_terminal_never_emits_error_meta() {
+        let mut err = WaferError::new(ErrorCode::ResourceExhausted, "Too many requests");
+        err.meta.push(MetaEntry {
+            key: "http.header.authorization".into(),
+            value: "Bearer SECRET_TOKEN".into(),
+        });
+        err.meta.push(MetaEntry {
+            key: "resp.header.Retry-After".into(),
+            value: "30".into(),
+        });
+        let raw = output_to_json(OutputStream::error(err)).await;
+        assert!(!raw.contains("SECRET_TOKEN"), "request meta leaked: {raw}");
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            json["error"],
+            serde_json::json!({ "code": "ResourceExhausted", "message": "Too many requests" })
+        );
     }
 
     #[tokio::test]
