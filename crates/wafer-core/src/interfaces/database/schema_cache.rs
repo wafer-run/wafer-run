@@ -5,8 +5,9 @@
 //! column-list introspection query, issued *before* the actual data query. On
 //! a local SQLite file those are cheap, but on Cloudflare D1 each is a network
 //! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
-//! facts per table so a warm backend issues zero introspection round-trips in
-//! steady state.
+//! facts per table — plus the table's primary key, which a sorted or paged
+//! `list` appends to its `ORDER BY` — so a warm backend issues zero
+//! introspection round-trips in steady state.
 //!
 //! # Correctness
 //!
@@ -56,13 +57,17 @@ use parking_lot::RwLock;
 
 /// Memoized introspection facts for one table. Each fact is independently
 /// populated (`dbx_table_exists` fills `exists`, the column-list introspection
-/// fills `columns`), so both are `Option` and `None` means "not yet probed".
+/// fills `columns`, the primary-key introspection fills `primary_key`), so
+/// each is an `Option` and `None` means "not yet probed".
 #[derive(Debug, Default)]
 struct TableSchema {
     /// Whether the table exists, once probed.
     exists: Option<bool>,
     /// Lowercased column names, once listed.
     columns: Option<Vec<String>>,
+    /// Primary-key column names in key order, as the catalog spells them;
+    /// empty for a table with no primary key.
+    primary_key: Option<Vec<String>>,
 }
 
 /// Lock-protected cache state: the per-table facts plus the generation counter
@@ -157,6 +162,46 @@ impl SchemaCache {
         entry.columns = Some(columns);
     }
 
+    /// Cached primary-key columns, or `None` on a miss.
+    #[must_use]
+    pub fn primary_key(&self, table: &str) -> Option<Vec<String>> {
+        self.inner
+            .read()
+            .tables
+            .get(table)
+            .and_then(|t| t.primary_key.clone())
+    }
+
+    /// Record `table`'s primary-key columns, but only if the cache has not
+    /// been mutated since `expected_gen` (see the module docs).
+    ///
+    /// A non-empty key proves the table exists, so the exists fact is set
+    /// alongside it. An empty key is ambiguous: the key introspection of a
+    /// table with no primary key and of a table that does not exist yet both
+    /// come back empty. It is recorded only when the entry already knows the
+    /// table exists; otherwise it is dropped, so a table that a later
+    /// migration creates with a key is re-introspected rather than listed
+    /// without a tiebreak for the life of the cache.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the write guard covers the whole critical section — the \
+                  generation check, the exists check and the key-set mutate \
+                  the same entry and are the entire body"
+    )]
+    pub fn set_primary_key_if_gen(&self, table: &str, key: Vec<String>, expected_gen: u64) {
+        let mut inner = self.inner.write();
+        if inner.generation != expected_gen {
+            return;
+        }
+        let entry = inner.tables.entry(table.to_string()).or_default();
+        if !key.is_empty() {
+            entry.exists = Some(true);
+        } else if entry.exists != Some(true) {
+            return;
+        }
+        entry.primary_key = Some(key);
+    }
+
     /// Invalidate every cached fact for `table` and bump the generation.
     /// Called after a targeted schema mutation (migration, drop, add-column,
     /// lazy `ALTER TABLE`): the next read re-introspects, and any write-back
@@ -226,6 +271,36 @@ mod tests {
             Some(false),
             "an empty column list must not overwrite the existence probe"
         );
+    }
+
+    #[test]
+    fn primary_key_miss_then_hit_and_dropped_by_invalidate() {
+        let c = SchemaCache::new();
+        assert_eq!(c.primary_key("t"), None);
+        c.set_primary_key_if_gen("t", vec!["id".into()], c.generation());
+        assert_eq!(c.primary_key("t"), Some(vec!["id".to_string()]));
+        assert_eq!(c.table_exists("t"), Some(true), "a key proves the table");
+        // An empty key for a table not known to exist may be a table that
+        // does not exist yet: it is dropped, so the next lookup re-probes.
+        c.set_primary_key_if_gen("later", Vec::new(), c.generation());
+        assert_eq!(c.primary_key("later"), None);
+        c.set_table_exists_if_gen("later", false, c.generation());
+        c.set_primary_key_if_gen("later", Vec::new(), c.generation());
+        assert_eq!(
+            c.primary_key("later"),
+            None,
+            "a missing table's key is not cached"
+        );
+        // Once the table is known to exist, an empty key is a cached answer
+        // ("no primary key"), not a miss.
+        c.set_table_exists_if_gen("keyless", true, c.generation());
+        c.set_primary_key_if_gen("keyless", Vec::new(), c.generation());
+        assert_eq!(c.primary_key("keyless"), Some(Vec::new()));
+        let stale = c.generation();
+        c.invalidate("t");
+        assert_eq!(c.primary_key("t"), None);
+        c.set_primary_key_if_gen("t", vec!["old".into()], stale);
+        assert_eq!(c.primary_key("t"), None, "a raced write-back is dropped");
     }
 
     #[test]

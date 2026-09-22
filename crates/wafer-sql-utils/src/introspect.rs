@@ -91,6 +91,54 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
     }
 }
 
+/// Build query to list the columns of a table's primary key.
+///
+/// Returns `(sql, params)`. One `name` column per key column, in key order
+/// (the order of the `PRIMARY KEY (...)` list), in both dialects. A table
+/// with no primary key, or no such table, yields zero rows.
+///
+/// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
+/// (`pk` is the column's 1-based position in the key, `0` off it).
+/// Postgres: the key columns of the table's `indisprimary` index in
+/// `pg_catalog.pg_index`, in `indkey` order, for the table
+/// `to_regclass('public.<table>')` names — the `public` schema
+/// [`build_list_columns`] reads. `to_regclass` is `NULL` for a missing
+/// table, so that case is zero rows rather than an error. `indkey` also lists
+/// a `PRIMARY KEY (...) INCLUDE (...)` index's non-key columns after its
+/// `indnkeyatts` key columns; those are cut off, since they do not identify
+/// a row.
+///
+/// Postgres reads the system catalog rather than
+/// `information_schema.table_constraints`: the information schema shows a
+/// constraint only to a role that owns the table or holds a privilege other
+/// than `SELECT` on it, so a read-only role would see no key at all and
+/// every list would silently lose its tiebreak. `pg_catalog` is readable by
+/// every role.
+///
+/// Names come back as the catalog spells them (not lowercased), so a caller
+/// can quote them straight back into SQL. The table name is parameter-bound,
+/// so this builder is infallible.
+pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk".to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT a.attname::text AS name FROM pg_catalog.pg_index i \
+             CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN pg_catalog.pg_attribute a \
+             ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+             WHERE i.indisprimary AND k.ord <= i.indnkeyatts \
+             AND i.indrelid = to_regclass(format('public.%I', $1::text)) \
+             ORDER BY k.ord"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
@@ -265,5 +313,51 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_list_primary_key_postgres() {
+        let (sql, params) = build_list_primary_key("users", Backend::Postgres);
+        assert!(sql.contains("i.indisprimary"), "{sql}");
+        assert!(
+            !sql.contains("information_schema"),
+            "the information schema hides keys from read-only roles: {sql}"
+        );
+        assert!(sql.contains("$1"), "table name must be bound: {sql}");
+        assert!(sql.contains("ORDER BY k.ord"), "{sql}");
+        assert!(
+            sql.contains("k.ord <= i.indnkeyatts"),
+            "INCLUDE columns are not key columns: {sql}"
+        );
+        assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    // The key columns, in key order rather than declaration order, for a
+    // single-column key, a composite key, an INTEGER PRIMARY KEY, a table with
+    // no key, and a missing table — on a real SQLite engine.
+    #[test]
+    fn test_list_primary_key_executes_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE single (token_hash TEXT PRIMARY KEY, id TEXT);
+             CREATE TABLE composite (role_id TEXT, user_id TEXT, created_at TEXT,
+                 PRIMARY KEY (user_id, role_id));
+             CREATE TABLE rowid_key (n INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);
+             CREATE TABLE keyless (a TEXT, b TEXT);",
+        )
+        .unwrap();
+        let key = |table: &str| -> Vec<String> {
+            let (sql, params) = build_list_primary_key(table, Backend::Sqlite);
+            let mut stmt = conn.prepare(&sql).unwrap();
+            stmt.query_map([params[0].as_str().unwrap()], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(key("single"), vec!["token_hash"]);
+        assert_eq!(key("composite"), vec!["user_id", "role_id"]);
+        assert_eq!(key("rowid_key"), vec!["n"]);
+        assert!(key("keyless").is_empty());
+        assert!(key("no_such_table").is_empty());
     }
 }

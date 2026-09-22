@@ -395,45 +395,155 @@ async fn malformed_column_compare_is_invalid_argument() {
     }
 }
 
+/// Every row, as `(id, data)` in id order — the whole table's state.
+async fn snapshot(svc: &SQLiteDatabaseService) -> Vec<(String, String)> {
+    let opts = wafer_block::db::ListOptions {
+        sort: vec![wafer_block::db::SortField {
+            field: "id".into(),
+            desc: false,
+        }],
+        ..Default::default()
+    };
+    svc.list(TABLE, &opts)
+        .await
+        .expect("snapshot list")
+        .records
+        .into_iter()
+        .map(|r| {
+            let mut data: Vec<_> = r.data.into_iter().collect();
+            data.sort_by(|a, b| a.0.cmp(&b.0));
+            (r.id, format!("{data:?}"))
+        })
+        .collect()
+}
+
+/// A column-to-column leaf is a filter-TREE leaf only. Every op that takes
+/// flat filters (`handler::flatten_leaves`) must refuse it as
+/// `InvalidArgument` before any SQL runs — for a write op, running it with the
+/// leaf dropped or misread would change rows the caller never selected. Each
+/// request is otherwise valid (the control runs it with a value filter), and
+/// the table is byte-identical afterwards.
 #[tokio::test]
 async fn flat_filter_ops_reject_column_compare() {
     let svc = seeded().await;
-    let leaf = serde_json::json!([
+    let before = snapshot(&svc).await;
+    let column_leaf = serde_json::json!([
         { "field": "refunded_cents", "operator": "gt", "column": "total_cents" },
     ]);
-    let count = dispatch(
+    // Matches no row, so the controls leave the table as it was too.
+    let value_leaf = serde_json::json!([{ "field": "account", "value": "nobody" }]);
+    let set = serde_json::json!({ "account": "rewritten" });
+    let requests = |filters: &serde_json::Value| {
+        [
+            (
+                ServiceOp::DATABASE_COUNT,
+                serde_json::json!({ "collection": TABLE, "filters": filters }),
+            ),
+            (
+                ServiceOp::DATABASE_SUM,
+                serde_json::json!({ "collection": TABLE, "field": "total_cents", "filters": filters }),
+            ),
+            (
+                ServiceOp::DATABASE_DELETE_WHERE,
+                serde_json::json!({ "collection": TABLE, "filters": filters }),
+            ),
+            (
+                ServiceOp::DATABASE_DELETE_WHERE_COUNT,
+                serde_json::json!({ "collection": TABLE, "filters": filters }),
+            ),
+            (
+                ServiceOp::DATABASE_TAKE_WHERE,
+                serde_json::json!({ "collection": TABLE, "filters": filters }),
+            ),
+            (
+                ServiceOp::DATABASE_UPDATE_WHERE,
+                serde_json::json!({ "collection": TABLE, "filters": filters, "data": set }),
+            ),
+            (
+                ServiceOp::DATABASE_UPDATE_WHERE_COUNT,
+                serde_json::json!({ "collection": TABLE, "filters": filters, "data": set }),
+            ),
+            (
+                ServiceOp::DATABASE_INCREMENT_FIELD_WHERE,
+                serde_json::json!({
+                    "collection": TABLE, "col": "total_cents", "delta": 1, "filters": filters,
+                }),
+            ),
+            (
+                ServiceOp::DATABASE_AGGREGATE,
+                serde_json::json!({
+                    "collection": TABLE,
+                    "aggregates": [{ "Count": { "alias": "n" } }],
+                    "filters": filters,
+                }),
+            ),
+        ]
+    };
+    for (op, request) in requests(&value_leaf) {
+        dispatch(&svc, op, &request)
+            .await
+            .unwrap_or_else(|e| panic!("control: {op} with a value filter is valid: {e:?}"));
+    }
+    for (op, request) in requests(&column_leaf) {
+        expect_invalid(dispatch(&svc, op, &request).await, op).await;
+    }
+    assert_eq!(
+        snapshot(&svc).await,
+        before,
+        "every rejection happened before any SQL ran"
+    );
+}
+
+#[tokio::test]
+async fn avg_cast_as_bigint_is_invalid_argument() {
+    let svc = seeded().await;
+    for cast in ["BIGINT", "bigint"] {
+        let result = aggregate(
+            &svc,
+            serde_json::json!([
+                { "Avg": { "field": "total_cents", "alias": "x", "cast_as": cast } },
+            ]),
+        )
+        .await;
+        expect_invalid(result, &format!("Avg cast_as {cast:?}")).await;
+    }
+    // The same cast stays valid on a sum, whose value is integral.
+    aggregate(
         &svc,
-        ServiceOp::DATABASE_COUNT,
-        &serde_json::json!({ "collection": TABLE, "filters": leaf }),
+        serde_json::json!([
+            { "Sum": { "field": "total_cents", "alias": "x", "cast_as": "BIGINT" } },
+        ]),
     )
-    .await;
-    expect_invalid(count, "count").await;
-    let sum = dispatch(
-        &svc,
-        ServiceOp::DATABASE_SUM,
-        &serde_json::json!({ "collection": TABLE, "field": "total_cents", "filters": leaf }),
-    )
-    .await;
-    expect_invalid(sum, "sum").await;
-    let delete = dispatch(
-        &svc,
-        ServiceOp::DATABASE_DELETE_WHERE,
-        &serde_json::json!({ "collection": TABLE, "filters": leaf }),
-    )
-    .await;
-    expect_invalid(delete, "delete_where").await;
-    let grouped = aggregate(&svc, serde_json::json!([{ "Count": { "alias": "n" } }])).await;
-    assert!(grouped.is_ok(), "control: the aggregate itself is valid");
+    .await
+    .expect("Sum cast_as BIGINT");
+}
+
+/// Ungrouped over no rows, `SUM` is `NULL`; the conditional sum and the
+/// conditional count answer 0.
+#[tokio::test]
+async fn conditional_sums_over_no_rows_are_zero() {
+    let svc = seeded().await;
     let request = serde_json::json!({
         "collection": TABLE,
-        "aggregates": [{ "Count": { "alias": "n" } }],
-        "filters": leaf,
+        "aggregates": [
+            { "SumWhere": {
+                "field": "total_cents",
+                "when": [{ "field": "account", "value": "a" }],
+                "alias": "summed",
+                "cast_as": "BIGINT",
+            } },
+            { "CaseWhenSum": {
+                "when": [{ "field": "account", "value": "a" }],
+                "alias": "counted",
+            } },
+        ],
+        "filters": [{ "field": "account", "value": "nobody" }],
     });
-    expect_invalid(
-        dispatch(&svc, ServiceOp::DATABASE_AGGREGATE, &request).await,
-        "aggregate filters",
-    )
-    .await;
-    // Nothing was deleted: the rejection happened before any SQL ran.
-    assert_eq!(svc.count(TABLE, &[]).await.expect("count"), 3);
+    let body = dispatch(&svc, ServiceOp::DATABASE_AGGREGATE, &request)
+        .await
+        .expect("ungrouped aggregate over no rows");
+    let rows: Vec<wire::Record> = codec::decode(&body).expect("decode aggregate rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(int(&rows[0], "summed"), 0);
+    assert_eq!(int(&rows[0], "counted"), 0);
 }

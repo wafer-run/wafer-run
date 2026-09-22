@@ -74,25 +74,73 @@
   `wire::database::FilterDef` gains a `column` field and
   `AggregateColumnDef::{Sum, Avg}` gain `cast_as`, so struct literals need
   `column: None` / `cast_as: None`; `wafer_block::db::FilterTree` gains a
-  `ColumnCompare` variant, so exhaustive matches need an arm;
+  `ColumnCompare` variant, `wire::database::AggregateColumnDef` and
+  `service::AggregateColumnSpec` each gain a `SumWhere` variant, so
+  exhaustive matches on any of the three need an arm;
   `service::AggregateColumnSpec::{Sum, Avg}` gain `cast_as`; and
   `wafer_sql_utils::aggregate::AggregateColumn::cast_as` is now
   `Option<CastType>` instead of `Option<String>`.
+- `wafer_sql_utils::query::{build_select, build_select_with_condition,
+  build_select_columns}` take a `unique_key: &[&str]` argument before
+  `backend`: the table's primary-key columns, appended to the `ORDER BY` of a
+  sorted or paged select (see the `database.list` entry under **Added**).
+  Pass the key, or `&[]` for a table without one. A sorted `database.list`
+  changes order only among rows that tie on every sort key, which previously
+  came back in whatever order the backend produced. An unsorted but paged
+  `list` (`limit` or `offset` set, `sort` empty) changes order for every
+  row: it had no `ORDER BY` and came back in storage order, which on SQLite
+  is insertion order, and now comes back in primary-key order. A caller that
+  pages through a table without a `sort` and relied on insertion order must
+  sort by its timestamp.
+- `DbExec::create` and `create_many` mint a missing `id` as a UUIDv7
+  (`Uuid::now_v7`) instead of a UUIDv4. The id is still a hyphenated UUID
+  string, but it now leads with its creation time, so key order is creation
+  order within a process and rows whose sort key ties list in the order they
+  were created rather than a random one. The workspace `uuid` dependency
+  gains the `v7` feature. On `wasm32-unknown-unknown` the v7 clock is
+  `Date.now()` through uuid's `js` feature, which an embedding binary
+  already enables for uuid's randomness source; a binary that picked another
+  getrandom backend instead must enable `uuid/js` too, or `SystemTime` panics
+  when the first id is minted. The policy is public as
+  `wafer_core::interfaces::database::mint_record_id`, for a backend that
+  inserts rows through its own path. A minted id now reveals its record's
+  creation time, carries about 74 random bits and is near-sequential with
+  ids minted in the same millisecond, so a record id must never serve as a
+  bearer secret.
+- `database.aggregate` rejects `Avg` with `cast_as: "BIGINT"` as
+  `InvalidArgument`; `Avg` casts to `DOUBLE PRECISION` only. This is a
+  wire-visible validation change to the `cast_as` addition under **Added**: a
+  `BIGINT` cast rounds a non-integral value on Postgres and truncates it on
+  SQLite, and an average is rarely integral, so the same request answered
+  differently per backend. Read the average as a float and convert it where
+  the rounding rule is yours to choose. `Sum` and `SumWhere` keep both
+  types.
+- `wafer_sql_utils::aggregate::AggFunc` gains `SumOrZero`
+  (`COALESCE(SUM(...), 0)`), so exhaustive matches need an arm.
 
 ### Added
 
-- `database.aggregate` output casts: `AggregateColumnDef::{Sum, Avg}` take an
-  optional `cast_as` of `BIGINT` or `DOUBLE PRECISION` (ASCII
-  case-insensitive), rendered as `CAST(<aggregate> AS <type>)`. The handler
-  parses it against that allowlist (`wafer_sql_utils::aggregate::CastType`)
-  and rejects anything else as `InvalidArgument` — the type name is spliced
-  into SQL text, so it is never passed through. Postgres widens
-  `SUM(<bigint>)` to `NUMERIC`, which decodes as a JSON float; `BIGINT` makes
-  an integral sum read as an integer on every backend.
+- `database.aggregate` output casts: `AggregateColumnDef::Sum` takes an
+  optional `cast_as` of `BIGINT` or `DOUBLE PRECISION`, `Avg` of
+  `DOUBLE PRECISION` only (ASCII case-insensitive), rendered as
+  `CAST(<aggregate> AS <type>)`. The handler parses it against that
+  allowlist (`wafer_sql_utils::aggregate::CastType`) and rejects anything
+  else as `InvalidArgument` — the type name is spliced into SQL text, so it
+  is never passed through. Postgres widens `SUM(<bigint>)` to `NUMERIC`,
+  which decodes as a JSON float; `BIGINT` makes an integral sum read as an
+  integer on every backend. A non-integral value is rounded by the `BIGINT`
+  cast on Postgres and truncated on SQLite, so cast only a sum of integers.
 - `AggregateColumnDef::SumWhere { field, when, alias, cast_as }`:
-  `SUM(CASE WHEN <when> THEN field ELSE 0 END)`, the sum of a column over the
-  rows matching a predicate, validated like `CaseWhenSum` (an empty `when` is
-  `InvalidArgument`). Builder: `AggregateColumn::sum_where`.
+  `COALESCE(SUM(CASE WHEN <when> THEN field ELSE 0 END), 0)`, the sum of a
+  column over the rows matching a predicate — `0`, not `NULL`, when nothing
+  non-null is summed (no matching row in a group, matching rows whose
+  `field` is `NULL`, or an ungrouped query over no rows) — validated like
+  `CaseWhenSum` (an empty `when` is `InvalidArgument`) and cast like `Sum`.
+  Builder: `AggregateColumn::sum_where`. On SQLite that `0` is the integer
+  `0` even over a `REAL` column (Postgres gives the column's type), so a
+  sum of a floating-point field that no row matches decodes as a JSON
+  integer there; pass `cast_as: "DOUBLE PRECISION"` to read a float on
+  every backend.
 - Column-to-column filters: `FilterDef.column` compares `field` to another
   column of the same row instead of to `value` (`eq`/`neq`/`gt`/`gte`/`lt`/
   `lte` only). Both identifiers are validated; a non-null `value` alongside
@@ -104,7 +152,37 @@
   the encoding when unset, so existing requests encode exactly as before. An
   older runtime ignores `cast_as` (the result comes back uncast) and
   `column` (the leaf compares `field` to `NULL`, which matches no row); it
-  rejects `SumWhere` as an unknown variant.
+  rejects `SumWhere` as an unknown variant. Neither ignored field fails the
+  request, so a caller that sends them to an older runtime gets a wrong
+  answer, not an error: a column-compare leaf makes a read silently smaller
+  (a `list` or `count` misses the rows it should match, a `CaseWhenSum`
+  counts fewer), and makes a flat-filter write — which the newer runtime
+  rejects — report success while changing nothing (`update_where_count`
+  and `delete_where_count` return `0`, `take_where` returns no rows).
+  Upgrade the runtime before sending either field.
+- `database.list` orders deterministically: a sorted or paged select
+  (`sort` non-empty, or `limit`/`offset` set) ends its `ORDER BY` with the
+  table's primary key, every column of it in key order, skipping any the
+  sort already names, in the direction of the last sort term (ascending with
+  no sort). Rows that tie on the sort key — a `created_at` stamped to the
+  second, a status column — therefore come back in one order on every query,
+  so `limit`/`offset` pages are disjoint and complete; before, a tie could
+  land on two pages or on none. The key is introspected
+  (`introspect::build_list_primary_key`, `DbExec::get_primary_key`) and
+  memoized in the backend's `SchemaCache`, in STRICT_SCHEMA mode too, so a
+  warm backend pays nothing; a backend without a cache pays one catalog read
+  per sorted or paged `list`. An empty key is memoized only for a table known
+  to exist (a keyless table costs one existence probe the first time), so a
+  `list` that runs before the migration creating its table does not pin "no
+  key" for the life of the cache. Postgres reads the key from
+  `pg_catalog.pg_index` (`indisprimary`), not
+  `information_schema.table_constraints`, which hides constraints from a
+  role that only holds `SELECT` on the table. An unsorted, unpaged `list`
+  looks nothing up and has no `ORDER BY`. A table without a primary key is
+  ordered by the sort alone. `aggregate` is unchanged — `query::apply_order`
+  still emits the sort only, because a key column outside the `GROUP BY` is
+  not a valid sort key there; the row selects use
+  `query::apply_order_with_unique_key`.
 - CI runs the shared `DatabaseService` conformance suite against a live
   PostgreSQL 16 service container (`scripts/check.sh postgres`, the
   `PostgreSQL Conformance` job). It previously ran only by hand.
@@ -325,6 +403,13 @@
   reduced strength.
 
 ### Fixed
+
+- `database.aggregate`'s `CaseWhenSum` counts `0`, not `NULL`, in an
+  ungrouped query over no rows: it renders
+  `COALESCE(SUM(CASE WHEN <when> THEN 1 ELSE 0 END), 0)`
+  (`AggregateColumn::case_when_sum`). `SUM` over an empty set is `NULL`, so
+  a "how many rows match" read of an empty table or window answered `null`
+  instead of a count.
 
 - Discovery documents no longer publish a rest parameter's `...` marker.
   A route whose pattern ends in a trailing-rest placeholder

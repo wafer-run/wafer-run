@@ -493,18 +493,24 @@ pub enum AggregateColumnDef {
         // Validated against that allowlist by the handler (anything else is
         // `InvalidArgument`). Postgres widens `SUM(<bigint>)` to `NUMERIC`,
         // which decodes as a float; `BIGINT` pins an integral sum to an
-        // integer on every backend.
+        // integer on every backend. A non-integral value is rounded by the
+        // `BIGINT` cast on Postgres and truncated on SQLite, so cast to
+        // `BIGINT` only a sum of integers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_as: Option<String>,
     },
-    /// `AVG(field) AS alias`, or `CAST(AVG(field) AS <cast_as>) AS alias`.
+    /// `AVG(field) AS alias`, or `CAST(AVG(field) AS DOUBLE PRECISION) AS
+    /// alias`.
     Avg {
         /// Numeric column to average.
         field: String,
         /// Output alias for the average.
         alias: String,
-        /// Optional output cast: `BIGINT` or `DOUBLE PRECISION`.
-        // Same allowlist and validation as `Sum::cast_as`.
+        /// Optional output cast: `DOUBLE PRECISION` only.
+        // The handler rejects `BIGINT` here as `InvalidArgument`: an average
+        // is rarely integral, and the cast rounds it on Postgres but
+        // truncates it on SQLite, so one request would answer differently
+        // per backend.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_as: Option<String>,
     },
@@ -515,22 +521,26 @@ pub enum AggregateColumnDef {
         /// Output alias for the maximum.
         alias: String,
     },
-    /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
-    /// conditional count (no `FILTER` clause required). `when` is a predicate
-    /// forest, AND-combined at the top level; the handler bounds and validates
-    /// it, and the server builds the `CASE` predicate (the sea-query
-    /// expression is `!Send`, so it can't be built caller-side). An empty
-    /// `when` is rejected as `InvalidArgument`.
+    /// `COALESCE(SUM(CASE WHEN <when> THEN 1 ELSE 0 END), 0) AS alias` — a
+    /// portable conditional count (no `FILTER` clause required), `0` when no
+    /// row matches. `when` is a predicate forest, AND-combined at the top
+    /// level; the handler bounds and validates it, and the server builds the
+    /// `CASE` predicate (the sea-query expression is `!Send`, so it can't be
+    /// built caller-side). An empty `when` is rejected as `InvalidArgument`.
     CaseWhenSum {
         /// Predicate whose matching rows are counted.
         when: Vec<FilterNode>,
         /// Output alias for the conditional count.
         alias: String,
     },
-    /// `SUM(CASE WHEN <when> THEN field ELSE 0 END) AS alias` — the sum of
-    /// `field` over the rows matching `when`, optionally cast like `Sum`.
+    /// `COALESCE(SUM(CASE WHEN <when> THEN field ELSE 0 END), 0) AS alias` —
+    /// the sum of `field` over the rows matching `when`, `0` when nothing
+    /// non-null is summed; optionally cast like `Sum`.
     // `when` is bounded and validated exactly like `CaseWhenSum.when`, and an
-    // empty `when` is rejected as `InvalidArgument`.
+    // empty `when` is rejected as `InvalidArgument`. When no row matches,
+    // SQLite's `0` is the integer `0` even over a `REAL` column (Postgres
+    // gives the column's type), so it decodes as a JSON integer there;
+    // `cast_as: "DOUBLE PRECISION"` reads a float on every backend.
     SumWhere {
         /// Numeric column to sum over the matching rows.
         field: String,
@@ -539,6 +549,8 @@ pub enum AggregateColumnDef {
         /// Output alias for the conditional sum.
         alias: String,
         /// Optional output cast: `BIGINT` or `DOUBLE PRECISION`.
+        // Same allowlist, and the same rounding-versus-truncation caveat for
+        // `BIGINT`, as `Sum::cast_as`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_as: Option<String>,
     },

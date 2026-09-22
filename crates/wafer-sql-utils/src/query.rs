@@ -144,10 +144,61 @@ fn node_to_cond(node: &FilterTree) -> Cond {
 }
 
 /// Apply sort directives to a SelectStatement.
+///
+/// Emits exactly `sort`, nothing more — rows that tie on every sort key come
+/// back in whatever order the backend produces. That is what a grouped
+/// aggregate needs (its sort keys are group columns and aliases, and a column
+/// outside the `GROUP BY` is not a valid sort key there), and it is why the
+/// row-returning selects go through [`apply_order_with_unique_key`] instead.
 pub fn apply_order(query: &mut SelectStatement, sort: &[SortField]) {
     for s in sort {
         let order = if s.desc { Order::Desc } else { Order::Asc };
         query.order_by(DynCol(s.field.clone()), order);
+    }
+}
+
+/// Whether the row select for `opts` has an `ORDER BY` — it sorts, or it
+/// pages with `limit`/`offset` — and therefore orders by the table's unique
+/// key as its final terms (see [`apply_order_with_unique_key`]).
+///
+/// An executor looks the unique key up only when this is `true`, so an
+/// unsorted, unpaged read pays for no introspection.
+#[must_use]
+pub fn orders_rows(opts: &ListOptions) -> bool {
+    !opts.sort.is_empty() || opts.limit > 0 || opts.offset > 0
+}
+
+/// Apply `sort`, then the columns of `unique_key` that `sort` does not already
+/// name, so rows that tie on every sort key still come back in one order that
+/// is the same on every query — which is what makes `limit`/`offset` pages
+/// disjoint and complete.
+///
+/// `unique_key` is the table's primary key (all of its columns, in key
+/// order). Its columns take the direction of the last sort term, so a
+/// newest-first list breaks ties newest-key-first; with no sort they are
+/// ascending. Nothing is emitted unless [`orders_rows`] holds — an unsorted,
+/// unpaged select stays unordered. An empty `unique_key` (a table with no
+/// primary key) appends nothing: such a table has no column set that
+/// identifies a row, so its ties stay backend-ordered.
+pub fn apply_order_with_unique_key(
+    query: &mut SelectStatement,
+    opts: &ListOptions,
+    unique_key: &[&str],
+) {
+    if !orders_rows(opts) {
+        return;
+    }
+    apply_order(query, &opts.sort);
+    let order = if opts.sort.last().is_some_and(|s| s.desc) {
+        Order::Desc
+    } else {
+        Order::Asc
+    };
+    for col in unique_key {
+        if opts.sort.iter().any(|s| s.field == *col) {
+            continue;
+        }
+        query.order_by(DynCol((*col).to_string()), order.clone());
     }
 }
 
@@ -162,8 +213,17 @@ pub fn apply_pagination(query: &mut SelectStatement, limit: i64, offset: i64) {
 }
 
 /// Build SELECT * FROM {table} with filters, sort, limit, offset.
-pub fn build_select(table: &str, opts: &ListOptions, backend: Backend) -> crate::Statement {
-    build_select_with_condition(table, opts, None, backend)
+///
+/// `unique_key` is the table's primary key, appended to the `ORDER BY` so
+/// ties resolve the same way on every query (see
+/// [`apply_order_with_unique_key`]); pass `&[]` for a table that has none.
+pub fn build_select(
+    table: &str,
+    opts: &ListOptions,
+    unique_key: &[&str],
+    backend: Backend,
+) -> crate::Statement {
+    build_select_with_condition(table, opts, None, unique_key, backend)
 }
 
 /// Build SELECT * FROM {table} with filters, sort, limit, offset, plus an
@@ -172,14 +232,15 @@ pub fn build_select(table: &str, opts: &ListOptions, backend: Backend) -> crate:
 /// Use this when you need a complex WHERE — most commonly an OR group —
 /// alongside the flat AND-of-filters list, without giving up `SELECT *`.
 /// See [`build_select_columns`] for the projection variant and an OR-group
-/// example.
+/// example, and [`build_select`] for `unique_key`.
 pub fn build_select_with_condition(
     table: &str,
     opts: &ListOptions,
     extra_condition: Option<Cond>,
+    unique_key: &[&str],
     backend: Backend,
 ) -> crate::Statement {
-    select_with_projection(table, None, opts, extra_condition, backend)
+    select_with_projection(table, None, opts, extra_condition, unique_key, backend)
 }
 
 /// Shared body of [`build_select_with_condition`] (`None` projection →
@@ -189,6 +250,7 @@ fn select_with_projection(
     columns: Option<&[&str]>,
     opts: &ListOptions,
     extra_condition: Option<Cond>,
+    unique_key: &[&str],
     backend: Backend,
 ) -> crate::Statement {
     let mut query = Query::select();
@@ -210,7 +272,7 @@ fn select_with_projection(
     if let Some(extra) = extra_condition {
         query.cond_where(extra);
     }
-    apply_order(&mut query, &opts.sort);
+    apply_order_with_unique_key(&mut query, opts, unique_key);
     apply_pagination(&mut query, opts.limit, opts.offset);
 
     let (sql, values) = crate::render_select(query, backend);
@@ -220,8 +282,9 @@ fn select_with_projection(
 /// Build SELECT {columns} FROM {table} with filters, sort, limit, offset.
 ///
 /// `extra_condition` is a sea-query `Cond` that is AND-ed with the
-/// `opts.filters` clause. Use it for conditions that don't fit the flat
-/// AND-of-filters model — for example, an OR group:
+/// `opts.filters` clause. `unique_key` is as for [`build_select`]. Use
+/// `extra_condition` for conditions that don't fit the flat AND-of-filters
+/// model — for example, an OR group:
 ///
 /// ```ignore
 /// use sea_query::{Cond, Expr};
@@ -237,6 +300,7 @@ fn select_with_projection(
 ///     &["id", "email"],
 ///     &ListOptions::default(),
 ///     Some(or_group),
+///     &["id"],
 ///     Backend::Sqlite,
 /// );
 /// ```
@@ -245,9 +309,17 @@ pub fn build_select_columns(
     columns: &[&str],
     opts: &ListOptions,
     extra_condition: Option<Cond>,
+    unique_key: &[&str],
     backend: Backend,
 ) -> crate::Statement {
-    select_with_projection(table, Some(columns), opts, extra_condition, backend)
+    select_with_projection(
+        table,
+        Some(columns),
+        opts,
+        extra_condition,
+        unique_key,
+        backend,
+    )
 }
 
 /// Build INSERT INTO {table} (cols) VALUES (vals).
@@ -432,7 +504,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = build_select("users", &opts, Backend::Sqlite);
+        let stmt = build_select("users", &opts, &["id"], Backend::Sqlite);
         let sql = stmt.sql;
         let values = stmt.values;
         assert!(sql.contains("SELECT"));
@@ -455,7 +527,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = build_select("users", &opts, Backend::Postgres);
+        let stmt = build_select("users", &opts, &["id"], Backend::Postgres);
         let sql = stmt.sql;
         let values = stmt.values;
         assert!(sql.contains("$1"));
@@ -787,6 +859,7 @@ mod tests {
                 ..Default::default()
             },
             Some(or_group),
+            &["id"],
             Backend::Sqlite,
         );
         let sql = stmt.sql;
@@ -972,5 +1045,204 @@ mod tests {
                 assert!(values.is_empty(), "a column operand binds no value");
             }
         }
+    }
+
+    fn sorted(sort: &[(&str, bool)], limit: i64, offset: i64) -> ListOptions {
+        ListOptions {
+            sort: sort
+                .iter()
+                .map(|(field, desc)| SortField {
+                    field: (*field).into(),
+                    desc: *desc,
+                })
+                .collect(),
+            limit,
+            offset,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_sorted_select_ends_with_the_unique_key_in_the_last_sort_direction() {
+        let opts = sorted(&[("created_at", true)], 0, 0);
+        let sqlite = build_select("t", &opts, &["id"], Backend::Sqlite).sql;
+        assert_eq!(
+            sqlite,
+            r#"SELECT * FROM "t" ORDER BY "created_at" DESC, "id" DESC"#
+        );
+        let postgres = build_select("t", &opts, &["id"], Backend::Postgres).sql;
+        assert_eq!(
+            postgres,
+            r#"SELECT * FROM "t" ORDER BY "created_at" DESC, "id" DESC"#
+        );
+        let asc = build_select(
+            "t",
+            &sorted(&[("created_at", false)], 0, 0),
+            &["id"],
+            Backend::Sqlite,
+        )
+        .sql;
+        assert_eq!(
+            asc,
+            r#"SELECT * FROM "t" ORDER BY "created_at" ASC, "id" ASC"#
+        );
+    }
+
+    #[test]
+    fn a_paged_select_with_no_sort_orders_by_the_unique_key() {
+        for (limit, offset) in [(2, 0), (0, 2), (2, 4)] {
+            let sql = build_select("t", &sorted(&[], limit, offset), &["id"], Backend::Sqlite).sql;
+            assert!(
+                sql.starts_with(r#"SELECT * FROM "t" ORDER BY "id" ASC"#),
+                "limit {limit} offset {offset}: {sql}"
+            );
+        }
+        // Neither sorted nor paged: no ORDER BY at all.
+        let sql = build_select("t", &sorted(&[], 0, 0), &["id"], Backend::Sqlite).sql;
+        assert_eq!(sql, r#"SELECT * FROM "t""#);
+    }
+
+    #[test]
+    fn the_unique_key_is_not_repeated_and_every_key_column_is_appended() {
+        let sql = build_select(
+            "t",
+            &sorted(&[("id", true)], 5, 0),
+            &["id"],
+            Backend::Sqlite,
+        )
+        .sql;
+        assert!(
+            sql.starts_with(r#"SELECT * FROM "t" ORDER BY "id" DESC LIMIT"#),
+            "{sql}"
+        );
+        // A composite key: both columns, key order, minus any the sort names.
+        let composite = &["user_id", "role_id"];
+        let sql = build_select(
+            "t",
+            &sorted(&[("created_at", false)], 0, 0),
+            composite,
+            Backend::Postgres,
+        )
+        .sql;
+        assert_eq!(
+            sql,
+            r#"SELECT * FROM "t" ORDER BY "created_at" ASC, "user_id" ASC, "role_id" ASC"#
+        );
+        let sql = build_select(
+            "t",
+            &sorted(&[("role_id", true)], 0, 0),
+            composite,
+            Backend::Postgres,
+        )
+        .sql;
+        assert_eq!(
+            sql,
+            r#"SELECT * FROM "t" ORDER BY "role_id" DESC, "user_id" DESC"#
+        );
+        // No primary key: the sort alone.
+        let sql = build_select(
+            "t",
+            &sorted(&[("created_at", true)], 0, 0),
+            &[],
+            Backend::Sqlite,
+        )
+        .sql;
+        assert_eq!(sql, r#"SELECT * FROM "t" ORDER BY "created_at" DESC"#);
+        // A projection is ordered the same way.
+        let sql = build_select_columns(
+            "t",
+            &["name"],
+            &sorted(&[("name", false)], 0, 0),
+            None,
+            &["id"],
+            Backend::Sqlite,
+        )
+        .sql;
+        assert_eq!(
+            sql,
+            r#"SELECT "name" FROM "t" ORDER BY "name" ASC, "id" ASC"#
+        );
+    }
+
+    /// A grouped aggregate shares `apply_order` with the row select but must
+    /// not gain a key column: `id` is not a `GROUP BY` term, which Postgres
+    /// rejects. Passes before and after the unique-key change by design.
+    #[test]
+    fn a_grouped_aggregate_orders_by_its_sort_alone() {
+        let stmt = crate::aggregate::build_grouped_query(
+            crate::aggregate::GroupedQueryConfig {
+                table: "t".into(),
+                select_columns: vec!["category".into()],
+                aggregates: vec![crate::aggregate::AggregateColumn {
+                    func: crate::aggregate::AggFunc::Count,
+                    field: None,
+                    alias: "cnt".into(),
+                    cast_as: None,
+                    inner_expr: None,
+                }],
+                filters: vec![],
+                group_by: vec!["category".into()],
+                date_buckets: vec![],
+                order_by: vec![SortField {
+                    field: "cnt".into(),
+                    desc: true,
+                }],
+                limit: Some(5),
+            },
+            Backend::Postgres,
+        );
+        assert!(
+            stmt.sql.ends_with(r#"ORDER BY "cnt" DESC LIMIT $1"#),
+            "{}",
+            stmt.sql
+        );
+    }
+
+    /// Five rows tie on the sort key and were inserted out of key order; pages
+    /// of two must be disjoint, complete, and in key order — run on a real
+    /// SQLite engine, which returns ties in insertion order when nothing
+    /// breaks them.
+    #[test]
+    fn pages_over_a_tied_sort_key_are_disjoint_and_complete_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id TEXT PRIMARY KEY, created_at TEXT)", [])
+            .unwrap();
+        for id in ["c", "a", "e", "b", "d"] {
+            conn.execute(
+                "INSERT INTO t (id, created_at) VALUES (?1, '2026-01-01')",
+                [id],
+            )
+            .unwrap();
+        }
+        let mut seen = Vec::new();
+        for offset in [0, 2, 4] {
+            let stmt = build_select(
+                "t",
+                &sorted(&[("created_at", true)], 2, offset),
+                &["id"],
+                Backend::Sqlite,
+            );
+            let params: Vec<i64> = stmt
+                .values
+                .iter()
+                .map(|v| match v {
+                    sea_query::Value::BigUnsigned(Some(n)) => i64::try_from(*n).unwrap(),
+                    sea_query::Value::BigInt(Some(n)) => *n,
+                    other => panic!("unexpected bound value {other:?}"),
+                })
+                .collect();
+            let mut q = conn.prepare(&stmt.sql).unwrap();
+            let ids: Vec<String> = q
+                .query_map(rusqlite::params_from_iter(params), |r| r.get("id"))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            seen.push(ids);
+        }
+        assert_eq!(
+            seen,
+            vec![vec!["e", "d"], vec!["c", "b"], vec!["a"]],
+            "newest-first ties break id-descending"
+        );
     }
 }

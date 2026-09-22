@@ -492,7 +492,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Postgres);
         let sql = stmt.sql;
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
@@ -521,7 +521,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Postgres);
         assert!(stmt.sql.contains("ORDER BY"));
         assert!(stmt.sql.contains("LIMIT"));
         assert!(stmt.sql.contains("OFFSET"));

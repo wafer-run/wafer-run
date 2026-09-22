@@ -10,7 +10,7 @@ pub mod codec;
 pub mod conformance;
 /// Shared SQL-backend execution layer (`DbExec`) behind `DatabaseService`.
 pub mod exec;
-pub use exec::{BatchOp, BatchResult};
+pub use exec::{mint_record_id, BatchOp, BatchResult};
 /// `forward_database_service!` — write a `DatabaseService` impl as an explicit
 /// ledger, so no operation can silently fall through to a trait default.
 pub mod forward;

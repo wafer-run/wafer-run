@@ -711,7 +711,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("users", &opts, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Sqlite);
         let sql = stmt.sql;
         assert!(sql.contains("WHERE"));
         // SQLite uses ? placeholders, not $N
@@ -745,7 +745,7 @@ mod tests {
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("items", &opts, Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Sqlite);
         assert!(stmt.sql.contains("ORDER BY"));
         assert!(stmt.sql.contains("LIMIT"));
         assert!(stmt.sql.contains("OFFSET"));
