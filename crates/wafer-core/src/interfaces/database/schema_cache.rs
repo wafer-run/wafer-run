@@ -172,20 +172,34 @@ impl SchemaCache {
             .and_then(|t| t.primary_key.clone())
     }
 
-    /// Record `table`'s primary-key columns (empty: the table has none), but
-    /// only if the cache has not been mutated since `expected_gen` (see the
-    /// module docs). Unlike a column list, an empty key proves nothing about
-    /// existence, so the exists fact is left alone.
+    /// Record `table`'s primary-key columns, but only if the cache has not
+    /// been mutated since `expected_gen` (see the module docs).
+    ///
+    /// A non-empty key proves the table exists, so the exists fact is set
+    /// alongside it. An empty key is ambiguous: the key introspection of a
+    /// table with no primary key and of a table that does not exist yet both
+    /// come back empty. It is recorded only when the entry already knows the
+    /// table exists; otherwise it is dropped, so a table that a later
+    /// migration creates with a key is re-introspected rather than listed
+    /// without a tiebreak for the life of the cache.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the write guard covers the whole critical section — the \
+                  generation check, the exists check and the key-set mutate \
+                  the same entry and are the entire body"
+    )]
     pub fn set_primary_key_if_gen(&self, table: &str, key: Vec<String>, expected_gen: u64) {
         let mut inner = self.inner.write();
         if inner.generation != expected_gen {
             return;
         }
-        inner
-            .tables
-            .entry(table.to_string())
-            .or_default()
-            .primary_key = Some(key);
+        let entry = inner.tables.entry(table.to_string()).or_default();
+        if !key.is_empty() {
+            entry.exists = Some(true);
+        } else if entry.exists != Some(true) {
+            return;
+        }
+        entry.primary_key = Some(key);
     }
 
     /// Invalidate every cached fact for `table` and bump the generation.
@@ -265,11 +279,23 @@ mod tests {
         assert_eq!(c.primary_key("t"), None);
         c.set_primary_key_if_gen("t", vec!["id".into()], c.generation());
         assert_eq!(c.primary_key("t"), Some(vec!["id".to_string()]));
-        // An empty key is a cached answer ("no primary key"), not a miss, and
-        // says nothing about whether the table exists.
+        assert_eq!(c.table_exists("t"), Some(true), "a key proves the table");
+        // An empty key for a table not known to exist may be a table that
+        // does not exist yet: it is dropped, so the next lookup re-probes.
+        c.set_primary_key_if_gen("later", Vec::new(), c.generation());
+        assert_eq!(c.primary_key("later"), None);
+        c.set_table_exists_if_gen("later", false, c.generation());
+        c.set_primary_key_if_gen("later", Vec::new(), c.generation());
+        assert_eq!(
+            c.primary_key("later"),
+            None,
+            "a missing table's key is not cached"
+        );
+        // Once the table is known to exist, an empty key is a cached answer
+        // ("no primary key"), not a miss.
+        c.set_table_exists_if_gen("keyless", true, c.generation());
         c.set_primary_key_if_gen("keyless", Vec::new(), c.generation());
         assert_eq!(c.primary_key("keyless"), Some(Vec::new()));
-        assert_eq!(c.table_exists("keyless"), None);
         let stale = c.generation();
         c.invalidate("t");
         assert_eq!(c.primary_key("t"), None);

@@ -99,9 +99,18 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
 ///
 /// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
 /// (`pk` is the column's 1-based position in the key, `0` off it).
-/// Postgres: the `PRIMARY KEY` constraint's columns from
-/// `information_schema.key_column_usage`, in `ordinal_position` order, for
-/// `table_schema='public'` — the schema [`build_list_columns`] reads.
+/// Postgres: the columns of the table's `indisprimary` index in
+/// `pg_catalog.pg_index`, in `indkey` order, for the table
+/// `to_regclass('public.<table>')` names — the `public` schema
+/// [`build_list_columns`] reads. `to_regclass` is `NULL` for a missing
+/// table, so that case is zero rows rather than an error.
+///
+/// Postgres reads the system catalog rather than
+/// `information_schema.table_constraints`: the information schema shows a
+/// constraint only to a role that owns the table or holds a privilege other
+/// than `SELECT` on it, so a read-only role would see no key at all and
+/// every list would silently lose its tiebreak. `pg_catalog` is readable by
+/// every role.
 ///
 /// Names come back as the catalog spells them (not lowercased), so a caller
 /// can quote them straight back into SQL. The table name is parameter-bound,
@@ -114,13 +123,13 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
             params,
         ),
         Backend::Postgres => (
-            "SELECT kcu.column_name AS name FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage kcu \
-             ON kcu.constraint_schema = tc.constraint_schema \
-             AND kcu.constraint_name = tc.constraint_name \
-             AND kcu.table_name = tc.table_name \
-             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public' \
-             AND tc.table_name = $1 ORDER BY kcu.ordinal_position"
+            "SELECT a.attname::text AS name FROM pg_catalog.pg_index i \
+             CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN pg_catalog.pg_attribute a \
+             ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+             WHERE i.indisprimary \
+             AND i.indrelid = to_regclass(format('public.%I', $1::text)) \
+             ORDER BY k.ord"
                 .to_string(),
             params,
         ),
@@ -306,9 +315,13 @@ mod tests {
     #[test]
     fn test_list_primary_key_postgres() {
         let (sql, params) = build_list_primary_key("users", Backend::Postgres);
-        assert!(sql.contains("'PRIMARY KEY'"), "{sql}");
+        assert!(sql.contains("i.indisprimary"), "{sql}");
+        assert!(
+            !sql.contains("information_schema"),
+            "the information schema hides keys from read-only roles: {sql}"
+        );
         assert!(sql.contains("$1"), "table name must be bound: {sql}");
-        assert!(sql.contains("ORDER BY kcu.ordinal_position"), "{sql}");
+        assert!(sql.contains("ORDER BY k.ord"), "{sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
     }
 

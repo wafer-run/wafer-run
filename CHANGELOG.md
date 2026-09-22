@@ -84,9 +84,24 @@
   build_select_columns}` take a `unique_key: &[&str]` argument before
   `backend`: the table's primary-key columns, appended to the `ORDER BY` of a
   sorted or paged select (see the `database.list` entry under **Added**).
-  Pass the key, or `&[]` for a table without one. `database.list` results
-  change order only among rows that tie on every sort key, which previously
-  came back in whatever order the backend produced.
+  Pass the key, or `&[]` for a table without one. A sorted `database.list`
+  changes order only among rows that tie on every sort key, which previously
+  came back in whatever order the backend produced. An unsorted but paged
+  `list` (`limit` or `offset` set, `sort` empty) changes order for every
+  row: it had no `ORDER BY` and came back in storage order, which on SQLite
+  is insertion order, and now comes back in primary-key order. A caller that
+  pages through a table without a `sort` and relied on insertion order must
+  sort by its timestamp.
+- `DbExec::create` and `create_many` mint a missing `id` as a UUIDv7
+  (`Uuid::now_v7`) instead of a UUIDv4. The id is still a hyphenated UUID
+  string, but it now leads with its creation time, so key order is creation
+  order within a process and rows whose sort key ties list in the order they
+  were created rather than a random one. The workspace `uuid` dependency
+  gains the `v7` feature. On `wasm32-unknown-unknown` the v7 clock is
+  `Date.now()` through uuid's `js` feature, which an embedding binary
+  already enables for uuid's randomness source; a binary that picked another
+  getrandom backend instead must enable `uuid/js` too, or `SystemTime` panics
+  when the first id is minted.
 - `database.aggregate` rejects `Avg` with `cast_as: "BIGINT"` as
   `InvalidArgument`; `Avg` casts to `DOUBLE PRECISION` only. This is a
   wire-visible validation change to the `cast_as` addition under **Added**: a
@@ -116,7 +131,11 @@
   non-null is summed (no matching row in a group, matching rows whose
   `field` is `NULL`, or an ungrouped query over no rows) — validated like
   `CaseWhenSum` (an empty `when` is `InvalidArgument`) and cast like `Sum`.
-  Builder: `AggregateColumn::sum_where`.
+  Builder: `AggregateColumn::sum_where`. On SQLite that `0` is the integer
+  `0` even over a `REAL` column (Postgres gives the column's type), so a
+  sum of a floating-point field that no row matches decodes as a JSON
+  integer there; pass `cast_as: "DOUBLE PRECISION"` to read a float on
+  every backend.
 - Column-to-column filters: `FilterDef.column` compares `field` to another
   column of the same row instead of to `value` (`eq`/`neq`/`gt`/`gte`/`lt`/
   `lte` only). Both identifiers are validated; a non-null `value` alongside
@@ -147,11 +166,18 @@
   (`introspect::build_list_primary_key`, `DbExec::get_primary_key`) and
   memoized in the backend's `SchemaCache`, in STRICT_SCHEMA mode too, so a
   warm backend pays nothing; a backend without a cache pays one catalog read
-  per sorted or paged `list`. An unsorted, unpaged `list` looks nothing up
-  and has no `ORDER BY`. A table without a primary key is ordered by the
-  sort alone. `aggregate` is unchanged — `query::apply_order` still emits the
-  sort only, because a key column outside the `GROUP BY` is not a valid sort
-  key there; the row selects use `query::apply_order_with_unique_key`.
+  per sorted or paged `list`. An empty key is memoized only for a table known
+  to exist (a keyless table costs one existence probe the first time), so a
+  `list` that runs before the migration creating its table does not pin "no
+  key" for the life of the cache. Postgres reads the key from
+  `pg_catalog.pg_index` (`indisprimary`), not
+  `information_schema.table_constraints`, which hides constraints from a
+  role that only holds `SELECT` on the table. An unsorted, unpaged `list`
+  looks nothing up and has no `ORDER BY`. A table without a primary key is
+  ordered by the sort alone. `aggregate` is unchanged — `query::apply_order`
+  still emits the sort only, because a key column outside the `GROUP BY` is
+  not a valid sort key there; the row selects use
+  `query::apply_order_with_unique_key`.
 - CI runs the shared `DatabaseService` conformance suite against a live
   PostgreSQL 16 service container (`scripts/check.sh postgres`, the
   `PostgreSQL Conformance` job). It previously ran only by hand.

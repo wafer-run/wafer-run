@@ -281,7 +281,8 @@ pub fn to_upsert_spec(
 /// maps to `InvalidArgument`, fail-closed. A `cast_as` type name is spliced
 /// into `CAST(... AS <type>)` text, so it is parsed against the
 /// [`CastType`] allowlist — every member for `Sum`/`SumWhere`, only
-/// `DOUBLE PRECISION` for `Avg` — and anything else is `InvalidArgument`. `CaseWhenSum.when` and `SumWhere.when` are run through
+/// `DOUBLE PRECISION` for `Avg` — and anything else is `InvalidArgument`.
+/// `CaseWhenSum.when` and `SumWhere.when` are run through
 /// [`convert_filter_tree`] for depth/node bounds + operator validation (and
 /// rejected if empty); their `!Send` `CASE` predicates are built server-side in
 /// [`AggregateSpec::into_grouped_config`], so the spec carries the validated

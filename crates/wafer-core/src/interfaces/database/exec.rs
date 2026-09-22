@@ -68,6 +68,27 @@ fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
     out
 }
 
+/// Mint the `id` of a record created without one: a UUIDv7.
+///
+/// A v7 id leads with its creation time in milliseconds and, within one
+/// process, [`Uuid::now_v7`](uuid::Uuid::now_v7) keeps ids strictly
+/// increasing, so key order is creation order. That matters because `list`
+/// breaks ties on the primary key: rows whose sort key ties (a `created_at`
+/// stamped in the same millisecond, as wasm32's `Date.now()` clock does for a
+/// burst of inserts) come back in the order they were created. A random v4 id
+/// would shuffle them.
+///
+/// Across processes (two Workers isolates, say) ids minted in the same
+/// millisecond are ordered by their random tail, not by creation; nothing
+/// shared orders those rows anyway.
+///
+/// On `wasm32-unknown-unknown` the clock is `Date.now()` through uuid's `js`
+/// feature, the same feature the embedding binary already enables for its
+/// randomness source; without it `std::time::SystemTime` panics there.
+fn mint_record_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
 fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_created: bool) {
     let now = chrono::Utc::now().to_rfc3339();
@@ -230,7 +251,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// is trusted — no columns are synthesized). The one introspection left is
     /// the primary-key lookup a sorted or paged [`list`](Self::list) orders by
     /// ([`get_primary_key`](Self::get_primary_key)), which a backend with a
-    /// [`schema_cache`](Self::schema_cache) issues once per table. Default
+    /// [`schema_cache`](Self::schema_cache) issues once per table, plus one
+    /// existence probe for a table whose key comes back empty. Default
     /// `false` preserves the self-healing lazy-schema behavior for
     /// development, tests, and other implementors.
     fn strict_schema(&self) -> bool {
@@ -451,6 +473,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// (`name` per key column) is identical in both dialects. Runs in
     /// STRICT_SCHEMA mode too: nothing else can tell the executor which
     /// columns identify a row.
+    ///
+    /// An empty answer is cached only for a table known to exist. The key
+    /// introspection of a missing table is empty too, and in STRICT_SCHEMA
+    /// mode nothing else probes existence, so a list against a table a later
+    /// migration creates would otherwise pin "no key" for the cache's life.
+    /// When the cache does not already know the table exists, an empty key
+    /// costs one [`dbx_table_exists`](Self::dbx_table_exists) probe, once per
+    /// keyless table.
     async fn get_primary_key(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
         let cache = self.schema_cache();
         if let Some(key) = cache.and_then(|c| c.primary_key(table)) {
@@ -470,6 +500,16 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             })
             .collect();
         if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            // The setter drops an empty key unless the entry knows the table
+            // exists; settle that first. Only a positive answer is recorded:
+            // a table that does not exist yet stays unprobed, so the next
+            // lookup asks again.
+            if key.is_empty()
+                && cache.table_exists(table).is_none()
+                && self.dbx_table_exists(table).await?
+            {
+                cache.set_table_exists_if_gen(table, true, gen0);
+            }
             cache.set_primary_key_if_gen(table, key.clone(), gen0);
         }
         Ok(key)
@@ -775,8 +815,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `create`: id/timestamp defaulting → lazy column-add → INSERT.
     ///
-    /// A missing `id` gets a synthesized UUID string unless the backend
-    /// reports the table generates its own
+    /// A missing `id` gets a synthesized UUIDv7 string ([`mint_record_id`])
+    /// unless the backend reports the table generates its own
     /// ([`table_autogenerates_id`](Self::table_autogenerates_id)), in which
     /// case the backend-generated id from [`run_insert`](Self::run_insert) is
     /// folded back into the returned record.
@@ -791,7 +831,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if !data.contains_key("id") && !self.table_autogenerates_id(&table).await {
             data.insert(
                 "id".to_string(),
-                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                serde_json::Value::String(mint_record_id()),
             );
         }
         stamp_timestamps(&mut data, true);
@@ -1277,7 +1317,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             if !data.contains_key("id") && !autogenerates_id {
                 data.insert(
                     "id".to_string(),
-                    serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                    serde_json::Value::String(mint_record_id()),
                 );
             }
             stamp_timestamps(&mut data, true);
@@ -1335,6 +1375,26 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    /// Minted ids are UUIDv7 and sort in the order they were minted, even
+    /// many to a millisecond, so a list that breaks ties on the key lists
+    /// same-stamp rows in creation order.
+    #[test]
+    fn minted_record_ids_are_v7_and_increase_in_mint_order() {
+        let ids: Vec<String> = (0..2000).map(|_| mint_record_id()).collect();
+        for id in &ids {
+            let parsed = uuid::Uuid::parse_str(id).expect("minted id is a UUID");
+            assert_eq!(parsed.get_version_num(), 7, "{id} is not a v7 UUID");
+        }
+        for pair in ids.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} then {} is out of order",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
 
     /// Mock backend whose `dbx_table_exists` parks on a barrier mid-probe, so a
     /// test can fire an invalidation into the exact TOCTOU window between the
@@ -1915,9 +1975,13 @@ mod tests {
 
     /// Strict-schema backend with a schema cache whose `run_fetch` records
     /// every statement and answers the primary-key introspection with `key`.
+    /// `exists` answers `dbx_table_exists`, and `exists_probes` counts them;
+    /// a test flips `exists` and `key` to model a migration landing.
     struct KeyedMock {
         cache: SchemaCache,
-        key: Vec<&'static str>,
+        key: Mutex<Vec<&'static str>>,
+        exists: Mutex<bool>,
+        exists_probes: Mutex<usize>,
         fetches: Mutex<Vec<String>>,
     }
 
@@ -1925,7 +1989,9 @@ mod tests {
         fn new(key: &[&'static str]) -> Self {
             Self {
                 cache: SchemaCache::new(),
-                key: key.to_vec(),
+                key: Mutex::new(key.to_vec()),
+                exists: Mutex::new(true),
+                exists_probes: Mutex::new(0),
                 fetches: Mutex::new(Vec::new()),
             }
         }
@@ -1955,6 +2021,8 @@ mod tests {
             if sql.contains("pk > 0") {
                 return Ok(self
                     .key
+                    .lock()
+                    .unwrap()
                     .iter()
                     .map(|name| Record {
                         id: String::new(),
@@ -2006,7 +2074,8 @@ mod tests {
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            Ok(true)
+            *self.exists_probes.lock().unwrap() += 1;
+            Ok(*self.exists.lock().unwrap())
         }
     }
 
@@ -2079,6 +2148,48 @@ mod tests {
             fetches.last().map(String::as_str),
             Some(r#"SELECT * FROM "t" ORDER BY "created_at" DESC"#)
         );
+    }
+
+    /// In STRICT_SCHEMA mode a list can run before the migration that creates
+    /// its table. The key introspection of the missing table is empty, and
+    /// caching that would list the table without a tiebreak for the life of
+    /// the cache once the migration lands. A keyless table that does exist is
+    /// cached after one existence probe.
+    #[tokio::test]
+    async fn an_empty_key_is_cached_only_for_a_table_that_exists() {
+        let mock = KeyedMock::new(&[]);
+        *mock.exists.lock().unwrap() = false;
+        DbExec::list(&mock, "later", &newest_first(2, 0))
+            .await
+            .expect("list before the migration");
+        assert_eq!(mock.cache.primary_key("later"), None, "not cached");
+
+        // The migration lands out of band: the table now exists with a key.
+        *mock.exists.lock().unwrap() = true;
+        *mock.key.lock().unwrap() = vec!["id"];
+        DbExec::list(&mock, "later", &newest_first(2, 0))
+            .await
+            .expect("list after the migration");
+        let select = mock.fetches().pop().expect("a select");
+        assert!(
+            select.contains(r#"ORDER BY "created_at" DESC, "id" DESC LIMIT"#),
+            "the new key breaks ties: {select}"
+        );
+
+        let keyless = KeyedMock::new(&[]);
+        for _ in 0..2 {
+            DbExec::list(&keyless, "keyless", &newest_first(2, 0))
+                .await
+                .expect("list keyless");
+        }
+        assert_eq!(keyless.cache.primary_key("keyless"), Some(Vec::new()));
+        assert_eq!(*keyless.exists_probes.lock().unwrap(), 1, "probed once");
+        let key_probes = keyless
+            .fetches()
+            .iter()
+            .filter(|sql| sql.contains("pk > 0"))
+            .count();
+        assert_eq!(key_probes, 1, "the empty key is served from the cache");
     }
 
     // -----------------------------------------------------------------------

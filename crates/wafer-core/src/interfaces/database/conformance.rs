@@ -809,9 +809,10 @@ async fn pages(
 /// Without it a backend returns ties in storage order — insertion order on
 /// SQLite — so the pages here would read `c a | e b | d`.
 ///
-/// Covered for a table keyed by `id`, a table keyed by another column (no
-/// `id` at all), a composite key, and a table with no primary key, whose
-/// select must still be valid SQL.
+/// Covered for a table keyed by `id`, a table whose `id` the backend mints
+/// (ties list in creation order), a table keyed by another column (no `id`
+/// at all), a composite key, and a table with no primary key, whose select
+/// must still be valid SQL.
 async fn check_list_tiebreak(svc: &dyn DatabaseService) {
     let tied = |table: &str, key_cols: Vec<Column>, primary_key: Vec<String>| Table {
         name: table.to_string(),
@@ -852,6 +853,46 @@ async fn check_list_tiebreak(svc: &dyn DatabaseService) {
         pages(svc, "conf_tie_id", &[], &["id"]).await,
         vec![vec!["a", "b"], vec!["c", "d"], vec!["e"]],
         "a paged list with no sort is in key order"
+    );
+
+    // Keyed by an `id` the backend mints: rows created in order without an
+    // id come back in creation order when their sort key ties, because the
+    // minted id is time-ordered. A random id would shuffle them.
+    reset(
+        svc,
+        &tied(
+            "conf_tie_minted",
+            vec![pk("id"), Column::new("label", DataType::Text)],
+            Vec::new(),
+        ),
+    )
+    .await;
+    for label in order {
+        svc.create(
+            "conf_tie_minted",
+            row([
+                ("label", serde_json::json!(label)),
+                ("created_at", serde_json::json!("2026-01-01T00:00:00Z")),
+            ]),
+        )
+        .await
+        .expect("seed conf_tie_minted");
+    }
+    assert_eq!(
+        pages(svc, "conf_tie_minted", &[("created_at", false)], &["label"])
+            .await
+            .concat(),
+        order,
+        "oldest-first ties on a minted id list in creation order"
+    );
+    let mut newest_first = order;
+    newest_first.reverse();
+    assert_eq!(
+        pages(svc, "conf_tie_minted", &[("created_at", true)], &["label"])
+            .await
+            .concat(),
+        newest_first,
+        "newest-first ties on a minted id list in reverse creation order"
     );
 
     // Keyed by a column other than `id`; the upsert path writes rows without

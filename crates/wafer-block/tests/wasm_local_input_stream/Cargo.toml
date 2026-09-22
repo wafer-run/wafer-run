@@ -38,5 +38,7 @@ futures = "0.3"
 # `uuid` refuses to build for wasm32-unknown-unknown without a randomness
 # source, and the choice belongs to the embedding binary, not to the library
 # crates that use it (wafer-core). This fixture is that binary's stand-in, so
-# it makes the choice here rather than forcing one on every consumer.
+# it makes the choice here rather than forcing one on every consumer. `js`
+# also gives wafer-core's UUIDv7 record ids their clock (`Date.now()`);
+# without it `SystemTime` panics there.
 uuid = { version = "1", features = ["js"] }

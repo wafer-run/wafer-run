@@ -537,7 +537,10 @@ pub enum AggregateColumnDef {
     /// the sum of `field` over the rows matching `when`, `0` when nothing
     /// non-null is summed; optionally cast like `Sum`.
     // `when` is bounded and validated exactly like `CaseWhenSum.when`, and an
-    // empty `when` is rejected as `InvalidArgument`.
+    // empty `when` is rejected as `InvalidArgument`. When no row matches,
+    // SQLite's `0` is the integer `0` even over a `REAL` column (Postgres
+    // gives the column's type), so it decodes as a JSON integer there;
+    // `cast_as: "DOUBLE PRECISION"` reads a float on every backend.
     SumWhere {
         /// Numeric column to sum over the matching rows.
         field: String,
