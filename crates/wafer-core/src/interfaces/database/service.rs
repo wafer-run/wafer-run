@@ -122,7 +122,9 @@ pub enum AggregateColumnSpec {
         /// Optional output cast.
         cast_as: Option<CastType>,
     },
-    /// `AVG(field) AS alias`, cast when `cast_as` is set.
+    /// `AVG(field) AS alias`, cast when `cast_as` is set. The database
+    /// handler admits only [`CastType::Double`] here: `BigInt` rounds an
+    /// average on Postgres and truncates it on SQLite.
     Avg {
         /// Numeric column to average.
         field: String,
@@ -138,18 +140,19 @@ pub enum AggregateColumnSpec {
         /// Output alias.
         alias: String,
     },
-    /// `SUM(CASE WHEN <when> THEN 1 ELSE 0 END) AS alias` — a portable
-    /// conditional count. `when` is the validated predicate forest,
-    /// AND-combined at the top level.
+    /// `COALESCE(SUM(CASE WHEN <when> THEN 1 ELSE 0 END), 0) AS alias` — a
+    /// portable conditional count, `0` when no row matches. `when` is the
+    /// validated predicate forest, AND-combined at the top level.
     CaseWhenSum {
         /// Predicate whose matching rows are counted.
         when: Vec<FilterTree>,
         /// Output alias.
         alias: String,
     },
-    /// `SUM(CASE WHEN <when> THEN field ELSE 0 END) AS alias` — the sum of
-    /// `field` over the rows matching the validated predicate forest `when`
-    /// (AND-combined at the top level), cast when `cast_as` is set.
+    /// `COALESCE(SUM(CASE WHEN <when> THEN field ELSE 0 END), 0) AS alias` —
+    /// the sum of `field` over the rows matching the validated predicate
+    /// forest `when` (AND-combined at the top level), `0` when nothing
+    /// non-null is summed, cast when `cast_as` is set.
     SumWhere {
         /// Numeric column to sum over the matching rows.
         field: String,

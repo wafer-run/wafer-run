@@ -85,21 +85,36 @@
   Pass the key, or `&[]` for a table without one. `database.list` results
   change order only among rows that tie on every sort key, which previously
   came back in whatever order the backend produced.
+- `database.aggregate` rejects `Avg` with `cast_as: "BIGINT"` as
+  `InvalidArgument`; `Avg` casts to `DOUBLE PRECISION` only. This is a
+  wire-visible validation change to the `cast_as` addition under **Added**: a
+  `BIGINT` cast rounds a non-integral value on Postgres and truncates it on
+  SQLite, and an average is rarely integral, so the same request answered
+  differently per backend. Read the average as a float and convert it where
+  the rounding rule is yours to choose. `Sum` and `SumWhere` keep both
+  types.
+- `wafer_sql_utils::aggregate::AggFunc` gains `SumOrZero`
+  (`COALESCE(SUM(...), 0)`), so exhaustive matches need an arm.
 
 ### Added
 
-- `database.aggregate` output casts: `AggregateColumnDef::{Sum, Avg}` take an
-  optional `cast_as` of `BIGINT` or `DOUBLE PRECISION` (ASCII
-  case-insensitive), rendered as `CAST(<aggregate> AS <type>)`. The handler
-  parses it against that allowlist (`wafer_sql_utils::aggregate::CastType`)
-  and rejects anything else as `InvalidArgument` — the type name is spliced
-  into SQL text, so it is never passed through. Postgres widens
-  `SUM(<bigint>)` to `NUMERIC`, which decodes as a JSON float; `BIGINT` makes
-  an integral sum read as an integer on every backend.
+- `database.aggregate` output casts: `AggregateColumnDef::Sum` takes an
+  optional `cast_as` of `BIGINT` or `DOUBLE PRECISION`, `Avg` of
+  `DOUBLE PRECISION` only (ASCII case-insensitive), rendered as
+  `CAST(<aggregate> AS <type>)`. The handler parses it against that
+  allowlist (`wafer_sql_utils::aggregate::CastType`) and rejects anything
+  else as `InvalidArgument` — the type name is spliced into SQL text, so it
+  is never passed through. Postgres widens `SUM(<bigint>)` to `NUMERIC`,
+  which decodes as a JSON float; `BIGINT` makes an integral sum read as an
+  integer on every backend. A non-integral value is rounded by the `BIGINT`
+  cast on Postgres and truncated on SQLite, so cast only a sum of integers.
 - `AggregateColumnDef::SumWhere { field, when, alias, cast_as }`:
-  `SUM(CASE WHEN <when> THEN field ELSE 0 END)`, the sum of a column over the
-  rows matching a predicate, validated like `CaseWhenSum` (an empty `when` is
-  `InvalidArgument`). Builder: `AggregateColumn::sum_where`.
+  `COALESCE(SUM(CASE WHEN <when> THEN field ELSE 0 END), 0)`, the sum of a
+  column over the rows matching a predicate — `0`, not `NULL`, when nothing
+  non-null is summed (no matching row in a group, matching rows whose
+  `field` is `NULL`, or an ungrouped query over no rows) — validated like
+  `CaseWhenSum` (an empty `when` is `InvalidArgument`) and cast like `Sum`.
+  Builder: `AggregateColumn::sum_where`.
 - Column-to-column filters: `FilterDef.column` compares `field` to another
   column of the same row instead of to `value` (`eq`/`neq`/`gt`/`gte`/`lt`/
   `lte` only). Both identifiers are validated; a non-null `value` alongside
@@ -348,6 +363,13 @@
   reduced strength.
 
 ### Fixed
+
+- `database.aggregate`'s `CaseWhenSum` counts `0`, not `NULL`, in an
+  ungrouped query over no rows: it renders
+  `COALESCE(SUM(CASE WHEN <when> THEN 1 ELSE 0 END), 0)`
+  (`AggregateColumn::case_when_sum`). `SUM` over an empty set is `NULL`, so
+  a "how many rows match" read of an empty table or window answered `null`
+  instead of a count.
 
 - Discovery documents no longer publish a rest parameter's `...` marker.
   A route whose pattern ends in a trailing-rest placeholder

@@ -1634,7 +1634,7 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
             },
             // `SumWhere` over a column-to-column predicate: the totals of the
             // over-refunded rows. Account b's only row matches nothing, so it
-            // must sum to 0 (the inline `ELSE 0`), not NULL.
+            // must sum to 0, not NULL.
             AggregateColumnSpec::SumWhere {
                 field: "total_cents".into(),
                 when: over_refunded(),
@@ -1695,6 +1695,45 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
             "cast Avg for {account}"
         );
     }
+
+    // Ungrouped, over no rows at all: `SUM` of nothing is NULL, so the
+    // conditional sum and count must still come back as the integer 0.
+    let empty = svc
+        .aggregate(
+            "conf_money",
+            AggregateSpec {
+                select_columns: vec![],
+                aggregates: vec![
+                    AggregateColumnSpec::SumWhere {
+                        field: "refunded_cents".into(),
+                        when: vec![FilterTree::Leaf(filt(
+                            "refunded_cents",
+                            FilterOp::GreaterThan,
+                            serde_json::json!(0),
+                        ))],
+                        alias: "refunded".into(),
+                        cast_as: Some(CastType::BigInt),
+                    },
+                    AggregateColumnSpec::CaseWhenSum {
+                        when: over_refunded(),
+                        alias: "over_refunded_orders".into(),
+                    },
+                ],
+                filters: vec![eq("account", serde_json::json!("nobody"))],
+                group_by: vec![],
+                sort: vec![],
+                limit: 0,
+            },
+        )
+        .await
+        .expect("ungrouped aggregate over no rows");
+    assert_eq!(empty.len(), 1, "an ungrouped aggregate is one row");
+    assert_eq!(field_i64(&empty[0], "refunded"), 0, "SumWhere over no rows");
+    assert_eq!(
+        field_i64(&empty[0], "over_refunded_orders"),
+        0,
+        "CaseWhenSum over no rows"
+    );
 
     // A column-to-column predicate as a `list` filter, alone and inside an OR
     // group: `>=` catches the equal row the strict `>` above excludes.

@@ -13,6 +13,7 @@ use wafer_block::{
     *,
 };
 use wafer_schema::Table;
+use wafer_sql_utils::aggregate::CastType;
 
 use super::{
     schema_wire,
@@ -279,8 +280,8 @@ pub fn to_upsert_spec(
 /// each is validated via [`wafer_sql_utils::ident::validate_ident`] — a failure
 /// maps to `InvalidArgument`, fail-closed. A `cast_as` type name is spliced
 /// into `CAST(... AS <type>)` text, so it is parsed against the
-/// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist; anything else
-/// is `InvalidArgument`. `CaseWhenSum.when` and `SumWhere.when` are run through
+/// [`CastType`] allowlist — every member for `Sum`/`SumWhere`, only
+/// `DOUBLE PRECISION` for `Avg` — and anything else is `InvalidArgument`. `CaseWhenSum.when` and `SumWhere.when` are run through
 /// [`convert_filter_tree`] for depth/node bounds + operator validation (and
 /// rejected if empty); their `!Send` `CASE` predicates are built server-side in
 /// [`AggregateSpec::into_grouped_config`], so the spec carries the validated
@@ -317,7 +318,7 @@ pub fn to_aggregate_spec(
                 service::AggregateColumnSpec::Sum {
                     field,
                     alias,
-                    cast_as: parse_cast(cast_as.as_deref())?,
+                    cast_as: parse_cast(cast_as.as_deref(), &CastType::ALL)?,
                 }
             }
             wire::AggregateColumnDef::Avg {
@@ -327,10 +328,14 @@ pub fn to_aggregate_spec(
             } => {
                 check_ident(&field)?;
                 check_ident(&alias)?;
+                // An average is rarely integral, and `BIGINT` rounds it on
+                // Postgres but truncates it on SQLite — the same request would
+                // answer differently per backend — so `Avg` casts to
+                // `DOUBLE PRECISION` only.
                 service::AggregateColumnSpec::Avg {
                     field,
                     alias,
-                    cast_as: parse_cast(cast_as.as_deref())?,
+                    cast_as: parse_cast(cast_as.as_deref(), &[CastType::Double])?,
                 }
             }
             wire::AggregateColumnDef::Max { field, alias } => {
@@ -357,7 +362,7 @@ pub fn to_aggregate_spec(
                     field,
                     when: convert_when(when, "sum-where")?,
                     alias,
-                    cast_as: parse_cast(cast_as.as_deref())?,
+                    cast_as: parse_cast(cast_as.as_deref(), &CastType::ALL)?,
                 }
             }
         };
@@ -408,23 +413,22 @@ fn convert_when(when: Vec<wire::FilterNode>, kind: &str) -> Result<Vec<FilterTre
     Ok(tree)
 }
 
-/// Parse an aggregate's optional output cast against the
-/// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist. The type name
-/// is spliced into `CAST(... AS <type>)` text, so anything off the list is
-/// `InvalidArgument`.
-fn parse_cast(
-    cast_as: Option<&str>,
-) -> Result<Option<wafer_sql_utils::aggregate::CastType>, WaferError> {
-    use wafer_sql_utils::aggregate::CastType;
+/// Parse an aggregate's optional output cast against `allowed`, a subset of
+/// the [`CastType`] allowlist. The type name is spliced into
+/// `CAST(... AS <type>)` text, so anything off the list is `InvalidArgument`.
+fn parse_cast(cast_as: Option<&str>, allowed: &[CastType]) -> Result<Option<CastType>, WaferError> {
     let Some(name) = cast_as else {
         return Ok(None);
     };
-    CastType::parse(name).map(Some).ok_or_else(|| {
-        let allowed: Vec<&str> = CastType::ALL.iter().map(|t| t.as_sql()).collect();
-        invalid(format!(
-            "aggregate cast_as {name:?} is not one of {allowed:?}"
-        ))
-    })
+    CastType::parse(name)
+        .filter(|t| allowed.contains(t))
+        .map(Some)
+        .ok_or_else(|| {
+            let allowed: Vec<&str> = allowed.iter().map(|t| t.as_sql()).collect();
+            invalid(format!(
+                "aggregate cast_as {name:?} is not one of {allowed:?}"
+            ))
+        })
 }
 
 fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {

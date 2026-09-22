@@ -344,7 +344,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
                     "select_columns": { "type": "array", "items": { "type": "string" }, "description": "Plain (non-aggregated) columns to also select." },
                     "aggregates": {
                         "type": "array",
-                        "description": "Aggregate output columns: Count{alias}, Sum{field,alias,cast_as?}, Avg{field,alias,cast_as?}, Max{field,alias}, CaseWhenSum{when,alias}, or SumWhere{field,when,alias,cast_as?}. cast_as is BIGINT or DOUBLE PRECISION. At least one required.",
+                        "description": "Aggregate output columns: Count{alias}, Sum{field,alias,cast_as?}, Avg{field,alias,cast_as?}, Max{field,alias}, CaseWhenSum{when,alias}, or SumWhere{field,when,alias,cast_as?}. cast_as is BIGINT or DOUBLE PRECISION (Avg: DOUBLE PRECISION only). At least one required.",
                         "items": { "type": "object" }
                     },
                     "filters": { "type": "array", "items": filter_schema() },

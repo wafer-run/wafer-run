@@ -183,8 +183,14 @@ pub fn build_avg(
 pub enum AggFunc {
     /// `COUNT(...)` — row count over the inner expression (`*` if no field).
     Count,
-    /// `SUM(...)` — numeric sum of the inner expression.
+    /// `SUM(...)` — numeric sum of the inner expression. `NULL` when no row
+    /// contributes a non-null value (an empty table, or an empty set of rows
+    /// in an ungrouped query).
     Sum,
+    /// `COALESCE(SUM(...), 0)` — [`Sum`](Self::Sum), but `0` where `SUM`
+    /// would be `NULL`. The `0` is an inline literal, so it takes the sum's
+    /// type on Postgres instead of binding as `INT8`.
+    SumOrZero,
     /// `AVG(...)` — arithmetic mean of the inner expression.
     Avg,
     /// `MAX(...)` — greatest value of the inner expression.
@@ -211,7 +217,8 @@ pub enum AggFunc {
 ///   SQLite returns a `REAL` sum over text-stored numbers; casting pins the
 ///   result to an integer on both. A non-integral value is rounded on
 ///   Postgres and truncated on SQLite, so cast only aggregates whose value is
-///   integral.
+///   integral — a sum of integers. An average is not one, which is why the
+///   database handler accepts only `DOUBLE PRECISION` for `Avg`.
 /// - [`Double`](Self::Double) — a double-precision float, for a result that
 ///   must read as a float on every backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,9 +279,12 @@ pub struct AggregateColumn {
 }
 
 impl AggregateColumn {
-    /// Convenience constructor for `SUM(CASE WHEN <predicate> THEN 1 ELSE 0 END) AS <alias>`,
+    /// Convenience constructor for
+    /// `COALESCE(SUM(CASE WHEN <predicate> THEN 1 ELSE 0 END), 0) AS <alias>`,
     /// a portable way to "count rows matching a predicate" inside a
-    /// grouped query (no FILTER-clause support needed).
+    /// grouped query (no FILTER-clause support needed). The count is `0`, not
+    /// `NULL`, when no row matches — including an ungrouped query over no
+    /// rows at all, where `SUM` alone is `NULL`.
     ///
     /// # Example
     ///
@@ -282,7 +292,7 @@ impl AggregateColumn {
     /// use sea_query::Expr;
     /// use wafer_sql_utils::{aggregate::AggregateColumn, ident::DynCol};
     ///
-    /// // SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+    /// // COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS errors
     /// let errors = AggregateColumn::case_when_sum(
     ///     "errors",
     ///     Expr::col(DynCol("status_code".into())).gte(400),
@@ -302,7 +312,7 @@ impl AggregateColumn {
             .finally(Expr::cust("0"))
             .into();
         Self {
-            func: AggFunc::Sum,
+            func: AggFunc::SumOrZero,
             field: None,
             alias: alias.into(),
             cast_as: None,
@@ -311,17 +321,19 @@ impl AggregateColumn {
     }
 
     /// Convenience constructor for
-    /// `SUM(CASE WHEN <predicate> THEN <field> ELSE 0 END) AS <alias>` — the
-    /// sum of `field` over the rows matching a predicate, inside a grouped
-    /// query (no `FILTER` clause needed).
+    /// `COALESCE(SUM(CASE WHEN <predicate> THEN <field> ELSE 0 END), 0) AS <alias>`
+    /// — the sum of `field` over the rows matching a predicate, inside a
+    /// grouped query (no `FILTER` clause needed).
     ///
-    /// The `ELSE` operand is an inline `0`, as in [`case_when_sum`], so a
-    /// group with no matching row sums to `0` rather than `NULL`, and the
-    /// `CASE` keeps `field`'s type (an inline `INT4` literal widens to it; a
-    /// bound parameter would bind as `INT8` and widen an `INT4` column's
-    /// `CASE`). `field` reaches sea-query as a quoted [`DynCol`]. The result
-    /// is `SUM(<field type>)`, which Postgres widens to `NUMERIC` for a
-    /// `BIGINT` column, so a caller that needs an integer sets
+    /// The result is `0`, not `NULL`, whenever nothing non-null is summed: a
+    /// group with no matching row (the `ELSE 0`), matching rows whose `field`
+    /// is `NULL`, and an ungrouped query over no rows (the `COALESCE`). Both
+    /// zeros are inline literals, as in [`case_when_sum`], so the `CASE` keeps
+    /// `field`'s type (an inline `INT4` literal widens to it; a bound
+    /// parameter would bind as `INT8` and widen an `INT4` column's `CASE`).
+    /// `field` reaches sea-query as a quoted [`DynCol`]. The result is
+    /// `SUM(<field type>)`, which Postgres widens to `NUMERIC` for a `BIGINT`
+    /// column, so a caller that needs an integer sets
     /// [`cast_as`](Self::cast_as).
     ///
     /// [`case_when_sum`]: Self::case_when_sum
@@ -331,7 +343,7 @@ impl AggregateColumn {
             .finally(Expr::cust("0"))
             .into();
         Self {
-            func: AggFunc::Sum,
+            func: AggFunc::SumOrZero,
             field: None,
             alias: alias.into(),
             cast_as: None,
@@ -386,7 +398,7 @@ pub struct GroupedQueryConfig {
 ///
 /// Produces queries like:
 /// ```sql
-/// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS BIGINT) as avg_ms
+/// SELECT method, path, COUNT(*) as cnt, AVG(duration_ms) as avg_ms
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
 ///
@@ -422,6 +434,7 @@ pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::
         let agg_expr: SimpleExpr = match &agg.func {
             AggFunc::Count => Func::count(inner).into(),
             AggFunc::Sum => Func::sum(inner).into(),
+            AggFunc::SumOrZero => Func::coalesce([Func::sum(inner).into(), Expr::cust("0")]).into(),
             AggFunc::Avg => Func::avg(inner).into(),
             AggFunc::Max => Func::max(inner).into(),
             AggFunc::Min => Func::min(inner).into(),
@@ -801,11 +814,69 @@ mod tests {
             assert_eq!(
                 single_aggregate(agg, backend),
                 format!(
-                    "SELECT CAST(SUM((CASE WHEN (\"status\" = {placeholder}) THEN \"refunded_total_cents\" \
-                     ELSE 0 END)) AS BIGINT) AS \"refunded\" FROM \"orders\""
+                    "SELECT CAST(COALESCE(SUM((CASE WHEN (\"status\" = {placeholder}) THEN \
+                     \"refunded_total_cents\" ELSE 0 END)), 0) AS BIGINT) AS \"refunded\" FROM \"orders\""
                 ),
                 "{backend:?}"
             );
         }
+    }
+
+    /// Run on a real SQLite engine: the conditional sum and count are `0`, not
+    /// `NULL`, over matching rows whose field is `NULL` and over no rows at
+    /// all — the two cases `SUM` alone answers with `NULL`.
+    #[test]
+    fn conditional_sums_are_zero_where_sum_alone_is_null() {
+        use sea_query::Expr;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE orders (status TEXT, refunded_total_cents INTEGER);
+             INSERT INTO orders VALUES ('paid', NULL), ('paid', NULL);",
+        )
+        .unwrap();
+        let run = |status: &str| -> (Option<i64>, Option<i64>) {
+            let summed = AggregateColumn::sum_where(
+                "summed",
+                "refunded_total_cents",
+                Expr::col(DynCol("status".into())).eq("paid"),
+            );
+            let counted = AggregateColumn::case_when_sum(
+                "counted",
+                Expr::col(DynCol("status".into())).eq("paid"),
+            );
+            let stmt = build_grouped_query(
+                GroupedQueryConfig {
+                    table: "orders".into(),
+                    select_columns: vec![],
+                    aggregates: vec![summed, counted],
+                    filters: vec![Filter {
+                        field: "status".into(),
+                        operator: FilterOp::Equal,
+                        value: serde_json::json!(status),
+                    }],
+                    group_by: vec![],
+                    date_buckets: vec![],
+                    order_by: vec![],
+                    limit: None,
+                },
+                Backend::Sqlite,
+            );
+            let params: Vec<String> = stmt
+                .values
+                .iter()
+                .map(|v| match v {
+                    sea_query::Value::String(Some(s)) => s.to_string(),
+                    other => panic!("unexpected bound value {other:?}"),
+                })
+                .collect();
+            conn.query_row(&stmt.sql, rusqlite::params_from_iter(params), |r| {
+                Ok((r.get("summed")?, r.get("counted")?))
+            })
+            .unwrap()
+        };
+        // Both rows match; their field is NULL.
+        assert_eq!(run("paid"), (Some(0), Some(2)));
+        // No row passes the WHERE.
+        assert_eq!(run("refunded"), (Some(0), Some(0)));
     }
 }
