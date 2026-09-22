@@ -52,10 +52,14 @@ type Response struct {
 }
 
 // WaferError represents a structured error returned by a block.
+//
+// Code is the coarse error classification (e.g. "NotFound"); DetailCode is
+// the block's application-level code (e.g. "auth.invalid_email"), empty when
+// the block set none.
 type WaferError struct {
-	Code    string            `json:"code"`
-	Message string            `json:"message"`
-	Meta    map[string]string `json:"meta,omitempty"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	DetailCode string `json:"detail_code,omitempty"`
 }
 
 // Error implements the error interface.

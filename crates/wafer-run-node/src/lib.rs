@@ -135,7 +135,9 @@ mod bindings {
         /// Run a flow with the given message (body-less).
         ///
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
-        /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
+        /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`;
+        /// an `error` result carries
+        /// `{"error":{"code":"...","message":"...","detail_code":"..."}}`.
         ///
         /// The wire format (including the `body` vs `body_base64` rules for
         /// `respond` and `halt`) is documented on

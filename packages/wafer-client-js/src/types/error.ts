@@ -23,7 +23,8 @@ export type WaferErrorCode =
 /**
  * Structured error thrown by WaferClient.
  *
- * Wafer error responses follow `{ "error": "code", "message": "..." }`.
+ * Wafer error responses follow `{ "error": "code", "message": "..." }`, plus
+ * `"code"` when the block attached an application-level detail code.
  */
 export class WaferError extends Error {
   /** Error code (e.g. "not_found", "unauthorized") */
@@ -34,14 +35,24 @@ export class WaferError extends Error {
   public readonly meta: WaferMeta;
   /** Parsed response body (if available) */
   public readonly data: unknown;
+  /** Application-level detail code (e.g. "auth.invalid_email"), if the block set one */
+  public readonly detailCode?: string;
 
-  constructor(code: WaferErrorCode, message: string, status: number = 0, meta: WaferMeta = {}, data: unknown = null) {
+  constructor(
+    code: WaferErrorCode,
+    message: string,
+    status: number = 0,
+    meta: WaferMeta = {},
+    data: unknown = null,
+    detailCode?: string,
+  ) {
     super(message);
     this.name = 'WaferError';
     this.code = code;
     this.status = status;
     this.meta = meta;
     this.data = data;
+    this.detailCode = detailCode;
   }
 
   /** Check if this error matches a given code. */

@@ -124,9 +124,11 @@ export async function send(config: WaferConfig, request: TransportRequest): Prom
 
   // Throw WaferError for non-2xx responses
   if (!res.ok) {
-    // Try to parse Wafer's error format: { "error": "code", "message": "..." }
+    // Try to parse Wafer's error format:
+    // { "error": "code", "message": "...", "code": "detail code" (optional) }
     let errorCode = 'internal_error';
     let errorMessage = `HTTP ${res.status}`;
+    let detailCode: string | undefined;
 
     if (data && typeof data === 'object' && data !== null) {
       const body = data as Record<string, unknown>;
@@ -136,9 +138,12 @@ export async function send(config: WaferConfig, request: TransportRequest): Prom
       if (typeof body.message === 'string') {
         errorMessage = body.message;
       }
+      if (typeof body.code === 'string') {
+        detailCode = body.code;
+      }
     }
 
-    throw new WaferError(errorCode, errorMessage, res.status, responseHeaders, data);
+    throw new WaferError(errorCode, errorMessage, res.status, responseHeaders, data, detailCode);
   }
 
   return waferResponse;

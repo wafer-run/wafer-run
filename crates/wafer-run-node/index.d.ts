@@ -56,7 +56,9 @@ export declare class WaferRuntime {
    * Run a flow with the given message (body-less).
    *
    * Takes the flow ID and a JSON message string. Returns a JSON result string:
-   * `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`
+   * `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`;
+   * an `error` result carries
+   * `{"error":{"code":"...","message":"...","detail_code":"..."}}`.
    *
    * Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead of
    * the `respond` action's `body` string — Halt may carry non-UTF-8 or empty bodies.

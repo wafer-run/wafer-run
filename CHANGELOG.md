@@ -117,6 +117,9 @@
   types.
 - `wafer_sql_utils::aggregate::AggFunc` gains `SumOrZero`
   (`COALESCE(SUM(...), 0)`), so exhaustive matches need an arm.
+- Go SDK: `WaferError.Meta` is removed and `WaferError.DetailCode` added
+  (see **Fixed**). The embedder never emitted an error's meta, so code that
+  read `Meta` always saw no entries; read `DetailCode` instead.
 
 ### Added
 
@@ -434,11 +437,18 @@
   themselves. The codec now emits `{"error": <ErrorCode>, "message": <msg>,
   "code": <detail code>}`, omitting `code` when no detail code is set. The
   Error arm lives in a new public `http_codec::error_to_http_response`, for
-  adapters that hold a `WaferError` rather than an `OutputStream`. The
-  embedder wire format (`embed::output_to_json`, used by `wafer-ffi` and
-  `wafer-run-node`) now includes the error's `meta` object in an `error`
-  result, so the detail code arrives there under the `error.code` key; the
-  Go SDK's `WaferError.Meta` field is now populated.
+  adapters that hold a `WaferError` rather than an `OutputStream`.
+  `wafer-client-js` exposes the field as `WaferError.detailCode`.
+- The embedder wire format (`embed::output_to_json`, used by `wafer-ffi` and
+  `wafer-run-node`) carries the detail code as `detail_code` in an `error`
+  result: `{"error": {"code", "message", "detail_code"}}`, omitted when
+  unset. The error's meta is never emitted there. The Go SDK's `WaferError`
+  gains `DetailCode` and drops `Meta`, a field no producer filled.
+- `wafer-run/ip-rate-limit` built its 429 error from the whole request
+  message, so the error's meta held the request's headers (including
+  `Authorization` and `Cookie`), caller identity and client IP next to the
+  `Retry-After` / `X-RateLimit-*` headers. The error now carries only those
+  three `resp.header.*` entries.
 
 ### Refactored
 
