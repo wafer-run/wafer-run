@@ -427,6 +427,18 @@
   (`*`, `**`, malformed braces) still reach the OpenAPI `paths` map
   unchanged — that projection has no refusal channel, and dropping a
   documented route silently would be worse than publishing it as it was.
+- HTTP error bodies now carry the application-level detail code. A
+  `WaferError` built with `with_detail_code("auth.invalid_email")` was
+  rendered by `http_codec::collect_http_response` as `{"error","message"}`
+  only, so the code reached a client solely through adapters that added it
+  themselves. The codec now emits `{"error": <ErrorCode>, "message": <msg>,
+  "code": <detail code>}`, omitting `code` when no detail code is set. The
+  Error arm lives in a new public `http_codec::error_to_http_response`, for
+  adapters that hold a `WaferError` rather than an `OutputStream`. The
+  embedder wire format (`embed::output_to_json`, used by `wafer-ffi` and
+  `wafer-run-node`) now includes the error's `meta` object in an `error`
+  result, so the detail code arrives there under the `error.code` key; the
+  Go SDK's `WaferError.Meta` field is now populated.
 
 ### Refactored
 

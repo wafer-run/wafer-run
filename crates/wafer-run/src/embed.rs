@@ -31,7 +31,12 @@ fn meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 ///   string values.
 /// - `halt` always uses `body_base64` — Halt may carry non-UTF-8 or empty
 ///   bodies. Carries `meta` like `respond`.
-/// - `error` carries `{"error":{"code":"...","message":"..."}}`.
+/// - `error` carries `{"error":{"code":"...","message":"...","meta":{...}}}`.
+///   `meta` is the error's meta as a JSON object of string values, so the
+///   application-level detail code set via
+///   [`wafer_block::WaferError::with_detail_code`] arrives under the
+///   [`wafer_block::meta::META_ERROR_CODE`] key. The `Internal` error for a
+///   stream without a terminal event carries no `meta`.
 /// - `drop` carries no payload.
 /// - `continue` carries the follow-up `message` as a JSON object.
 /// - A stream that ends without a terminal event encodes as an `error` with
@@ -64,6 +69,7 @@ pub async fn output_to_json(output: OutputStream) -> String {
             "error": {
                 "code": format!("{:?}", err.code),
                 "message": err.message,
+                "meta": meta_to_json(&err.meta),
             }
         })
         .to_string(),
@@ -193,6 +199,20 @@ mod tests {
         assert_eq!(json["action"], "error");
         assert_eq!(json["error"]["code"], "NotFound");
         assert_eq!(json["error"]["message"], "missing");
+    }
+
+    #[tokio::test]
+    async fn error_terminal_carries_meta_with_detail_code() {
+        let out = OutputStream::error(
+            WaferError::new(ErrorCode::InvalidArgument, "x").with_detail_code("auth.invalid_email"),
+        );
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(json["action"], "error");
+        assert_eq!(json["error"]["code"], "InvalidArgument");
+        assert_eq!(
+            json["error"]["meta"][wafer_block::meta::META_ERROR_CODE],
+            "auth.invalid_email"
+        );
     }
 
     #[tokio::test]
