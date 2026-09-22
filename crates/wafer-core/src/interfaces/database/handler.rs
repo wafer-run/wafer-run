@@ -5,7 +5,7 @@
 
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
-    db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
+    db::{ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField},
     streams::output::OutputStream,
     types::ResourceType,
     wire::database as wire,
@@ -47,7 +47,8 @@ fn invalid(msg: impl Into<String>) -> WaferError {
 
 /// Convert a wire `FilterNode` forest into builder-input `FilterTree`,
 /// rejecting trees that exceed the depth or node-count bounds, reject unknown
-/// filter operators, and reject nested empty `all`/`any` groups (which would
+/// filter operators, reject malformed column-to-column leaves (see
+/// [`convert_leaf`]), and reject nested empty `all`/`any` groups (which would
 /// otherwise collapse to a degenerate always-true/always-false condition).
 /// Total and panic-free on any input.
 ///
@@ -80,11 +81,7 @@ fn convert_node(
         return Err(invalid("filter tree has too many nodes"));
     }
     match node {
-        wire::FilterNode::Leaf(f) => Ok(FilterTree::Leaf(Filter {
-            field: f.field,
-            operator: FilterOp::parse_wire(&f.operator).map_err(|e| invalid(e.to_string()))?,
-            value: f.value,
-        })),
+        wire::FilterNode::Leaf(f) => convert_leaf(f),
         wire::FilterNode::All { all } => {
             if all.is_empty() {
                 return Err(invalid("filter group must have at least one child"));
@@ -108,10 +105,55 @@ fn convert_node(
     }
 }
 
-/// Flatten a tree to a leaf-only `Vec<Filter>`, rejecting any group node.
-/// Used by ops whose builders take a flat `&[Filter]` and which no current
-/// caller invokes with a group; a group here is a client/runtime mismatch, so
-/// fail closed rather than silently drop it.
+/// Validate one [`wire::FilterDef`] and convert it: a value leaf to
+/// [`FilterTree::Leaf`], or — when `column` is set — a column-to-column leaf to
+/// [`FilterTree::ColumnCompare`].
+///
+/// The column form is rejected as `InvalidArgument` when it also carries a
+/// non-null `value` (the two are mutually exclusive), when its operator has no
+/// column form (`like`, `in`, `is_null`, `is_not_null`), or when either column
+/// fails [`wafer_sql_utils::ident::validate_ident`].
+fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
+    let operator = FilterOp::parse_wire(&f.operator).map_err(|e| invalid(e.to_string()))?;
+    let Some(column) = f.column else {
+        return Ok(FilterTree::Leaf(Filter {
+            field: f.field,
+            operator,
+            value: f.value,
+        }));
+    };
+    if !f.value.is_null() {
+        return Err(invalid(
+            "a filter compares its field to either `value` or `column`, not both",
+        ));
+    }
+    let Some(operator) = ColumnCompareOp::from_filter_op(&operator) else {
+        return Err(invalid(format!(
+            "filter operator {:?} cannot compare two columns",
+            f.operator
+        )));
+    };
+    check_ident(&f.field)?;
+    check_ident(&column)?;
+    Ok(FilterTree::ColumnCompare(ColumnFilter {
+        field: f.field,
+        operator,
+        column,
+    }))
+}
+
+/// Validate a caller-supplied identifier that reaches SQL text, mapping a
+/// failure to `InvalidArgument`.
+fn check_ident(name: &str) -> Result<(), WaferError> {
+    wafer_sql_utils::ident::validate_ident(name)
+        .map(|_| ())
+        .map_err(|e| invalid(e.to_string()))
+}
+
+/// Flatten a tree to a leaf-only `Vec<Filter>`, rejecting any group node and
+/// any column-to-column leaf. Used by ops whose builders take a flat
+/// `&[Filter]`, which can represent neither; either one here is a
+/// client/runtime mismatch, so fail closed rather than silently drop it.
 ///
 /// Public as part of the wire→builder-input conversion surface (see
 /// [`convert_filter_tree`]); asserted against direct builder calls in
@@ -121,6 +163,11 @@ pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
     for node in tree {
         match node {
             FilterTree::Leaf(f) => out.push(f.clone()),
+            FilterTree::ColumnCompare(_) => {
+                return Err(invalid(
+                    "operation does not support column-to-column filters",
+                ));
+            }
             FilterTree::All(_) | FilterTree::Any(_) => {
                 return Err(invalid("operation does not support filter groups"));
             }
@@ -155,12 +202,6 @@ pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
 pub fn to_upsert_spec(
     req: wire::UpsertRequest,
 ) -> Result<(String, service::UpsertSpec), WaferError> {
-    fn check_ident(name: &str) -> Result<(), WaferError> {
-        wafer_sql_utils::ident::validate_ident(name)
-            .map(|_| ())
-            .map_err(|e| invalid(e.to_string()))
-    }
-
     for (col, _) in &req.data {
         check_ident(col)?;
     }
@@ -231,18 +272,21 @@ pub fn to_upsert_spec(
 /// AggregateSpec)` pair for [`DatabaseService::aggregate`], validating **every**
 /// identifier that could reach raw SQL text.
 ///
-/// Aliases, aggregated `Sum`/`Avg` `field`s, `DateBucket.field`s, plain
-/// `GroupByDef::Column`s, and `select_columns` are all interpolated as
-/// identifiers (aliases/date-bucket fields reach *raw* `date(...)` /
-/// `AS <alias>` expression text where binding is impossible), so each is
-/// validated via [`wafer_sql_utils::ident::validate_ident`] — a failure maps to
-/// `InvalidArgument`, fail-closed. `CaseWhenSum.when` is run through
+/// Aliases, aggregated `Sum`/`Avg`/`Max`/`SumWhere` `field`s,
+/// `DateBucket.field`s, plain `GroupByDef::Column`s, and `select_columns` are
+/// all interpolated as identifiers (aliases/date-bucket fields reach *raw*
+/// `date(...)` / `AS <alias>` expression text where binding is impossible), so
+/// each is validated via [`wafer_sql_utils::ident::validate_ident`] — a failure
+/// maps to `InvalidArgument`, fail-closed. A `cast_as` type name is spliced
+/// into `CAST(... AS <type>)` text, so it is parsed against the
+/// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist; anything else
+/// is `InvalidArgument`. `CaseWhenSum.when` and `SumWhere.when` are run through
 /// [`convert_filter_tree`] for depth/node bounds + operator validation (and
-/// rejected if empty); its `!Send` `CASE` predicate is built server-side in
+/// rejected if empty); their `!Send` `CASE` predicates are built server-side in
 /// [`AggregateSpec::into_grouped_config`], so the spec carries the validated
-/// [`FilterTree`] forest, not a sea-query expression. `filters` are flattened
-/// to AND-of-leaves (a group → `InvalidArgument`, consistent with
-/// `count`/`sum`).
+/// [`FilterTree`] forests, not sea-query expressions. `filters` are flattened
+/// to AND-of-leaves (a group or a column-to-column leaf → `InvalidArgument`,
+/// consistent with `count`/`sum`).
 ///
 /// Public as part of the wire→builder-input conversion surface (see
 /// [`convert_filter_tree`]): it takes only the wire request and its output,
@@ -252,12 +296,6 @@ pub fn to_upsert_spec(
 pub fn to_aggregate_spec(
     req: wire::AggregateRequest,
 ) -> Result<(String, service::AggregateSpec), WaferError> {
-    fn check_ident(name: &str) -> Result<(), WaferError> {
-        wafer_sql_utils::ident::validate_ident(name)
-            .map(|_| ())
-            .map_err(|e| invalid(e.to_string()))
-    }
-
     for col in &req.select_columns {
         check_ident(col)?;
     }
@@ -269,15 +307,31 @@ pub fn to_aggregate_spec(
                 check_ident(&alias)?;
                 service::AggregateColumnSpec::Count { alias }
             }
-            wire::AggregateColumnDef::Sum { field, alias } => {
+            wire::AggregateColumnDef::Sum {
+                field,
+                alias,
+                cast_as,
+            } => {
                 check_ident(&field)?;
                 check_ident(&alias)?;
-                service::AggregateColumnSpec::Sum { field, alias }
+                service::AggregateColumnSpec::Sum {
+                    field,
+                    alias,
+                    cast_as: parse_cast(cast_as.as_deref())?,
+                }
             }
-            wire::AggregateColumnDef::Avg { field, alias } => {
+            wire::AggregateColumnDef::Avg {
+                field,
+                alias,
+                cast_as,
+            } => {
                 check_ident(&field)?;
                 check_ident(&alias)?;
-                service::AggregateColumnSpec::Avg { field, alias }
+                service::AggregateColumnSpec::Avg {
+                    field,
+                    alias,
+                    cast_as: parse_cast(cast_as.as_deref())?,
+                }
             }
             wire::AggregateColumnDef::Max { field, alias } => {
                 check_ident(&field)?;
@@ -286,15 +340,25 @@ pub fn to_aggregate_spec(
             }
             wire::AggregateColumnDef::CaseWhenSum { when, alias } => {
                 check_ident(&alias)?;
-                // Bounds + operator validation on the predicate tree; the
-                // `SimpleExpr` itself is built server-side (it is `!Send`).
-                let tree = convert_filter_tree(when)?;
-                if tree.is_empty() {
-                    return Err(invalid(
-                        "case-when-sum aggregate requires at least one predicate in `when`",
-                    ));
+                service::AggregateColumnSpec::CaseWhenSum {
+                    when: convert_when(when, "case-when-sum")?,
+                    alias,
                 }
-                service::AggregateColumnSpec::CaseWhenSum { when: tree, alias }
+            }
+            wire::AggregateColumnDef::SumWhere {
+                field,
+                when,
+                alias,
+                cast_as,
+            } => {
+                check_ident(&field)?;
+                check_ident(&alias)?;
+                service::AggregateColumnSpec::SumWhere {
+                    field,
+                    when: convert_when(when, "sum-where")?,
+                    alias,
+                    cast_as: parse_cast(cast_as.as_deref())?,
+                }
             }
         };
         aggregates.push(spec);
@@ -315,8 +379,9 @@ pub fn to_aggregate_spec(
         group_by.push(spec);
     }
 
-    // Aggregation filters are AND-of-leaves today; a group here is a
-    // client/runtime mismatch → InvalidArgument (same rule as count/sum).
+    // Aggregation filters are AND-of-leaves; a group or a column-to-column
+    // leaf here is a client/runtime mismatch → InvalidArgument (same rule as
+    // count/sum).
     let tree = convert_filter_tree(req.filters)?;
     let filters = flatten_leaves(&tree)?;
 
@@ -329,6 +394,37 @@ pub fn to_aggregate_spec(
         limit: req.limit,
     };
     Ok((req.collection, spec))
+}
+
+/// Bound and validate a conditional aggregate's `when` forest, rejecting an
+/// empty one. The `SimpleExpr` itself is built server-side (it is `!Send`).
+fn convert_when(when: Vec<wire::FilterNode>, kind: &str) -> Result<Vec<FilterTree>, WaferError> {
+    let tree = convert_filter_tree(when)?;
+    if tree.is_empty() {
+        return Err(invalid(format!(
+            "{kind} aggregate requires at least one predicate in `when`"
+        )));
+    }
+    Ok(tree)
+}
+
+/// Parse an aggregate's optional output cast against the
+/// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist. The type name
+/// is spliced into `CAST(... AS <type>)` text, so anything off the list is
+/// `InvalidArgument`.
+fn parse_cast(
+    cast_as: Option<&str>,
+) -> Result<Option<wafer_sql_utils::aggregate::CastType>, WaferError> {
+    use wafer_sql_utils::aggregate::CastType;
+    let Some(name) = cast_as else {
+        return Ok(None);
+    };
+    CastType::parse(name).map(Some).ok_or_else(|| {
+        let allowed: Vec<&str> = CastType::ALL.iter().map(|t| t.as_sql()).collect();
+        invalid(format!(
+            "aggregate cast_as {name:?} is not one of {allowed:?}"
+        ))
+    })
 }
 
 fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {
@@ -997,6 +1093,7 @@ mod filter_tree_conversion_tests {
             field: field.into(),
             operator: "eq".into(),
             value: serde_json::json!(1),
+            column: None,
         })
     }
 
@@ -1061,6 +1158,7 @@ mod filter_tree_conversion_tests {
             field: "a".into(),
             operator: "no_such_op".into(),
             value: serde_json::json!(1),
+            column: None,
         });
         let err = convert_filter_tree(vec![bad]).unwrap_err();
         assert_eq!(err.code, wafer_block::ErrorCode::InvalidArgument);

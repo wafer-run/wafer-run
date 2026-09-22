@@ -64,6 +64,40 @@ jobs:
       - name: Run tests
         run: ./scripts/check.sh test
 
+  postgres:
+    name: PostgreSQL Conformance
+    runs-on: ubuntu-latest
+    # The shared DatabaseService conformance suite against a live server.
+    # The test skips when WAFER_CONFORMANCE_POSTGRES_URL is unset, so the
+    # check.sh step refuses to run without it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      WAFER_CONFORMANCE_POSTGRES_URL: postgres://postgres:pw@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: postgres
+
+      - name: PostgreSQL conformance
+        run: ./scripts/check.sh postgres
+
   wasm:
     name: Wasm & Feature Builds
     runs-on: ubuntu-latest

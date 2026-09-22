@@ -5,9 +5,12 @@
 //! this needs a **live** PostgreSQL server, so it is gated behind the
 //! `WAFER_CONFORMANCE_POSTGRES_URL` environment variable. When the variable is
 //! unset the test is a no-op that prints a skip notice — so a default
-//! `cargo test` / CI run stays green without a database.
+//! `cargo test` stays green without a database. CI's `PostgreSQL Conformance`
+//! job runs it against a `postgres:16` service container through
+//! `scripts/check.sh postgres`, which fails rather than skips when the
+//! variable is unset.
 //!
-//! To run it against a throwaway database:
+//! To run it locally against a throwaway database:
 //!
 //! ```sh
 //! docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw --name pg-conf postgres:16
@@ -26,8 +29,8 @@
 //! (stamped RFC3339 string vs a real `TIMESTAMPTZ` column) is deferred — it
 //! does not manifest for any real code, since every block stores timestamps in
 //! TEXT columns. See the `conformance` module's "Backend divergences" section.
-//! The test is still gated off by default (no `WAFER_CONFORMANCE_POSTGRES_URL`
-//! → skip), so `cargo test --workspace` stays green without a database.
+//! The test is gated off by default (no `WAFER_CONFORMANCE_POSTGRES_URL` →
+//! skip), so `cargo test --workspace` stays green without a database.
 //!
 //! [`DatabaseService`]: wafer_core::interfaces::database::service::DatabaseService
 

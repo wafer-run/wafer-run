@@ -198,6 +198,54 @@ pub enum AggFunc {
     Coalesce(serde_json::Value),
 }
 
+/// The SQL types an aggregate output may be cast to.
+///
+/// A closed set rather than a type-name string: the cast type is spliced into
+/// the statement text (`CAST(<aggregate> AS <type>)`, never a bound
+/// parameter), so an open string would be an injection vector. Every member
+/// renders the same spelling on SQLite and Postgres and yields the same
+/// storage class on both:
+///
+/// - [`BigInt`](Self::BigInt) — a 64-bit integer. Postgres widens
+///   `SUM(<bigint>)` to `NUMERIC` and `AVG(<integer>)` to `NUMERIC`, and
+///   SQLite returns a `REAL` sum over text-stored numbers; casting pins the
+///   result to an integer on both. A non-integral value is rounded on
+///   Postgres and truncated on SQLite, so cast only aggregates whose value is
+///   integral.
+/// - [`Double`](Self::Double) — a double-precision float, for a result that
+///   must read as a float on every backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastType {
+    /// `BIGINT`.
+    BigInt,
+    /// `DOUBLE PRECISION`.
+    Double,
+}
+
+impl CastType {
+    /// Every allowed cast type, in the order they are documented.
+    pub const ALL: [Self; 2] = [Self::BigInt, Self::Double];
+
+    /// The SQL spelling spliced into `CAST(... AS <type>)`.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::BigInt => "BIGINT",
+            Self::Double => "DOUBLE PRECISION",
+        }
+    }
+
+    /// Parse a caller-supplied type name against the allowlist. Matching is
+    /// ASCII case-insensitive on the exact [`as_sql`](Self::as_sql) spelling;
+    /// anything else is `None`.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.as_sql().eq_ignore_ascii_case(name))
+    }
+}
+
 /// A single aggregate column in a grouped query.
 #[derive(Debug, Clone)]
 pub struct AggregateColumn {
@@ -209,8 +257,8 @@ pub struct AggregateColumn {
     pub field: Option<String>,
     /// Output alias for this column.
     pub alias: String,
-    /// Optional CAST type (e.g. "INTEGER" for CAST(AVG(...) AS INTEGER)).
-    pub cast_as: Option<String>,
+    /// Optional output cast: `CAST(<aggregate> AS <type>)`.
+    pub cast_as: Option<CastType>,
     /// Pre-built sea-query expression used as the aggregate's inner
     /// argument. When set, takes precedence over [`field`](Self::field)
     /// and lets callers express patterns the field/Asterisk shape can't —
@@ -251,6 +299,35 @@ impl AggregateColumn {
         // to an integer either way).
         let case: SimpleExpr = sea_query::CaseStatement::new()
             .case(when, Expr::cust("1"))
+            .finally(Expr::cust("0"))
+            .into();
+        Self {
+            func: AggFunc::Sum,
+            field: None,
+            alias: alias.into(),
+            cast_as: None,
+            inner_expr: Some(case),
+        }
+    }
+
+    /// Convenience constructor for
+    /// `SUM(CASE WHEN <predicate> THEN <field> ELSE 0 END) AS <alias>` — the
+    /// sum of `field` over the rows matching a predicate, inside a grouped
+    /// query (no `FILTER` clause needed).
+    ///
+    /// The `ELSE` operand is an inline `0`, as in [`case_when_sum`], so a
+    /// group with no matching row sums to `0` rather than `NULL`, and the
+    /// `CASE` keeps `field`'s type (an inline `INT4` literal widens to it; a
+    /// bound parameter would bind as `INT8` and widen an `INT4` column's
+    /// `CASE`). `field` reaches sea-query as a quoted [`DynCol`]. The result
+    /// is `SUM(<field type>)`, which Postgres widens to `NUMERIC` for a
+    /// `BIGINT` column, so a caller that needs an integer sets
+    /// [`cast_as`](Self::cast_as).
+    ///
+    /// [`case_when_sum`]: Self::case_when_sum
+    pub fn sum_where(alias: impl Into<String>, field: impl Into<String>, when: SimpleExpr) -> Self {
+        let case: SimpleExpr = sea_query::CaseStatement::new()
+            .case(when, Expr::col(DynCol(field.into())))
             .finally(Expr::cust("0"))
             .into();
         Self {
@@ -309,7 +386,7 @@ pub struct GroupedQueryConfig {
 ///
 /// Produces queries like:
 /// ```sql
-/// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS INTEGER) as avg_ms
+/// SELECT method, path, COUNT(*) as cnt, CAST(AVG(duration_ms) AS BIGINT) as avg_ms
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
 ///
@@ -355,8 +432,8 @@ pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::
             .into(),
         };
 
-        let final_expr: sea_query::SimpleExpr = if let Some(ref cast_type) = agg.cast_as {
-            Expr::expr(agg_expr).cast_as(Alias::new(cast_type))
+        let final_expr: sea_query::SimpleExpr = if let Some(cast_type) = agg.cast_as {
+            Expr::expr(agg_expr).cast_as(Alias::new(cast_type.as_sql()))
         } else {
             agg_expr
         };
@@ -482,7 +559,7 @@ mod tests {
                     func: AggFunc::Avg,
                     field: Some("duration_ms".into()),
                     alias: "avg_ms".into(),
-                    cast_as: Some("INTEGER".into()),
+                    cast_as: Some(CastType::BigInt),
                     inner_expr: None,
                 },
             ],
@@ -645,5 +722,90 @@ mod tests {
         assert!(pg.sql.contains("to_char"), "pg date bucket: {}", pg.sql);
         assert!(pg.sql.contains("CAST"), "{}", pg.sql);
         assert!(pg.sql.contains("GROUP BY"), "{}", pg.sql);
+    }
+
+    fn single_aggregate(agg: AggregateColumn, backend: Backend) -> String {
+        build_grouped_query(
+            GroupedQueryConfig {
+                table: "orders".into(),
+                select_columns: vec![],
+                aggregates: vec![agg],
+                filters: vec![],
+                group_by: vec![],
+                date_buckets: vec![],
+                order_by: vec![],
+                limit: None,
+            },
+            backend,
+        )
+        .sql
+    }
+
+    #[test]
+    fn cast_as_wraps_the_aggregate_on_both_dialects() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            for (cast, spelled) in [
+                (CastType::BigInt, "BIGINT"),
+                (CastType::Double, "DOUBLE PRECISION"),
+            ] {
+                let sql = single_aggregate(
+                    AggregateColumn {
+                        func: AggFunc::Sum,
+                        field: Some("total_cents".into()),
+                        alias: "gross".into(),
+                        cast_as: Some(cast),
+                        inner_expr: None,
+                    },
+                    backend,
+                );
+                assert!(
+                    sql.contains(&format!("CAST(SUM(\"total_cents\") AS {spelled})")),
+                    "{backend:?} {cast:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cast_type_parse_accepts_only_the_allowlist() {
+        assert_eq!(CastType::parse("BIGINT"), Some(CastType::BigInt));
+        assert_eq!(CastType::parse("bigint"), Some(CastType::BigInt));
+        assert_eq!(CastType::parse("double precision"), Some(CastType::Double));
+        for rejected in [
+            "",
+            "INTEGER",
+            "TEXT",
+            "BIGINT ",
+            " BIGINT",
+            "BIGINT) AS x, (SELECT 1",
+            "DOUBLE",
+            "NUMERIC",
+        ] {
+            assert_eq!(CastType::parse(rejected), None, "{rejected:?}");
+        }
+        for t in CastType::ALL {
+            assert_eq!(CastType::parse(t.as_sql()), Some(t));
+        }
+    }
+
+    #[test]
+    fn sum_where_sums_the_field_over_matching_rows() {
+        use sea_query::Expr;
+        for (backend, placeholder) in [(Backend::Sqlite, "?"), (Backend::Postgres, "$1")] {
+            let mut agg = AggregateColumn::sum_where(
+                "refunded",
+                "refunded_total_cents",
+                Expr::col(DynCol("status".into())).eq("paid"),
+            );
+            agg.cast_as = Some(CastType::BigInt);
+            assert_eq!(
+                single_aggregate(agg, backend),
+                format!(
+                    "SELECT CAST(SUM((CASE WHEN (\"status\" = {placeholder}) THEN \"refunded_total_cents\" \
+                     ELSE 0 END)) AS BIGINT) AS \"refunded\" FROM \"orders\""
+                ),
+                "{backend:?}"
+            );
+        }
     }
 }

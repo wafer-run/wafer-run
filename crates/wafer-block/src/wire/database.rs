@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 // --- Filter / sort sub-types ---
 
-/// A single WHERE-clause predicate: `field <operator> value`.
+/// A single WHERE-clause predicate: `field <operator> value`, or
+/// `field <operator> column` when `column` is set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterDef {
     /// Column name to filter on.
@@ -26,6 +27,18 @@ pub struct FilterDef {
     /// JSON value compared against the column.
     #[serde(default)]
     pub value: serde_json::Value,
+    /// Another column of the same row to compare `field` against, in place
+    /// of `value`.
+    // Mutually exclusive with a non-null `value`, and only the six ordering
+    // / equality operators apply; the handler rejects anything else as
+    // `InvalidArgument`. Accepted wherever a filter *tree* is (`list`, and
+    // the `CaseWhenSum` / `SumWhere` predicates of `aggregate`); the ops that
+    // take flat filters (`count`, `sum`, the `*_where` family, and
+    // `aggregate`'s own `filters`) reject it rather than drop it. Omitted
+    // from the encoding when unset, so a request that does not use it
+    // encodes exactly as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
 }
 
 fn default_operator() -> String {
@@ -470,19 +483,30 @@ pub enum AggregateColumnDef {
         /// Output alias for the count.
         alias: String,
     },
-    /// `SUM(field) AS alias`.
+    /// `SUM(field) AS alias`, or `CAST(SUM(field) AS <cast_as>) AS alias`.
     Sum {
         /// Numeric column to sum.
         field: String,
         /// Output alias for the sum.
         alias: String,
+        /// Optional output cast: `BIGINT` or `DOUBLE PRECISION`.
+        // Validated against that allowlist by the handler (anything else is
+        // `InvalidArgument`). Postgres widens `SUM(<bigint>)` to `NUMERIC`,
+        // which decodes as a float; `BIGINT` pins an integral sum to an
+        // integer on every backend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_as: Option<String>,
     },
-    /// `AVG(field) AS alias`.
+    /// `AVG(field) AS alias`, or `CAST(AVG(field) AS <cast_as>) AS alias`.
     Avg {
         /// Numeric column to average.
         field: String,
         /// Output alias for the average.
         alias: String,
+        /// Optional output cast: `BIGINT` or `DOUBLE PRECISION`.
+        // Same allowlist and validation as `Sum::cast_as`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_as: Option<String>,
     },
     /// `MAX(field) AS alias` — greatest value in each group.
     Max {
@@ -502,6 +526,21 @@ pub enum AggregateColumnDef {
         when: Vec<FilterNode>,
         /// Output alias for the conditional count.
         alias: String,
+    },
+    /// `SUM(CASE WHEN <when> THEN field ELSE 0 END) AS alias` — the sum of
+    /// `field` over the rows matching `when`, optionally cast like `Sum`.
+    // `when` is bounded and validated exactly like `CaseWhenSum.when`, and an
+    // empty `when` is rejected as `InvalidArgument`.
+    SumWhere {
+        /// Numeric column to sum over the matching rows.
+        field: String,
+        /// Predicate selecting the rows whose `field` is summed.
+        when: Vec<FilterNode>,
+        /// Output alias for the conditional sum.
+        alias: String,
+        /// Optional output cast: `BIGINT` or `DOUBLE PRECISION`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_as: Option<String>,
     },
 }
 
@@ -623,6 +662,7 @@ mod tests {
                 field: "active".into(),
                 operator: "eq".into(),
                 value: serde_json::json!(true),
+                column: None,
             })],
             sort: vec![SortFieldDef {
                 field: "created_at".into(),
@@ -785,16 +825,19 @@ mod tests {
                 AggregateColumnDef::Sum {
                     field: "bytes".into(),
                     alias: "total_bytes".into(),
+                    cast_as: None,
                 },
                 AggregateColumnDef::Avg {
                     field: "duration_ms".into(),
                     alias: "avg_ms".into(),
+                    cast_as: None,
                 },
                 AggregateColumnDef::CaseWhenSum {
                     when: vec![FilterNode::Leaf(FilterDef {
                         field: "status".into(),
                         operator: "gte".into(),
                         value: serde_json::json!(400),
+                        column: None,
                     })],
                     alias: "errors".into(),
                 },
@@ -803,6 +846,7 @@ mod tests {
                 field: "active".into(),
                 operator: "eq".into(),
                 value: serde_json::json!(true),
+                column: None,
             })],
             group_by: vec![
                 GroupByDef::Column("method".into()),
@@ -1139,12 +1183,14 @@ mod filter_node_tests {
                     field: "a".into(),
                     operator: "eq".into(),
                     value: serde_json::json!(1),
+                    column: None,
                 }),
                 FilterNode::Any {
                     any: vec![FilterNode::Leaf(FilterDef {
                         field: "b".into(),
                         operator: "gt".into(),
                         value: serde_json::json!(2),
+                        column: None,
                     })],
                 },
             ],

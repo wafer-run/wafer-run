@@ -9,7 +9,18 @@
 #   ./scripts/check.sh              # run all steps
 #   ./scripts/check.sh <step>...    # run only the named steps
 #
-# Steps: fixtures fmt clippy test wasm audit
+# Steps: fixtures fmt clippy test postgres wasm audit
+#
+# The postgres step runs the shared DatabaseService conformance suite
+# against a live PostgreSQL server named by WAFER_CONFORMANCE_POSTGRES_URL
+# (CI provides one as a service container). Named explicitly, it FAILS
+# when the variable is unset — the test itself skips without it, so a
+# missing URL must not read as a pass. In the no-argument full run it is
+# skipped, loudly, when the variable is unset. To run it locally:
+#
+#   docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:16
+#   WAFER_CONFORMANCE_POSTGRES_URL=postgres://postgres:pw@localhost:5432/postgres \
+#     ./scripts/check.sh postgres
 #
 # The audit step is BLOCKING, here and in CI. It used to be advisory —
 # CI's audit job carried continue-on-error and the full local run only
@@ -59,6 +70,15 @@ run_test() {
     # loopback that the SSRF gate otherwise blocks).
     echo "==> Network redirect SSRF escape-hatch e2e (allow-private-network)"
     cargo test -p wafer-block-network --features allow-private-network --test redirect_ssrf
+}
+
+run_postgres() {
+    echo "==> PostgreSQL conformance (live server)"
+    if [ -z "${WAFER_CONFORMANCE_POSTGRES_URL:-}" ]; then
+        echo "error: WAFER_CONFORMANCE_POSTGRES_URL is not set; the postgres step needs a live server (see the header of this script)" >&2
+        exit 1
+    fi
+    cargo test -p wafer-block-postgres --test conformance
 }
 
 run_wasm() {
@@ -112,6 +132,11 @@ if [ "$#" -eq 0 ]; then
     run_fmt
     run_clippy
     run_test
+    if [ -n "${WAFER_CONFORMANCE_POSTGRES_URL:-}" ]; then
+        run_postgres
+    else
+        echo "==> SKIPPED PostgreSQL conformance: WAFER_CONFORMANCE_POSTGRES_URL is not set (CI runs it)"
+    fi
     run_wasm
     run_audit
     echo "==> All checks passed."
@@ -122,10 +147,11 @@ else
             fmt) run_fmt ;;
             clippy) run_clippy ;;
             test) run_test ;;
+            postgres) run_postgres ;;
             wasm) run_wasm ;;
             audit) run_audit ;;
             *)
-                echo "error: unknown step '$step' (valid: fixtures fmt clippy test wasm audit)" >&2
+                echo "error: unknown step '$step' (valid: fixtures fmt clippy test postgres wasm audit)" >&2
                 exit 2
                 ;;
         esac

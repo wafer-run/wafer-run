@@ -12,6 +12,7 @@ pub use wafer_schema::{
     default_true, default_zero, pk, pk_int, soft_delete as schema_soft_delete, timestamps, Column,
     DataType, DefaultVal, DefaultValue, Index, Reference, Table,
 };
+use wafer_sql_utils::aggregate::CastType;
 
 /// Errors returned by [`DatabaseService`] operations.
 #[derive(Error, Debug)]
@@ -74,8 +75,10 @@ pub enum UpsertConflict {
 /// [`AggregateRequest`](wafer_block::wire::database::AggregateRequest) into
 /// this, validating **every** identifier that reaches raw SQL text (aliases,
 /// aggregated `field`s, date-bucket fields, plain group-by columns, and
-/// `select_columns`) and bounding every `CaseWhenSum` predicate tree — so the
-/// service never sees an untrusted column name. Rendering into the `!Send`
+/// `select_columns`), bounding every `CaseWhenSum` / `SumWhere` predicate tree,
+/// and parsing every output cast against the
+/// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist — so the
+/// service never sees an untrusted column name or type name. Rendering into the `!Send`
 /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
 /// happens server-side in [`DbExec::aggregate`](super::exec::DbExec::aggregate)
 /// via [`AggregateSpec::into_grouped_config`].
@@ -99,9 +102,9 @@ pub struct AggregateSpec {
 /// plain-data twin of the wire
 /// [`AggregateColumnDef`](wafer_block::wire::database::AggregateColumnDef).
 ///
-/// The `CaseWhenSum` predicate is carried as an already-bounds-checked
-/// [`FilterTree`] forest (not a sea-query `SimpleExpr`) so the `!Send` `CASE`
-/// expression can be built server-side in
+/// The `CaseWhenSum` / `SumWhere` predicates are carried as already-bounds-checked
+/// [`FilterTree`] forests (not sea-query `SimpleExpr`s) so the `!Send` `CASE`
+/// expressions can be built server-side in
 /// [`AggregateSpec::into_grouped_config`].
 #[derive(Debug, Clone)]
 pub enum AggregateColumnSpec {
@@ -110,19 +113,23 @@ pub enum AggregateColumnSpec {
         /// Output alias.
         alias: String,
     },
-    /// `SUM(field) AS alias`.
+    /// `SUM(field) AS alias`, cast when `cast_as` is set.
     Sum {
         /// Numeric column to sum.
         field: String,
         /// Output alias.
         alias: String,
+        /// Optional output cast.
+        cast_as: Option<CastType>,
     },
-    /// `AVG(field) AS alias`.
+    /// `AVG(field) AS alias`, cast when `cast_as` is set.
     Avg {
         /// Numeric column to average.
         field: String,
         /// Output alias.
         alias: String,
+        /// Optional output cast.
+        cast_as: Option<CastType>,
     },
     /// `MAX(field) AS alias`.
     Max {
@@ -139,6 +146,19 @@ pub enum AggregateColumnSpec {
         when: Vec<FilterTree>,
         /// Output alias.
         alias: String,
+    },
+    /// `SUM(CASE WHEN <when> THEN field ELSE 0 END) AS alias` — the sum of
+    /// `field` over the rows matching the validated predicate forest `when`
+    /// (AND-combined at the top level), cast when `cast_as` is set.
+    SumWhere {
+        /// Numeric column to sum over the matching rows.
+        field: String,
+        /// Predicate selecting the rows whose `field` is summed.
+        when: Vec<FilterTree>,
+        /// Output alias.
+        alias: String,
+        /// Optional output cast.
+        cast_as: Option<CastType>,
     },
 }
 
@@ -162,8 +182,8 @@ impl AggregateSpec {
     /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
     /// for `table`.
     ///
-    /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` `CASE`
-    /// predicate via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
+    /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` and
+    /// `SumWhere` `CASE` predicates via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
     /// returned config holds `Rc<dyn Iden>` and is therefore also `!Send`, so
     /// call this server-side inside
     /// [`DbExec::aggregate`](super::exec::DbExec::aggregate) and drop the
@@ -188,18 +208,26 @@ impl AggregateSpec {
                     cast_as: None,
                     inner_expr: None,
                 },
-                AggregateColumnSpec::Sum { field, alias } => AggregateColumn {
+                AggregateColumnSpec::Sum {
+                    field,
+                    alias,
+                    cast_as,
+                } => AggregateColumn {
                     func: AggFunc::Sum,
                     field: Some(field),
                     alias,
-                    cast_as: None,
+                    cast_as,
                     inner_expr: None,
                 },
-                AggregateColumnSpec::Avg { field, alias } => AggregateColumn {
+                AggregateColumnSpec::Avg {
+                    field,
+                    alias,
+                    cast_as,
+                } => AggregateColumn {
                     func: AggFunc::Avg,
                     field: Some(field),
                     alias,
-                    cast_as: None,
+                    cast_as,
                     inner_expr: None,
                 },
                 AggregateColumnSpec::Max { field, alias } => AggregateColumn {
@@ -216,6 +244,19 @@ impl AggregateSpec {
                     alias,
                     wafer_sql_utils::query::tree_to_simple_expr(&when),
                 ),
+                AggregateColumnSpec::SumWhere {
+                    field,
+                    when,
+                    alias,
+                    cast_as,
+                } => AggregateColumn {
+                    cast_as,
+                    ..AggregateColumn::sum_where(
+                        alias,
+                        field,
+                        wafer_sql_utils::query::tree_to_simple_expr(&when),
+                    )
+                },
             })
             .collect();
 

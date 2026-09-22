@@ -64,6 +64,7 @@ fn to_wire_filters(filters: &[Filter]) -> Vec<FilterNode> {
                 field: f.field.clone(),
                 operator: filter_op_str(&f.operator).to_string(),
                 value: f.value.clone(),
+                column: None,
             })
         })
         .collect()
@@ -81,6 +82,13 @@ pub(crate) fn filter_tree_to_wire_node(tree: &FilterTree) -> FilterNode {
             field: f.field.clone(),
             operator: filter_op_str(&f.operator).to_string(),
             value: f.value.clone(),
+            column: None,
+        }),
+        FilterTree::ColumnCompare(f) => FilterNode::Leaf(WireFilterDef {
+            field: f.field.clone(),
+            operator: filter_op_str(&f.operator.as_filter_op()).to_string(),
+            value: serde_json::Value::Null,
+            column: Some(f.column.clone()),
         }),
         FilterTree::All(children) => FilterNode::All {
             all: children.iter().map(filter_tree_to_wire_node).collect(),

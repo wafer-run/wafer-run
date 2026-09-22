@@ -366,6 +366,7 @@ async fn aggregate_bad_sum_field_is_invalid_argument() {
         aggregates: vec![wire::AggregateColumnDef::Sum {
             field: "amount) FROM x --".into(),
             alias: "total".into(),
+            cast_as: None,
         }],
         filters: vec![],
         group_by: vec![],
@@ -438,6 +439,7 @@ async fn aggregate_filter_group_is_invalid_argument() {
                 field: "status".into(),
                 operator: "eq".into(),
                 value: serde_json::json!("active"),
+                column: None,
             })],
         }],
         group_by: vec![],

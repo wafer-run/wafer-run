@@ -130,7 +130,8 @@ fn filter_schema() -> serde_json::Value {
         "properties": {
             "field": { "type": "string" },
             "operator": { "type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "like", "in", "is_null", "is_not_null"], "default": "eq" },
-            "value": {}
+            "value": {},
+            "column": { "type": "string", "description": "Compare `field` to this column of the same row instead of to `value` (eq/neq/gt/gte/lt/lte only; not accepted by ops that take flat filters)." }
         },
         "required": ["field"]
     })
@@ -335,7 +336,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_AGGREGATE => ActionSpec {
-            description: "Run a grouped aggregate query (COUNT/SUM/AVG/conditional-count with GROUP BY columns and/or date buckets), WRAP-authorized against its target collection and rendered server-side; returns one row per group.".into(),
+            description: "Run a grouped aggregate query (COUNT/SUM/AVG/MAX/conditional count and sum with GROUP BY columns and/or date buckets), WRAP-authorized against its target collection and rendered server-side; returns one row per group.".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -343,7 +344,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
                     "select_columns": { "type": "array", "items": { "type": "string" }, "description": "Plain (non-aggregated) columns to also select." },
                     "aggregates": {
                         "type": "array",
-                        "description": "Aggregate output columns: Count{alias}, Sum{field,alias}, Avg{field,alias}, or CaseWhenSum{when,alias}. At least one required.",
+                        "description": "Aggregate output columns: Count{alias}, Sum{field,alias,cast_as?}, Avg{field,alias,cast_as?}, Max{field,alias}, CaseWhenSum{when,alias}, or SumWhere{field,when,alias,cast_as?}. cast_as is BIGINT or DOUBLE PRECISION. At least one required.",
                         "items": { "type": "object" }
                     },
                     "filters": { "type": "array", "items": filter_schema() },

@@ -70,8 +70,44 @@
   `Allowlist::intersect_path_prefix` rather than a set intersection, so an
   override nested under a declared entry (or vice versa) survives as the
   narrower of the two instead of collapsing to deny-all.
+- Rust API (not wire) changes from the `database` additions under **Added**:
+  `wire::database::FilterDef` gains a `column` field and
+  `AggregateColumnDef::{Sum, Avg}` gain `cast_as`, so struct literals need
+  `column: None` / `cast_as: None`; `wafer_block::db::FilterTree` gains a
+  `ColumnCompare` variant, so exhaustive matches need an arm;
+  `service::AggregateColumnSpec::{Sum, Avg}` gain `cast_as`; and
+  `wafer_sql_utils::aggregate::AggregateColumn::cast_as` is now
+  `Option<CastType>` instead of `Option<String>`.
 
 ### Added
+
+- `database.aggregate` output casts: `AggregateColumnDef::{Sum, Avg}` take an
+  optional `cast_as` of `BIGINT` or `DOUBLE PRECISION` (ASCII
+  case-insensitive), rendered as `CAST(<aggregate> AS <type>)`. The handler
+  parses it against that allowlist (`wafer_sql_utils::aggregate::CastType`)
+  and rejects anything else as `InvalidArgument` — the type name is spliced
+  into SQL text, so it is never passed through. Postgres widens
+  `SUM(<bigint>)` to `NUMERIC`, which decodes as a JSON float; `BIGINT` makes
+  an integral sum read as an integer on every backend.
+- `AggregateColumnDef::SumWhere { field, when, alias, cast_as }`:
+  `SUM(CASE WHEN <when> THEN field ELSE 0 END)`, the sum of a column over the
+  rows matching a predicate, validated like `CaseWhenSum` (an empty `when` is
+  `InvalidArgument`). Builder: `AggregateColumn::sum_where`.
+- Column-to-column filters: `FilterDef.column` compares `field` to another
+  column of the same row instead of to `value` (`eq`/`neq`/`gt`/`gte`/`lt`/
+  `lte` only). Both identifiers are validated; a non-null `value` alongside
+  it, or another operator, is `InvalidArgument`. Accepted wherever a filter
+  tree is — `list`, and the `CaseWhenSum` / `SumWhere` predicates — and
+  rejected as `InvalidArgument` by the ops that take flat filters (`count`,
+  `sum`, the `*_where` family, and `aggregate`'s own `filters`).
+- All three are wire-additive: every new field defaults and is omitted from
+  the encoding when unset, so existing requests encode exactly as before. An
+  older runtime ignores `cast_as` (the result comes back uncast) and
+  `column` (the leaf compares `field` to `NULL`, which matches no row); it
+  rejects `SumWhere` as an unknown variant.
+- CI runs the shared `DatabaseService` conformance suite against a live
+  PostgreSQL 16 service container (`scripts/check.sh postgres`, the
+  `PostgreSQL Conformance` job). It previously ran only by hand.
 
 - `InputStream::from_stream` and `from_stream_with_cancel` take
   `S: Stream<Item = Vec<u8>> + MaybeSend + 'static` instead of requiring

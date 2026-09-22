@@ -275,6 +275,7 @@ fn eq_filter(field: &str, value: &str) -> wire::FilterNode {
         field: field.into(),
         operator: "eq".into(),
         value: serde_json::json!(value),
+        column: None,
     })
 }
 

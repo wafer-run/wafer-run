@@ -45,8 +45,74 @@ pub struct Filter {
     pub value: serde_json::Value,
 }
 
-/// A predicate tree for WHERE-clause construction: a leaf [`Filter`] or an
-/// `AND`/`OR` group of sub-trees. This is the builder-input analogue of the
+/// A comparison between two columns of the same row: `field <operator>
+/// column`.
+///
+/// The builder-input analogue of a wire `FilterDef` that names a `column`
+/// instead of a `value`. It is a [`FilterTree`] leaf only — never a flat
+/// [`Filter`] — so the ops that take flat filters cannot receive one.
+#[derive(Debug, Clone)]
+pub struct ColumnFilter {
+    /// Left-hand column.
+    pub field: String,
+    /// Comparison operator.
+    pub operator: ColumnCompareOp,
+    /// Right-hand column.
+    pub column: String,
+}
+
+/// The operators a [`ColumnFilter`] supports: the equality and ordering
+/// subset of [`FilterOp`]. `LIKE`, `IN` and the null tests take a value, not a
+/// second column, so they have no column form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnCompareOp {
+    /// `field = column`.
+    Equal,
+    /// `field <> column`.
+    NotEqual,
+    /// `field > column`.
+    GreaterThan,
+    /// `field >= column`.
+    GreaterEqual,
+    /// `field < column`.
+    LessThan,
+    /// `field <= column`.
+    LessEqual,
+}
+
+impl ColumnCompareOp {
+    /// The column form of `op`, or `None` for an operator that has none
+    /// (`Like`, `In`, `IsNull`, `IsNotNull`).
+    #[must_use]
+    pub fn from_filter_op(op: &FilterOp) -> Option<Self> {
+        match op {
+            FilterOp::Equal => Some(Self::Equal),
+            FilterOp::NotEqual => Some(Self::NotEqual),
+            FilterOp::GreaterThan => Some(Self::GreaterThan),
+            FilterOp::GreaterEqual => Some(Self::GreaterEqual),
+            FilterOp::LessThan => Some(Self::LessThan),
+            FilterOp::LessEqual => Some(Self::LessEqual),
+            FilterOp::Like | FilterOp::In | FilterOp::IsNull | FilterOp::IsNotNull => None,
+        }
+    }
+
+    /// The [`FilterOp`] this operator is the column form of.
+    #[must_use]
+    pub fn as_filter_op(self) -> FilterOp {
+        match self {
+            Self::Equal => FilterOp::Equal,
+            Self::NotEqual => FilterOp::NotEqual,
+            Self::GreaterThan => FilterOp::GreaterThan,
+            Self::GreaterEqual => FilterOp::GreaterEqual,
+            Self::LessThan => FilterOp::LessThan,
+            Self::LessEqual => FilterOp::LessEqual,
+        }
+    }
+}
+
+/// A predicate tree for WHERE-clause construction: a leaf [`Filter`], a
+/// column-to-column [`ColumnFilter`] leaf, or an `AND`/`OR` group of
+/// sub-trees. This is the builder-input analogue of the
 /// wire `FilterNode`; the database handler converts wire → this before
 /// calling [`wafer_sql_utils`] builders, so the SQL layer never sees wire
 /// types.
@@ -54,6 +120,8 @@ pub struct Filter {
 pub enum FilterTree {
     /// A single comparison predicate.
     Leaf(Filter),
+    /// A comparison between two columns of the same row.
+    ColumnCompare(ColumnFilter),
     /// AND of child predicates.
     All(Vec<FilterTree>),
     /// OR of child predicates.
@@ -177,5 +245,30 @@ mod tests {
         // Casing matters: the wire grammar is lowercase-only.
         let err = FilterOp::parse_wire("Equal").expect_err("non-wire casing must be rejected");
         assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn column_compare_op_covers_exactly_the_comparison_operators() {
+        let with_column_form = [
+            FilterOp::Equal,
+            FilterOp::NotEqual,
+            FilterOp::GreaterThan,
+            FilterOp::GreaterEqual,
+            FilterOp::LessThan,
+            FilterOp::LessEqual,
+        ];
+        for op in with_column_form {
+            let column_op = ColumnCompareOp::from_filter_op(&op)
+                .unwrap_or_else(|| panic!("{op:?} has a column form"));
+            assert_eq!(column_op.as_filter_op(), op);
+        }
+        for op in [
+            FilterOp::Like,
+            FilterOp::In,
+            FilterOp::IsNull,
+            FilterOp::IsNotNull,
+        ] {
+            assert_eq!(ColumnCompareOp::from_filter_op(&op), None, "{op:?}");
+        }
     }
 }
