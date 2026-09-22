@@ -224,6 +224,7 @@ fn dispatch(msg: &Message, _body: &[u8]) -> GuestResult {
                 field: "x".to_string(),
                 operator: "eq".to_string(),
                 value: serde_json::json!(1),
+                column: None,
             });
             // 17 nested `all` groups puts the innermost node past
             // MAX_FILTER_DEPTH (16), the documented bound.

@@ -124,11 +124,13 @@ fn update_where_parity(backend: Backend) {
                 field: "id".to_string(),
                 operator: "eq".to_string(),
                 value: json!("row-1"),
+                column: None,
             }),
             wire::FilterNode::Leaf(wire::FilterDef {
                 field: "tenant".to_string(),
                 operator: "neq".to_string(),
                 value: json!("system"),
+                column: None,
             }),
         ],
         data: HashMap::from([
@@ -205,11 +207,13 @@ fn list_projection_parity(backend: Backend) {
                     field: "status".to_string(),
                     operator: "eq".to_string(),
                     value: json!("active"),
+                    column: None,
                 }),
                 wire::FilterNode::Leaf(wire::FilterDef {
                     field: "status".to_string(),
                     operator: "eq".to_string(),
                     value: json!("pending"),
+                    column: None,
                 }),
             ],
         }],
@@ -481,6 +485,7 @@ fn aggregate_parity(backend: Backend) {
                     field: "status".to_string(),
                     operator: "gte".to_string(),
                     value: json!(400),
+                    column: None,
                 })],
                 alias: "errors".to_string(),
             },
@@ -493,6 +498,7 @@ fn aggregate_parity(backend: Backend) {
             field: "active".to_string(),
             operator: "eq".to_string(),
             value: json!(true),
+            column: None,
         })],
         group_by: vec![
             wire::GroupByDef::Column("method".to_string()),

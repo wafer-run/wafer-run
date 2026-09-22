@@ -95,7 +95,10 @@
 
 use std::collections::HashMap;
 
-use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
+use wafer_block::db::{
+    ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
+};
+use wafer_sql_utils::aggregate::CastType;
 
 use super::service::{
     pk, AggregateColumnSpec, AggregateSpec, Column, DataType, DatabaseError, DatabaseService,
@@ -217,7 +220,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `take_where`; `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
 /// `WindowedCounter`); `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
-/// `CaseWhenSum`, and `DateBucket`); `query_raw`/`exec_raw`; and the
+/// `CaseWhenSum`, and `DateBucket`, then — over `BIGINT` money columns — the
+/// `cast_as` output cast, `SumWhere`, and column-to-column predicates in both
+/// an aggregate `when` and a `list` filter); `query_raw`/`exec_raw`; and the
 /// structured-value round trip that every backend's row decoder must agree on
 /// (see [`check_json_value_round_trip`]).
 pub async fn run_conformance(svc: &dyn DatabaseService) {
@@ -238,6 +243,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_upsert_set_columns(svc).await;
     check_upsert_windowed_counter(svc).await;
     check_aggregate(svc).await;
+    check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
     check_json_value_round_trip(svc).await;
 }
@@ -1215,10 +1221,12 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             AggregateColumnSpec::Sum {
                 field: "amount".into(),
                 alias: "total".into(),
+                cast_as: None,
             },
             AggregateColumnSpec::Avg {
                 field: "amount".into(),
                 alias: "mean".into(),
+                cast_as: None,
             },
             AggregateColumnSpec::Max {
                 field: "amount".into(),
@@ -1322,6 +1330,189 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             "first bucket is the 15th, got {day}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// aggregate over BIGINT money — cast_as, SumWhere, column-to-column filters
+// ---------------------------------------------------------------------------
+
+async fn check_aggregate_money(svc: &dyn DatabaseService) {
+    // Money in minor units, in `BIGINT` columns — the shape on which Postgres
+    // widens `SUM` to `NUMERIC`. One amount exceeds `i32::MAX`, so an `INT4`
+    // path would overflow rather than pass by accident.
+    //   a: o1 total 1000 refunded    0
+    //      o2 total 2000 refunded 2500   (refunded > total)
+    //   b: o3 total 3_000_000_000 refunded 3_000_000_000   (refunded = total)
+    let table = Table {
+        name: "conf_money".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("account", DataType::Text),
+            Column::new("total_cents", DataType::Int64),
+            Column::new("refunded_cents", DataType::Int64),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+    for (id, account, total, refunded) in [
+        ("o1", "a", 1000_i64, 0_i64),
+        ("o2", "a", 2000, 2500),
+        ("o3", "b", 3_000_000_000, 3_000_000_000),
+    ] {
+        svc.create(
+            "conf_money",
+            row([
+                ("id", serde_json::json!(id)),
+                ("account", serde_json::json!(account)),
+                ("total_cents", serde_json::json!(total)),
+                ("refunded_cents", serde_json::json!(refunded)),
+            ]),
+        )
+        .await
+        .expect("seed conf_money");
+    }
+
+    let over_refunded = || {
+        vec![FilterTree::ColumnCompare(ColumnFilter {
+            field: "refunded_cents".into(),
+            operator: ColumnCompareOp::GreaterThan,
+            column: "total_cents".into(),
+        })]
+    };
+    let spec = AggregateSpec {
+        select_columns: vec!["account".into()],
+        aggregates: vec![
+            // `CAST(SUM(<bigint>) AS BIGINT)` — an integer on every backend.
+            // Uncast, Postgres returns `NUMERIC`, which decodes as a JSON
+            // float, and `field_i64` (`as_i64`) rejects a float.
+            AggregateColumnSpec::Sum {
+                field: "total_cents".into(),
+                alias: "gross".into(),
+                cast_as: Some(CastType::BigInt),
+            },
+            // `SumWhere`: refunds on rows that carry one.
+            AggregateColumnSpec::SumWhere {
+                field: "refunded_cents".into(),
+                when: vec![FilterTree::Leaf(filt(
+                    "refunded_cents",
+                    FilterOp::GreaterThan,
+                    serde_json::json!(0),
+                ))],
+                alias: "refunded".into(),
+                cast_as: Some(CastType::BigInt),
+            },
+            // `SumWhere` over a column-to-column predicate: the totals of the
+            // over-refunded rows. Account b's only row matches nothing, so it
+            // must sum to 0 (the inline `ELSE 0`), not NULL.
+            AggregateColumnSpec::SumWhere {
+                field: "total_cents".into(),
+                when: over_refunded(),
+                alias: "over_refunded_total".into(),
+                cast_as: Some(CastType::BigInt),
+            },
+            // `CaseWhenSum` over the same column-to-column predicate.
+            AggregateColumnSpec::CaseWhenSum {
+                when: over_refunded(),
+                alias: "over_refunded_orders".into(),
+            },
+            // `CAST(AVG(<bigint>) AS DOUBLE PRECISION)` — a float everywhere.
+            AggregateColumnSpec::Avg {
+                field: "total_cents".into(),
+                alias: "mean".into(),
+                cast_as: Some(CastType::Double),
+            },
+        ],
+        filters: vec![],
+        group_by: vec![GroupBySpec::Column("account".into())],
+        sort: vec![SortField {
+            field: "account".into(),
+            desc: false,
+        }],
+        limit: 0,
+    };
+    let groups = svc
+        .aggregate("conf_money", spec)
+        .await
+        .expect("aggregate with casts, SumWhere and a column-to-column predicate");
+    assert_eq!(groups.len(), 2, "two account groups");
+    let expect = [
+        ("a", 3000_i64, 2500_i64, 2000_i64, 1_i64, 1500.0_f64),
+        ("b", 3_000_000_000, 3_000_000_000, 0, 0, 3_000_000_000.0),
+    ];
+    for (grp, (account, gross, refunded, over_total, over_orders, mean)) in
+        groups.iter().zip(expect)
+    {
+        assert_eq!(grp.data["account"], serde_json::json!(account), "group key");
+        assert_eq!(field_i64(grp, "gross"), gross, "cast Sum for {account}");
+        assert_eq!(
+            field_i64(grp, "refunded"),
+            refunded,
+            "SumWhere for {account}"
+        );
+        assert_eq!(
+            field_i64(grp, "over_refunded_total"),
+            over_total,
+            "column-compare SumWhere for {account}"
+        );
+        assert_eq!(
+            field_i64(grp, "over_refunded_orders"),
+            over_orders,
+            "column-compare CaseWhenSum for {account}"
+        );
+        assert!(
+            (field_f64(grp, "mean") - mean).abs() < 1e-6,
+            "cast Avg for {account}"
+        );
+    }
+
+    // A column-to-column predicate as a `list` filter, alone and inside an OR
+    // group: `>=` catches the equal row the strict `>` above excludes.
+    let opts = ListOptions {
+        sort: vec![SortField {
+            field: "id".into(),
+            desc: false,
+        }],
+        filter_tree: Some(vec![FilterTree::ColumnCompare(ColumnFilter {
+            field: "refunded_cents".into(),
+            operator: ColumnCompareOp::GreaterEqual,
+            column: "total_cents".into(),
+        })]),
+        ..ListOptions::default()
+    };
+    let listed = svc
+        .list("conf_money", &opts)
+        .await
+        .expect("list with a column-to-column filter");
+    let ids: Vec<&str> = listed.records.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, vec!["o2", "o3"], "refunded >= total");
+    assert_eq!(
+        listed.total_count, 2,
+        "total_count honours the column filter"
+    );
+
+    let opts = ListOptions {
+        sort: vec![SortField {
+            field: "id".into(),
+            desc: false,
+        }],
+        filter_tree: Some(vec![FilterTree::Any(vec![
+            FilterTree::ColumnCompare(ColumnFilter {
+                field: "refunded_cents".into(),
+                operator: ColumnCompareOp::LessThan,
+                column: "total_cents".into(),
+            }),
+            FilterTree::Leaf(eq("account", serde_json::json!("b"))),
+        ])]),
+        ..ListOptions::default()
+    };
+    let listed = svc
+        .list("conf_money", &opts)
+        .await
+        .expect("list with a column-to-column filter in an OR group");
+    let ids: Vec<&str> = listed.records.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, vec!["o1", "o3"], "refunded < total OR account = b");
 }
 
 // ---------------------------------------------------------------------------

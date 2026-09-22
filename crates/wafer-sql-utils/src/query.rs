@@ -1,5 +1,7 @@
 use sea_query::{Asterisk, Cond, Expr, LikeExpr, Order, Query, SelectStatement, SimpleExpr};
-use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
+use wafer_block::db::{
+    ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
+};
 
 use crate::{ident::DynCol, value::json_to_sea_value, Backend};
 
@@ -55,6 +57,21 @@ pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
     }
 }
 
+/// Render one [`ColumnFilter`] leaf — `field <op> column` — to a sea-query
+/// predicate. Both columns reach sea-query via [`DynCol`], which quotes them.
+fn column_compare_expr(filter: &ColumnFilter) -> SimpleExpr {
+    let left = Expr::col(DynCol(filter.field.clone()));
+    let right = Expr::col(DynCol(filter.column.clone()));
+    match filter.operator {
+        ColumnCompareOp::Equal => left.eq(right),
+        ColumnCompareOp::NotEqual => left.ne(right),
+        ColumnCompareOp::GreaterThan => left.gt(right),
+        ColumnCompareOp::GreaterEqual => left.gte(right),
+        ColumnCompareOp::LessThan => left.lt(right),
+        ColumnCompareOp::LessEqual => left.lte(right),
+    }
+}
+
 /// Convert a slice of Filters into a sea_query Cond (AND-combined).
 /// Returns None if filters is empty.
 pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
@@ -70,7 +87,8 @@ pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
 
 /// Convert a predicate **tree** into a sea_query `Cond`. The top-level slice
 /// is AND-combined; `All` nodes render `Cond::all()`, `Any` nodes
-/// `Cond::any()`, leaves render via [`leaf_expr`]. Empty slice → `None`.
+/// `Cond::any()`, value leaves render via [`leaf_expr`] and column-to-column
+/// leaves as `field <op> column`. Empty slice → `None`.
 ///
 /// Bounds (depth / node count) are enforced by the caller (the database
 /// handler) before conversion, so this function assumes already-validated
@@ -107,6 +125,7 @@ pub fn tree_to_simple_expr(nodes: &[FilterTree]) -> SimpleExpr {
 fn node_to_cond(node: &FilterTree) -> Cond {
     match node {
         FilterTree::Leaf(f) => Cond::all().add(leaf_expr(f)),
+        FilterTree::ColumnCompare(f) => Cond::all().add(column_compare_expr(f)),
         FilterTree::All(children) => {
             let mut c = Cond::all();
             for child in children {
@@ -918,5 +937,40 @@ mod tests {
         let (sql, _) = crate::render_select(q, Backend::Sqlite);
         assert!(sql.contains(" OR "), "{sql}");
         assert!(sql.contains("AND"), "{sql}");
+    }
+
+    #[test]
+    fn column_compare_leaf_renders_both_sides_as_quoted_columns() {
+        use wafer_block::db::{ColumnCompareOp, ColumnFilter, FilterTree};
+        let cases = [
+            (ColumnCompareOp::Equal, "="),
+            (ColumnCompareOp::NotEqual, "<>"),
+            (ColumnCompareOp::GreaterThan, ">"),
+            (ColumnCompareOp::GreaterEqual, ">="),
+            (ColumnCompareOp::LessThan, "<"),
+            (ColumnCompareOp::LessEqual, "<="),
+        ];
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            for (operator, sql_op) in cases {
+                let tree = vec![FilterTree::ColumnCompare(ColumnFilter {
+                    field: "refunded_total_cents".into(),
+                    operator,
+                    column: "total_cents".into(),
+                })];
+                let mut q = sea_query::Query::select();
+                q.column(sea_query::Asterisk)
+                    .from(crate::ident::DynCol("orders".into()))
+                    .cond_where(build_condition_tree(&tree).expect("some"));
+                let (sql, values) = crate::render_select(q, backend);
+                assert_eq!(
+                    sql,
+                    format!(
+                        "SELECT * FROM \"orders\" WHERE \"refunded_total_cents\" {sql_op} \"total_cents\""
+                    ),
+                    "{backend:?} {operator:?}"
+                );
+                assert!(values.is_empty(), "a column operand binds no value");
+            }
+        }
     }
 }

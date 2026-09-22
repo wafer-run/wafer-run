@@ -41,14 +41,19 @@ fn sorted_pairs(data: &HashMap<String, serde_json::Value>) -> Vec<(String, serde
     pairs
 }
 
-/// Recursively collect the `field` name of every [`FilterTree::Leaf`],
-/// depth-first. Used by [`DbExec::ensure_query_columns`] so fields that only
+/// Recursively collect every column a [`FilterTree`] names — the `field` of
+/// each [`FilterTree::Leaf`], and both columns of each
+/// [`FilterTree::ColumnCompare`] — depth-first. Used by [`DbExec::ensure_query_columns`] so fields that only
 /// appear inside a group (`All`/`Any`) — not the flat `opts.filters` list —
 /// still get their lazy TEXT column added before the query runs.
 fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
     fn walk<'a>(node: &'a FilterTree, out: &mut Vec<&'a str>) {
         match node {
             FilterTree::Leaf(f) => out.push(f.field.as_str()),
+            FilterTree::ColumnCompare(f) => {
+                out.push(f.field.as_str());
+                out.push(f.column.as_str());
+            }
             FilterTree::All(children) | FilterTree::Any(children) => {
                 for child in children {
                     walk(child, out);
