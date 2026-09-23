@@ -33,10 +33,12 @@ use wafer_run::{Message, StaticConfigSource, Wafer};
 /// - For lifecycle ops (`wafer_resolve`/`wafer_start`/`wafer_stop`): `result`
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
-///   the form `{"action":"respond|drop|error|continue|halt", ...}`. The
-///   wire format (including the `body` vs `body_base64` rules for `respond`
-///   and `halt`) is documented on [`wafer_run::embed::output_to_json`],
-///   which produces it.
+///   the form `{"action":"respond|drop|error|continue|halt", ...}`. Its
+///   `meta` holds only the canonical response keys (`resp.status`,
+///   `resp.header.*`, `resp.cookie.*`, `resp.content_type`); request state
+///   never crosses this boundary. The wire format (including the `body` vs
+///   `body_base64` rules for `respond` and `halt`) is documented on
+///   [`wafer_run::embed::output_to_json`], which produces it.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.

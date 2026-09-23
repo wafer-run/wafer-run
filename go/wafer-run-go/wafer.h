@@ -104,14 +104,26 @@ char* wafer_register(WaferRuntime* w, const char* name, const char* path);
 /* --- Execution ----------------------------------------------------------- */
 
 /*
- * Run a flow with the given message (async).
+ * Run a flow with the given message (async). The message carries no body;
+ * wafer_run dispatches with an empty input stream.
  *
  *   flow_id      — the flow identifier
  *   message_json — JSON string matching the Message schema:
- *                  {"kind": "...", "data": "...", "meta": {"key": "val"}}
+ *                  {"kind": "...", "meta": [{"key": "...", "value": "..."}]}
+ *                  Both fields are required; `meta` may be [].
  *
  * Returns immediately. Invokes `cb` with a JSON result string of the form
- *   {"action": "respond|drop|error|continue", ...}
+ *   {"action": "respond|drop|error|continue|halt", ...}
+ *
+ * Every action but "drop" carries a "meta" object holding ONLY the canonical
+ * response keys — "resp.status", "resp.header.*", "resp.cookie.*",
+ * "resp.content_type" — for the host to apply to its response. Request state
+ * (headers, cookies, caller identity, client IP, query) never crosses this
+ * boundary, even when the block built its terminal from the request message.
+ * "respond" carries "body" or "body_base64", "halt" always "body_base64",
+ * "error" an {"code","message","detail_code"?} object, "continue" the
+ * follow-up message's "kind".
+ *
  * The result pointer is freed by the FFI after the callback returns.
  */
 void wafer_run(WaferRuntime* w,
