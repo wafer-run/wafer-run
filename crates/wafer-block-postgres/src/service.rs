@@ -453,12 +453,21 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
 }
 
 /// A failed statement as a [`DatabaseError`]: a unique violation (SQLSTATE
-/// `23505`, primary keys included) is [`DatabaseError::AlreadyExists`],
-/// anything else `Internal`.
+/// `23505`, primary keys included) on a row of a user table is
+/// [`DatabaseError::AlreadyExists`]; anything else is `Internal`.
+///
+/// A `23505` on a `pg_catalog` table is not a duplicate row: two sessions
+/// creating the same table at once collide on a catalog index
+/// (`pg_type_typname_nsp_index`) even under `IF NOT EXISTS`. That is a DDL
+/// race, and reporting it as a taken key would misdirect the caller.
 fn statement_error(e: &sqlx::Error) -> DatabaseError {
-    if e.as_database_error()
-        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
-    {
+    let duplicate_row = e.as_database_error().is_some_and(|db| {
+        db.is_unique_violation()
+            && db
+                .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+                .is_some_and(|pg| pg.schema().is_some_and(|schema| schema != "pg_catalog"))
+    });
+    if duplicate_row {
         DatabaseError::AlreadyExists(e.to_string())
     } else {
         DatabaseError::Internal(e.to_string())

@@ -394,3 +394,60 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
         "five racing updates under a 60-byte cap: {updates:?}"
     );
 }
+
+/// Two sessions creating the same table at once collide on a catalog index
+/// (`pg_type_typname_nsp_index`, SQLSTATE 23505) even under `IF NOT EXISTS`.
+/// That is a DDL race, not a duplicate row: it must stay `Internal`, never
+/// `AlreadyExists`. An uncommitted `CREATE TABLE` in another session forces
+/// the collision: the service's create waits on it, then fails once it
+/// commits. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_catalog_collision_is_not_already_exists() {
+    use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::{pk, DatabaseError, DatabaseService, Table};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres catalog-collision check: set {URL_ENV} to run");
+        return;
+    };
+    let table = "conf_catalog_race";
+    let admin = PgPool::connect(&url).await.expect("connect as admin");
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(&admin)
+        .await
+        .expect("drop");
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect the service");
+
+    let mut other = admin.begin().await.expect("begin the other session");
+    sqlx::query(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY)"))
+        .execute(&mut *other)
+        .await
+        .expect("create in the other session");
+    let schema = Table {
+        name: table.into(),
+        columns: vec![pk("id")],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    let create = svc.ensure_schema_table(&schema);
+    let commit = async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        other.commit().await.expect("commit the other session");
+    };
+    let (created, ()) = tokio::join!(create, commit);
+
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(&admin)
+        .await
+        .expect("drop");
+    match created {
+        Err(DatabaseError::Internal(msg)) => assert!(
+            msg.contains("23505") || msg.contains("duplicate key"),
+            "{msg}"
+        ),
+        other => panic!("a catalog collision must be Internal, got {other:?}"),
+    }
+}
