@@ -430,8 +430,14 @@
   handler authorizes every op's collection for WRITE before anything runs,
   and validates every op (filters, upsert identifiers) before any SQL, so a
   batch naming one collection the caller may not write, or one malformed op,
-  touches nothing. Lazily added columns are created before the transaction
-  and are not rolled back with it. Guest clients:
+  touches nothing. One call carries at most `wire::database::MAX_BATCH_WRITES`
+  (1000) ops or rows — Cloudflare's per-invocation D1 query limit on Workers
+  Paid (the Free plan allows 50), which also bounds how long one call holds
+  SQLite's single write connection; a larger call is `InvalidArgument`. An
+  `UpdateWhere` against a missing table matches nothing
+  (`UpdatedWhere { rows_affected: 0 }`), as `update_where_count` returns 0.
+  Lazily added columns are created before the transaction and are not
+  rolled back with it. Guest clients:
   `wafer_core::clients::database::{create_many, batch}` and
   `wafer_sdk::clients::database::{create_many, batch}`; builders
   `wafer_sql_utils::query::{build_insert_returning,

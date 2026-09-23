@@ -1564,6 +1564,44 @@ async fn check_batch(svc: &dyn DatabaseService) {
         .await
         .expect("an empty batch")
         .is_empty());
+
+    // An `UpdateWhere` against a missing table matches nothing, as the single
+    // `update_where_count` does: it does not abort the batch around it.
+    svc.schema_drop_table("conf_batch_missing")
+        .await
+        .expect("drop (idempotent)");
+    assert_eq!(
+        svc.update_where_count(
+            "conf_batch_missing",
+            &[eq("category", serde_json::json!("a"))],
+            row([("name", serde_json::json!("Z"))]),
+        )
+        .await
+        .expect("single op on a missing table"),
+        0
+    );
+    let outcomes = svc
+        .batch(vec![
+            WriteOp::Create {
+                collection: "conf_batch".into(),
+                data: row([("id", serde_json::json!("beside_missing"))]),
+            },
+            WriteOp::UpdateWhere {
+                collection: "conf_batch_missing".into(),
+                filters: vec![eq("category", serde_json::json!("a"))],
+                data: row([("name", serde_json::json!("Z"))]),
+            },
+        ])
+        .await
+        .expect("an update-where on a missing table does not fail the batch");
+    assert!(
+        matches!(outcomes[1], WriteOutcome::UpdatedWhere { rows_affected: 0 }),
+        "{:?}",
+        outcomes[1]
+    );
+    svc.get("conf_batch", "beside_missing")
+        .await
+        .expect("the op beside it committed");
 }
 
 // ---------------------------------------------------------------------------

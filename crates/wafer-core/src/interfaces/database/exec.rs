@@ -913,13 +913,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sanitize_ident(collection);
         let mut data = data;
 
-        if !data.contains_key("id") && !self.table_autogenerates_id(&table).await {
-            data.insert(
-                "id".to_string(),
-                serde_json::Value::String(mint_record_id()),
-            );
-        }
-        stamp_timestamps(&mut data, true);
+        // The key probe only matters for a row without an id.
+        let autogenerates_id =
+            !data.contains_key("id") && self.table_autogenerates_id(&table).await;
+        prepare_created_row(&mut data, autogenerates_id);
 
         // Ensure any new columns exist. Table creation itself is the block
         // migration's job; a failure here is a real DDL error and propagates
@@ -1445,17 +1442,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// then run every statement as ONE
     /// [`run_transaction`](Self::run_transaction).
     ///
+    /// An `UpdateWhere` against a missing table settles as
+    /// `UpdatedWhere { rows_affected: 0 }` without a statement, exactly as
+    /// [`update_where_count`](Self::update_where_count) returns 0; every other
+    /// op fails on a missing table, as its single op does.
+    ///
     /// The lazy column-adds run before the transaction and are not rolled
     /// back with it. An empty `ops` runs nothing.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
-        /// How the statement planned for an op decodes back into its outcome.
-        #[derive(Clone, Copy)]
+        /// How the statement planned for an op decodes back into its outcome,
+        /// or the outcome of an op that needs no statement.
         enum Planned {
             Created,
             Updated,
             Deleted,
             UpdatedWhere,
             Upserted,
+            Settled(WriteOutcome),
         }
 
         let mut planned = Vec::with_capacity(ops.len());
@@ -1504,6 +1507,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     mut data,
                 } => {
                     let table = sanitize_ident(&collection);
+                    if !self.table_present_for_op(&table).await? {
+                        planned.push(Planned::Settled(WriteOutcome::UpdatedWhere {
+                            rows_affected: 0,
+                        }));
+                        continue;
+                    }
                     stamp_timestamps(&mut data, false);
                     self.ensure_data_columns(&table, &data).await?;
                     self.ensure_query_columns(&table, &filters, &[], None)
@@ -1525,54 +1534,66 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
         if statements.is_empty() {
-            return Ok(Vec::new());
+            return Ok(planned
+                .into_iter()
+                .filter_map(|kind| match kind {
+                    Planned::Settled(outcome) => Some(outcome),
+                    _ => None,
+                })
+                .collect());
         }
 
         let tx_ops: Vec<TxOp<'_>> = statements
             .iter()
-            .zip(&planned)
+            .zip(planned.iter().filter(|k| !matches!(k, Planned::Settled(_))))
             .map(|((sql, params), kind)| match kind {
                 Planned::Created | Planned::Updated => TxOp::Returning { sql, params },
-                Planned::Deleted | Planned::UpdatedWhere | Planned::Upserted => {
-                    TxOp::Execute { sql, params }
-                }
+                _ => TxOp::Execute { sql, params },
             })
             .collect();
         let results = self.run_transaction(&tx_ops).await?;
-        if results.len() != planned.len() {
+        if results.len() != statements.len() {
             return Err(DatabaseError::Internal(format!(
                 "run_transaction returned {} results for {} statements",
                 results.len(),
-                planned.len()
+                statements.len()
             )));
         }
 
+        let mut results = results.into_iter();
         planned
             .into_iter()
-            .zip(results)
-            .map(|(kind, result)| match (kind, result) {
-                (Planned::Created, TxResult::Returning(rows)) => rows
-                    .into_iter()
-                    .next()
-                    .map(WriteOutcome::Created)
-                    .ok_or_else(|| {
-                        DatabaseError::Internal("INSERT … RETURNING returned no row".into())
-                    }),
-                (Planned::Updated, TxResult::Returning(rows)) => {
-                    Ok(WriteOutcome::Updated(rows.into_iter().next()))
+            .map(|kind| {
+                if let Planned::Settled(outcome) = kind {
+                    return Ok(outcome);
                 }
-                (Planned::Deleted, TxResult::Execute(rows_affected)) => {
-                    Ok(WriteOutcome::Deleted { rows_affected })
+                let result = results.next().ok_or_else(|| {
+                    DatabaseError::Internal("run_transaction returned too few results".into())
+                })?;
+                match (kind, result) {
+                    (Planned::Created, TxResult::Returning(rows)) => rows
+                        .into_iter()
+                        .next()
+                        .map(WriteOutcome::Created)
+                        .ok_or_else(|| {
+                            DatabaseError::Internal("INSERT … RETURNING returned no row".into())
+                        }),
+                    (Planned::Updated, TxResult::Returning(rows)) => {
+                        Ok(WriteOutcome::Updated(rows.into_iter().next()))
+                    }
+                    (Planned::Deleted, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::Deleted { rows_affected })
+                    }
+                    (Planned::UpdatedWhere, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::UpdatedWhere { rows_affected })
+                    }
+                    (Planned::Upserted, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::Upserted { rows_affected })
+                    }
+                    (_, other) => Err(DatabaseError::Internal(format!(
+                        "run_transaction returned {other:?} for a statement of the other kind"
+                    ))),
                 }
-                (Planned::UpdatedWhere, TxResult::Execute(rows_affected)) => {
-                    Ok(WriteOutcome::UpdatedWhere { rows_affected })
-                }
-                (Planned::Upserted, TxResult::Execute(rows_affected)) => {
-                    Ok(WriteOutcome::Upserted { rows_affected })
-                }
-                (_, other) => Err(DatabaseError::Internal(format!(
-                    "run_transaction returned {other:?} for a statement of the other kind"
-                ))),
             })
             .collect()
     }

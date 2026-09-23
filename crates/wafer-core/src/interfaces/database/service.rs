@@ -405,7 +405,10 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// return the number inserted. Each row gets [`create`](Self::create)'s
     /// stamping; rows may carry different column sets. Either every row is
     /// stored or, when any insert fails, none is. No default: a backend that
-    /// cannot make the inserts atomic must say so with an error.
+    /// cannot make the inserts atomic must say so with an error. The database
+    /// handler refuses a call carrying more than
+    /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
+    /// rows before it reaches this method.
     async fn create_many(
         &self,
         collection: &str,
@@ -416,7 +419,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`WriteOutcome`] per op in the same order. Either every op is applied
     /// or, when any statement fails, none is. An `Update`/`Delete` whose id
     /// matches no row is an outcome, not a failure. No default, for the same
-    /// reason as [`create_many`](Self::create_many).
+    /// reason as [`create_many`](Self::create_many); the handler caps `ops` at
+    /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
+    /// the same way.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
 
     /// Update modifies an existing record by ID.

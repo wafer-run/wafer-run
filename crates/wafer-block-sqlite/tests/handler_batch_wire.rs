@@ -15,6 +15,7 @@ use wafer_block::{
         output::{OutputStream, TerminalNotResponse},
     },
     types::ResourceType,
+    wire::database::MAX_BATCH_WRITES,
     ErrorCode, Message, WaferError,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
@@ -246,4 +247,68 @@ async fn a_failing_statement_rolls_the_whole_batch_back() {
         serde_json::json!("orig"),
         "the update was rolled back"
     );
+}
+
+/// A call carrying more than `MAX_BATCH_WRITES` rows or ops is refused as
+/// `InvalidArgument` before any write; a call of exactly the limit runs.
+#[tokio::test]
+async fn calls_over_the_write_limit_are_refused_and_the_limit_itself_runs() {
+    let svc = seeded().await;
+    let rows = |n: usize| -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| serde_json::json!({ "name": format!("r{i}") }))
+            .collect()
+    };
+    let creates = |n: usize| -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                serde_json::json!({ "Create": {
+                    "collection": TABLE, "data": { "name": format!("b{i}") },
+                } })
+            })
+            .collect()
+    };
+
+    for (op, request) in [
+        (
+            ServiceOp::DATABASE_CREATE_MANY,
+            serde_json::json!({ "collection": TABLE, "rows": rows(MAX_BATCH_WRITES + 1) }),
+        ),
+        (
+            ServiceOp::DATABASE_BATCH,
+            serde_json::json!({ "ops": creates(MAX_BATCH_WRITES + 1) }),
+        ),
+    ] {
+        let err = dispatch(&svc, op, &request)
+            .await
+            .expect_err("one over the limit is refused");
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidArgument,
+            "{op}: {}",
+            err.message
+        );
+        assert_eq!(count(&svc).await, 3, "{op}: nothing was written");
+    }
+
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_CREATE_MANY,
+        &serde_json::json!({ "collection": TABLE, "rows": rows(MAX_BATCH_WRITES) }),
+    )
+    .await
+    .expect("create_many of exactly the limit");
+    assert_eq!(resp["rows_affected"], MAX_BATCH_WRITES);
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": creates(MAX_BATCH_WRITES) }),
+    )
+    .await
+    .expect("batch of exactly the limit");
+    assert_eq!(
+        resp["results"].as_array().map(Vec::len),
+        Some(MAX_BATCH_WRITES)
+    );
+    assert_eq!(count(&svc).await, 3 + 2 * MAX_BATCH_WRITES as i64);
 }

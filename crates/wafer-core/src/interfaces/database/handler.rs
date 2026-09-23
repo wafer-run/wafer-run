@@ -649,6 +649,13 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
+            if req.rows.len() > wire::MAX_BATCH_WRITES {
+                return OutputStream::error(invalid(format!(
+                    "create_many carries {} rows; at most {} per call",
+                    req.rows.len(),
+                    wire::MAX_BATCH_WRITES
+                )));
+            }
             match service.create_many(&req.collection, req.rows).await {
                 Ok(rows_affected) => to_output(&wire::CreateManyResponse { rows_affected }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -678,6 +685,13 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
+            if req.ops.len() > wire::MAX_BATCH_WRITES {
+                return OutputStream::error(invalid(format!(
+                    "batch carries {} ops; at most {} per call",
+                    req.ops.len(),
+                    wire::MAX_BATCH_WRITES
+                )));
+            }
             let ops = match req
                 .ops
                 .into_iter()
