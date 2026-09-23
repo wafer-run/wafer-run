@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // scope this to a path prefix matching `web_root` instead of "*".
     wafer.add_wrap_grants(vec![
         ResourceGrant::read("wafer-run/web", "*").typed(ResourceType::Storage)
-    ]);
+    ])?;
 
     tracing::info!("serving static files from ./public on http://localhost:8080");
     let wafer = wafer.start().await?;

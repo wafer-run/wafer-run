@@ -202,6 +202,14 @@ mod tests {
         ) -> Result<(), WaferError> {
             Ok(())
         }
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _access: ResourceAccess,
+        ) -> bool {
+            true
+        }
     }
 
     /// A `NetworkService` that returns a fixed-body 200 response.

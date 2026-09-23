@@ -20,7 +20,7 @@ pub use block_info::{BlockCategory, BlockInfo, BlockInfoError, BlockRuntime};
 pub use config_var::{ConfigVar, InputType, WAFER_RUN_SHARED_PREFIX};
 pub use endpoint::{AgentTool, AuthLevel, BlockEndpoint, HttpMethod};
 pub use grants::{
-    InvalidGrantShape, ResourceAccess, ResourceGrant, ResourceType, UnknownResourceType,
+    GrantWrite, InvalidGrantShape, ResourceAccess, ResourceGrant, ResourceType, UnknownResourceType,
 };
 pub use interface_spec::{ActionSpec, InterfaceSpec};
 pub use message_ext::{hashmap_to_meta, meta_to_hashmap, MetaGet, MetaSet};

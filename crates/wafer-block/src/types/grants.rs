@@ -110,34 +110,88 @@ impl std::fmt::Display for ResourceAccess {
     }
 }
 
+/// How much a [`ResourceGrant`] lets its grantee change — the grant's
+/// `write` field.
+///
+/// Encoded on the wire as `false` ([`Self::None`]), `true` ([`Self::Full`])
+/// or the string `"append"` ([`Self::Append`]). The first two are the
+/// boolean `write` field as it has always been encoded, so every existing
+/// grant keeps its encoding and its meaning. `"append"` is deliberately not
+/// a boolean: a runtime that predates append-only grants decodes `write` as
+/// a `bool`, so it rejects a grant carrying `"append"` — and with it the
+/// declaring `BlockInfo` — instead of reading it as a read-only grant and
+/// admitting reads the grant never conferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GrantWrite {
+    /// Read-only: admits [`ResourceAccess::Read`].
+    #[default]
+    None,
+    /// Read-write: admits every [`ResourceAccess`].
+    Full,
+    /// Append-only: admits [`ResourceAccess::Append`] on database
+    /// collections, and nothing else — not even [`ResourceAccess::Read`].
+    Append,
+}
+
+/// The wire string of [`GrantWrite::Append`].
+const GRANT_WRITE_APPEND: &str = "append";
+
+impl serde::Serialize for GrantWrite {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::None => serializer.serialize_bool(false),
+            Self::Full => serializer.serialize_bool(true),
+            Self::Append => serializer.serialize_str(GRANT_WRITE_APPEND),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GrantWrite {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct GrantWriteVisitor;
+
+        impl serde::de::Visitor<'_> for GrantWriteVisitor {
+            type Value = GrantWrite;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a boolean or the string `{GRANT_WRITE_APPEND}`")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<GrantWrite, E> {
+                Ok(if v {
+                    GrantWrite::Full
+                } else {
+                    GrantWrite::None
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<GrantWrite, E> {
+                if v == GRANT_WRITE_APPEND {
+                    Ok(GrantWrite::Append)
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Str(v), &self))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(GrantWriteVisitor)
+    }
+}
+
 /// A resource access grant declared by a block.
 ///
 /// Blocks can only grant access to resources they own (enforced at startup).
 /// The runtime collects all grants and checks them in `call_block()`.
-///
-/// A grant is one of three kinds, chosen by `write` and `append`:
-///
-/// | `write` | `append` | kind                        | admits                  |
-/// |---------|----------|-----------------------------|-------------------------|
-/// | `false` | `false`  | read-only ([`Self::read`])  | `Read`                  |
-/// | `true`  | `false`  | read-write ([`Self::read_write`]) | `Read`, `Append`, `Write` |
-/// | `false` | `true`   | append-only ([`Self::append`]) | `Append`             |
-/// | `true`  | `true`   | invalid ([`Self::check_shape`]) | nothing             |
+/// What the grant admits is set by [`Self::write`]; see [`Self::admits`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResourceGrant {
     /// Block ID that receives this grant, or `"*"` for all blocks.
     pub grantee: String,
     /// Exact resource name or prefix pattern ending with `*`.
     pub resource: String,
-    /// If true, the grantee can both read and write. If false, read-only
-    /// (or append-only, when `append` is set).
+    /// Read-only, read-write or append-only.
     #[serde(default)]
-    pub write: bool,
-    /// If true, the grantee may only insert rows into the matched database
-    /// collections — no read, update, delete or upsert. Requires
-    /// `write == false` and `resource_type == Some(ResourceType::Db)`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub append: bool,
+    pub write: GrantWrite,
     /// Resource type this grant applies to. `None` = all types (wildcard).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<ResourceType>,
@@ -149,8 +203,7 @@ impl ResourceGrant {
         Self {
             grantee: grantee.to_string(),
             resource: resource.to_string(),
-            write: false,
-            append: false,
+            write: GrantWrite::None,
             resource_type: None,
         }
     }
@@ -160,8 +213,7 @@ impl ResourceGrant {
         Self {
             grantee: grantee.to_string(),
             resource: resource.to_string(),
-            write: true,
-            append: false,
+            write: GrantWrite::Full,
             resource_type: None,
         }
     }
@@ -169,14 +221,14 @@ impl ResourceGrant {
     /// Create an append-only grant on database collections: the grantee may
     /// insert rows (`database.create`, `create_many`, a `Create` inside
     /// `database.batch`) and nothing else — it cannot read, update, delete,
-    /// upsert or consume a row. Pair it with [`Self::read`] on the same
+    /// upsert or consume a row, add a column, or choose a row's `id`,
+    /// `created_at` or `updated_at`. Pair it with [`Self::read`] on the same
     /// resource when the grantee also needs to read.
     pub fn append(grantee: &str, resource: &str) -> Self {
         Self {
             grantee: grantee.to_string(),
             resource: resource.to_string(),
-            write: false,
-            append: true,
+            write: GrantWrite::Append,
             resource_type: Some(ResourceType::Db),
         }
     }
@@ -187,31 +239,33 @@ impl ResourceGrant {
         self
     }
 
-    /// Whether this grant admits a request for `access` — the access half of
-    /// grant matching (grantee, resource pattern and resource type are
-    /// matched by [`crate::wrap::check_access`]). A grant that fails
-    /// [`Self::check_shape`] admits nothing, so a malformed grant that
-    /// reaches the check without passing registration fails closed.
+    /// Whether this grant admits a request for `access`. This is the access
+    /// half of grant matching; the grantee, resource pattern and resource
+    /// type are matched alongside it when [`crate::wrap::check_access`]
+    /// looks for a grant.
+    ///
+    /// A read-only grant admits `Read`; a read-write grant admits every
+    /// access; an append-only grant admits `Append` only, and only when it
+    /// is typed `Db` — an append grant of any other type admits nothing
+    /// (registration rejects it too, see [`Self::check_shape`]).
     #[must_use]
     pub fn admits(&self, access: ResourceAccess) -> bool {
-        match (self.write, self.append) {
-            (false, false) => access == ResourceAccess::Read,
-            (true, false) => true,
-            (false, true) => access == ResourceAccess::Append,
-            (true, true) => false,
+        match self.write {
+            GrantWrite::None => access == ResourceAccess::Read,
+            GrantWrite::Full => true,
+            GrantWrite::Append => {
+                access == ResourceAccess::Append && self.resource_type == Some(ResourceType::Db)
+            }
         }
     }
 
-    /// Reject a grant whose fields contradict each other: `append` together
-    /// with `write`, or `append` on anything but a typed `Db` grant (only a
-    /// database collection has an insert-only access to admit). Called at
-    /// block registration, where a failing grant is rejected with
+    /// Reject a grant the runtime will not install: an append-only grant
+    /// not typed `Db` (only a database collection has an insert-only access
+    /// to admit). Block registration and `Wafer::add_wrap_grants` both run
+    /// it, rejecting a failing grant with
     /// [`crate::error::GrantValidationError`].
     pub fn check_shape(&self) -> Result<(), InvalidGrantShape> {
-        if self.append && self.write {
-            return Err(InvalidGrantShape::AppendWithWrite);
-        }
-        if self.append && self.resource_type != Some(ResourceType::Db) {
+        if self.write == GrantWrite::Append && self.resource_type != Some(ResourceType::Db) {
             return Err(InvalidGrantShape::AppendNotDb);
         }
         Ok(())
@@ -221,19 +275,13 @@ impl ResourceGrant {
 /// Error from [`ResourceGrant::check_shape`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidGrantShape {
-    /// `append` and `write` are both set; a grant is either read-write or
-    /// append-only.
-    AppendWithWrite,
-    /// `append` is set on a grant not typed `Db`.
+    /// An append-only grant not typed `Db`.
     AppendNotDb,
 }
 
 impl std::fmt::Display for InvalidGrantShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AppendWithWrite => f.write_str(
-                "`append` and `write` are both set; a grant is either read-write or append-only",
-            ),
             Self::AppendNotDb => f.write_str(
                 "append-only grants apply to database collections only; type the grant `db`",
             ),
@@ -288,39 +336,34 @@ mod tests {
     #[test]
     fn grant_kinds_admit_their_accesses() {
         use ResourceAccess::{Append, Read, Write};
-        let read = ResourceGrant::read("a/b", "x__y__z");
-        let rw = ResourceGrant::read_write("a/b", "x__y__z");
-        let append = ResourceGrant::append("a/b", "x__y__z");
+        let admitted = |g: &ResourceGrant| [g.admits(Read), g.admits(Append), g.admits(Write)];
         assert_eq!(
-            [read.admits(Read), read.admits(Append), read.admits(Write)],
+            admitted(&ResourceGrant::read("a/b", "x__y__z")),
             [true, false, false]
         );
         assert_eq!(
-            [rw.admits(Read), rw.admits(Append), rw.admits(Write)],
+            admitted(&ResourceGrant::read_write("a/b", "x__y__z")),
             [true, true, true]
         );
         assert_eq!(
-            [
-                append.admits(Read),
-                append.admits(Append),
-                append.admits(Write)
-            ],
+            admitted(&ResourceGrant::append("a/b", "x__y__z")),
             [false, true, false]
         );
-        let mut both = ResourceGrant::read_write("a/b", "x__y__z").typed(ResourceType::Db);
-        both.append = true;
-        assert!(![Read, Append, Write].into_iter().any(|a| both.admits(a)));
+        // An append grant not typed `Db` admits nothing, even if it reaches
+        // the check without passing `check_shape`.
+        let untyped = ResourceGrant {
+            resource_type: None,
+            ..ResourceGrant::append("a/b", "x__y__z")
+        };
+        assert_eq!(admitted(&untyped), [false, false, false]);
     }
 
     #[test]
-    fn check_shape_rejects_contradictory_append_grants() {
+    fn check_shape_rejects_append_grants_not_typed_db() {
         assert_eq!(
             ResourceGrant::append("a/b", "x__y__z").check_shape(),
             Ok(())
         );
-        let mut both = ResourceGrant::append("a/b", "x__y__z");
-        both.write = true;
-        assert_eq!(both.check_shape(), Err(InvalidGrantShape::AppendWithWrite));
         let untyped = ResourceGrant {
             resource_type: None,
             ..ResourceGrant::append("a/b", "x__y__z")
@@ -328,27 +371,62 @@ mod tests {
         assert_eq!(untyped.check_shape(), Err(InvalidGrantShape::AppendNotDb));
         let storage = ResourceGrant::append("a/b", "x/y").typed(ResourceType::Storage);
         assert_eq!(storage.check_shape(), Err(InvalidGrantShape::AppendNotDb));
+        assert_eq!(
+            ResourceGrant::read_write("a/b", "x/y").check_shape(),
+            Ok(())
+        );
     }
 
     #[test]
-    fn append_flag_serializes_only_when_set() {
-        // A read or read-write grant serializes exactly as before the
-        // `append` field existed, and a payload without it deserializes as
-        // not append-only — existing declarations keep their meaning.
+    fn existing_grants_keep_their_encoding() {
         let rw = serde_json::to_value(ResourceGrant::read_write("a/b", "x__y__z")).unwrap();
         assert_eq!(
             rw,
             serde_json::json!({"grantee": "a/b", "resource": "x__y__z", "write": true})
         );
-        let legacy: ResourceGrant = serde_json::from_value(
-            serde_json::json!({"grantee": "a/b", "resource": "r", "write": true}),
-        )
-        .unwrap();
-        assert!(!legacy.append);
-        let append = serde_json::to_value(ResourceGrant::append("a/b", "x__y__z")).unwrap();
-        assert_eq!(append["append"], serde_json::json!(true));
-        let back: ResourceGrant = serde_json::from_value(append).unwrap();
-        assert!(back.append && !back.write);
+        let ro = serde_json::to_value(ResourceGrant::read("a/b", "x__y__z")).unwrap();
+        assert_eq!(ro["write"], serde_json::json!(false));
+        let absent: ResourceGrant =
+            serde_json::from_value(serde_json::json!({"grantee": "a/b", "resource": "r"})).unwrap();
+        assert_eq!(absent.write, GrantWrite::None);
+    }
+
+    /// The `ResourceGrant` shape a runtime that predates append-only grants
+    /// decodes: `write` is a `bool`.
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "decoded only to prove the decode fails")]
+    struct PreAppendGrant {
+        grantee: String,
+        resource: String,
+        #[serde(default)]
+        write: bool,
+        #[serde(default)]
+        resource_type: Option<ResourceType>,
+    }
+
+    #[test]
+    fn append_grants_round_trip_and_older_decoders_reject_them() {
+        let append = ResourceGrant::append("a/b", "x__y__z");
+        let json = serde_json::to_value(&append).unwrap();
+        assert_eq!(json["write"], serde_json::json!("append"));
+        let back: ResourceGrant = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.write, GrantWrite::Append);
         assert_eq!(back.resource_type, Some(ResourceType::Db));
+        let packed = crate::codec::encode(&append).unwrap();
+        let back: ResourceGrant = crate::codec::decode(&packed).unwrap();
+        assert_eq!(back.write, GrantWrite::Append);
+
+        // Both BlockInfo encodings a host decodes a guest's grants from.
+        assert!(serde_json::from_value::<PreAppendGrant>(json).is_err());
+        assert!(crate::codec::decode::<PreAppendGrant>(&packed).is_err());
+        // Existing grants still decode on such a runtime.
+        let rw = crate::codec::encode(&ResourceGrant::read_write("a/b", "r")).unwrap();
+        assert!(crate::codec::decode::<PreAppendGrant>(&rw).is_ok());
+    }
+
+    #[test]
+    fn grant_write_rejects_other_strings() {
+        let bad = serde_json::json!({"grantee": "a/b", "resource": "r", "write": "yes"});
+        assert!(serde_json::from_value::<ResourceGrant>(bad).is_err());
     }
 }

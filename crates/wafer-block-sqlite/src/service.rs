@@ -633,6 +633,7 @@ forward_database_service! {
             // exactly right here — each table already gets its own write job.
             ensure_schema_tables: inherit,
             schema_table_exists: forward,
+            schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
             set_strict_schema: custom,

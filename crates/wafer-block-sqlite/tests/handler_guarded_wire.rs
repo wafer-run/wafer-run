@@ -53,6 +53,14 @@ impl Context for AllowCtx {
     ) -> Result<(), WaferError> {
         Ok(())
     }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
+    }
 }
 
 const TABLE: &str = "files";

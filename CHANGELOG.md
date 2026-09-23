@@ -204,11 +204,18 @@
   `Context` implementation and every direct caller has to be updated.
   `decode_and_authorize_all`'s closure now returns a `Result`, so it can
   refuse a request before any check runs, as `decode_and_authorize_checked`'s
-  does. `ResourceGrant` gains a public `append` field, so a struct literal
-  has to name it (`append: false` keeps a grant's meaning). No existing grant
-  changes meaning: `read` and `read_write` grants admit what they admitted,
-  and their serialized form is unchanged — `append` is omitted when false and
-  defaults to false when absent.
+  does. `Context` gains `resource_access_admitted` (default `false`); a mock
+  that admits every access should answer `true` there too.
+- `ResourceGrant::write` is a `GrantWrite` (`None` / `Full` / `Append`)
+  instead of a `bool`. `None` and `Full` encode as `false` and `true`, so
+  every existing grant keeps its wire form and its meaning; code that reads
+  or builds the field changes (`write: true` → `write: GrantWrite::Full`).
+- `DatabaseService` gains a required `schema_columns(table)`, and
+  `forward_database_service!`'s ledger a `schema_columns` entry after
+  `schema_table_exists`. A `DbExec`-backed service forwards it.
+- `Wafer::add_wrap_grants` returns `Result<(), RuntimeError>`: it rejects the
+  whole call with `GrantsRejected` when any grant fails
+  `ResourceGrant::check_shape`, where it used to install grants unchecked.
 
 ### Added
 
@@ -581,15 +588,17 @@
   table, `wrap::DATABASE_OP_ACCESS`, and a test fails when an op in
   `ServiceOp::DATABASE_OPS` is missing from it; a batch is authorized per
   write (`BatchWrite::access`), so one `Update` behind a `Create` refuses the
-  whole batch before anything runs. An append grant must be typed `Db` and
-  must not also set `write`; `ResourceGrant::check_shape` enforces both at
-  registration, rejecting the grant through `RuntimeError::GrantsRejected`,
-  and a malformed grant that reaches the check another way admits nothing.
-  Two limits are inherent to inserting: an insert that collides with an
-  existing key fails, which tells the grantee the key exists; and outside
-  `STRICT_SCHEMA` an insert naming an unseen column adds it (nullable), as
-  for any writer — existing rows are left as they are. A runtime that
-  predates the `append` field ignores it, reading an append grant as
+  whole batch before anything runs. An insert admitted only through an
+  append grant (no `Write`) must also leave the table and the row identity to
+  the server: naming `id`, `created_at` or `updated_at`, or a column the table
+  lacks, is `PermissionDenied` and nothing is written — so an append-only
+  grantee cannot forge or back-date an entry, and cannot add a column (which
+  outside `STRICT_SCHEMA` the insert would otherwise do, typed by its first
+  value). An append grant must be typed `Db`; `ResourceGrant::check_shape`
+  enforces it at registration and in `Wafer::add_wrap_grants`, and an append
+  grant of another type admits nothing. An append grant encodes `write` as
+  the string `"append"`, which a runtime that predates append grants fails to
+  decode, so it refuses the declaring block rather than reading the grant as
   read-only.
 
 ### Fixed

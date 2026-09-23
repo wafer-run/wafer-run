@@ -170,6 +170,28 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
             "WRAP: context does not implement resource-access enforcement",
         ))
     }
+
+    /// Whether [`Self::check_resource_access`] would admit the caller to
+    /// `access` `resource`, asked without recording a denial.
+    ///
+    /// For a handler choosing between two paths it is ALREADY authorized for
+    /// — e.g. the database handler asking whether an admitted insert also
+    /// holds `Write`, and applying the append-only insert rules when it does
+    /// not. It is never the authorization itself: call
+    /// `check_resource_access` for that.
+    ///
+    /// FAIL-CLOSED like `check_resource_access`: the default answers
+    /// `false`, so a Context that does not implement it gets the narrower
+    /// path.
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: crate::types::ResourceType,
+        access: crate::types::ResourceAccess,
+    ) -> bool {
+        let _ = (resource, resource_type, access);
+        false
+    }
 }
 
 #[cfg(test)]

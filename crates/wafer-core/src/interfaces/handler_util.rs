@@ -314,6 +314,14 @@ mod decode_and_authorize_tests {
         ) -> Result<(), WaferError> {
             Ok(())
         }
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _access: ResourceAccess,
+        ) -> bool {
+            true
+        }
     }
 
     /// `Context` stub that always denies access, mirroring a real WRAP

@@ -40,6 +40,9 @@ const AUDIT: &str = "test_org__ledger__audit";
 const APPENDER: &str = "test-org/appender";
 /// Holds `ResourceGrant::append` AND `ResourceGrant::read` on [`AUDIT`].
 const READ_APPENDER: &str = "test-org/read-appender";
+/// Holds `ResourceGrant::read_write` on [`AUDIT`]: the append-only insert
+/// rules do not apply to it.
+const WRITER: &str = "test-org/writer";
 
 /// The owning block: declares the grants, handles nothing.
 struct Ledger;
@@ -51,6 +54,7 @@ impl Block for Ledger {
             ResourceGrant::append(APPENDER, AUDIT),
             ResourceGrant::append(READ_APPENDER, AUDIT),
             ResourceGrant::read(READ_APPENDER, AUDIT).typed(ResourceType::Db),
+            ResourceGrant::read_write(WRITER, AUDIT).typed(ResourceType::Db),
         ])
     }
     async fn lifecycle(&self, _ctx: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
@@ -120,7 +124,7 @@ async fn build() -> (Arc<Wafer>, Arc<SQLiteDatabaseService>) {
     wafer
         .register_block(OWNER, Arc::new(Ledger))
         .expect("register owner");
-    for grantee in [APPENDER, READ_APPENDER] {
+    for grantee in [APPENDER, READ_APPENDER, WRITER] {
         wafer
             .register_block(grantee, Arc::new(Grantee(grantee)))
             .expect("register grantee");
@@ -390,4 +394,146 @@ async fn insert_guarded_needs_read_alongside_append() {
         Err(ErrorCode::PermissionDenied)
     );
     assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 2);
+}
+
+/// An append-only insert may not add a column: outside STRICT_SCHEMA the
+/// service would ALTER an unseen column into the owner's table (typed by the
+/// first value). Every insert path refuses it before the service runs; a
+/// read-write grantee still grows the table as before.
+#[tokio::test]
+async fn append_only_inserts_cannot_add_columns() {
+    let (wafer, sqlite) = build().await;
+    let evil = json!({ "action": "a", "evil": 1 });
+    let attempts = [
+        (
+            "create",
+            APPENDER,
+            ServiceOp::DATABASE_CREATE,
+            json!({ "collection": AUDIT, "data": evil }),
+        ),
+        (
+            "create_many",
+            APPENDER,
+            ServiceOp::DATABASE_CREATE_MANY,
+            json!({ "collection": AUDIT, "rows": [{ "action": "ok" }, evil] }),
+        ),
+        (
+            "batch Create",
+            APPENDER,
+            ServiceOp::DATABASE_BATCH,
+            json!({ "ops": [{ "Create": { "collection": AUDIT, "data": evil } }] }),
+        ),
+        (
+            "insert_guarded",
+            READ_APPENDER,
+            ServiceOp::DATABASE_INSERT_GUARDED,
+            json!({
+                "collection": AUDIT,
+                "data": evil,
+                "guards": [{ "CountBelow": { "filters": [], "cap": 1000 } }],
+            }),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (label, caller, op, request) in &attempts {
+        match call(&wafer, caller, op, request).await {
+            Err(ErrorCode::PermissionDenied) => {}
+            other => wrong.push(format!("{label}: expected PermissionDenied, got {other:?}")),
+        }
+    }
+    assert!(wrong.is_empty(), "unseen column:\n  {}", wrong.join("\n  "));
+    let columns = sqlite.schema_columns(AUDIT).await.expect("columns");
+    assert!(!columns.contains(&"evil".to_string()), "{columns:?}");
+    assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 1);
+
+    // A read-write grantee is not append-only: the column is added.
+    let grown = json!({ "collection": AUDIT, "data": { "action": "w", "grown": 1 } });
+    assert_eq!(
+        call(&wafer, WRITER, ServiceOp::DATABASE_CREATE, &grown).await,
+        Ok(())
+    );
+    let columns = sqlite.schema_columns(AUDIT).await.expect("columns");
+    assert!(columns.contains(&"grown".to_string()), "{columns:?}");
+}
+
+/// An append-only insert may not choose a row's `id`, `created_at` or
+/// `updated_at` — the server stamps them, so an append-only grantee cannot
+/// forge or back-date an entry. The refusal covers every insert path and any
+/// letter case; a read-write grantee still chooses them.
+#[tokio::test]
+async fn append_only_inserts_cannot_set_server_owned_columns() {
+    let (wafer, sqlite) = build().await;
+    let mut wrong = Vec::new();
+    for (column, value) in [
+        ("id", json!("forged")),
+        ("ID", json!("forged")),
+        ("created_at", json!("2000-01-01T00:00:00Z")),
+        ("updated_at", json!("2000-01-01T00:00:00Z")),
+    ] {
+        let data = json!({ "action": "a", column: value });
+        for (op, request) in [
+            (
+                ServiceOp::DATABASE_CREATE,
+                json!({ "collection": AUDIT, "data": data }),
+            ),
+            (
+                ServiceOp::DATABASE_CREATE_MANY,
+                json!({ "collection": AUDIT, "rows": [data] }),
+            ),
+            (
+                ServiceOp::DATABASE_BATCH,
+                json!({ "ops": [{ "Create": { "collection": AUDIT, "data": data } }] }),
+            ),
+        ] {
+            match call(&wafer, APPENDER, op, &request).await {
+                Err(ErrorCode::PermissionDenied) => {}
+                other => wrong.push(format!(
+                    "{op} setting `{column}`: expected PermissionDenied, got {other:?}"
+                )),
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "server-owned column:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 1);
+    assert!(sqlite.get(AUDIT, "forged").await.is_err());
+
+    // What an append-only insert stores carries server-assigned values.
+    assert_eq!(
+        call(
+            &wafer,
+            APPENDER,
+            ServiceOp::DATABASE_CREATE,
+            &json!({ "collection": AUDIT, "data": { "action": "stamped" } }),
+        )
+        .await,
+        Ok(())
+    );
+    let stamped: Vec<_> = sqlite
+        .list(AUDIT, &wafer_block::db::ListOptions::default())
+        .await
+        .expect("list")
+        .records
+        .into_iter()
+        .filter(|r| r.data.get("action") == Some(&json!("stamped")))
+        .collect();
+    assert_eq!(stamped.len(), 1);
+    assert!(!stamped[0].id.is_empty());
+    let created = stamped[0].data["created_at"].as_str().expect("created_at");
+    assert!(!created.starts_with("2000"), "created_at: {created}");
+
+    // A read-write grantee chooses them.
+    let chosen = json!({
+        "collection": AUDIT,
+        "data": { "id": "chosen", "action": "w", "created_at": "2000-01-01T00:00:00Z" },
+    });
+    assert_eq!(
+        call(&wafer, WRITER, ServiceOp::DATABASE_CREATE, &chosen).await,
+        Ok(())
+    );
+    let row = sqlite.get(AUDIT, "chosen").await.expect("chosen row");
+    assert_eq!(row.data["created_at"], json!("2000-01-01T00:00:00Z"));
 }

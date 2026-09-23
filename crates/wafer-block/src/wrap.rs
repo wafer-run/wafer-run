@@ -636,11 +636,11 @@ pub enum DatabaseOpAccess {
 /// - the schema ops — they reshape the table (and additionally need the
 ///   [`SCHEMA_RESOURCE`] sentinel).
 ///
-/// Two effects are inherent to inserting: an insert that collides with an
-/// existing key fails, which tells an append-only caller that the key
-/// exists; and outside `STRICT_SCHEMA` an insert naming an unseen column adds
-/// it (nullable), as it does for any writer, leaving existing rows as they
-/// are.
+/// An insert admitted through `Append` alone is further held, by the
+/// database handler, to the append-only insert rules: it may not name `id`,
+/// `created_at` or `updated_at` (the server assigns them) nor any column the
+/// table lacks (it may not reshape the table). With the id server-assigned,
+/// an append-only insert cannot collide with an existing row.
 pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
     use DatabaseOpAccess::{On, PerWrite};
     use ResourceAccess::{Append, Read, Write};

@@ -108,6 +108,14 @@ impl Context for AllowCtx {
     ) -> Result<(), WaferError> {
         Ok(())
     }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +653,15 @@ impl Context for OwnNamespaceCtx {
                 format!("no grant for {resource}"),
             ))
         }
+    }
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 

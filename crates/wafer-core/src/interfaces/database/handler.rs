@@ -3,6 +3,8 @@
 //! Any block implementing the `database@v1` interface can delegate to these
 //! functions to avoid duplicating the message protocol handling.
 
+use std::collections::HashMap;
+
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     db::{ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField},
@@ -629,6 +631,78 @@ fn op_checks(
     }
 }
 
+/// Columns the server fills on every inserted row. A caller inserting
+/// through an append-only grant may not supply them: an audit trail whose
+/// grantees could pick a row's `id` or back-date its timestamps would record
+/// whatever history they chose.
+const SERVER_OWNED_COLUMNS: [&str; 3] = ["id", "created_at", "updated_at"];
+
+/// Whether the caller — already authorized to append to `collection` —
+/// holds only that: no `Write` on it. Such an insert follows the
+/// append-only rules of [`check_append_only_rows`].
+fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
+    !ctx.resource_access_admitted(collection, ResourceType::Db, ResourceAccess::Write)
+}
+
+/// The rules an insert through an append-only grant must satisfy, checked
+/// before the service runs so a refused insert changes nothing:
+/// - it names only plain column identifiers;
+/// - it names none of [`SERVER_OWNED_COLUMNS`], which the server stamps;
+/// - every column it would write — the ones it names and the server-owned
+///   ones — already exists. Outside STRICT_SCHEMA the service adds an unseen
+///   column on insert, and the value's type fixes the column's type; that
+///   reshapes the owner's table, which an append-only grant does not confer.
+///   Columns are never dropped individually, so one present here is present
+///   when the insert runs.
+async fn check_append_only_rows<'a>(
+    service: &dyn DatabaseService,
+    collection: &str,
+    rows: impl IntoIterator<Item = &'a HashMap<String, serde_json::Value>>,
+) -> Result<(), WaferError> {
+    let mut named: Vec<String> = Vec::new();
+    for row in rows {
+        for key in row.keys() {
+            if wafer_sql_utils::ident::validate_ident(key).is_err() {
+                return Err(invalid(format!(
+                    "`{key}` is not a column name (letters, digits and `_` only)"
+                )));
+            }
+            let column = key.to_ascii_lowercase();
+            if SERVER_OWNED_COLUMNS.contains(&column.as_str()) {
+                return Err(WaferError::new(
+                    ErrorCode::PermissionDenied,
+                    format!(
+                        "an append-only insert into `{collection}` cannot set `{key}`; \
+                         the server assigns it"
+                    ),
+                ));
+            }
+            if !named.contains(&column) {
+                named.push(column);
+            }
+        }
+    }
+    let existing = service
+        .schema_columns(collection)
+        .await
+        .map_err(db_error_to_wafer)?;
+    let missing = SERVER_OWNED_COLUMNS
+        .iter()
+        .map(|c| (*c).to_string())
+        .chain(named)
+        .find(|c| !existing.contains(c));
+    match missing {
+        Some(column) => Err(WaferError::new(
+            ErrorCode::PermissionDenied,
+            format!(
+                "`{collection}` has no column `{column}`, and an append-only insert \
+                 cannot add one"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Decode an `op` request and authorize it on the one resource `resource`
 /// names, for every access [`op_checks`] lists — the typed request is
 /// returned only when every check passed.
@@ -724,6 +798,12 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
+            if inserts_append_only(ctx, &req.collection) {
+                if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
+                {
+                    return OutputStream::error(e);
+                }
+            }
             match service.create(&req.collection, req.data).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -745,6 +825,11 @@ pub async fn handle_message(
                     req.rows.len(),
                     wire::MAX_BATCH_WRITES
                 )));
+            }
+            if inserts_append_only(ctx, &req.collection) {
+                if let Err(e) = check_append_only_rows(service, &req.collection, &req.rows).await {
+                    return OutputStream::error(e);
+                }
             }
             match service.create_many(&req.collection, req.rows).await {
                 Ok(rows_affected) => to_output(&wire::CreateManyResponse { rows_affected }),
@@ -789,6 +874,30 @@ pub async fn handle_message(
                     wire::MAX_BATCH_WRITES
                 )));
             }
+            // A `Create` into a collection the caller may only append to
+            // follows the append-only insert rules.
+            let mut append_only: Vec<&str> = Vec::new();
+            for op in &req.ops {
+                if let wire::BatchWrite::Create { collection, .. } = op {
+                    if !append_only.contains(&collection.as_str())
+                        && inserts_append_only(ctx, collection)
+                    {
+                        append_only.push(collection);
+                    }
+                }
+            }
+            for collection in append_only {
+                let rows = req.ops.iter().filter_map(|op| match op {
+                    wire::BatchWrite::Create {
+                        collection: c,
+                        data,
+                    } if c == collection => Some(data),
+                    _ => None,
+                });
+                if let Err(e) = check_append_only_rows(service, collection, rows).await {
+                    return OutputStream::error(e);
+                }
+            }
             let ops = match req
                 .ops
                 .into_iter()
@@ -819,6 +928,12 @@ pub async fn handle_message(
                 Ok(g) => g,
                 Err(e) => return OutputStream::error(e),
             };
+            if inserts_append_only(ctx, &req.collection) {
+                if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
+                {
+                    return OutputStream::error(e);
+                }
+            }
             match service
                 .insert_guarded(&req.collection, req.data, &guards)
                 .await

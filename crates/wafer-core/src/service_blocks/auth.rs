@@ -184,7 +184,7 @@ mod tests {
         );
         assert_eq!(info.grants[0].grantee, "test/consumer");
         assert_eq!(info.grants[0].resource, "wafer_run__auth__sessions");
-        assert!(!info.grants[0].write);
+        assert_eq!(info.grants[0].write, wafer_block::types::GrantWrite::None);
     }
 
     #[test]

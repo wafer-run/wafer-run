@@ -57,6 +57,14 @@ impl Context for AllowCtx {
     ) -> Result<(), WaferError> {
         Ok(())
     }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
+    }
 }
 
 struct DenyCtx;
@@ -243,6 +251,9 @@ mod db_fakes {
         }
         async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
             Ok(true)
+        }
+        async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
+            Ok(Vec::new())
         }
         async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
             Ok(())

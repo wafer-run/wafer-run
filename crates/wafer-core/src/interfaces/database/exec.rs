@@ -1328,6 +1328,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(affected)
     }
 
+    /// Shared `schema_columns`: [`get_columns`](Self::get_columns) of the
+    /// table name as `create` names it.
+    async fn schema_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+        self.get_columns(&sanitize_ident(table)).await
+    }
+
     /// Shared `schema_table_exists`: pass-through to `dbx_table_exists`
     /// (the primitive preserves each backend's error text).
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {

@@ -489,6 +489,59 @@ impl Context for RuntimeContext {
         resource_type: wafer_block::types::ResourceType,
         access: wafer_block::types::ResourceAccess,
     ) -> Result<(), wafer_block::WaferError> {
+        self.authorize_resource(resource, resource_type.clone(), access)
+            .map_err(|(denial, e)| {
+                tracing::warn!(
+                    caller = ?self.caller_id, %resource, %resource_type, %access,
+                    "WRAP deny ({denial})"
+                );
+                e
+            })
+    }
+
+    /// The same decision as [`Self::check_resource_access`], without the
+    /// denial log: a `false` here is a handler choosing a path, not a refusal.
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: wafer_block::types::ResourceType,
+        access: wafer_block::types::ResourceAccess,
+    ) -> bool {
+        self.authorize_resource(resource, resource_type, access)
+            .is_ok()
+    }
+
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        Arc::new(self.clone())
+    }
+
+    async fn validate_all_block_configs(&self) -> wafer_block::ValidationReport {
+        // `all_blocks` contains registered blocks AND alias keys pointing at
+        // the same instances. Filter the alias keys out so the shared
+        // validator sees the canonical view — otherwise aliased blocks would
+        // be validated and reported twice (once per name). Collected up front
+        // because a borrowed `filter` closure does not generalize across the
+        // validator's async boundary.
+        let canonical: Vec<(&String, &Arc<dyn Block>)> = self
+            .all_blocks
+            .iter()
+            .filter(|(name, _)| !self.aliases.contains_key(*name))
+            .collect();
+        crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
+    }
+}
+
+impl RuntimeContext {
+    /// The WRAP decision behind [`Context::check_resource_access`] and
+    /// [`Context::resource_access_admitted`]: the grant check, then the
+    /// caller's resource capability. A denial names which of the two refused
+    /// (`"grant"` / `"capability"`) for the caller that logs it.
+    fn authorize_resource(
+        &self,
+        resource: &str,
+        resource_type: wafer_block::types::ResourceType,
+        access: wafer_block::types::ResourceAccess,
+    ) -> Result<(), (&'static str, wafer_block::WaferError)> {
         use wafer_block::types::ResourceType;
         let caller = self.caller_id.as_deref();
 
@@ -502,11 +555,7 @@ impl Context for RuntimeContext {
             &self.wrap_grants,
             &self.wrap_admin_block,
         )
-        .inspect_err(|_| {
-            tracing::warn!(
-                caller = ?caller, %resource, %resource_type, %access, "WRAP deny (grant)"
-            );
-        })?;
+        .map_err(|e| ("grant", e))?;
 
         // 2) Resource capability check — on the CALLER's declared
         // capabilities (the block that invoked us).
@@ -534,40 +583,20 @@ impl Context for RuntimeContext {
                     ResourceType::Vector => caps.allows_vector_index(resource),
                 };
                 if !allowed {
-                    tracing::warn!(
-                        caller = ?caller,
-                        %resource,
-                        %resource_type,
-                        "WRAP deny (capability)"
-                    );
-                    return Err(wafer_block::WaferError::new(
-                        wafer_block::ErrorCode::PermissionDenied,
-                        format!("block capability denies access to {resource_type} '{resource}'"),
+                    return Err((
+                        "capability",
+                        wafer_block::WaferError::new(
+                            wafer_block::ErrorCode::PermissionDenied,
+                            format!(
+                                "block capability denies access to {resource_type} '{resource}'"
+                            ),
+                        ),
                     ));
                 }
             }
         }
 
         Ok(())
-    }
-
-    fn clone_arc(&self) -> Arc<dyn Context> {
-        Arc::new(self.clone())
-    }
-
-    async fn validate_all_block_configs(&self) -> wafer_block::ValidationReport {
-        // `all_blocks` contains registered blocks AND alias keys pointing at
-        // the same instances. Filter the alias keys out so the shared
-        // validator sees the canonical view — otherwise aliased blocks would
-        // be validated and reported twice (once per name). Collected up front
-        // because a borrowed `filter` closure does not generalize across the
-        // validator's async boundary.
-        let canonical: Vec<(&String, &Arc<dyn Block>)> = self
-            .all_blocks
-            .iter()
-            .filter(|(name, _)| !self.aliases.contains_key(*name))
-            .collect();
-        crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
     }
 }
 

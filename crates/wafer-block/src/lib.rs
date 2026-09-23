@@ -26,9 +26,9 @@ pub use meta::*;
 // Re-export runtime-specific types (needed by block authors for BlockInfo etc.)
 pub use types::{
     ActionSpec, AgentTool, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockInfoError,
-    BlockRuntime, CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema,
-    InputType, InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceAccess, ResourceGrant,
-    ResourceType, SkillTool, WAFER_RUN_SHARED_PREFIX,
+    BlockRuntime, CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, GrantWrite, HttpMethod,
+    IndexSchema, InputType, InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceAccess,
+    ResourceGrant, ResourceType, SkillTool, WAFER_RUN_SHARED_PREFIX,
 };
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 

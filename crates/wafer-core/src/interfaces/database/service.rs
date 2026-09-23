@@ -712,6 +712,12 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Check whether a table exists in the database.
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError>;
 
+    /// The column names of `table`, lowercased; empty when the table does
+    /// not exist. No default: the database handler refuses an append-only
+    /// insert naming a column this does not list, so a backend that cannot
+    /// answer must say so with an error rather than guess.
+    async fn schema_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError>;
+
     /// Drop a table if it exists.
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError>;
 
