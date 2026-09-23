@@ -151,9 +151,10 @@
   encoding. Read `kind` instead of `message.kind`.
 - Go SDK: `Message` matches the runtime's `Message` — `Kind` plus an ordered
   `Meta []MetaEntry`, and no `Data` (the FFI's `wafer_run` is body-less).
-  `NewMessage` takes only a kind. The previous shape (`Data []byte`,
-  `Meta map[string]string`) could not be deserialized by the runtime at all,
-  so `Run` failed on every call that reached it.
+  `NewMessage` takes only a kind. A `Message` with a nil `Meta` encodes it
+  as `[]`, which `wafer_run` requires; `null` is rejected. The previous
+  shape (`Data []byte`, `Meta map[string]string`) could not be deserialized
+  by the runtime at all, so `Run` failed on every call that reached it.
 - Go SDK: `Result` matches the wire format — `Body` / `BodyBase64` / `Kind` /
   `Meta` / `Error` at the top level, plus `ActionHalt` and `IsHalt()`. The
   `Response` type and `Result.Response` field are removed; no runtime version

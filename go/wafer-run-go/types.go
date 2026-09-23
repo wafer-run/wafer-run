@@ -1,6 +1,9 @@
 package wafer
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Action tells the runtime what to do after a block processes a message.
 type Action string
@@ -29,9 +32,21 @@ type Message struct {
 	Meta []MetaEntry `json:"meta"`
 }
 
+// MarshalJSON encodes a nil Meta as an empty list. The runtime's Message
+// requires a meta list and rejects null, and a Message built as a literal
+// without SetMeta has a nil Meta, which encoding/json writes as null.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type wireMessage Message
+	w := wireMessage(m)
+	if w.Meta == nil {
+		w.Meta = []MetaEntry{}
+	}
+	return json.Marshal(w)
+}
+
 // NewMessage creates a new Message with the given kind and no metadata.
 func NewMessage(kind string) *Message {
-	return &Message{Kind: kind, Meta: []MetaEntry{}}
+	return &Message{Kind: kind}
 }
 
 // SetMeta sets a metadata key-value pair on the message, replacing any
