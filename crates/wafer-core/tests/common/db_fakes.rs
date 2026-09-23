@@ -109,12 +109,14 @@ impl DatabaseService for RecordingDb {
         collection: &str,
         data: std::collections::HashMap<String, serde_json::Value>,
         _guards: &[wafer_core::interfaces::database::service::CapGuard],
-    ) -> Result<Option<Record>, DatabaseError> {
+    ) -> Result<wafer_core::interfaces::database::service::GuardedInsert, DatabaseError> {
         self.record("insert_guarded");
-        Ok(Some(Record {
-            id: collection.to_string(),
-            data,
-        }))
+        Ok(
+            wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
+                id: collection.to_string(),
+                data,
+            }),
+        )
     }
     async fn update_guarded(
         &self,
@@ -122,9 +124,9 @@ impl DatabaseService for RecordingDb {
         _filters: &[wafer_block::db::Filter],
         _data: std::collections::HashMap<String, serde_json::Value>,
         _guards: &[wafer_core::interfaces::database::service::CapGuard],
-    ) -> Result<i64, DatabaseError> {
+    ) -> Result<wafer_core::interfaces::database::service::GuardedUpdate, DatabaseError> {
         self.record("update_guarded");
-        Ok(1)
+        Ok(wafer_core::interfaces::database::service::GuardedUpdate::Updated { rows_affected: 1 })
     }
     async fn update(
         &self,

@@ -140,7 +140,7 @@ async fn create_many_with_a_duplicate_key_inserts_nothing() {
     )
     .await
     .expect_err("the duplicate key fails the call");
-    assert_eq!(err.code, ErrorCode::Internal, "{}", err.message);
+    assert_eq!(err.code, ErrorCode::AlreadyExists, "{}", err.message);
     assert_eq!(count(&svc).await, 3, "new1 was rolled back");
 }
 
@@ -240,7 +240,7 @@ async fn a_failing_statement_rolls_the_whole_batch_back() {
     )
     .await
     .expect_err("the duplicate key fails the batch");
-    assert_eq!(err.code, ErrorCode::Internal, "{}", err.message);
+    assert_eq!(err.code, ErrorCode::AlreadyExists, "{}", err.message);
     assert_eq!(count(&svc).await, 3, "i4 was rolled back");
     assert_eq!(
         svc.get(TABLE, "i1").await.expect("i1").data["name"],

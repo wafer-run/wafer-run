@@ -426,7 +426,8 @@ mod db_fakes {
             _collection: &str,
             _data: std::collections::HashMap<String, serde_json::Value>,
             _guards: &[wafer_core::interfaces::database::service::CapGuard],
-        ) -> Result<Option<Record>, DatabaseError> {
+        ) -> Result<wafer_core::interfaces::database::service::GuardedInsert, DatabaseError>
+        {
             Err(DatabaseError::Internal(
                 "fixture: insert_guarded not needed".into(),
             ))
@@ -437,7 +438,8 @@ mod db_fakes {
             _filters: &[wafer_block::db::Filter],
             _data: std::collections::HashMap<String, serde_json::Value>,
             _guards: &[wafer_core::interfaces::database::service::CapGuard],
-        ) -> Result<i64, DatabaseError> {
+        ) -> Result<wafer_core::interfaces::database::service::GuardedUpdate, DatabaseError>
+        {
             Err(DatabaseError::Internal(
                 "fixture: update_guarded not needed".into(),
             ))

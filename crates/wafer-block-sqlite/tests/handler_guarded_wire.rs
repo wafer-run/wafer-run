@@ -103,7 +103,7 @@ fn byte_cap(owner: &str, except: Option<&str>, add: i64, cap: i64) -> serde_json
 }
 
 #[tokio::test]
-async fn insert_guarded_returns_the_row_until_the_cap_then_null() {
+async fn insert_guarded_returns_the_row_until_the_cap_then_the_refusing_guard() {
     let svc = empty_files().await;
     let guards = serde_json::json!([
         { "CountBelow": { "filters": [{ "field": "owner", "operator": "eq", "value": "u" }], "cap": 2 } }
@@ -121,15 +121,15 @@ async fn insert_guarded_returns_the_row_until_the_cap_then_null() {
         )
         .await
         .expect("insert_guarded");
-        records.push(resp["record"].clone());
+        records.push(resp);
     }
-    assert_eq!(records[0]["id"], "f0");
-    assert_eq!(records[0]["data"]["owner"], "u");
-    assert_eq!(records[1]["id"], "f1");
+    assert_eq!(records[0]["Inserted"]["record"]["id"], "f0");
+    assert_eq!(records[0]["Inserted"]["record"]["data"]["owner"], "u");
+    assert_eq!(records[1]["Inserted"]["record"]["id"], "f1");
     assert_eq!(
         records[2],
-        serde_json::Value::Null,
-        "the third file is refused"
+        serde_json::json!({ "Refused": { "guard": 0 } }),
+        "the third file is refused by guard 0"
     );
     assert_eq!(svc.count(TABLE, &[]).await.expect("count"), 2);
 }
@@ -150,7 +150,7 @@ async fn a_byte_cap_admits_landing_on_it_exactly() {
         )
         .await
         .expect("insert_guarded");
-        admitted.push(!resp["record"].is_null());
+        admitted.push(resp.get("Inserted").is_some());
     }
     assert_eq!(
         admitted,
@@ -186,7 +186,7 @@ async fn update_guarded_reports_the_rows_it_changed() {
         .expect("update_guarded");
     assert_eq!(
         refused,
-        serde_json::json!({ "rows_affected": 0 }),
+        serde_json::json!({ "Refused": { "guard": 0 } }),
         "30 + 71 > 100"
     );
     let landed = dispatch(&svc, ServiceOp::DATABASE_UPDATE_GUARDED, &replace_a(70))
@@ -194,9 +194,22 @@ async fn update_guarded_reports_the_rows_it_changed() {
         .expect("update_guarded");
     assert_eq!(
         landed,
-        serde_json::json!({ "rows_affected": 1 }),
+        serde_json::json!({ "Updated": { "rows_affected": 1 } }),
         "30 + 70 == 100"
     );
+    let gone = dispatch(
+        &svc,
+        ServiceOp::DATABASE_UPDATE_GUARDED,
+        &serde_json::json!({
+            "collection": TABLE,
+            "filters": [{ "field": "id", "operator": "eq", "value": "gone" }],
+            "data": { "size": 1 },
+            "guards": [],
+        }),
+    )
+    .await
+    .expect("update_guarded");
+    assert_eq!(gone, serde_json::json!("NoMatch"));
 }
 
 #[tokio::test]
@@ -215,4 +228,35 @@ async fn a_guard_naming_a_non_identifier_field_is_invalid_argument() {
     .expect_err("a hostile field is refused");
     assert_eq!(err.code, ErrorCode::InvalidArgument, "{}", err.message);
     assert_eq!(svc.count(TABLE, &[]).await.expect("count"), 0);
+}
+
+/// A taken key reaches the caller as `AlreadyExists` — from a guarded insert
+/// and from a plain create — never as an internal error.
+#[tokio::test]
+async fn a_taken_key_is_already_exists_on_the_wire() {
+    let svc = empty_files().await;
+    let request = |op: &str| {
+        let data = serde_json::json!({ "id": "a", "owner": "u", "size": 1 });
+        if op == ServiceOp::DATABASE_INSERT_GUARDED {
+            serde_json::json!({ "collection": TABLE, "data": data, "guards": [] })
+        } else {
+            serde_json::json!({ "collection": TABLE, "data": data })
+        }
+    };
+    dispatch(
+        &svc,
+        ServiceOp::DATABASE_CREATE,
+        &request(ServiceOp::DATABASE_CREATE),
+    )
+    .await
+    .expect("first create");
+    for op in [
+        ServiceOp::DATABASE_INSERT_GUARDED,
+        ServiceOp::DATABASE_CREATE,
+    ] {
+        let err = dispatch(&svc, op, &request(op))
+            .await
+            .expect_err("a duplicate id is refused");
+        assert_eq!(err.code, ErrorCode::AlreadyExists, "{op}: {}", err.message);
+    }
 }

@@ -24,8 +24,8 @@ use wafer_sql_utils::{
 use super::{
     schema_cache::SchemaCache,
     service::{
-        AggregateSpec, CapGuard, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec,
-        WriteOp, WriteOutcome,
+        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
+        UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 
@@ -1600,48 +1600,94 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .collect()
     }
 
-    /// Run one statement from [`wafer_sql_utils::guard`] so that its guard
-    /// check and its write are one atomic step against every other guarded
-    /// write to `table`: ONE [`run_transaction`](Self::run_transaction) that
-    /// first takes [`guard::build_guard_lock`]'s lock where the backend needs
-    /// one (PostgreSQL), then runs the statement. Returns the statement's
-    /// result — rows when `returning`, else its affected count.
+    /// Run one guarded write from [`wafer_sql_utils::guard`] so that its
+    /// guard check and its write are one atomic step against every other
+    /// guarded write to `table`, as ONE
+    /// [`run_transaction`](Self::run_transaction):
+    /// [`guard::build_guard_preamble`] (READ COMMITTED and the table's lock,
+    /// on PostgreSQL), then — when there are guards — the
+    /// [`guard::build_guard_probe`] of every guard's verdict, then the write.
+    /// The probe and the write see the same table, as every guarded write
+    /// that could change it waits on the lock, so the probe names the guard
+    /// that refused the write.
+    ///
+    /// Returns the index of the first refusing guard (if any) and the write's
+    /// own result — rows when `returning`, else its affected count.
     async fn run_guarded(
         &self,
         table: &str,
-        stmt: wafer_sql_utils::Statement,
+        guards: &[CapGuard],
+        write: wafer_sql_utils::Statement,
         returning: bool,
-    ) -> Result<TxResult, DatabaseError> {
-        let lock = guard::build_guard_lock(table, Self::BACKEND)
-            .map(|lock| (lock.sql, sea_values_to_json(lock.values)));
-        let params = sea_values_to_json(stmt.values);
-        let mut ops = Vec::with_capacity(2);
-        if let Some((sql, params)) = &lock {
-            ops.push(TxOp::Execute { sql, params });
+    ) -> Result<(Option<usize>, TxResult), DatabaseError> {
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> =
+            guard::build_guard_preamble(table, Self::BACKEND)
+                .into_iter()
+                .map(|stmt| (stmt.sql, sea_values_to_json(stmt.values)))
+                .collect();
+        let preamble = statements.len();
+        if !guards.is_empty() {
+            let probe = guard::build_guard_probe(table, guards, Self::BACKEND)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            statements.push((probe.sql, sea_values_to_json(probe.values)));
         }
-        ops.push(if returning {
-            TxOp::Returning {
-                sql: &stmt.sql,
-                params: &params,
-            }
-        } else {
-            TxOp::Execute {
-                sql: &stmt.sql,
-                params: &params,
-            }
-        });
-        let expected = ops.len();
-        let results = self.run_transaction(&ops).await?;
-        if results.len() != expected {
+        statements.push((write.sql, sea_values_to_json(write.values)));
+
+        let last = statements.len() - 1;
+        let ops: Vec<TxOp<'_>> = statements
+            .iter()
+            .enumerate()
+            .map(|(i, (sql, params))| {
+                if i < preamble || (i == last && !returning) {
+                    TxOp::Execute { sql, params }
+                } else {
+                    TxOp::Returning { sql, params }
+                }
+            })
+            .collect();
+        let mut results = self.run_transaction(&ops).await?;
+        if results.len() != ops.len() {
             return Err(DatabaseError::Internal(format!(
-                "run_transaction returned {} results for {expected} statements",
-                results.len()
+                "run_transaction returned {} results for {} statements",
+                results.len(),
+                ops.len()
             )));
         }
-        results
-            .into_iter()
-            .last()
-            .ok_or_else(|| DatabaseError::Internal("run_transaction returned no result".into()))
+        let write_result = results
+            .pop()
+            .ok_or_else(|| DatabaseError::Internal("run_transaction returned no result".into()))?;
+        if guards.is_empty() {
+            return Ok((None, write_result));
+        }
+        let verdicts = match results.pop() {
+            Some(TxResult::Returning(rows)) => rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| DatabaseError::Internal("the guard probe returned no row".into()))?,
+            other => {
+                return Err(DatabaseError::Internal(format!(
+                    "run_transaction returned {other:?} for the guard probe"
+                )))
+            }
+        };
+        for index in 0..guards.len() {
+            let column = guard::guard_probe_column(index);
+            match verdicts
+                .data
+                .get(&column)
+                .and_then(serde_json::Value::as_i64)
+            {
+                Some(1) => {}
+                Some(0) => return Ok((Some(index), write_result)),
+                _ => {
+                    return Err(DatabaseError::Internal(format!(
+                        "the guard probe's {column} is not 0 or 1: {:?}",
+                        verdicts.data
+                    )))
+                }
+            }
+        }
+        Ok((None, write_result))
     }
 
     /// Lazily add the columns every guard's filters name, as a filtered read
@@ -1664,16 +1710,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `insert_guarded`: [`create`](Self::create)'s id/timestamp
-    /// policy and lazy column-add, then ONE
-    /// [`guard::build_insert_guarded`] statement (`INSERT … SELECT … WHERE
-    /// {guards} RETURNING *`) through [`run_guarded`](Self::run_guarded).
-    /// A refused insert returns no row, so `None`.
+    /// policy and lazy column-add, then ONE [`guard::build_insert_guarded`]
+    /// statement (`INSERT … SELECT … WHERE {guards} RETURNING *`) through
+    /// [`run_guarded`](Self::run_guarded).
+    ///
+    /// On PostgreSQL an unguarded write committing between the probe and the
+    /// insert can refuse the insert while the probe saw every guard hold;
+    /// that is an `Internal` error naming the race, never a silent success.
     async fn insert_guarded(
         &self,
         collection: &str,
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
-    ) -> Result<Option<Record>, DatabaseError> {
+    ) -> Result<GuardedInsert, DatabaseError> {
         let table = sanitize_ident(collection);
         let mut data = data;
         let autogenerates_id =
@@ -1683,28 +1732,35 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.ensure_guard_columns(&table, guards).await?;
         let stmt = guard::build_insert_guarded(&table, &sorted_pairs(&data), guards, Self::BACKEND)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(&table, stmt, true).await? {
-            TxResult::Returning(rows) => Ok(rows.into_iter().next()),
-            other @ TxResult::Execute(_) => Err(DatabaseError::Internal(format!(
+        match self.run_guarded(&table, guards, stmt, true).await? {
+            (refused, TxResult::Returning(rows)) => match (rows.into_iter().next(), refused) {
+                (Some(row), _) => Ok(GuardedInsert::Inserted(row)),
+                (None, Some(guard)) => Ok(GuardedInsert::Refused { guard }),
+                (None, None) => Err(DatabaseError::Internal(format!(
+                    "guarded insert into {table} wrote nothing although every guard held: an \
+                     unguarded write changed the table between the probe and the insert"
+                ))),
+            },
+            (_, other @ TxResult::Execute(_)) => Err(DatabaseError::Internal(format!(
                 "run_transaction returned {other:?} for a guarded insert"
             ))),
         }
     }
 
-    /// Shared `update_guarded`: table-exists guard (a missing table updates
+    /// Shared `update_guarded`: table-exists guard (a missing table matches
     /// nothing) → timestamp stamping → lazy data/filter/guard column-add →
     /// ONE [`guard::build_update_guarded`] statement through
-    /// [`run_guarded`](Self::run_guarded), returning its affected count.
+    /// [`run_guarded`](Self::run_guarded).
     async fn update_guarded(
         &self,
         collection: &str,
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
-    ) -> Result<i64, DatabaseError> {
+    ) -> Result<GuardedUpdate, DatabaseError> {
         let table = sanitize_ident(collection);
         if !self.table_present_for_op(&table).await? {
-            return Ok(0);
+            return Ok(GuardedUpdate::NoMatch);
         }
         let mut data = data;
         stamp_timestamps(&mut data, false);
@@ -1720,9 +1776,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             Self::BACKEND,
         )
         .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(&table, stmt, false).await? {
-            TxResult::Execute(rows_affected) => Ok(rows_affected),
-            other @ TxResult::Returning(_) => Err(DatabaseError::Internal(format!(
+        match self.run_guarded(&table, guards, stmt, false).await? {
+            (_, TxResult::Execute(rows_affected)) if rows_affected > 0 => {
+                Ok(GuardedUpdate::Updated { rows_affected })
+            }
+            (Some(guard), TxResult::Execute(_)) => Ok(GuardedUpdate::Refused { guard }),
+            (None, TxResult::Execute(_)) => Ok(GuardedUpdate::NoMatch),
+            (_, other @ TxResult::Returning(_)) => Err(DatabaseError::Internal(format!(
                 "run_transaction returned {other:?} for a guarded update"
             ))),
         }
@@ -2259,6 +2319,14 @@ mod tests {
                 .iter()
                 .map(|op| match op {
                     TxOp::Execute { .. } => TxResult::Execute(1),
+                    // A guard probe (the only SELECT sent to a transaction):
+                    // its one guard holds.
+                    TxOp::Returning { sql, .. } if sql.starts_with("SELECT") => {
+                        TxResult::Returning(vec![Record {
+                            id: String::new(),
+                            data: HashMap::from([("g0".to_string(), serde_json::json!(1))]),
+                        }])
+                    }
                     TxOp::Returning { .. } => {
                         TxResult::Returning(vec![Self::canned_rows().swap_remove(0)])
                     }
@@ -2950,8 +3018,9 @@ mod tests {
     }
 
     /// A guarded write reaches the backend as ONE `run_transaction` holding
-    /// the one conditional statement (SQLite needs no lock statement ahead of
-    /// it): the guard and the write cannot be split across calls.
+    /// the guard probe and the one conditional write (SQLite needs no lock
+    /// statement ahead of them): the guard and the write cannot be split
+    /// across calls.
     #[tokio::test]
     async fn guarded_writes_run_one_conditional_statement_in_one_transaction() {
         let mock = BatchMock::new(0);
@@ -2967,7 +3036,7 @@ mod tests {
         )
         .await
         .expect("insert_guarded");
-        assert!(inserted.is_some());
+        assert!(matches!(inserted, GuardedInsert::Inserted(_)));
         let updated = DbExec::update_guarded(
             &mock,
             "widgets",
@@ -2977,24 +3046,27 @@ mod tests {
         )
         .await
         .expect("update_guarded");
-        assert_eq!(updated, 1);
+        assert!(matches!(
+            updated,
+            GuardedUpdate::Updated { rows_affected: 1 }
+        ));
 
         let calls = mock.tx_calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 2, "one transaction per guarded write");
-        assert_eq!(calls[0].len(), 1, "{:?}", calls[0]);
-        assert_eq!(calls[0][0].0, "Returning");
-        assert!(
-            calls[0][0].1.starts_with("INSERT") && calls[0][0].1.contains("SELECT COUNT(*)"),
-            "{}",
-            calls[0][0].1
-        );
-        assert_eq!(calls[1].len(), 1, "{:?}", calls[1]);
-        assert_eq!(calls[1][0].0, "Execute");
-        assert!(
-            calls[1][0].1.starts_with("UPDATE") && calls[1][0].1.contains("SELECT COUNT(*)"),
-            "{}",
-            calls[1][0].1
-        );
+        for (call, (kind, verb)) in calls
+            .iter()
+            .zip([("Returning", "INSERT"), ("Execute", "UPDATE")])
+        {
+            assert_eq!(call.len(), 2, "the probe, then the write: {call:?}");
+            assert_eq!(call[0].0, "Returning");
+            assert!(call[0].1.starts_with("SELECT (CASE WHEN"), "{}", call[0].1);
+            assert_eq!(call[1].0, kind);
+            assert!(
+                call[1].1.starts_with(verb) && call[1].1.contains("SELECT COUNT(*)"),
+                "{}",
+                call[1].1
+            );
+        }
         assert!(mock.batch_calls.lock().unwrap().is_empty());
     }
 

@@ -20,8 +20,8 @@ use std::{
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec,
-    WriteOp, WriteOutcome,
+    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
+    RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,12 +103,14 @@ impl DatabaseService for RecordingDb {
         collection: &str,
         data: std::collections::HashMap<String, serde_json::Value>,
         _guards: &[wafer_core::interfaces::database::service::CapGuard],
-    ) -> Result<Option<Record>, DatabaseError> {
+    ) -> Result<wafer_core::interfaces::database::service::GuardedInsert, DatabaseError> {
         self.note("insert_guarded");
-        Ok(Some(Record {
-            id: collection.to_string(),
-            data,
-        }))
+        Ok(
+            wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
+                id: collection.to_string(),
+                data,
+            }),
+        )
     }
     async fn update_guarded(
         &self,
@@ -116,9 +118,9 @@ impl DatabaseService for RecordingDb {
         _filters: &[wafer_block::db::Filter],
         _data: std::collections::HashMap<String, serde_json::Value>,
         _guards: &[wafer_core::interfaces::database::service::CapGuard],
-    ) -> Result<i64, DatabaseError> {
+    ) -> Result<wafer_core::interfaces::database::service::GuardedUpdate, DatabaseError> {
         self.note("update_guarded");
-        Ok(1)
+        Ok(wafer_core::interfaces::database::service::GuardedUpdate::Updated { rows_affected: 1 })
     }
     async fn update(
         &self,
@@ -439,17 +441,18 @@ async fn the_rest_of_the_surface_forwards() {
         .len(),
         1
     );
-    assert!(dec
-        .insert_guarded("t", HashMap::new(), &[])
-        .await
-        .expect("insert_guarded")
-        .is_some());
-    assert_eq!(
+    assert!(matches!(
+        dec.insert_guarded("t", HashMap::new(), &[])
+            .await
+            .expect("insert_guarded"),
+        GuardedInsert::Inserted(_)
+    ));
+    assert!(matches!(
         dec.update_guarded("t", &[], HashMap::new(), &[])
             .await
             .expect("update_guarded"),
-        1
-    );
+        GuardedUpdate::Updated { rows_affected: 1 }
+    ));
     dec.update("t", "r1", HashMap::new()).await.expect("update");
     dec.delete("t", "r1").await.expect("delete");
     dec.sum("t", "n", &[]).await.expect("sum");

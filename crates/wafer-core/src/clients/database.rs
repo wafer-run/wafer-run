@@ -240,17 +240,19 @@ dual_api! {
     }
 
     /// Insert `data` into `collection` only while every guard holds over the
-    /// collection as it stands before the insert, and return the stored row —
-    /// or `None` when a guard refused it. The check and the insert are one
-    /// atomic step against every other guarded write to `collection`, so
-    /// concurrent callers cannot overshoot a cap. The row is stamped like
-    /// [`create`]'s. WRAP-authorized (write) against `collection`.
+    /// collection as it stands before the insert: `Inserted { record }` with
+    /// the stored row, or `Refused { guard }` naming the index of the first
+    /// guard that refused it. The check and the insert are one atomic step
+    /// against every other guarded write to `collection`, so concurrent
+    /// callers cannot overshoot a cap. The row is stamped like [`create`]'s.
+    /// A key that is already taken is an `AlreadyExists` error.
+    /// WRAP-authorized (write) against `collection`.
     pub fn insert_guarded(
         ctx,
         collection: &str,
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
-    ) -> Result<Option<Record>, WaferError> {
+    ) -> Result<InsertGuardedResponse, WaferError> {
         let req = InsertGuardedRequest {
             collection: collection.to_string(),
             data,
@@ -264,14 +266,14 @@ dual_api! {
             true,
             Some("db")
         )?;
-        let resp: InsertGuardedResponse = decode(&resp)?;
-        Ok(resp.record)
+        decode(&resp)
     }
 
     /// Set `data` on the rows of `collection` matching `filters` only while
-    /// every guard holds, and return the rows updated — 0 when a guard
-    /// refused the write or nothing matched. Atomic as [`insert_guarded`];
-    /// exclude a row the update replaces from a guard with a filter.
+    /// every guard holds: `Updated { rows_affected }`, `Refused { guard }`
+    /// naming the first guard that refused it, or `NoMatch` when every guard
+    /// held but no row matched. Atomic as [`insert_guarded`]; exclude a row
+    /// the update replaces from a guard with a filter.
     /// WRAP-authorized (write) against `collection`.
     pub fn update_guarded(
         ctx,
@@ -279,7 +281,7 @@ dual_api! {
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
-    ) -> Result<i64, WaferError> {
+    ) -> Result<UpdateGuardedResponse, WaferError> {
         let req = UpdateGuardedRequest {
             collection: collection.to_string(),
             filters: to_wire_filters(filters),
@@ -294,8 +296,7 @@ dual_api! {
             true,
             Some("db")
         )?;
-        let resp: UpdateGuardedResponse = decode(&resp)?;
-        Ok(resp.rows_affected)
+        decode(&resp)
     }
 
     /// Update the record `id` in `collection` with the fields in `data` and return the result.

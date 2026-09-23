@@ -187,24 +187,67 @@ async fn an_included_column_is_not_part_of_the_primary_key() {
 /// the cap. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
 #[tokio::test]
 async fn racing_guarded_writes_cannot_overshoot_the_cap() {
-    use std::collections::HashMap;
-
-    use sqlx::postgres::PgPool;
-    use wafer_block::db::{Filter, FilterOp};
-    use wafer_core::interfaces::database::service::{
-        pk, CapGuard, Column, DataType, DatabaseService, Table,
-    };
-
     let Ok(url) = std::env::var(URL_ENV) else {
         eprintln!("skipping postgres guarded-write race: set {URL_ENV} to run");
         return;
     };
-    let admin = PgPool::connect(&url).await.expect("connect as admin");
-    let svc = PostgresDatabaseService::connect(&url)
+    race_guarded_writes(&url, "conf_guarded_race", None).await;
+}
+
+/// The same race on a server whose sessions default to REPEATABLE READ.
+///
+/// A REPEATABLE READ transaction takes its one snapshot at its first
+/// statement — the lock statement, BEFORE the lock is granted — so a guard
+/// run after waiting would still miss the writes it waited for. The guarded
+/// transaction sets READ COMMITTED itself, so the session default cannot
+/// reopen the race. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_repeatable_read_session_default_cannot_reopen_the_race() {
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres guarded-write race (repeatable read): set {URL_ENV} to run");
+        return;
+    };
+    race_guarded_writes(&url, "conf_guarded_race_rr", Some("repeatable read")).await;
+}
+
+/// Race eight guarded inserts under a cap of three files and five guarded
+/// updates under a 60-byte cap on `table`, with every writing transaction
+/// held open by a trigger, the service's sessions defaulting to
+/// `isolation` when given; exactly the caps must land.
+async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
+    use std::collections::HashMap;
+
+    use sqlx::postgres::{PgPool, PgPoolOptions};
+    use wafer_block::db::{Filter, FilterOp};
+    use wafer_core::interfaces::database::service::{
+        pk, CapGuard, Column, DataType, DatabaseService, GuardedInsert, GuardedUpdate, Table,
+    };
+
+    let admin = PgPool::connect(url).await.expect("connect as admin");
+    let session_default =
+        isolation.map(|level| format!("SET default_transaction_isolation = '{level}'"));
+    let pool = PgPoolOptions::new()
+        .after_connect(move |conn, _| {
+            let session_default = session_default.clone();
+            Box::pin(async move {
+                if let Some(stmt) = session_default {
+                    sqlx::Executor::execute(conn, stmt.as_str()).await?;
+                }
+                Ok(())
+            })
+        })
+        .connect(url)
         .await
         .expect("connect the service");
+    if let Some(level) = isolation {
+        let current: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&pool)
+            .await
+            .expect("read the session isolation");
+        assert_eq!(current, level, "the session default took effect");
+    }
+    let svc = PostgresDatabaseService::from_pool(pool);
 
-    let table = "conf_guarded_race";
     svc.schema_drop_table(table).await.expect("drop");
     svc.ensure_schema_table(&Table {
         name: table.into(),
@@ -222,12 +265,16 @@ async fn racing_guarded_writes_cannot_overshoot_the_cap() {
     .await
     .expect("create");
     for stmt in [
-        "CREATE OR REPLACE FUNCTION conf_guarded_race_linger() RETURNS trigger \
-         LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$",
-        "CREATE TRIGGER conf_guarded_race_linger AFTER INSERT OR UPDATE ON conf_guarded_race \
-         FOR EACH ROW EXECUTE FUNCTION conf_guarded_race_linger()",
+        format!(
+            "CREATE OR REPLACE FUNCTION {table}_linger() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER {table}_linger AFTER INSERT OR UPDATE ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {table}_linger()"
+        ),
     ] {
-        sqlx::query(stmt)
+        sqlx::query(&stmt)
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{stmt}: {e}"));
@@ -259,10 +306,14 @@ async fn racing_guarded_writes_cannot_overshoot_the_cap() {
             &cap,
         )
     });
-    let admitted = futures::future::join_all(inserts)
-        .await
-        .into_iter()
-        .filter(|r| r.as_ref().expect("insert_guarded").is_some())
+    let inserts = futures::future::join_all(inserts).await;
+    let admitted = inserts
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedInsert::Inserted(_))))
+        .count();
+    let refused = inserts
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedInsert::Refused { guard: 0 })))
         .count();
     let files = svc.count(table, &[owner("u")]).await.expect("count");
 
@@ -315,27 +366,31 @@ async fn racing_guarded_writes_cannot_overshoot_the_cap() {
             &guards[i],
         )
     });
-    let grown: i64 = futures::future::join_all(updates)
-        .await
-        .into_iter()
-        .map(|r| r.expect("update_guarded"))
-        .sum();
+    let updates = futures::future::join_all(updates).await;
+    let grown = updates
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedUpdate::Updated { rows_affected: 1 })))
+        .count();
+    let refused_updates = updates
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedUpdate::Refused { guard: 0 })))
+        .count();
     let bytes = svc.sum(table, "size", &[owner("v")]).await.expect("sum");
 
     svc.schema_drop_table(table).await.expect("drop");
-    sqlx::query("DROP FUNCTION conf_guarded_race_linger()")
+    sqlx::query(&format!("DROP FUNCTION {table}_linger()"))
         .execute(&admin)
         .await
         .expect("drop function");
 
     assert_eq!(
-        (admitted, files),
-        (3, 3),
-        "eight racing inserts under a cap of three"
+        (admitted, refused, files),
+        (3, 5, 3),
+        "eight racing inserts under a cap of three: {inserts:?}"
     );
     assert_eq!(
-        (grown, bytes),
-        (1, 60.0),
-        "five racing updates under a 60-byte cap"
+        (grown, refused_updates, bytes),
+        (1, 4, 60.0),
+        "five racing updates under a 60-byte cap: {updates:?}"
     );
 }

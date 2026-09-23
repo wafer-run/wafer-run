@@ -177,6 +177,23 @@ fn cap_guard_schema() -> serde_json::Value {
     })
 }
 
+/// JSON Schema for a guarded write refused by one of its guards.
+fn refused_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "Refused": {
+                "type": "object",
+                "properties": {
+                    "guard": { "type": "integer", "description": "Index of the first guard that refused the write." }
+                },
+                "required": ["guard"]
+            }
+        },
+        "required": ["Refused"]
+    })
+}
+
 /// JSON Schema for a single sort directive, shared by the database list action.
 fn sort_schema() -> serde_json::Value {
     json!({
@@ -287,7 +304,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_INSERT_GUARDED => ActionSpec {
-            description: format!("Insert one record only while every guard holds over the collection as it stands before the write — CountBelow{{filters,cap}}: fewer than cap matching rows; SumAtMost{{field,filters,add,cap}}: SUM(field) of matching rows + add <= cap. The check and the insert are one atomic step on every backend (guarded writes to one collection are serialised). Returns the stored record, or null when a guard refused it. At most {MAX_WRITE_GUARDS} guards."),
+            description: format!("Insert one record only while every guard holds over the collection as it stands before the write — CountBelow{{filters,cap}}: fewer than cap matching rows; SumAtMost{{field,filters,add,cap}}: SUM(field) of matching rows + add <= cap. The check and the insert are one atomic step on every backend (guarded writes to one collection are serialised). Returns Inserted{{record}}, or Refused{{guard}} naming the index of the first guard that refused it. A key that is already taken is an AlreadyExists error. At most {MAX_WRITE_GUARDS} guards."),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -298,17 +315,24 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "required": ["collection", "data", "guards"]
             })),
             response_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "record": {
-                        "description": "The inserted record, or null when a guard refused the insert.",
-                        "type": ["object", "null"]
-                    }
-                }
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "Inserted": {
+                                "type": "object",
+                                "properties": { "record": { "type": "object" } },
+                                "required": ["record"]
+                            }
+                        },
+                        "required": ["Inserted"]
+                    },
+                    refused_schema()
+                ]
             })),
         },
         ServiceOp::DATABASE_UPDATE_GUARDED => ActionSpec {
-            description: format!("Update fields on the records matching a set of filters only while every guard holds over the collection as it stands before the write (guards as for database.insert_guarded; exclude a replaced row from a guard with a filter). The check and the update are one atomic step on every backend. Returns the number of records updated: 0 when a guard refused the write or no record matched. At most {MAX_WRITE_GUARDS} guards."),
+            description: format!("Update fields on the records matching a set of filters only while every guard holds over the collection as it stands before the write (guards as for database.insert_guarded; exclude a replaced row from a guard with a filter). The check and the update are one atomic step on every backend. Returns Updated{{rows_affected}} (at least one), Refused{{guard}} naming the index of the first guard that refused it (guards are checked before the filters), or \"NoMatch\" when every guard held but no record matched. At most {MAX_WRITE_GUARDS} guards."),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -320,10 +344,21 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "required": ["collection", "data", "guards"]
             })),
             response_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "rows_affected": { "type": "integer" }
-                }
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "Updated": {
+                                "type": "object",
+                                "properties": { "rows_affected": { "type": "integer" } },
+                                "required": ["rows_affected"]
+                            }
+                        },
+                        "required": ["Updated"]
+                    },
+                    refused_schema(),
+                    { "const": "NoMatch" }
+                ]
             })),
         },
         ServiceOp::DATABASE_UPDATE => ActionSpec {

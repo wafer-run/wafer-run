@@ -831,18 +831,41 @@ pub enum BatchWriteResult {
     },
 }
 
-/// Response for `database.insert_guarded`.
+/// Response for `database.insert_guarded`. A key that is already taken is
+/// not a response but an `AlreadyExists` error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InsertGuardedResponse {
-    /// The inserted row as stored, or `None` when a guard refused the insert.
-    pub record: Option<Record>,
+pub enum InsertGuardedResponse {
+    /// Every guard held; the row as stored.
+    Inserted {
+        /// The inserted row, including its id.
+        record: Record,
+    },
+    /// The guard at this index of the request's `guards` refused the insert
+    /// (the first that did); nothing was written.
+    Refused {
+        /// Index into the request's `guards`.
+        guard: usize,
+    },
 }
 
 /// Response for `database.update_guarded`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateGuardedResponse {
-    /// Rows updated: 0 when a guard refused the write or no row matched.
-    pub rows_affected: i64,
+pub enum UpdateGuardedResponse {
+    /// Every guard held; this many rows (at least one) matched and were
+    /// updated.
+    Updated {
+        /// Rows updated.
+        rows_affected: i64,
+    },
+    /// The guard at this index of the request's `guards` refused the update
+    /// (the first that did); nothing was written. Guards are checked before
+    /// the filters.
+    Refused {
+        /// Index into the request's `guards`.
+        guard: usize,
+    },
+    /// Every guard held but no row matched the filters; nothing was written.
+    NoMatch,
 }
 
 /// Response for `database.upsert`.
@@ -1365,15 +1388,24 @@ mod tests {
         assert_eq!(format!("{decoded:?}"), format!("{update:?}"));
 
         for response in [
-            InsertGuardedResponse { record: None },
-            InsertGuardedResponse {
-                record: Some(Record {
+            InsertGuardedResponse::Refused { guard: 1 },
+            InsertGuardedResponse::Inserted {
+                record: Record {
                     id: "1".into(),
                     data: HashMap::new(),
-                }),
+                },
             },
         ] {
             let decoded: InsertGuardedResponse =
+                codec::decode(&codec::encode(&response).expect("encode")).expect("decode");
+            assert_eq!(format!("{decoded:?}"), format!("{response:?}"));
+        }
+        for response in [
+            UpdateGuardedResponse::Updated { rows_affected: 2 },
+            UpdateGuardedResponse::Refused { guard: 0 },
+            UpdateGuardedResponse::NoMatch,
+        ] {
+            let decoded: UpdateGuardedResponse =
                 codec::decode(&codec::encode(&response).expect("encode")).expect("decode");
             assert_eq!(format!("{decoded:?}"), format!("{response:?}"));
         }

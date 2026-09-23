@@ -60,15 +60,17 @@ pub fn batch(request: &BatchRequest) -> Result<BatchResponse, WaferError> {
 }
 
 /// Buffered: insert the request's row only while every cap guard holds —
-/// the check and the insert are one atomic step. The response carries the
-/// stored row, or `None` when a guard refused it.
+/// the check and the insert are one atomic step. The response is the stored
+/// row (`Inserted`) or the index of the guard that refused it (`Refused`); a
+/// taken key is an `AlreadyExists` error.
 pub fn insert_guarded(request: &InsertGuardedRequest) -> Result<InsertGuardedResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_INSERT_GUARDED, request)
 }
 
 /// Buffered: update the rows matching the request's filters only while every
-/// cap guard holds — the check and the update are one atomic step. Returns
-/// the rows updated (0 when a guard refused the write).
+/// cap guard holds — the check and the update are one atomic step. The
+/// response is `Updated` with the rows changed, `Refused` with the index of
+/// the refusing guard, or `NoMatch` when no row matched.
 pub fn update_guarded(request: &UpdateGuardedRequest) -> Result<UpdateGuardedResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_UPDATE_GUARDED, request)
 }

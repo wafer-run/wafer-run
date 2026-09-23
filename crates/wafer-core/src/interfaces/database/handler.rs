@@ -578,6 +578,15 @@ fn is_preserved_db_error(msg: &str) -> bool {
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     match e {
         DatabaseError::NotFound => WaferError::new(ErrorCode::NotFound, "record not found"),
+        // The driver's message names the constraint and its columns, which is
+        // schema, not the caller's concern; log it, answer with the code.
+        DatabaseError::AlreadyExists(msg) => {
+            tracing::debug!(error = %msg, "database unique constraint violated");
+            WaferError::new(
+                ErrorCode::AlreadyExists,
+                "a record with this key already exists",
+            )
+        }
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
@@ -766,9 +775,14 @@ pub async fn handle_message(
                 .insert_guarded(&req.collection, req.data, &guards)
                 .await
             {
-                Ok(record) => to_output(&wire::InsertGuardedResponse {
-                    record: record.map(service_record_to_wire),
-                }),
+                Ok(service::GuardedInsert::Inserted(record)) => {
+                    to_output(&wire::InsertGuardedResponse::Inserted {
+                        record: service_record_to_wire(record),
+                    })
+                }
+                Ok(service::GuardedInsert::Refused { guard }) => {
+                    to_output(&wire::InsertGuardedResponse::Refused { guard })
+                }
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
@@ -794,7 +808,15 @@ pub async fn handle_message(
                 .update_guarded(&req.collection, &filters, req.data, &guards)
                 .await
             {
-                Ok(rows_affected) => to_output(&wire::UpdateGuardedResponse { rows_affected }),
+                Ok(outcome) => to_output(&match outcome {
+                    service::GuardedUpdate::Updated { rows_affected } => {
+                        wire::UpdateGuardedResponse::Updated { rows_affected }
+                    }
+                    service::GuardedUpdate::Refused { guard } => {
+                        wire::UpdateGuardedResponse::Refused { guard }
+                    }
+                    service::GuardedUpdate::NoMatch => wire::UpdateGuardedResponse::NoMatch,
+                }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

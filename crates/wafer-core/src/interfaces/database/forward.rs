@@ -67,8 +67,8 @@
 //!
 //! use wafer_block::db::{Filter, ListOptions};
 //! use wafer_core::interfaces::database::service::{
-//!     AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, Record, RecordList,
-//!     Table, UpsertSpec, WriteOp, WriteOutcome,
+//!     AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
+//!     GuardedUpdate, Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
 //! };
 //!
 //! struct ReadOnlyGuard {
@@ -144,7 +144,7 @@
 //!             _collection: &str,
 //!             _data: HashMap<String, serde_json::Value>,
 //!             _guards: &[CapGuard],
-//!         ) -> Result<Option<Record>, DatabaseError> {
+//!         ) -> Result<GuardedInsert, DatabaseError> {
 //!             Err(Self::refuse("insert_guarded"))
 //!         }
 //!
@@ -154,7 +154,7 @@
 //!             _filters: &[Filter],
 //!             _data: HashMap<String, serde_json::Value>,
 //!             _guards: &[CapGuard],
-//!         ) -> Result<i64, DatabaseError> {
+//!         ) -> Result<GuardedUpdate, DatabaseError> {
 //!             Err(Self::refuse("update_guarded"))
 //!         }
 //!     }
@@ -790,7 +790,7 @@ macro_rules! __forward_database_step {
                     data: ::std::collections::HashMap<::std::string::String, ::serde_json::Value>,
                     guards: &[$crate::interfaces::database::service::CapGuard],
                 ) -> ::core::result::Result<
-                    ::core::option::Option<$crate::interfaces::database::service::Record>,
+                    $crate::interfaces::database::service::GuardedInsert,
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::insert_guarded($recv(self), collection, data, guards).await
@@ -813,7 +813,7 @@ macro_rules! __forward_database_step {
                     data: ::std::collections::HashMap<::std::string::String, ::serde_json::Value>,
                     guards: &[$crate::interfaces::database::service::CapGuard],
                 ) -> ::core::result::Result<
-                    i64,
+                    $crate::interfaces::database::service::GuardedUpdate,
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::update_guarded($recv(self), collection, filters, data, guards)

@@ -49,42 +49,77 @@ fn aggregate_subquery(table: &str, aggregate: SimpleExpr, filters: &[Filter]) ->
     SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
 }
 
-/// Every guard as one AND-combined predicate; `None` when there are none.
+/// The predicate "`guard` holds".
 ///
 /// The subqueries name `table` in their own `FROM`, so an unqualified column
 /// in a guard's filters resolves to the counted rows, never to the row an
 /// enclosing `UPDATE` is writing.
+fn guard_holds(table: &str, guard: &CapGuard) -> Result<SimpleExpr, SqlBuildError> {
+    Ok(match guard {
+        CapGuard::CountBelow { filters, cap } => Expr::expr(aggregate_subquery(
+            table,
+            Func::count(Expr::col(Asterisk)).into(),
+            filters,
+        ))
+        .lt(*cap),
+        CapGuard::SumAtMost {
+            field,
+            filters,
+            add,
+            cap,
+        } => {
+            let field = validate_ident(field)?;
+            let sum = Func::coalesce([
+                Func::sum(Expr::col(DynCol(field.into()))).into(),
+                Expr::val(0_i64).into(),
+            ]);
+            Expr::expr(aggregate_subquery(table, sum.into(), filters))
+                .add(*add)
+                .lte(*cap)
+        }
+    })
+}
+
+/// Every guard as one AND-combined predicate; `None` when there are none.
 fn guard_condition(table: &str, guards: &[CapGuard]) -> Result<Option<Cond>, SqlBuildError> {
     if guards.is_empty() {
         return Ok(None);
     }
     let mut cond = Cond::all();
     for guard in guards {
-        cond = cond.add(match guard {
-            CapGuard::CountBelow { filters, cap } => Expr::expr(aggregate_subquery(
-                table,
-                Func::count(Expr::col(Asterisk)).into(),
-                filters,
-            ))
-            .lt(*cap),
-            CapGuard::SumAtMost {
-                field,
-                filters,
-                add,
-                cap,
-            } => {
-                let field = validate_ident(field)?;
-                let sum = Func::coalesce([
-                    Func::sum(Expr::col(DynCol(field.into()))).into(),
-                    Expr::val(0_i64).into(),
-                ]);
-                Expr::expr(aggregate_subquery(table, sum.into(), filters))
-                    .add(*add)
-                    .lte(*cap)
-            }
-        });
+        cond = cond.add(guard_holds(table, guard)?);
     }
     Ok(Some(cond))
+}
+
+/// Column of [`build_guard_probe`]'s row holding guard `index`'s verdict.
+#[must_use]
+pub fn guard_probe_column(index: usize) -> String {
+    format!("g{index}")
+}
+
+/// Build `SELECT CASE WHEN {guard_0} THEN 1 ELSE 0 END AS g0, …`: one row
+/// holding each guard's verdict (`1` holds, `0` refuses), named by
+/// [`guard_probe_column`], evaluated exactly as the guarded write evaluates
+/// it. Run it in the guarded write's transaction, just before the write, to
+/// say which guard refused a write.
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] when a `SumAtMost` field is
+/// not a plain identifier.
+pub fn build_guard_probe(
+    table: &str,
+    guards: &[CapGuard],
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
+    let mut select = Query::select();
+    for (index, guard) in guards.iter().enumerate() {
+        let verdict = sea_query::CaseStatement::new()
+            .case(guard_holds(table, guard)?, Expr::val(1_i64))
+            .finally(Expr::val(0_i64));
+        select.expr_as(verdict, DynCol(guard_probe_column(index)));
+    }
+    let (sql, values) = crate::render_select(select, backend);
+    Ok(crate::Statement::new(sql, values, table))
 }
 
 /// Build `INSERT INTO {table} (cols) SELECT vals WHERE {guards} RETURNING *`:
@@ -94,7 +129,7 @@ fn guard_condition(table: &str, guards: &[CapGuard]) -> Result<Option<Cond>, Sql
 /// One statement is atomic where writers are serialised (SQLite, D1). On
 /// PostgreSQL under READ COMMITTED it is not — two concurrent statements each
 /// count without the other's uncommitted row — so run it inside a transaction
-/// that first takes [`build_guard_lock`]'s lock. With no guards the row is
+/// that first takes [`build_guard_preamble`]'s lock. With no guards the row is
 /// inserted unconditionally.
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] when a `SumAtMost` field is
@@ -126,11 +161,12 @@ pub fn build_insert_guarded(
 
 /// Build `UPDATE {table} SET ... WHERE {filters} AND {guards}`: one statement
 /// that updates the matching rows only when every guard holds; its affected
-/// row count is 0 when a guard refused the write.
+/// row count is 0 when a guard refused the write or no row matched (a
+/// [`build_guard_probe`] in the same transaction tells the two apart).
 ///
 /// The guards are evaluated once against the table before the update, not per
 /// updated row. Atomicity is as for [`build_insert_guarded`]: run it after
-/// [`build_guard_lock`]'s lock on PostgreSQL.
+/// [`build_guard_preamble`]'s lock on PostgreSQL.
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] when a `SumAtMost` field is
 /// not a plain identifier.
@@ -160,15 +196,21 @@ pub fn build_update_guarded(
 /// with an application's own single-key advisory locks.
 const GUARD_LOCK_NAMESPACE: &str = "wafer.guarded_write";
 
-/// The statement that serialises guarded writes to `table`, to run first in
-/// the guarded write's transaction; `None` where writers are already
+/// The statements that serialise guarded writes to `table`, to run first in
+/// the guarded write's transaction, in order; none where writers are already
 /// serialised.
 ///
-/// - PostgreSQL: `SELECT pg_advisory_xact_lock(hashtext(ns), hashtext(table))`.
-///   The lock is held to the end of the transaction, and under READ COMMITTED
-///   the guarded statement that follows takes its snapshot after acquiring
-///   it, so it counts every guarded write committed before it.
-/// - SQLite (and D1, which renders as SQLite): `None`. A write transaction
+/// - PostgreSQL: `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`, then
+///   `SELECT pg_advisory_xact_lock(hashtext(ns), hashtext(table))`. The lock
+///   is held to the end of the transaction, and under READ COMMITTED each
+///   statement after it takes a fresh snapshot once the lock is granted, so
+///   it counts every guarded write committed before it. The isolation level
+///   is set explicitly because a server or role whose
+///   `default_transaction_isolation` is REPEATABLE READ or SERIALIZABLE
+///   would take the transaction's one snapshot at the lock statement —
+///   BEFORE the lock is granted — and the guard would then miss the writes
+///   it waited for.
+/// - SQLite (and D1, which renders as SQLite): none. A write transaction
 ///   holds the database's single write lock, so no other write interleaves.
 ///
 /// The key is the TABLE, not the guard's filters: guards with different
@@ -179,17 +221,24 @@ const GUARD_LOCK_NAMESPACE: &str = "wafer.guarded_write";
 /// PostgreSQL, as every write already does on SQLite. Unguarded writes do not
 /// take the lock, so a guard is exact only against other guarded writes.
 #[must_use]
-pub fn build_guard_lock(table: &str, backend: Backend) -> Option<crate::Statement> {
+pub fn build_guard_preamble(table: &str, backend: Backend) -> Vec<crate::Statement> {
     match backend {
-        Backend::Sqlite => None,
-        Backend::Postgres => Some(crate::Statement::new(
-            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))".to_string(),
-            vec![
-                GUARD_LOCK_NAMESPACE.into(),
-                sea_query::Value::from(table.to_string()),
-            ],
-            table,
-        )),
+        Backend::Sqlite => Vec::new(),
+        Backend::Postgres => vec![
+            crate::Statement::new(
+                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED".to_string(),
+                Vec::new(),
+                table,
+            ),
+            crate::Statement::new(
+                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))".to_string(),
+                vec![
+                    GUARD_LOCK_NAMESPACE.into(),
+                    sea_query::Value::from(table.to_string()),
+                ],
+                table,
+            ),
+        ],
     }
 }
 
@@ -385,6 +434,45 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_reports_each_guards_verdict_as_the_write_evaluates_it() {
+        let db = db();
+        let insert = crate::query::build_insert("files", &row("a", "u", 8), Backend::Sqlite);
+        run(&db, &insert);
+        let guards = [
+            CapGuard::CountBelow {
+                filters: vec![eq("owner", serde_json::json!("u"))],
+                cap: 5,
+            },
+            CapGuard::SumAtMost {
+                field: "size".into(),
+                filters: vec![eq("owner", serde_json::json!("u"))],
+                add: 3,
+                cap: 10,
+            },
+        ];
+        let probe = build_guard_probe("files", &guards, Backend::Sqlite).expect("probe");
+        let params: Vec<rusqlite::types::Value> = sea_values_to_json(probe.values)
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::Number(n) => {
+                    rusqlite::types::Value::Integer(n.as_i64().expect("integer"))
+                }
+                serde_json::Value::String(s) => rusqlite::types::Value::Text(s),
+                other => panic!("unexpected probe parameter {other}"),
+            })
+            .collect();
+        let verdicts: (i64, i64) = db
+            .query_row(&probe.sql, rusqlite::params_from_iter(params), |r| {
+                Ok((
+                    r.get(guard_probe_column(0).as_str())?,
+                    r.get(guard_probe_column(1).as_str())?,
+                ))
+            })
+            .expect(&probe.sql);
+        assert_eq!(verdicts, (1, 0), "1 file < 5 holds; 8 + 3 > 10 refuses");
+    }
+
+    #[test]
     fn no_guards_is_an_unconditional_write() {
         let db = db();
         let stmt =
@@ -413,9 +501,16 @@ mod tests {
 
     #[test]
     fn only_postgres_takes_a_guard_lock_and_it_is_keyed_by_table() {
-        assert!(build_guard_lock("files", Backend::Sqlite).is_none());
-        let lock = build_guard_lock("files", Backend::Postgres).expect("postgres lock");
+        assert!(build_guard_preamble("files", Backend::Sqlite).is_empty());
+        let mut preamble = build_guard_preamble("files", Backend::Postgres).into_iter();
+        let isolation = preamble.next().expect("isolation statement");
+        assert_eq!(
+            isolation.sql,
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        );
+        let lock = preamble.next().expect("lock statement");
         assert!(lock.sql.contains("pg_advisory_xact_lock"), "{}", lock.sql);
+        assert!(preamble.next().is_none());
         assert_eq!(
             sea_values_to_json(lock.values),
             [

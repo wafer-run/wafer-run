@@ -234,15 +234,29 @@ impl SQLiteDatabaseService {
         sql: &str,
         sql_params: &[SqlValue],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let mut prepared = db
-            .prepare(sql)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let mut prepared = db.prepare(sql).map_err(|e| statement_error(&e))?;
         let records = prepared
             .query_map(as_params(sql_params).as_slice(), Self::row_to_record)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?
+            .map_err(|e| statement_error(&e))?
             .collect::<rusqlite::Result<Vec<Record>>>()
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            .map_err(|e| statement_error(&e))?;
         Ok(records)
+    }
+}
+
+/// A failed statement as a [`DatabaseError`]: a primary- or unique-key
+/// violation is [`DatabaseError::AlreadyExists`], anything else `Internal`.
+fn statement_error(e: &rusqlite::Error) -> DatabaseError {
+    let unique = matches!(
+        e,
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+    );
+    if unique {
+        DatabaseError::AlreadyExists(e.to_string())
+    } else {
+        DatabaseError::Internal(e.to_string())
     }
 }
 
@@ -360,7 +374,7 @@ impl DbExec for SQLiteDatabaseService {
             db.query_row(&sql, as_params(&sql_params).as_slice(), Self::row_to_record)
                 .map_err(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
-                    _ => DatabaseError::Internal(e.to_string()),
+                    _ => statement_error(&e),
                 })
         })
         .await?
@@ -376,7 +390,7 @@ impl DbExec for SQLiteDatabaseService {
         self.on_write(move |db| {
             let rows = db
                 .execute(&sql, as_params(&sql_params).as_slice())
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                .map_err(|e| statement_error(&e))?;
             Ok(rows as i64)
         })
         .await?
@@ -406,7 +420,7 @@ impl DbExec for SQLiteDatabaseService {
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
         self.on_read(move |db| {
             db.query_row(&sql, as_params(&sql_params).as_slice(), |row| row.get(0))
-                .map_err(|e| DatabaseError::Internal(e.to_string()))
+                .map_err(|e| statement_error(&e))
         })
         .await?
     }
@@ -420,7 +434,7 @@ impl DbExec for SQLiteDatabaseService {
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
         self.on_read(move |db| {
             db.query_row(&sql, as_params(&sql_params).as_slice(), |row| row.get(0))
-                .map_err(|e| DatabaseError::Internal(e.to_string()))
+                .map_err(|e| statement_error(&e))
         })
         .await?
     }
@@ -442,7 +456,7 @@ impl DbExec for SQLiteDatabaseService {
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
         self.on_write(move |db| {
             db.execute(&sql, as_params(&sql_params).as_slice())
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                .map_err(|e| statement_error(&e))?;
             Ok(Some(db.last_insert_rowid()))
         })
         .await?
@@ -475,7 +489,7 @@ impl DbExec for SQLiteDatabaseService {
                 } else {
                     let rows = tx
                         .execute(sql, as_params(params).as_slice())
-                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                        .map_err(|e| statement_error(&e))?;
                     TxResult::Execute(rows as i64)
                 };
                 results.push(result);
