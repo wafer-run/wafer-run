@@ -404,7 +404,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
 #[tokio::test]
 async fn a_catalog_collision_is_not_already_exists() {
     use sqlx::postgres::PgPool;
-    use wafer_core::interfaces::database::service::{pk, DatabaseError, DatabaseService, Table};
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
 
     let Ok(url) = std::env::var(URL_ENV) else {
         eprintln!("skipping postgres catalog-collision check: set {URL_ENV} to run");
@@ -425,14 +425,10 @@ async fn a_catalog_collision_is_not_already_exists() {
         .execute(&mut *other)
         .await
         .expect("create in the other session");
-    let schema = Table {
-        name: table.into(),
-        columns: vec![pk("id")],
-        indexes: Vec::new(),
-        primary_key: Vec::new(),
-        unique_keys: Vec::new(),
-    };
-    let create = svc.ensure_schema_table(&schema);
+    // Through `exec_raw`, the path a migration runner takes: the driver's
+    // error reaches the classifier unwrapped.
+    let statement = format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)");
+    let create = svc.exec_raw(&statement, &[]);
     let commit = async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         other.commit().await.expect("commit the other session");
