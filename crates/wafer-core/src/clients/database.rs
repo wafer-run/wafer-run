@@ -16,17 +16,20 @@ use wafer_block::{
         CreateManyResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
         DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest, EnsureTableRequest,
         ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
-        IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest, SchemaOpResponse,
-        SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TableDef, TableExistsRequest,
-        TableExistsResponse, TakeWhereRequest, TakeWhereResponse, UpdateRequest,
-        UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest,
-        UpsertResponse,
+        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
+        OnConflict, QueryRawRequest, SchemaOpResponse, SortFieldDef as WireSortFieldDef,
+        SumRequest, SumResponse, TableDef, TableExistsRequest, TableExistsResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateGuardedRequest, UpdateGuardedResponse,
+        UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest,
+        UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
 };
 
 use super::{call_service, decode, dual_api, svc, svc_fn};
+/// The cap a guarded write must stay within — see [`insert_guarded`].
+pub use crate::interfaces::database::service::CapGuard;
 // Re-export schema types for declarative table management.
 pub use crate::interfaces::database::service::{
     col_blob, col_bool, col_datetime, col_float, col_int, col_int64, col_json, col_string,
@@ -112,6 +115,32 @@ fn list_wire_filters(opts: &ListOptions) -> Vec<FilterNode> {
         nodes.extend(tree.iter().map(filter_tree_to_wire_node));
     }
     nodes
+}
+
+/// Encode client-side [`CapGuard`]s as their wire shape.
+fn to_wire_guards(guards: &[CapGuard]) -> Vec<wafer_block::wire::database::CapGuard> {
+    guards
+        .iter()
+        .map(|guard| match guard {
+            CapGuard::CountBelow { filters, cap } => {
+                wafer_block::wire::database::CapGuard::CountBelow {
+                    filters: to_wire_filters(filters),
+                    cap: *cap,
+                }
+            }
+            CapGuard::SumAtMost {
+                field,
+                filters,
+                add,
+                cap,
+            } => wafer_block::wire::database::CapGuard::SumAtMost {
+                field: field.clone(),
+                filters: to_wire_filters(filters),
+                add: *add,
+                cap: *cap,
+            },
+        })
+        .collect()
 }
 
 fn to_wire_sort(sort: &[SortField]) -> Vec<WireSortFieldDef> {
@@ -208,6 +237,65 @@ dual_api! {
         let resp = svc!(ctx, BLOCK, ServiceOp::DATABASE_BATCH, &req, None, true, Some("db"))?;
         let resp: BatchResponse = decode(&resp)?;
         Ok(resp.results)
+    }
+
+    /// Insert `data` into `collection` only while every guard holds over the
+    /// collection as it stands before the insert, and return the stored row —
+    /// or `None` when a guard refused it. The check and the insert are one
+    /// atomic step against every other guarded write to `collection`, so
+    /// concurrent callers cannot overshoot a cap. The row is stamped like
+    /// [`create`]'s. WRAP-authorized (write) against `collection`.
+    pub fn insert_guarded(
+        ctx,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<Option<Record>, WaferError> {
+        let req = InsertGuardedRequest {
+            collection: collection.to_string(),
+            data,
+            guards: to_wire_guards(guards),
+        };
+        let resp = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_INSERT_GUARDED,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: InsertGuardedResponse = decode(&resp)?;
+        Ok(resp.record)
+    }
+
+    /// Set `data` on the rows of `collection` matching `filters` only while
+    /// every guard holds, and return the rows updated — 0 when a guard
+    /// refused the write or nothing matched. Atomic as [`insert_guarded`];
+    /// exclude a row the update replaces from a guard with a filter.
+    /// WRAP-authorized (write) against `collection`.
+    pub fn update_guarded(
+        ctx,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<i64, WaferError> {
+        let req = UpdateGuardedRequest {
+            collection: collection.to_string(),
+            filters: to_wire_filters(filters),
+            data,
+            guards: to_wire_guards(guards),
+        };
+        let resp = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_UPDATE_GUARDED,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: UpdateGuardedResponse = decode(&resp)?;
+        Ok(resp.rows_affected)
     }
 
     /// Update the record `id` in `collection` with the fields in `data` and return the result.

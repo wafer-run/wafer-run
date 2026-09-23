@@ -609,6 +609,8 @@ forward_database_service! {
             upsert: forward,
             aggregate: forward,
             batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
             // The four below are not `DbExec` operations: the shared executor
             // has no schema-mutation primitives, and STRICT_SCHEMA is per-backend
             // state.

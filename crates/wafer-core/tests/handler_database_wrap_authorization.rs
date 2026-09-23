@@ -833,3 +833,138 @@ async fn create_many_is_authorized_as_a_write_on_its_collection() {
     .await;
     assert_eq!(*calls.lock().unwrap(), vec!["create_many"]);
 }
+
+// ---------------------------------------------------------------------------
+// Guarded writes — `database.insert_guarded` and `database.update_guarded`.
+// ---------------------------------------------------------------------------
+
+fn guarded_bodies(
+    collection: &str,
+    guards: Vec<wire::database::CapGuard>,
+) -> [(&'static str, Vec<u8>); 2] {
+    [
+        (
+            ServiceOp::DATABASE_INSERT_GUARDED,
+            codec::encode(&wire::database::InsertGuardedRequest {
+                collection: collection.into(),
+                data: Default::default(),
+                guards: guards.clone(),
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::DATABASE_UPDATE_GUARDED,
+            codec::encode(&wire::database::UpdateGuardedRequest {
+                collection: collection.into(),
+                filters: Vec::new(),
+                data: Default::default(),
+                guards,
+            })
+            .unwrap(),
+        ),
+    ]
+}
+
+/// Both guarded ops are writes on their collection: a foreign collection and
+/// a read-only grant are refused before the service runs; an own collection
+/// reaches it.
+#[tokio::test]
+async fn guarded_writes_are_authorized_as_writes_on_their_collection() {
+    for ((op, foreign), (_, own)) in guarded_bodies("my_org__other_block__secrets", Vec::new())
+        .into_iter()
+        .zip(guarded_bodies("my_org__auth__users", Vec::new()))
+    {
+        let calls = new_calls();
+        let svc = db_fakes::RecordingDb::new(calls.clone());
+        let msg = msg_without_wrap_meta(op);
+        expect_permission_denied(
+            wafer_core::interfaces::database::handler::handle_message(
+                &svc,
+                &OwnNamespaceCtx,
+                &msg,
+                &foreign,
+            )
+            .await,
+        )
+        .await;
+        expect_permission_denied(
+            wafer_core::interfaces::database::handler::handle_message(
+                &svc,
+                &ReadOnlyCtx,
+                &msg,
+                &own,
+            )
+            .await,
+        )
+        .await;
+        assert!(calls.lock().unwrap().is_empty(), "{op}");
+
+        expect_success(
+            wafer_core::interfaces::database::handler::handle_message(
+                &svc,
+                &OwnNamespaceCtx,
+                &msg,
+                &own,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(calls.lock().unwrap().len(), 1, "{op}");
+    }
+}
+
+/// A malformed guard — a `SumAtMost` field that is not a plain identifier, a
+/// filter group, or more than `MAX_WRITE_GUARDS` guards — is
+/// `InvalidArgument` before the service runs.
+#[tokio::test]
+async fn malformed_guards_are_invalid_argument_before_the_service_runs() {
+    let leaf = |field: &str| {
+        wire::database::FilterNode::Leaf(wire::database::FilterDef {
+            field: field.into(),
+            operator: "eq".into(),
+            value: serde_json::json!("u"),
+            column: None,
+        })
+    };
+    let count_below = || wire::database::CapGuard::CountBelow {
+        filters: Vec::new(),
+        cap: 1,
+    };
+    let malformed = [
+        vec![wire::database::CapGuard::SumAtMost {
+            field: "size\"); DROP TABLE x; --".into(),
+            filters: Vec::new(),
+            add: 1,
+            cap: 1,
+        }],
+        vec![wire::database::CapGuard::CountBelow {
+            filters: vec![wire::database::FilterNode::Any {
+                any: vec![leaf("a"), leaf("b")],
+            }],
+            cap: 1,
+        }],
+        (0..=wire::database::MAX_WRITE_GUARDS)
+            .map(|_| count_below())
+            .collect(),
+    ];
+    for guards in malformed {
+        for (op, body) in guarded_bodies("my_org__auth__users", guards.clone()) {
+            let calls = new_calls();
+            let svc = db_fakes::RecordingDb::new(calls.clone());
+            let out = wafer_core::interfaces::database::handler::handle_message(
+                &svc,
+                &OwnNamespaceCtx,
+                &msg_without_wrap_meta(op),
+                &body,
+            )
+            .await;
+            match out.collect_buffered().await {
+                Err(TerminalNotResponse::Error(e)) => {
+                    assert_eq!(e.code, ErrorCode::InvalidArgument, "{op}: {}", e.message);
+                }
+                other => panic!("{op}: expected InvalidArgument, got {other:?}"),
+            }
+            assert!(calls.lock().unwrap().is_empty(), "{op}");
+        }
+    }
+}

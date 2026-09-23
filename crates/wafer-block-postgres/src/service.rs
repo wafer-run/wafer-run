@@ -272,6 +272,8 @@ forward_database_service! {
             upsert: forward,
             aggregate: forward,
             batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
             // The shared default is CREATE → add missing declared columns →
             // indexes → FK indexes, and it invalidates this backend's schema
             // cache on both the success and failure paths. The hand-written

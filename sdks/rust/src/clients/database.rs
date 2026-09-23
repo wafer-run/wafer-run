@@ -16,9 +16,10 @@ use wafer_block::{
         CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest, DeleteRequest,
         DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest,
         EnsureTableRequest, ExecRawRequest, ExecRawResponse, GetRequest,
-        IncrementFieldWhereRequest, ListRequest, QueryRawRequest, Record, RecordList,
-        SchemaOpResponse, SumRequest, SumResponse, TableExistsRequest, TableExistsResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereCountRequest,
+        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
+        QueryRawRequest, Record, RecordList, SchemaOpResponse, SumRequest, SumResponse,
+        TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
+        UpdateGuardedRequest, UpdateGuardedResponse, UpdateRequest, UpdateWhereCountRequest,
         UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     ServiceOp, WaferError,
@@ -56,6 +57,20 @@ pub fn create_many(request: &CreateManyRequest) -> Result<CreateManyResponse, Wa
 /// them, or none when any statement fails. Returns one result per op.
 pub fn batch(request: &BatchRequest) -> Result<BatchResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_BATCH, request)
+}
+
+/// Buffered: insert the request's row only while every cap guard holds —
+/// the check and the insert are one atomic step. The response carries the
+/// stored row, or `None` when a guard refused it.
+pub fn insert_guarded(request: &InsertGuardedRequest) -> Result<InsertGuardedResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_INSERT_GUARDED, request)
+}
+
+/// Buffered: update the rows matching the request's filters only while every
+/// cap guard holds — the check and the update are one atomic step. Returns
+/// the rows updated (0 when a guard refused the write).
+pub fn update_guarded(request: &UpdateGuardedRequest) -> Result<UpdateGuardedResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_UPDATE_GUARDED, request)
 }
 
 /// Buffered: update a record by id. Returns the updated [`Record`].
@@ -190,6 +205,8 @@ const SUPPORTED_DATABASE_OPS: &[&str] = &[
     ServiceOp::DATABASE_CREATE,
     ServiceOp::DATABASE_CREATE_MANY,
     ServiceOp::DATABASE_BATCH,
+    ServiceOp::DATABASE_INSERT_GUARDED,
+    ServiceOp::DATABASE_UPDATE_GUARDED,
     ServiceOp::DATABASE_UPDATE,
     ServiceOp::DATABASE_UPDATE_WHERE,
     ServiceOp::DATABASE_UPDATE_WHERE_COUNT,

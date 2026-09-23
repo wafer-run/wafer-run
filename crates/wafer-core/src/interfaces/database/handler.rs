@@ -305,6 +305,46 @@ fn to_write_op(write: wire::BatchWrite) -> Result<service::WriteOp, WaferError> 
     })
 }
 
+/// Convert wire [`wire::CapGuard`]s into the service's
+/// [`CapGuard`](service::CapGuard)s, refusing more than
+/// [`wire::MAX_WRITE_GUARDS`], validating each guard's filters as
+/// `database.update_where`'s (bounded, AND-of-leaves), and the `SumAtMost`
+/// field as a plain identifier.
+fn to_cap_guards(guards: Vec<wire::CapGuard>) -> Result<Vec<service::CapGuard>, WaferError> {
+    if guards.len() > wire::MAX_WRITE_GUARDS {
+        return Err(invalid(format!(
+            "{} guards; at most {} per call",
+            guards.len(),
+            wire::MAX_WRITE_GUARDS
+        )));
+    }
+    guards
+        .into_iter()
+        .map(|guard| {
+            Ok(match guard {
+                wire::CapGuard::CountBelow { filters, cap } => service::CapGuard::CountBelow {
+                    filters: flatten_leaves(&convert_filter_tree(filters)?)?,
+                    cap,
+                },
+                wire::CapGuard::SumAtMost {
+                    field,
+                    filters,
+                    add,
+                    cap,
+                } => {
+                    check_ident(&field)?;
+                    service::CapGuard::SumAtMost {
+                        field,
+                        filters: flatten_leaves(&convert_filter_tree(filters)?)?,
+                        add,
+                        cap,
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
 fn write_outcome_to_wire(outcome: service::WriteOutcome) -> wire::BatchWriteResult {
     match outcome {
         service::WriteOutcome::Created(r) => {
@@ -705,6 +745,56 @@ pub async fn handle_message(
                 Ok(outcomes) => to_output(&wire::BatchResponse {
                     results: outcomes.into_iter().map(write_outcome_to_wire).collect(),
                 }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_INSERT_GUARDED => {
+            let req = match decode_and_authorize::<wire::InsertGuardedRequest>(
+                ctx,
+                body,
+                "database.insert_guarded",
+                |r| (r.collection.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            let guards = match to_cap_guards(req.guards) {
+                Ok(g) => g,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service
+                .insert_guarded(&req.collection, req.data, &guards)
+                .await
+            {
+                Ok(record) => to_output(&wire::InsertGuardedResponse {
+                    record: record.map(service_record_to_wire),
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_UPDATE_GUARDED => {
+            let req = match decode_and_authorize::<wire::UpdateGuardedRequest>(
+                ctx,
+                body,
+                "database.update_guarded",
+                |r| (r.collection.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            let filters = match convert_filter_tree(req.filters).and_then(|t| flatten_leaves(&t)) {
+                Ok(f) => f,
+                Err(e) => return OutputStream::error(e),
+            };
+            let guards = match to_cap_guards(req.guards) {
+                Ok(g) => g,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service
+                .update_guarded(&req.collection, &filters, req.data, &guards)
+                .await
+            {
+                Ok(rows_affected) => to_output(&wire::UpdateGuardedResponse { rows_affected }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

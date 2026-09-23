@@ -104,6 +104,28 @@ impl DatabaseService for RecordingDb {
             )
             .collect())
     }
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: std::collections::HashMap<String, serde_json::Value>,
+        _guards: &[wafer_core::interfaces::database::service::CapGuard],
+    ) -> Result<Option<Record>, DatabaseError> {
+        self.record("insert_guarded");
+        Ok(Some(Record {
+            id: collection.to_string(),
+            data,
+        }))
+    }
+    async fn update_guarded(
+        &self,
+        _collection: &str,
+        _filters: &[wafer_block::db::Filter],
+        _data: std::collections::HashMap<String, serde_json::Value>,
+        _guards: &[wafer_core::interfaces::database::service::CapGuard],
+    ) -> Result<i64, DatabaseError> {
+        self.record("update_guarded");
+        Ok(1)
+    }
     async fn update(
         &self,
         _collection: &str,

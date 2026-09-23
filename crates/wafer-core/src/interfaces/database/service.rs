@@ -13,6 +13,9 @@ pub use wafer_schema::{
     DataType, DefaultVal, DefaultValue, Index, Reference, Table,
 };
 use wafer_sql_utils::aggregate::CastType;
+/// A count or sum cap a guarded write must stay within — see
+/// [`DatabaseService::insert_guarded`].
+pub use wafer_sql_utils::guard::CapGuard;
 
 /// Errors returned by [`DatabaseService`] operations.
 #[derive(Error, Debug)]
@@ -423,6 +426,41 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
     /// the same way.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
+
+    /// Insert `data` into `collection` only while every guard in `guards`
+    /// holds over the table as it stands before the insert, returning the
+    /// stored row, or `None` when a guard refused it. The row gets
+    /// [`create`](Self::create)'s stamping.
+    ///
+    /// The check and the insert are ONE atomic step: no other guarded write
+    /// to `collection` can land between them, so N concurrent inserts under a
+    /// `CountBelow { cap }` leave at most `cap` rows. A write through any
+    /// other method is not serialised against it. No default: a backend must
+    /// make the step atomic itself (the shared
+    /// [`DbExec`](super::exec::DbExec) default renders one conditional
+    /// statement and, on PostgreSQL, takes a per-table advisory lock first).
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<Option<Record>, DatabaseError>;
+
+    /// Set `data` on the rows of `collection` matching `filters` only while
+    /// every guard in `guards` holds over the table as it stands before the
+    /// update, returning the rows updated — 0 when a guard refused the write
+    /// or no row matched (a missing table updates nothing, as
+    /// [`update_where_count`](Self::update_where_count)). A guard that should
+    /// not count a row the update replaces excludes it with a filter. Atomic
+    /// as [`insert_guarded`](Self::insert_guarded) is; no default, for the
+    /// same reason.
+    async fn update_guarded(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<i64, DatabaseError>;
 
     /// Update modifies an existing record by ID.
     async fn update(

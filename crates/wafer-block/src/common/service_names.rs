@@ -44,6 +44,13 @@ impl ServiceOp {
     /// upsert, across collections) in one transaction — all or none; every
     /// op's collection is WRAP-authorized for write.
     pub const DATABASE_BATCH: &str = "database.batch";
+    /// Insert one record only while every count/sum cap guard over the
+    /// collection holds — one atomic check-and-write on every backend.
+    pub const DATABASE_INSERT_GUARDED: &str = "database.insert_guarded";
+    /// Update the records matching a filter only while every count/sum cap
+    /// guard over the collection holds — one atomic check-and-write on every
+    /// backend.
+    pub const DATABASE_UPDATE_GUARDED: &str = "database.update_guarded";
     /// Update an existing record by primary key.
     pub const DATABASE_UPDATE: &str = "database.update";
     /// Delete a record by primary key.
@@ -217,6 +224,8 @@ impl ServiceOp {
         Self::DATABASE_CREATE,
         Self::DATABASE_CREATE_MANY,
         Self::DATABASE_BATCH,
+        Self::DATABASE_INSERT_GUARDED,
+        Self::DATABASE_UPDATE_GUARDED,
         Self::DATABASE_UPDATE,
         Self::DATABASE_UPDATE_WHERE,
         Self::DATABASE_UPDATE_WHERE_COUNT,

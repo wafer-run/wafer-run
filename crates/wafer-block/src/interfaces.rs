@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::{
     common::ServiceOp,
     types::{ActionSpec, InterfaceSpec},
-    wire::database::MAX_BATCH_WRITES,
+    wire::database::{MAX_BATCH_WRITES, MAX_WRITE_GUARDS},
 };
 
 /// Return all well-known interface specs.
@@ -138,6 +138,45 @@ fn filter_schema() -> serde_json::Value {
     })
 }
 
+/// JSON Schema for one cap guard of the guarded-write actions (an externally
+/// tagged enum: one key naming the guard).
+fn cap_guard_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "CountBelow": {
+                        "type": "object",
+                        "properties": {
+                            "filters": { "type": "array", "items": filter_schema() },
+                            "cap": { "type": "integer" }
+                        },
+                        "required": ["cap"]
+                    }
+                },
+                "required": ["CountBelow"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "SumAtMost": {
+                        "type": "object",
+                        "properties": {
+                            "field": { "type": "string" },
+                            "filters": { "type": "array", "items": filter_schema() },
+                            "add": { "type": "integer" },
+                            "cap": { "type": "integer" }
+                        },
+                        "required": ["field", "add", "cap"]
+                    }
+                },
+                "required": ["SumAtMost"]
+            }
+        ]
+    })
+}
+
 /// JSON Schema for a single sort directive, shared by the database list action.
 fn sort_schema() -> serde_json::Value {
     json!({
@@ -244,6 +283,46 @@ fn database_action_spec(op: &str) -> ActionSpec {
                         "description": "One per op, in order: Created(record), Updated(record or null), Deleted{rows_affected}, UpdatedWhere{rows_affected} or Upserted{rows_affected}.",
                         "items": { "type": "object" }
                     }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_INSERT_GUARDED => ActionSpec {
+            description: format!("Insert one record only while every guard holds over the collection as it stands before the write — CountBelow{{filters,cap}}: fewer than cap matching rows; SumAtMost{{field,filters,add,cap}}: SUM(field) of matching rows + add <= cap. The check and the insert are one atomic step on every backend (guarded writes to one collection are serialised). Returns the stored record, or null when a guard refused it. At most {MAX_WRITE_GUARDS} guards."),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "data": { "type": "object" },
+                    "guards": { "type": "array", "items": cap_guard_schema(), "maxItems": MAX_WRITE_GUARDS }
+                },
+                "required": ["collection", "data", "guards"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "record": {
+                        "description": "The inserted record, or null when a guard refused the insert.",
+                        "type": ["object", "null"]
+                    }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_UPDATE_GUARDED => ActionSpec {
+            description: format!("Update fields on the records matching a set of filters only while every guard holds over the collection as it stands before the write (guards as for database.insert_guarded; exclude a replaced row from a guard with a filter). The check and the update are one atomic step on every backend. Returns the number of records updated: 0 when a guard refused the write or no record matched. At most {MAX_WRITE_GUARDS} guards."),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "filters": { "type": "array", "items": filter_schema() },
+                    "data": { "type": "object" },
+                    "guards": { "type": "array", "items": cap_guard_schema(), "maxItems": MAX_WRITE_GUARDS }
+                },
+                "required": ["collection", "data", "guards"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rows_affected": { "type": "integer" }
                 }
             })),
         },

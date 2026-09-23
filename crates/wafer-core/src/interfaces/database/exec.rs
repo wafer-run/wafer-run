@@ -17,13 +17,15 @@ use std::collections::HashMap;
 
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
-use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend};
+use wafer_sql_utils::{
+    ddl, guard, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend,
+};
 
 use super::{
     schema_cache::SchemaCache,
     service::{
-        AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec, WriteOp,
-        WriteOutcome,
+        AggregateSpec, CapGuard, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec,
+        WriteOp, WriteOutcome,
     },
 };
 
@@ -1596,6 +1598,134 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 }
             })
             .collect()
+    }
+
+    /// Run one statement from [`wafer_sql_utils::guard`] so that its guard
+    /// check and its write are one atomic step against every other guarded
+    /// write to `table`: ONE [`run_transaction`](Self::run_transaction) that
+    /// first takes [`guard::build_guard_lock`]'s lock where the backend needs
+    /// one (PostgreSQL), then runs the statement. Returns the statement's
+    /// result — rows when `returning`, else its affected count.
+    async fn run_guarded(
+        &self,
+        table: &str,
+        stmt: wafer_sql_utils::Statement,
+        returning: bool,
+    ) -> Result<TxResult, DatabaseError> {
+        let lock = guard::build_guard_lock(table, Self::BACKEND)
+            .map(|lock| (lock.sql, sea_values_to_json(lock.values)));
+        let params = sea_values_to_json(stmt.values);
+        let mut ops = Vec::with_capacity(2);
+        if let Some((sql, params)) = &lock {
+            ops.push(TxOp::Execute { sql, params });
+        }
+        ops.push(if returning {
+            TxOp::Returning {
+                sql: &stmt.sql,
+                params: &params,
+            }
+        } else {
+            TxOp::Execute {
+                sql: &stmt.sql,
+                params: &params,
+            }
+        });
+        let expected = ops.len();
+        let results = self.run_transaction(&ops).await?;
+        if results.len() != expected {
+            return Err(DatabaseError::Internal(format!(
+                "run_transaction returned {} results for {expected} statements",
+                results.len()
+            )));
+        }
+        results
+            .into_iter()
+            .last()
+            .ok_or_else(|| DatabaseError::Internal("run_transaction returned no result".into()))
+    }
+
+    /// Lazily add the columns every guard's filters name, as a filtered read
+    /// would (see [`ensure_query_columns`](Self::ensure_query_columns)). A
+    /// `SumAtMost` field is not added, as the `sum` op does not add it.
+    async fn ensure_guard_columns(
+        &self,
+        table: &str,
+        guards: &[CapGuard],
+    ) -> Result<(), DatabaseError> {
+        let filters: Vec<Filter> = guards
+            .iter()
+            .flat_map(|guard| match guard {
+                CapGuard::CountBelow { filters, .. } | CapGuard::SumAtMost { filters, .. } => {
+                    filters.iter().cloned()
+                }
+            })
+            .collect();
+        self.ensure_query_columns(table, &filters, &[], None).await
+    }
+
+    /// Shared `insert_guarded`: [`create`](Self::create)'s id/timestamp
+    /// policy and lazy column-add, then ONE
+    /// [`guard::build_insert_guarded`] statement (`INSERT … SELECT … WHERE
+    /// {guards} RETURNING *`) through [`run_guarded`](Self::run_guarded).
+    /// A refused insert returns no row, so `None`.
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<Option<Record>, DatabaseError> {
+        let table = sanitize_ident(collection);
+        let mut data = data;
+        let autogenerates_id =
+            !data.contains_key("id") && self.table_autogenerates_id(&table).await;
+        prepare_created_row(&mut data, autogenerates_id);
+        self.ensure_data_columns(&table, &data).await?;
+        self.ensure_guard_columns(&table, guards).await?;
+        let stmt = guard::build_insert_guarded(&table, &sorted_pairs(&data), guards, Self::BACKEND)
+            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        match self.run_guarded(&table, stmt, true).await? {
+            TxResult::Returning(rows) => Ok(rows.into_iter().next()),
+            other @ TxResult::Execute(_) => Err(DatabaseError::Internal(format!(
+                "run_transaction returned {other:?} for a guarded insert"
+            ))),
+        }
+    }
+
+    /// Shared `update_guarded`: table-exists guard (a missing table updates
+    /// nothing) → timestamp stamping → lazy data/filter/guard column-add →
+    /// ONE [`guard::build_update_guarded`] statement through
+    /// [`run_guarded`](Self::run_guarded), returning its affected count.
+    async fn update_guarded(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<i64, DatabaseError> {
+        let table = sanitize_ident(collection);
+        if !self.table_present_for_op(&table).await? {
+            return Ok(0);
+        }
+        let mut data = data;
+        stamp_timestamps(&mut data, false);
+        self.ensure_data_columns(&table, &data).await?;
+        self.ensure_query_columns(&table, filters, &[], None)
+            .await?;
+        self.ensure_guard_columns(&table, guards).await?;
+        let stmt = guard::build_update_guarded(
+            &table,
+            &sorted_pairs(&data),
+            filters,
+            guards,
+            Self::BACKEND,
+        )
+        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        match self.run_guarded(&table, stmt, false).await? {
+            TxResult::Execute(rows_affected) => Ok(rows_affected),
+            other @ TxResult::Returning(_) => Err(DatabaseError::Internal(format!(
+                "run_transaction returned {other:?} for a guarded update"
+            ))),
+        }
     }
 }
 

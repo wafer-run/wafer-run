@@ -500,6 +500,70 @@ impl BatchWrite {
     }
 }
 
+/// Most cap guards one `database.insert_guarded` or `database.update_guarded`
+/// call may carry; the database handler answers a larger call with
+/// `InvalidArgument` before anything runs. Each guard is one aggregate
+/// subquery in the write's statement.
+pub const MAX_WRITE_GUARDS: usize = 16;
+
+/// A cap a guarded write must stay within, measured over the rows of the
+/// written collection that match `filters` as they stand BEFORE the write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CapGuard {
+    /// Holds when fewer than `cap` rows match `filters`.
+    CountBelow {
+        /// WHERE-clause predicates (AND-combined leaves).
+        #[serde(default)]
+        filters: Vec<FilterNode>,
+        /// Largest row count an insert may leave.
+        cap: i64,
+    },
+    /// Holds when `SUM(field)` over the rows matching `filters`, plus `add`,
+    /// is at most `cap`.
+    SumAtMost {
+        /// Numeric column summed.
+        field: String,
+        /// WHERE-clause predicates (AND-combined leaves).
+        #[serde(default)]
+        filters: Vec<FilterNode>,
+        /// What the write adds to the sum.
+        add: i64,
+        /// Largest total the write may leave.
+        cap: i64,
+    },
+}
+
+/// Request for `database.insert_guarded`: insert `data` into `collection`
+/// only while every guard holds. WRAP-authorized (write) against
+/// `collection`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsertGuardedRequest {
+    /// Collection (table) name.
+    pub collection: String,
+    /// Column → value map; `id` and timestamps are stamped when absent, as
+    /// for `database.create`.
+    pub data: HashMap<String, serde_json::Value>,
+    /// Caps that must all hold. At most [`MAX_WRITE_GUARDS`].
+    pub guards: Vec<CapGuard>,
+}
+
+/// Request for `database.update_guarded`: set `data` on the rows of
+/// `collection` matching `filters` only while every guard holds.
+/// WRAP-authorized (write) against `collection`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateGuardedRequest {
+    /// Collection (table) name.
+    pub collection: String,
+    /// WHERE-clause predicates selecting the updated rows (AND-combined
+    /// leaves).
+    #[serde(default)]
+    pub filters: Vec<FilterNode>,
+    /// Column → value map to set on matching rows.
+    pub data: HashMap<String, serde_json::Value>,
+    /// Caps that must all hold. At most [`MAX_WRITE_GUARDS`].
+    pub guards: Vec<CapGuard>,
+}
+
 /// Conflict-resolution strategy for [`UpsertRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OnConflict {
@@ -765,6 +829,20 @@ pub enum BatchWriteResult {
         /// Rows affected by the insert/update.
         rows_affected: i64,
     },
+}
+
+/// Response for `database.insert_guarded`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsertGuardedResponse {
+    /// The inserted row as stored, or `None` when a guard refused the insert.
+    pub record: Option<Record>,
+}
+
+/// Response for `database.update_guarded`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateGuardedResponse {
+    /// Rows updated: 0 when a guard refused the write or no row matched.
+    pub rows_affected: i64,
 }
 
 /// Response for `database.upsert`.
@@ -1246,6 +1324,59 @@ mod tests {
         let decoded: BatchResponse =
             codec::decode(&codec::encode(&original).expect("encode")).expect("decode");
         assert_eq!(format!("{decoded:?}"), format!("{original:?}"));
+    }
+
+    #[test]
+    fn guarded_write_requests_round_trip_every_guard() {
+        let guards = vec![
+            CapGuard::CountBelow {
+                filters: vec![FilterNode::Leaf(FilterDef {
+                    field: "owner".into(),
+                    operator: "eq".into(),
+                    value: serde_json::json!("u"),
+                    column: None,
+                })],
+                cap: 3,
+            },
+            CapGuard::SumAtMost {
+                field: "size".into(),
+                filters: Vec::new(),
+                add: 5,
+                cap: 10,
+            },
+        ];
+        let insert = InsertGuardedRequest {
+            collection: "files".into(),
+            data: HashMap::from([("size".to_string(), serde_json::json!(5))]),
+            guards: guards.clone(),
+        };
+        let decoded: InsertGuardedRequest =
+            codec::decode(&codec::encode(&insert).expect("encode")).expect("decode");
+        assert_eq!(format!("{decoded:?}"), format!("{insert:?}"));
+
+        let update = UpdateGuardedRequest {
+            collection: "files".into(),
+            filters: Vec::new(),
+            data: HashMap::new(),
+            guards,
+        };
+        let decoded: UpdateGuardedRequest =
+            codec::decode(&codec::encode(&update).expect("encode")).expect("decode");
+        assert_eq!(format!("{decoded:?}"), format!("{update:?}"));
+
+        for response in [
+            InsertGuardedResponse { record: None },
+            InsertGuardedResponse {
+                record: Some(Record {
+                    id: "1".into(),
+                    data: HashMap::new(),
+                }),
+            },
+        ] {
+            let decoded: InsertGuardedResponse =
+                codec::decode(&codec::encode(&response).expect("encode")).expect("decode");
+            assert_eq!(format!("{decoded:?}"), format!("{response:?}"));
+        }
     }
 
     #[test]
