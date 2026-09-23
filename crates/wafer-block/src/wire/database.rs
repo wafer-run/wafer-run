@@ -410,6 +410,85 @@ pub struct UpsertRequest {
     pub on_conflict: OnConflict,
 }
 
+/// Request for `database.create_many`: insert every row of `rows` into
+/// `collection` in one transaction — all of them or, when any insert fails,
+/// none. Rows may carry different column sets. WRAP-authorized (write)
+/// against `collection`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateManyRequest {
+    /// Collection (table) name.
+    pub collection: String,
+    /// One column → value map per row; `id` and timestamps are stamped when
+    /// absent, as for `database.create`.
+    pub rows: Vec<HashMap<String, serde_json::Value>>,
+}
+
+/// Request for `database.batch`: apply `ops` in order as one transaction —
+/// all of them or, when any statement fails, none. Every op's collection is
+/// WRAP-authorized (write) before anything runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRequest {
+    /// The writes, applied in order.
+    pub ops: Vec<BatchWrite>,
+}
+
+/// One write in a [`BatchRequest`], with the semantics of the single op it is
+/// named after — except that an `Update` or `Delete` whose `id` matches no
+/// row is reported in its [`BatchWriteResult`] instead of failing the batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BatchWrite {
+    /// As `database.create`.
+    Create {
+        /// Collection (table) name.
+        collection: String,
+        /// Column → value map.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// As `database.update`.
+    Update {
+        /// Collection (table) name.
+        collection: String,
+        /// Primary-key id of the row.
+        id: String,
+        /// Column → value map to set.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// As `database.delete`.
+    Delete {
+        /// Collection (table) name.
+        collection: String,
+        /// Primary-key id of the row.
+        id: String,
+    },
+    /// As `database.update_where_count`.
+    UpdateWhere {
+        /// Collection (table) name.
+        collection: String,
+        /// WHERE-clause predicates (AND-combined leaves).
+        #[serde(default)]
+        filters: Vec<FilterNode>,
+        /// Column → value map to set on matching rows.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// As `database.upsert`.
+    Upsert(UpsertRequest),
+}
+
+impl BatchWrite {
+    /// The collection this write targets — the resource it is authorized
+    /// against.
+    #[must_use]
+    pub fn collection(&self) -> &str {
+        match self {
+            Self::Create { collection, .. }
+            | Self::Update { collection, .. }
+            | Self::Delete { collection, .. }
+            | Self::UpdateWhere { collection, .. } => collection,
+            Self::Upsert(req) => &req.collection,
+        }
+    }
+}
+
 /// Conflict-resolution strategy for [`UpsertRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OnConflict {
@@ -636,6 +715,45 @@ pub struct TakeWhereResponse {
 pub struct ExecRawResponse {
     /// Number of rows affected by the statement.
     pub rows_affected: i64,
+}
+
+/// Response for `database.create_many`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateManyResponse {
+    /// Number of rows inserted.
+    pub rows_affected: i64,
+}
+
+/// Response for `database.batch`: one result per op, in the order of
+/// [`BatchRequest::ops`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchResponse {
+    /// Per-op results.
+    pub results: Vec<BatchWriteResult>,
+}
+
+/// The result of one [`BatchWrite`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BatchWriteResult {
+    /// The inserted row as stored, including its id.
+    Created(Record),
+    /// The updated row, or `None` when the id matched no row.
+    Updated(Option<Record>),
+    /// Rows deleted: `1`, or `0` when the id matched no row.
+    Deleted {
+        /// Number of rows deleted.
+        rows_affected: i64,
+    },
+    /// Rows the filtered update changed.
+    UpdatedWhere {
+        /// Number of rows updated.
+        rows_affected: i64,
+    },
+    /// Rows the upsert inserted or updated.
+    Upserted {
+        /// Rows affected by the insert/update.
+        rows_affected: i64,
+    },
 }
 
 /// Response for `database.upsert`.
@@ -1036,6 +1154,87 @@ mod tests {
             hex, "81ad726f77735f616666656374656400",
             "ExecRawResponse schema changed — review consumer impact before updating this literal"
         );
+    }
+
+    #[test]
+    fn create_many_request_round_trips() {
+        let original = CreateManyRequest {
+            collection: "items".into(),
+            rows: vec![
+                HashMap::from([("name".to_string(), serde_json::json!("a"))]),
+                HashMap::from([("other".to_string(), serde_json::json!(2))]),
+            ],
+        };
+        let decoded: CreateManyRequest =
+            codec::decode(&codec::encode(&original).expect("encode")).expect("decode");
+        assert_eq!(decoded.collection, "items");
+        assert_eq!(decoded.rows, original.rows);
+    }
+
+    #[test]
+    fn batch_request_round_trips_every_write() {
+        let original = BatchRequest {
+            ops: vec![
+                BatchWrite::Create {
+                    collection: "a".into(),
+                    data: HashMap::from([("k".to_string(), serde_json::json!(1))]),
+                },
+                BatchWrite::Update {
+                    collection: "b".into(),
+                    id: "1".into(),
+                    data: HashMap::new(),
+                },
+                BatchWrite::Delete {
+                    collection: "c".into(),
+                    id: "2".into(),
+                },
+                BatchWrite::UpdateWhere {
+                    collection: "d".into(),
+                    filters: vec![FilterNode::Leaf(FilterDef {
+                        field: "k".into(),
+                        operator: "eq".into(),
+                        value: serde_json::json!(1),
+                        column: None,
+                    })],
+                    data: HashMap::new(),
+                },
+                BatchWrite::Upsert(UpsertRequest {
+                    collection: "e".into(),
+                    data: vec![("id".into(), serde_json::json!("3"))],
+                    conflict_columns: vec!["id".into()],
+                    on_conflict: OnConflict::SetColumns(Vec::new()),
+                }),
+            ],
+        };
+        let decoded: BatchRequest =
+            codec::decode(&codec::encode(&original).expect("encode")).expect("decode");
+        let collections: Vec<&str> = decoded.ops.iter().map(BatchWrite::collection).collect();
+        assert_eq!(collections, ["a", "b", "c", "d", "e"]);
+        assert!(matches!(&decoded.ops[1], BatchWrite::Update { id, .. } if id == "1"));
+        assert!(
+            matches!(&decoded.ops[3], BatchWrite::UpdateWhere { filters, .. } if filters.len() == 1)
+        );
+    }
+
+    #[test]
+    fn batch_response_round_trips_every_result() {
+        let record = Record {
+            id: "1".into(),
+            data: HashMap::new(),
+        };
+        let original = BatchResponse {
+            results: vec![
+                BatchWriteResult::Created(record.clone()),
+                BatchWriteResult::Updated(Some(record)),
+                BatchWriteResult::Updated(None),
+                BatchWriteResult::Deleted { rows_affected: 0 },
+                BatchWriteResult::UpdatedWhere { rows_affected: 2 },
+                BatchWriteResult::Upserted { rows_affected: 1 },
+            ],
+        };
+        let decoded: BatchResponse =
+            codec::decode(&codec::encode(&original).expect("encode")).expect("decode");
+        assert_eq!(format!("{decoded:?}"), format!("{original:?}"));
     }
 
     #[test]

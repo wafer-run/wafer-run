@@ -37,6 +37,13 @@ impl ServiceOp {
     pub const DATABASE_LIST: &str = "database.list";
     /// Insert a new record.
     pub const DATABASE_CREATE: &str = "database.create";
+    /// Insert many records into one collection in one transaction — all or
+    /// none.
+    pub const DATABASE_CREATE_MANY: &str = "database.create_many";
+    /// Apply a list of writes (create / update / delete / update-where /
+    /// upsert, across collections) in one transaction — all or none; every
+    /// op's collection is WRAP-authorized for write.
+    pub const DATABASE_BATCH: &str = "database.batch";
     /// Update an existing record by primary key.
     pub const DATABASE_UPDATE: &str = "database.update";
     /// Delete a record by primary key.
@@ -208,6 +215,8 @@ impl ServiceOp {
         Self::DATABASE_GET,
         Self::DATABASE_LIST,
         Self::DATABASE_CREATE,
+        Self::DATABASE_CREATE_MANY,
+        Self::DATABASE_BATCH,
         Self::DATABASE_UPDATE,
         Self::DATABASE_UPDATE_WHERE,
         Self::DATABASE_UPDATE_WHERE_COUNT,

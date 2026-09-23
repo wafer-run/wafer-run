@@ -119,6 +119,29 @@ mod db_fakes {
                 data,
             })
         }
+        async fn create_many(
+            &self,
+            _collection: &str,
+            rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, DatabaseError> {
+            self.record("create_many");
+            Ok(rows.len() as i64)
+        }
+        async fn batch(
+            &self,
+            ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::WriteOutcome>, DatabaseError>
+        {
+            self.record("batch");
+            Ok(ops
+                .iter()
+                .map(
+                    |_| wafer_core::interfaces::database::service::WriteOutcome::Deleted {
+                        rows_affected: 1,
+                    },
+                )
+                .collect())
+        }
         async fn update(
             &self,
             _collection: &str,
@@ -611,6 +634,18 @@ fn database_op_body(op: &str) -> Vec<u8> {
         ServiceOp::DATABASE_CREATE => codec::encode(&wire::CreateRequest {
             collection: "my_org__auth__users".into(),
             data: HashMap::new(),
+        }),
+        ServiceOp::DATABASE_CREATE_MANY => codec::encode(&wire::CreateManyRequest {
+            collection: "my_org__auth__users".into(),
+            rows: vec![HashMap::new()],
+        }),
+        // One op, so the batch names a collection the deny ctx must refuse;
+        // an empty batch names none and would run nothing either way.
+        ServiceOp::DATABASE_BATCH => codec::encode(&wire::BatchRequest {
+            ops: vec![wire::BatchWrite::Create {
+                collection: "my_org__auth__users".into(),
+                data: HashMap::new(),
+            }],
         }),
         ServiceOp::DATABASE_UPDATE => codec::encode(&wire::UpdateRequest {
             collection: "my_org__auth__users".into(),

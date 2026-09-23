@@ -102,7 +102,7 @@ use wafer_sql_utils::aggregate::CastType;
 
 use super::service::{
     pk, AggregateColumnSpec, AggregateSpec, Column, DataType, DatabaseError, DatabaseService,
-    GroupBySpec, Record, Table, UpsertConflict, UpsertSpec,
+    GroupBySpec, Record, Table, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -219,7 +219,10 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// ordered by the primary key — single-column, composite, or none);
 /// `update`/`update_where`/
 /// `update_where_count`; `delete`/`delete_where`/`delete_where_count`/
-/// `take_where`; `increment_field_where` (atomic CAS bump + decrement);
+/// `take_where`; `create_many` (a hundred sparse rows land; a failing row
+/// lands none) and `batch` (mixed ops across collections apply in order and
+/// report per-op outcomes; one failing op rolls every op back);
+/// `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
 /// `WindowedCounter`); `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
 /// `CaseWhenSum`, and `DateBucket`, then — over `BIGINT` money columns — the
@@ -242,6 +245,8 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_update_family(svc).await;
     check_delete_family(svc).await;
     check_take_where(svc).await;
+    check_create_many(svc).await;
+    check_batch(svc).await;
     check_increment(svc).await;
     check_upsert_set_columns(svc).await;
     check_upsert_windowed_counter(svc).await;
@@ -1221,6 +1226,344 @@ async fn check_take_where(svc: &dyn DatabaseService) {
         .await
         .expect("take_where x again");
     assert!(again.is_empty(), "nothing left to take");
+}
+
+// ---------------------------------------------------------------------------
+// create_many (all-or-nothing multi-row insert)
+// ---------------------------------------------------------------------------
+
+async fn check_create_many(svc: &dyn DatabaseService) {
+    let table = crud_table("conf_create_many");
+    reset(svc, &table).await;
+
+    // A hundred rows, no ids (each is minted), with differing column sets:
+    // every third row carries a `note` the others omit.
+    let rows: Vec<_> = (0..100)
+        .map(|i| {
+            let mut r = row([
+                ("name", serde_json::json!(format!("m{i:03}"))),
+                ("score", serde_json::json!(i)),
+            ]);
+            if i % 3 == 0 {
+                r.insert("note".into(), serde_json::json!("third"));
+            }
+            r
+        })
+        .collect();
+    let inserted = svc
+        .create_many("conf_create_many", rows)
+        .await
+        .expect("create_many of 100 rows");
+    assert_eq!(inserted, 100, "create_many reports every row inserted");
+    assert_eq!(
+        svc.count("conf_create_many", &[]).await.expect("count"),
+        100,
+        "all 100 rows landed"
+    );
+    assert_eq!(
+        svc.count(
+            "conf_create_many",
+            &[eq("note", serde_json::json!("third"))]
+        )
+        .await
+        .expect("count notes"),
+        34,
+        "the sparse column landed on exactly the rows that carried it"
+    );
+    let listed = svc
+        .list(
+            "conf_create_many",
+            &ListOptions {
+                filters: vec![eq("name", serde_json::json!("m042"))],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list m042");
+    assert_eq!(listed.records.len(), 1);
+    let m042 = &listed.records[0];
+    assert!(!m042.id.is_empty(), "a minted id");
+    assert_eq!(field_i64(m042, "score"), 42);
+    assert!(
+        m042.data["created_at"].is_string() && m042.data["updated_at"].is_string(),
+        "rows are stamped like create: {:?}",
+        m042.data
+    );
+
+    // One failing row (a duplicate primary key, third of four) lands NONE of
+    // the call's rows — the two before it are rolled back.
+    svc.create(
+        "conf_create_many",
+        row([("id", serde_json::json!("taken"))]),
+    )
+    .await
+    .expect("seed the conflicting id");
+    let err = svc
+        .create_many(
+            "conf_create_many",
+            vec![
+                row([("id", serde_json::json!("fresh1"))]),
+                row([("id", serde_json::json!("fresh2"))]),
+                row([("id", serde_json::json!("taken"))]),
+                row([("id", serde_json::json!("fresh3"))]),
+            ],
+        )
+        .await;
+    assert!(err.is_err(), "a duplicate key fails the call: {err:?}");
+    assert_eq!(
+        svc.count("conf_create_many", &[]).await.expect("count"),
+        101,
+        "no row of the failed call landed"
+    );
+    for id in ["fresh1", "fresh2", "fresh3"] {
+        assert!(
+            matches!(
+                svc.get("conf_create_many", id).await,
+                Err(DatabaseError::NotFound)
+            ),
+            "{id} must not exist after the failed call"
+        );
+    }
+
+    assert_eq!(
+        svc.create_many("conf_create_many", Vec::new())
+            .await
+            .expect("empty create_many"),
+        0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// batch (all-or-nothing mixed writes across collections)
+// ---------------------------------------------------------------------------
+
+async fn check_batch(svc: &dyn DatabaseService) {
+    let table = crud_table("conf_batch");
+    reset(svc, &table).await;
+    let other = crud_table("conf_batch_other");
+    reset(svc, &other).await;
+    for (id, category) in [("b1", "a"), ("b2", "a"), ("b3", "b")] {
+        svc.create(
+            "conf_batch",
+            row([
+                ("id", serde_json::json!(id)),
+                ("category", serde_json::json!(category)),
+                ("name", serde_json::json!("orig")),
+                ("score", serde_json::json!(1)),
+            ]),
+        )
+        .await
+        .expect("seed conf_batch");
+    }
+
+    let upsert = |id: &str, name: &str| WriteOp::Upsert {
+        collection: "conf_batch".into(),
+        spec: UpsertSpec {
+            data: vec![
+                ("id".into(), serde_json::json!(id)),
+                ("name".into(), serde_json::json!(name)),
+            ],
+            conflict_columns: vec!["id".into()],
+            on_conflict: UpsertConflict::SetColumns(vec!["name".into()]),
+        },
+    };
+    let outcomes = svc
+        .batch(vec![
+            WriteOp::Create {
+                collection: "conf_batch".into(),
+                data: row([
+                    ("id", serde_json::json!("b4")),
+                    ("name", serde_json::json!("new")),
+                ]),
+            },
+            // Sees the create above: same transaction, in order.
+            WriteOp::Update {
+                collection: "conf_batch".into(),
+                id: "b4".into(),
+                data: row([("score", serde_json::json!(7))]),
+            },
+            WriteOp::Update {
+                collection: "conf_batch".into(),
+                id: "b1".into(),
+                data: row([("score", serde_json::json!(5))]),
+            },
+            WriteOp::Delete {
+                collection: "conf_batch".into(),
+                id: "b2".into(),
+            },
+            WriteOp::UpdateWhere {
+                collection: "conf_batch".into(),
+                filters: vec![eq("category", serde_json::json!("b"))],
+                data: row([("name", serde_json::json!("Y"))]),
+            },
+            upsert("b5", "upserted"),
+            WriteOp::Update {
+                collection: "conf_batch".into(),
+                id: "missing".into(),
+                data: row([("score", serde_json::json!(0))]),
+            },
+            WriteOp::Delete {
+                collection: "conf_batch".into(),
+                id: "missing".into(),
+            },
+            WriteOp::Create {
+                collection: "conf_batch_other".into(),
+                data: row([("name", serde_json::json!("elsewhere"))]),
+            },
+        ])
+        .await
+        .expect("mixed batch");
+    assert_eq!(outcomes.len(), 9, "one outcome per op");
+    match &outcomes[0] {
+        WriteOutcome::Created(r) => {
+            assert_eq!(r.id, "b4");
+            assert_eq!(r.data["name"], serde_json::json!("new"));
+            assert!(r.data["created_at"].is_string(), "stored row: {:?}", r.data);
+        }
+        other => panic!("op 0: expected Created, got {other:?}"),
+    }
+    match &outcomes[1] {
+        WriteOutcome::Updated(Some(r)) => {
+            assert_eq!(r.id, "b4");
+            assert_eq!(field_i64(r, "score"), 7, "the updated row is returned");
+            assert_eq!(r.data["name"], serde_json::json!("new"));
+        }
+        other => panic!("op 1: expected Updated(Some), got {other:?}"),
+    }
+    assert!(
+        matches!(&outcomes[2], WriteOutcome::Updated(Some(r)) if field_i64(r, "score") == 5),
+        "op 2: {:?}",
+        outcomes[2]
+    );
+    assert!(
+        matches!(outcomes[3], WriteOutcome::Deleted { rows_affected: 1 }),
+        "op 3: {:?}",
+        outcomes[3]
+    );
+    assert!(
+        matches!(outcomes[4], WriteOutcome::UpdatedWhere { rows_affected: 1 }),
+        "op 4: {:?}",
+        outcomes[4]
+    );
+    assert!(
+        matches!(outcomes[5], WriteOutcome::Upserted { rows_affected: 1 }),
+        "op 5: {:?}",
+        outcomes[5]
+    );
+    assert!(
+        matches!(outcomes[6], WriteOutcome::Updated(None)),
+        "op 6: an update of a missing id is an outcome, not a failure: {:?}",
+        outcomes[6]
+    );
+    assert!(
+        matches!(outcomes[7], WriteOutcome::Deleted { rows_affected: 0 }),
+        "op 7: a delete of a missing id deletes nothing: {:?}",
+        outcomes[7]
+    );
+    let elsewhere_id = match &outcomes[8] {
+        WriteOutcome::Created(r) => {
+            assert!(!r.id.is_empty(), "a minted id comes back");
+            r.id.clone()
+        }
+        other => panic!("op 8: expected Created, got {other:?}"),
+    };
+
+    // Everything persisted.
+    assert_eq!(
+        field_i64(&svc.get("conf_batch", "b4").await.expect("b4"), "score"),
+        7
+    );
+    assert_eq!(
+        field_i64(&svc.get("conf_batch", "b1").await.expect("b1"), "score"),
+        5
+    );
+    assert!(matches!(
+        svc.get("conf_batch", "b2").await,
+        Err(DatabaseError::NotFound)
+    ));
+    assert_eq!(
+        svc.get("conf_batch", "b3").await.expect("b3").data["name"],
+        serde_json::json!("Y")
+    );
+    assert_eq!(
+        svc.get("conf_batch", "b5").await.expect("b5").data["name"],
+        serde_json::json!("upserted")
+    );
+    assert_eq!(
+        svc.get("conf_batch_other", &elsewhere_id)
+            .await
+            .expect("other collection")
+            .data["name"],
+        serde_json::json!("elsewhere")
+    );
+
+    // One failing op — a create reusing b3's primary key, after writes to
+    // both collections — rolls EVERY op of the batch back.
+    let before = svc.count("conf_batch", &[]).await.expect("count");
+    let err = svc
+        .batch(vec![
+            WriteOp::Create {
+                collection: "conf_batch".into(),
+                data: row([("id", serde_json::json!("rolled"))]),
+            },
+            WriteOp::Update {
+                collection: "conf_batch".into(),
+                id: "b1".into(),
+                data: row([("name", serde_json::json!("rolled"))]),
+            },
+            WriteOp::Delete {
+                collection: "conf_batch".into(),
+                id: "b4".into(),
+            },
+            WriteOp::UpdateWhere {
+                collection: "conf_batch_other".into(),
+                filters: vec![eq("name", serde_json::json!("elsewhere"))],
+                data: row([("name", serde_json::json!("rolled"))]),
+            },
+            upsert("b5", "rolled"),
+            WriteOp::Create {
+                collection: "conf_batch".into(),
+                data: row([("id", serde_json::json!("b3"))]),
+            },
+        ])
+        .await;
+    assert!(err.is_err(), "a duplicate key fails the batch: {err:?}");
+    assert_eq!(
+        svc.count("conf_batch", &[]).await.expect("count"),
+        before,
+        "no row added or removed by the failed batch"
+    );
+    assert!(matches!(
+        svc.get("conf_batch", "rolled").await,
+        Err(DatabaseError::NotFound)
+    ));
+    assert_eq!(
+        svc.get("conf_batch", "b1").await.expect("b1").data["name"],
+        serde_json::json!("orig"),
+        "the update was rolled back"
+    );
+    svc.get("conf_batch", "b4")
+        .await
+        .expect("the delete was rolled back");
+    assert_eq!(
+        svc.get("conf_batch", "b5").await.expect("b5").data["name"],
+        serde_json::json!("upserted"),
+        "the upsert was rolled back"
+    );
+    assert_eq!(
+        svc.get("conf_batch_other", &elsewhere_id)
+            .await
+            .expect("other collection")
+            .data["name"],
+        serde_json::json!("elsewhere"),
+        "the other collection's update was rolled back too"
+    );
+
+    assert!(svc
+        .batch(Vec::new())
+        .await
+        .expect("an empty batch")
+        .is_empty());
 }
 
 // ---------------------------------------------------------------------------

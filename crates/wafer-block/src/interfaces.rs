@@ -209,6 +209,43 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "description": "The created record."
             })),
         },
+        ServiceOp::DATABASE_CREATE_MANY => ActionSpec {
+            description: "Insert many records into one collection in one transaction: all of them, or none when any insert fails. Rows may carry different columns.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string" },
+                    "rows": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["collection", "rows"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rows_affected": { "type": "integer" }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_BATCH => ActionSpec {
+            description: "Apply writes in order in one transaction: all of them, or none when any statement fails. Each op is Create{collection,data}, Update{collection,id,data}, Delete{collection,id}, UpdateWhere{collection,filters,data} or Upsert{...as database.upsert}; every op's collection is WRAP-authorized for write before anything runs. An Update or Delete whose id matches no row is reported in its result, not an error.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "ops": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["ops"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "results": {
+                        "type": "array",
+                        "description": "One per op, in order: Created(record), Updated(record or null), Deleted{rows_affected}, UpdatedWhere{rows_affected} or Upserted{rows_affected}.",
+                        "items": { "type": "object" }
+                    }
+                }
+            })),
+        },
         ServiceOp::DATABASE_UPDATE => ActionSpec {
             description: "Update an existing record by ID.".into(),
             message_schema: Some(json!({
