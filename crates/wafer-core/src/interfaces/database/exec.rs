@@ -2949,6 +2949,55 @@ mod tests {
         ));
     }
 
+    /// A guarded write reaches the backend as ONE `run_transaction` holding
+    /// the one conditional statement (SQLite needs no lock statement ahead of
+    /// it): the guard and the write cannot be split across calls.
+    #[tokio::test]
+    async fn guarded_writes_run_one_conditional_statement_in_one_transaction() {
+        let mock = BatchMock::new(0);
+        let guards = [CapGuard::CountBelow {
+            filters: Vec::new(),
+            cap: 3,
+        }];
+        let inserted = DbExec::insert_guarded(
+            &mock,
+            "widgets",
+            HashMap::from([("name".to_string(), serde_json::json!("a"))]),
+            &guards,
+        )
+        .await
+        .expect("insert_guarded");
+        assert!(inserted.is_some());
+        let updated = DbExec::update_guarded(
+            &mock,
+            "widgets",
+            &[],
+            HashMap::from([("name".to_string(), serde_json::json!("b"))]),
+            &guards,
+        )
+        .await
+        .expect("update_guarded");
+        assert_eq!(updated, 1);
+
+        let calls = mock.tx_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "one transaction per guarded write");
+        assert_eq!(calls[0].len(), 1, "{:?}", calls[0]);
+        assert_eq!(calls[0][0].0, "Returning");
+        assert!(
+            calls[0][0].1.starts_with("INSERT") && calls[0][0].1.contains("SELECT COUNT(*)"),
+            "{}",
+            calls[0][0].1
+        );
+        assert_eq!(calls[1].len(), 1, "{:?}", calls[1]);
+        assert_eq!(calls[1][0].0, "Execute");
+        assert!(
+            calls[1][0].1.starts_with("UPDATE") && calls[1][0].1.contains("SELECT COUNT(*)"),
+            "{}",
+            calls[1][0].1
+        );
+        assert!(mock.batch_calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn batch_with_no_ops_runs_nothing() {
         let mock = BatchMock::new(0);

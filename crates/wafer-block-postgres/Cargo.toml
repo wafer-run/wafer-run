@@ -22,6 +22,8 @@ wafer-block-macro = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+# join_all drives the concurrent guarded-write race in tests/conformance.rs.
+futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 # Enable the shared DatabaseService conformance suite for tests/conformance.rs.
 # Same crate as the normal dependency; this dev-only entry turns on the

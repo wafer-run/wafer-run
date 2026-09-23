@@ -174,3 +174,168 @@ async fn an_included_column_is_not_part_of_the_primary_key() {
         .expect("drop");
     assert_eq!(key, ["a", "b"], "the INCLUDE column c is not a key column");
 }
+
+/// Concurrent guarded writes cannot overshoot their cap on PostgreSQL.
+///
+/// Under READ COMMITTED a guarded statement counts only committed rows, so
+/// two statements that run side by side each miss the other's row. The
+/// shared conformance suite races ten inserts, but nothing makes them
+/// overlap; here a trigger holds every writing transaction open for 200 ms
+/// after its row is written, so every racer's guard runs while the first
+/// admitted write is still uncommitted. Only the per-table guard lock, which
+/// makes each racer wait for the one before it to commit, keeps the count at
+/// the cap. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn racing_guarded_writes_cannot_overshoot_the_cap() {
+    use std::collections::HashMap;
+
+    use sqlx::postgres::PgPool;
+    use wafer_block::db::{Filter, FilterOp};
+    use wafer_core::interfaces::database::service::{
+        pk, CapGuard, Column, DataType, DatabaseService, Table,
+    };
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres guarded-write race: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect as admin");
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect the service");
+
+    let table = "conf_guarded_race";
+    svc.schema_drop_table(table).await.expect("drop");
+    svc.ensure_schema_table(&Table {
+        name: table.into(),
+        columns: vec![
+            pk("id"),
+            Column::new("owner", DataType::Text).null(),
+            Column::new("size", DataType::Int64).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    })
+    .await
+    .expect("create");
+    for stmt in [
+        "CREATE OR REPLACE FUNCTION conf_guarded_race_linger() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$",
+        "CREATE TRIGGER conf_guarded_race_linger AFTER INSERT OR UPDATE ON conf_guarded_race \
+         FOR EACH ROW EXECUTE FUNCTION conf_guarded_race_linger()",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let owner = |o: &str| Filter {
+        field: "owner".into(),
+        operator: FilterOp::Equal,
+        value: serde_json::json!(o),
+    };
+    let data = |pairs: &[(&str, serde_json::Value)]| -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    };
+
+    // Eight inserts under a cap of three files.
+    let cap = [CapGuard::CountBelow {
+        filters: vec![owner("u")],
+        cap: 3,
+    }];
+    let inserts = (0..8).map(|_| {
+        svc.insert_guarded(
+            table,
+            data(&[
+                ("owner", serde_json::json!("u")),
+                ("size", serde_json::json!(1)),
+            ]),
+            &cap,
+        )
+    });
+    let admitted = futures::future::join_all(inserts)
+        .await
+        .into_iter()
+        .filter(|r| r.as_ref().expect("insert_guarded").is_some())
+        .count();
+    let files = svc.count(table, &[owner("u")]).await.expect("count");
+
+    // Five 10-byte rows (50 of a 60-byte cap); five updates each grow a
+    // different row to 20 bytes, its own old size excluded from the sum. Only
+    // one fits: 40 + 20 = 60.
+    for i in 0..5 {
+        svc.create(
+            table,
+            data(&[
+                ("id", serde_json::json!(format!("v{i}"))),
+                ("owner", serde_json::json!("v")),
+                ("size", serde_json::json!(10)),
+            ]),
+        )
+        .await
+        .expect("seed");
+    }
+    let guards: Vec<[CapGuard; 1]> = (0..5)
+        .map(|i| {
+            [CapGuard::SumAtMost {
+                field: "size".into(),
+                filters: vec![
+                    owner("v"),
+                    Filter {
+                        field: "id".into(),
+                        operator: FilterOp::NotEqual,
+                        value: serde_json::json!(format!("v{i}")),
+                    },
+                ],
+                add: 20,
+                cap: 60,
+            }]
+        })
+        .collect();
+    let filters: Vec<[Filter; 1]> = (0..5)
+        .map(|i| {
+            [Filter {
+                field: "id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(format!("v{i}")),
+            }]
+        })
+        .collect();
+    let updates = (0..5).map(|i| {
+        svc.update_guarded(
+            table,
+            &filters[i],
+            data(&[("size", serde_json::json!(20))]),
+            &guards[i],
+        )
+    });
+    let grown: i64 = futures::future::join_all(updates)
+        .await
+        .into_iter()
+        .map(|r| r.expect("update_guarded"))
+        .sum();
+    let bytes = svc.sum(table, "size", &[owner("v")]).await.expect("sum");
+
+    svc.schema_drop_table(table).await.expect("drop");
+    sqlx::query("DROP FUNCTION conf_guarded_race_linger()")
+        .execute(&admin)
+        .await
+        .expect("drop function");
+
+    assert_eq!(
+        (admitted, files),
+        (3, 3),
+        "eight racing inserts under a cap of three"
+    );
+    assert_eq!(
+        (grown, bytes),
+        (1, 60.0),
+        "five racing updates under a 60-byte cap"
+    );
+}
