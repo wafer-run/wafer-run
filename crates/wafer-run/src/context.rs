@@ -489,7 +489,7 @@ impl Context for RuntimeContext {
         resource_type: wafer_block::types::ResourceType,
         access: wafer_block::types::ResourceAccess,
     ) -> Result<(), wafer_block::WaferError> {
-        self.authorize_resource(resource, resource_type.clone(), access)
+        self.authorize_resource(resource, &resource_type, access)
             .map_err(|(denial, e)| {
                 tracing::warn!(
                     caller = ?self.caller_id, %resource, %resource_type, %access,
@@ -507,7 +507,7 @@ impl Context for RuntimeContext {
         resource_type: wafer_block::types::ResourceType,
         access: wafer_block::types::ResourceAccess,
     ) -> bool {
-        self.authorize_resource(resource, resource_type, access)
+        self.authorize_resource(resource, &resource_type, access)
             .is_ok()
     }
 
@@ -539,7 +539,7 @@ impl RuntimeContext {
     fn authorize_resource(
         &self,
         resource: &str,
-        resource_type: wafer_block::types::ResourceType,
+        resource_type: &wafer_block::types::ResourceType,
         access: wafer_block::types::ResourceAccess,
     ) -> Result<(), (&'static str, wafer_block::WaferError)> {
         use wafer_block::types::ResourceType;
@@ -551,7 +551,7 @@ impl RuntimeContext {
             caller,
             resource,
             access,
-            Some(&resource_type),
+            Some(resource_type),
             &self.wrap_grants,
             &self.wrap_admin_block,
         )
