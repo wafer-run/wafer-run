@@ -1,4 +1,7 @@
-use sea_query::{Asterisk, Cond, Expr, LikeExpr, Order, Query, SelectStatement, SimpleExpr};
+use sea_query::{
+    Asterisk, Cond, Expr, InsertStatement, LikeExpr, Order, Query, SelectStatement, SimpleExpr,
+    UpdateStatement,
+};
 use wafer_block::db::{
     ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
 };
@@ -322,12 +325,8 @@ pub fn build_select_columns(
     )
 }
 
-/// Build INSERT INTO {table} (cols) VALUES (vals).
-pub fn build_insert(
-    table: &str,
-    data: &[(String, serde_json::Value)],
-    backend: Backend,
-) -> crate::Statement {
+/// The `INSERT INTO {table} (cols) VALUES (vals)` both insert builders render.
+fn insert_query(table: &str, data: &[(String, serde_json::Value)]) -> InsertStatement {
     let mut query = Query::insert();
     query.into_table(DynCol(table.into()));
 
@@ -339,7 +338,30 @@ pub fn build_insert(
 
     query.columns(cols);
     query.values_panic(vals);
+    query
+}
 
+/// Build INSERT INTO {table} (cols) VALUES (vals).
+pub fn build_insert(
+    table: &str,
+    data: &[(String, serde_json::Value)],
+    backend: Backend,
+) -> crate::Statement {
+    let (sql, values) = crate::render_insert(insert_query(table, data), backend);
+    crate::Statement::new(sql, values, table)
+}
+
+/// Build INSERT INTO {table} (cols) VALUES (vals) RETURNING *.
+///
+/// The row comes back as the database stored it, including a key the table
+/// generated itself (an `INTEGER PRIMARY KEY` on SQLite).
+pub fn build_insert_returning(
+    table: &str,
+    data: &[(String, serde_json::Value)],
+    backend: Backend,
+) -> crate::Statement {
+    let mut query = insert_query(table, data);
+    query.returning_all();
     let (sql, values) = crate::render_insert(query, backend);
     crate::Statement::new(sql, values, table)
 }
@@ -359,13 +381,13 @@ pub fn build_select_by_id(table: &str, id: &str, backend: Backend) -> crate::Sta
     crate::Statement::new(sql, values, table)
 }
 
-/// Build UPDATE {table} SET ... WHERE id = {id}.
-pub fn build_update_by_id(
+/// The `UPDATE {table} SET ... WHERE id = {id}` both by-id update builders
+/// render.
+fn update_by_id_query(
     table: &str,
     id: &str,
     data: &[(String, serde_json::Value)],
-    backend: Backend,
-) -> crate::Statement {
+) -> UpdateStatement {
     let mut query = Query::update();
     query.table(DynCol(table.into()));
 
@@ -373,7 +395,31 @@ pub fn build_update_by_id(
         query.value(DynCol(col.clone()), json_to_sea_value(val));
     }
     query.and_where(Expr::col(DynCol("id".into())).eq(id));
+    query
+}
 
+/// Build UPDATE {table} SET ... WHERE id = {id}.
+pub fn build_update_by_id(
+    table: &str,
+    id: &str,
+    data: &[(String, serde_json::Value)],
+    backend: Backend,
+) -> crate::Statement {
+    let (sql, values) = crate::render_update(update_by_id_query(table, id, data), backend);
+    crate::Statement::new(sql, values, table)
+}
+
+/// Build UPDATE {table} SET ... WHERE id = {id} RETURNING *.
+///
+/// Returns the updated row, or no row when `id` matched nothing.
+pub fn build_update_by_id_returning(
+    table: &str,
+    id: &str,
+    data: &[(String, serde_json::Value)],
+    backend: Backend,
+) -> crate::Statement {
+    let mut query = update_by_id_query(table, id, data);
+    query.returning_all();
     let (sql, values) = crate::render_update(query, backend);
     crate::Statement::new(sql, values, table)
 }
@@ -585,6 +631,33 @@ mod tests {
         assert!(sql.contains("$2"));
         assert_eq!(values.len(), 2);
         assert_eq!(stmt.collection, "users");
+    }
+
+    #[test]
+    fn insert_returning_renders_returning_on_both_backends() {
+        let data = vec![("name".to_string(), serde_json::json!("a"))];
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let stmt = build_insert_returning("items", &data, backend);
+            assert!(stmt.sql.starts_with("INSERT INTO"), "{}", stmt.sql);
+            assert!(stmt.sql.ends_with("RETURNING *"), "{}", stmt.sql);
+            assert_eq!(stmt.values.len(), 1);
+            let plain = build_insert("items", &data, backend);
+            assert!(!plain.sql.contains("RETURNING"), "{}", plain.sql);
+        }
+    }
+
+    #[test]
+    fn update_by_id_returning_renders_returning_on_both_backends() {
+        let data = vec![("name".to_string(), serde_json::json!("a"))];
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let stmt = build_update_by_id_returning("items", "i1", &data, backend);
+            assert!(stmt.sql.starts_with("UPDATE"), "{}", stmt.sql);
+            assert!(stmt.sql.contains("WHERE"), "{}", stmt.sql);
+            assert!(stmt.sql.ends_with("RETURNING *"), "{}", stmt.sql);
+            assert_eq!(stmt.values.len(), 2, "the SET value and the id");
+            let plain = build_update_by_id("items", "i1", &data, backend);
+            assert!(!plain.sql.contains("RETURNING"), "{}", plain.sql);
+        }
     }
 
     #[test]
