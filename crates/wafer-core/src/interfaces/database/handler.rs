@@ -9,7 +9,7 @@ use wafer_block::{
     streams::output::OutputStream,
     types::ResourceType,
     wire::database as wire,
-    wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE, SCHEMA_RESOURCE},
+    wrap::{database_op_access, DatabaseOpAccess, DDL_RESOURCE, RAW_SQL_RESOURCE, SCHEMA_RESOURCE},
     *,
 };
 use wafer_schema::Table;
@@ -19,7 +19,7 @@ use super::{
     schema_wire,
     service::{self, DatabaseError, DatabaseService},
 };
-use crate::interfaces::handler_util::{decode_and_authorize, decode_and_authorize_all, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize_all, to_output};
 
 // --- Helpers ---
 
@@ -609,13 +609,50 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     }
 }
 
+/// The WRAP checks `op` needs on `resource`, as
+/// [`wafer_block::wrap::DATABASE_OP_ACCESS`] classifies it. An op the table
+/// does not classify for a single resource is refused rather than run
+/// unchecked.
+fn op_checks(
+    op: &str,
+    resource: &str,
+) -> Result<Vec<(String, ResourceType, ResourceAccess)>, WaferError> {
+    match database_op_access(op) {
+        Some(DatabaseOpAccess::On(accesses)) => Ok(accesses
+            .iter()
+            .map(|access| (resource.to_string(), ResourceType::Db, *access))
+            .collect()),
+        Some(DatabaseOpAccess::PerWrite) | None => Err(WaferError::new(
+            ErrorCode::Internal,
+            format!("BUG: DATABASE_OP_ACCESS names no single-resource access for `{op}`"),
+        )),
+    }
+}
+
+/// Decode an `op` request and authorize it on the one resource `resource`
+/// names, for every access [`op_checks`] lists — the typed request is
+/// returned only when every check passed.
+fn decode_and_authorize_op<T>(
+    ctx: &dyn Context,
+    body: &[u8],
+    op: &str,
+    resource: impl FnOnce(&T) -> &str,
+) -> Result<T, OutputStream>
+where
+    T: serde::de::DeserializeOwned,
+{
+    decode_and_authorize_all(ctx, body, op, |req| op_checks(op, resource(req)))
+}
+
 /// Handle a database message using the given service.
 ///
 /// `ctx` is the trusted host-side authorization surface: every op arm that
 /// touches a WRAP-governed resource authorizes via
-/// [`decode_and_authorize`], which bundles the codec decode with a call to
-/// `ctx.check_resource_access` so an arm cannot obtain its typed request
-/// without also being checked.
+/// [`decode_and_authorize_op`] (or, for `database.batch`, per write via
+/// [`decode_and_authorize_all`]), which bundles the codec decode with the
+/// `ctx.check_resource_access` calls the op's
+/// [`wafer_block::wrap::DATABASE_OP_ACCESS`] entry names, so an arm cannot
+/// obtain its typed request without also being checked.
 pub async fn handle_message(
     service: &dyn DatabaseService,
     ctx: &dyn Context,
@@ -624,26 +661,30 @@ pub async fn handle_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::DATABASE_GET => {
-            let req =
-                match decode_and_authorize::<wire::GetRequest>(ctx, body, "database.get", |r| {
-                    (r.collection.clone(), ResourceType::Db, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+            let req = match decode_and_authorize_op::<wire::GetRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_GET,
+                |r| &r.collection,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.get(&req.collection, &req.id).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
         ServiceOp::DATABASE_LIST => {
-            let req =
-                match decode_and_authorize::<wire::ListRequest>(ctx, body, "database.list", |r| {
-                    (r.collection.clone(), ResourceType::Db, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+            let req = match decode_and_authorize_op::<wire::ListRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_LIST,
+                |r| &r.collection,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             let tree = match convert_filter_tree(req.filters) {
                 Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
@@ -674,11 +715,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_CREATE => {
-            let req = match decode_and_authorize::<wire::CreateRequest>(
+            let req = match decode_and_authorize_op::<wire::CreateRequest>(
                 ctx,
                 body,
-                "database.create",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_CREATE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -689,11 +730,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_CREATE_MANY => {
-            let req = match decode_and_authorize::<wire::CreateManyRequest>(
+            let req = match decode_and_authorize_op::<wire::CreateManyRequest>(
                 ctx,
                 body,
-                "database.create_many",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_CREATE_MANY,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -711,24 +752,31 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_BATCH => {
-            // Every op's collection is authorized for write before any op is
-            // validated or run, so a batch naming one collection the caller
-            // may not write never touches the service.
+            // Every write is authorized on its collection, for the access
+            // `BatchWrite::access` names, before any op is validated or run,
+            // so a batch naming one write the caller may not make never
+            // touches the service.
             let req = match decode_and_authorize_all::<wire::BatchRequest>(
                 ctx,
                 body,
-                "database.batch",
+                ServiceOp::DATABASE_BATCH,
                 |r| {
-                    let mut collections: Vec<&str> = Vec::new();
+                    if database_op_access(ServiceOp::DATABASE_BATCH)
+                        != Some(DatabaseOpAccess::PerWrite)
+                    {
+                        return Err(WaferError::new(
+                            ErrorCode::Internal,
+                            "BUG: DATABASE_OP_ACCESS does not classify database.batch per write",
+                        ));
+                    }
+                    let mut checks: Vec<(String, ResourceType, ResourceAccess)> = Vec::new();
                     for op in &r.ops {
-                        if !collections.contains(&op.collection()) {
-                            collections.push(op.collection());
+                        let check = (op.collection().to_string(), ResourceType::Db, op.access());
+                        if !checks.contains(&check) {
+                            checks.push(check);
                         }
                     }
-                    collections
-                        .into_iter()
-                        .map(|c| (c.to_string(), ResourceType::Db, true))
-                        .collect()
+                    Ok(checks)
                 },
             ) {
                 Ok(r) => r,
@@ -758,11 +806,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_INSERT_GUARDED => {
-            let req = match decode_and_authorize::<wire::InsertGuardedRequest>(
+            let req = match decode_and_authorize_op::<wire::InsertGuardedRequest>(
                 ctx,
                 body,
-                "database.insert_guarded",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_INSERT_GUARDED,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -787,11 +835,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_UPDATE_GUARDED => {
-            let req = match decode_and_authorize::<wire::UpdateGuardedRequest>(
+            let req = match decode_and_authorize_op::<wire::UpdateGuardedRequest>(
                 ctx,
                 body,
-                "database.update_guarded",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_UPDATE_GUARDED,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -821,11 +869,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_UPDATE => {
-            let req = match decode_and_authorize::<wire::UpdateRequest>(
+            let req = match decode_and_authorize_op::<wire::UpdateRequest>(
                 ctx,
                 body,
-                "database.update",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_UPDATE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -836,11 +884,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_DELETE => {
-            let req = match decode_and_authorize::<wire::DeleteRequest>(
+            let req = match decode_and_authorize_op::<wire::DeleteRequest>(
                 ctx,
                 body,
-                "database.delete",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_DELETE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -851,13 +899,15 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_COUNT => {
-            let req =
-                match decode_and_authorize::<wire::CountRequest>(ctx, body, "database.count", |r| {
-                    (r.collection.clone(), ResourceType::Db, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+            let req = match decode_and_authorize_op::<wire::CountRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_COUNT,
+                |r| &r.collection,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             let tree = match convert_filter_tree(req.filters) {
                 Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
@@ -872,11 +922,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_QUERY_RAW => {
-            let req = match decode_and_authorize::<wire::QueryRawRequest>(
+            let req = match decode_and_authorize_op::<wire::QueryRawRequest>(
                 ctx,
                 body,
-                "database.query_raw",
-                |_r| (RAW_SQL_RESOURCE.to_string(), ResourceType::Db, false),
+                ServiceOp::DATABASE_QUERY_RAW,
+                |_r| RAW_SQL_RESOURCE,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -891,13 +941,15 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_SUM => {
-            let req =
-                match decode_and_authorize::<wire::SumRequest>(ctx, body, "database.sum", |r| {
-                    (r.collection.clone(), ResourceType::Db, false)
-                }) {
-                    Ok(r) => r,
-                    Err(out) => return out,
-                };
+            let req = match decode_and_authorize_op::<wire::SumRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_SUM,
+                |r| &r.collection,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             let tree = match convert_filter_tree(req.filters) {
                 Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
@@ -912,11 +964,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_EXEC_RAW => {
-            let req = match decode_and_authorize::<wire::ExecRawRequest>(
+            let req = match decode_and_authorize_op::<wire::ExecRawRequest>(
                 ctx,
                 body,
-                "database.exec_raw",
-                |_r| (RAW_SQL_RESOURCE.to_string(), ResourceType::Db, true),
+                ServiceOp::DATABASE_EXEC_RAW,
+                |_r| RAW_SQL_RESOURCE,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -933,11 +985,11 @@ pub async fn handle_message(
             // `DATABASE_EXEC_RAW` so a caller can't relabel a DDL statement
             // as a plain exec_raw, or vice versa, to dodge the `__ddl__`
             // resource check).
-            let req = match decode_and_authorize::<wire::ExecRawRequest>(
+            let req = match decode_and_authorize_op::<wire::ExecRawRequest>(
                 ctx,
                 body,
-                "database.ddl",
-                |_r| (DDL_RESOURCE.to_string(), ResourceType::Db, true),
+                ServiceOp::DATABASE_DDL,
+                |_r| DDL_RESOURCE,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -950,11 +1002,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_DELETE_WHERE => {
-            let req = match decode_and_authorize::<wire::DeleteWhereRequest>(
+            let req = match decode_and_authorize_op::<wire::DeleteWhereRequest>(
                 ctx,
                 body,
-                "database.delete_where",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_DELETE_WHERE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -973,11 +1025,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_DELETE_WHERE_COUNT => {
-            let req = match decode_and_authorize::<wire::DeleteWhereCountRequest>(
+            let req = match decode_and_authorize_op::<wire::DeleteWhereCountRequest>(
                 ctx,
                 body,
-                "database.delete_where_count",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_DELETE_WHERE_COUNT,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -996,11 +1048,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_TAKE_WHERE => {
-            let req = match decode_and_authorize::<wire::TakeWhereRequest>(
+            let req = match decode_and_authorize_op::<wire::TakeWhereRequest>(
                 ctx,
                 body,
-                "database.take_where",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_TAKE_WHERE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1021,11 +1073,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_UPDATE_WHERE => {
-            let req = match decode_and_authorize::<wire::UpdateWhereRequest>(
+            let req = match decode_and_authorize_op::<wire::UpdateWhereRequest>(
                 ctx,
                 body,
-                "database.update_where",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_UPDATE_WHERE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1047,11 +1099,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_UPDATE_WHERE_COUNT => {
-            let req = match decode_and_authorize::<wire::UpdateWhereCountRequest>(
+            let req = match decode_and_authorize_op::<wire::UpdateWhereCountRequest>(
                 ctx,
                 body,
-                "database.update_where_count",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_UPDATE_WHERE_COUNT,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1073,11 +1125,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_INCREMENT_FIELD_WHERE => {
-            let req = match decode_and_authorize::<wire::IncrementFieldWhereRequest>(
+            let req = match decode_and_authorize_op::<wire::IncrementFieldWhereRequest>(
                 ctx,
                 body,
-                "database.increment_field_where",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_INCREMENT_FIELD_WHERE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1101,11 +1153,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_UPSERT => {
-            let req = match decode_and_authorize::<wire::UpsertRequest>(
+            let req = match decode_and_authorize_op::<wire::UpsertRequest>(
                 ctx,
                 body,
-                "database.upsert",
-                |r| (r.collection.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_UPSERT,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1120,11 +1172,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_AGGREGATE => {
-            let req = match decode_and_authorize::<wire::AggregateRequest>(
+            let req = match decode_and_authorize_op::<wire::AggregateRequest>(
                 ctx,
                 body,
-                "database.aggregate",
-                |r| (r.collection.clone(), ResourceType::Db, false),
+                ServiceOp::DATABASE_AGGREGATE,
+                |r| &r.collection,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1148,11 +1200,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_ENSURE_TABLE => {
-            let req = match decode_and_authorize::<wire::EnsureTableRequest>(
+            let req = match decode_and_authorize_op::<wire::EnsureTableRequest>(
                 ctx,
                 body,
-                "database.ensure_table",
-                |r| (r.table.name.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_ENSURE_TABLE,
+                |r| &r.table.name,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -1160,7 +1212,9 @@ pub async fn handle_message(
             // `SCHEMA_RESOURCE`, not `DDL_RESOURCE`: the statement is built
             // host-side from the validated `TableDef`, so this op does not
             // imply the arbitrary-statement `database.ddl` channel.
-            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+            if let Err(e) =
+                ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, ResourceAccess::Write)
+            {
                 return OutputStream::error(e);
             }
             let table = match schema_wire::table_from_def(&req.table) {
@@ -1175,16 +1229,18 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_ADD_COLUMN => {
-            let req = match decode_and_authorize::<wire::AddColumnRequest>(
+            let req = match decode_and_authorize_op::<wire::AddColumnRequest>(
                 ctx,
                 body,
-                "database.add_column",
-                |r| (r.table.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_ADD_COLUMN,
+                |r| &r.table,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+            if let Err(e) =
+                ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, ResourceAccess::Write)
+            {
                 return OutputStream::error(e);
             }
             let column = match schema_wire::column_from_def(&req.column) {
@@ -1197,16 +1253,18 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_DROP_TABLE => {
-            let req = match decode_and_authorize::<wire::DropTableRequest>(
+            let req = match decode_and_authorize_op::<wire::DropTableRequest>(
                 ctx,
                 body,
-                "database.drop_table",
-                |r| (r.table.clone(), ResourceType::Db, true),
+                ServiceOp::DATABASE_DROP_TABLE,
+                |r| &r.table,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if let Err(e) = ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, true) {
+            if let Err(e) =
+                ctx.check_resource_access(SCHEMA_RESOURCE, ResourceType::Db, ResourceAccess::Write)
+            {
                 return OutputStream::error(e);
             }
             match service.schema_drop_table(&req.table).await {
@@ -1215,11 +1273,11 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_TABLE_EXISTS => {
-            let req = match decode_and_authorize::<wire::TableExistsRequest>(
+            let req = match decode_and_authorize_op::<wire::TableExistsRequest>(
                 ctx,
                 body,
-                "database.table_exists",
-                |r| (r.table.clone(), ResourceType::Db, false),
+                ServiceOp::DATABASE_TABLE_EXISTS,
+                |r| &r.table,
             ) {
                 Ok(r) => r,
                 Err(out) => return out,

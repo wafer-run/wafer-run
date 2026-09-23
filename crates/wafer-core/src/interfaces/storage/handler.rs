@@ -142,7 +142,7 @@ pub async fn handle_message(
                     Ok((
                         object_resource("storage.put", &r.folder, &r.key)?,
                         ResourceType::Storage,
-                        true,
+                        ResourceAccess::Write,
                     ))
                 },
             ) {
@@ -166,7 +166,7 @@ pub async fn handle_message(
                     Ok((
                         object_resource("storage.get", &r.folder, &r.key)?,
                         ResourceType::Storage,
-                        false,
+                        ResourceAccess::Read,
                     ))
                 },
             ) {
@@ -221,7 +221,7 @@ pub async fn handle_message(
                     Ok((
                         object_resource("storage.get_streaming", &r.folder, &r.key)?,
                         ResourceType::Storage,
-                        false,
+                        ResourceAccess::Read,
                     ))
                 },
             ) {
@@ -248,7 +248,7 @@ pub async fn handle_message(
                     Ok((
                         object_resource("storage.delete", &r.folder, &r.key)?,
                         ResourceType::Storage,
-                        true,
+                        ResourceAccess::Write,
                     ))
                 },
             ) {
@@ -267,7 +267,11 @@ pub async fn handle_message(
                 "storage.list",
                 |r| {
                     check_path_component("storage.list", "folder", &r.folder)?;
-                    Ok((r.folder.clone(), ResourceType::Storage, false))
+                    Ok((
+                        r.folder.clone(),
+                        ResourceType::Storage,
+                        ResourceAccess::Read,
+                    ))
                 },
             ) {
                 Ok(r) => r,
@@ -291,7 +295,7 @@ pub async fn handle_message(
                 "storage.create_folder",
                 |r| {
                     check_path_component("storage.create_folder", "name", &r.name)?;
-                    Ok((r.name.clone(), ResourceType::Storage, true))
+                    Ok((r.name.clone(), ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
@@ -309,7 +313,7 @@ pub async fn handle_message(
                 "storage.delete_folder",
                 |r| {
                     check_path_component("storage.delete_folder", "name", &r.name)?;
-                    Ok((r.name.clone(), ResourceType::Storage, true))
+                    Ok((r.name.clone(), ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
@@ -326,7 +330,7 @@ pub async fn handle_message(
             if let Err(e) = ctx.check_resource_access(
                 wafer_block::wrap::STORAGE_LIST_ALL_RESOURCE,
                 ResourceType::Storage,
-                false,
+                ResourceAccess::Read,
             ) {
                 return OutputStream::error(e);
             }
@@ -393,7 +397,7 @@ pub async fn handle_put_streaming(
             Ok((
                 object_resource("storage.put_streaming", &h.folder, &h.key)?,
                 ResourceType::Storage,
-                true,
+                ResourceAccess::Write,
             ))
         },
     ) {

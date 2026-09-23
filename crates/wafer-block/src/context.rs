@@ -152,8 +152,8 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         crate::validation::ValidationReport::default()
     }
 
-    /// Authorize the CALLER (host-trusted identity) to access `resource` of
-    /// `resource_type` for read/write. Runs the full WRAP grant + capability check.
+    /// Authorize the CALLER (host-trusted identity) to `access` `resource` of
+    /// `resource_type`. Runs the full WRAP grant + capability check.
     ///
     /// FAIL-CLOSED: the default DENIES. A Context that legitimately does not enforce
     /// WRAP (test mocks, forwarders) must EXPLICITLY override this so the enforcing
@@ -162,9 +162,9 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         &self,
         resource: &str,
         resource_type: crate::types::ResourceType,
-        is_write: bool,
+        access: crate::types::ResourceAccess,
     ) -> Result<(), crate::WaferError> {
-        let _ = (resource, resource_type, is_write);
+        let _ = (resource, resource_type, access);
         Err(crate::WaferError::new(
             crate::ErrorCode::PermissionDenied,
             "WRAP: context does not implement resource-access enforcement",
@@ -177,7 +177,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{types::ResourceType, ErrorCode};
+    use crate::{
+        types::{ResourceAccess, ResourceType},
+        ErrorCode,
+    };
 
     /// Minimal `Context` impl that only implements the methods without a
     /// default (`call_block`, `is_cancelled`, `config_get`, `clone_arc`) and
@@ -213,7 +216,7 @@ mod tests {
     fn check_resource_access_defaults_to_deny() {
         let ctx = DefaultCtx;
         let err = ctx
-            .check_resource_access("any", ResourceType::Db, false)
+            .check_resource_access("any", ResourceType::Db, ResourceAccess::Read)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::PermissionDenied);
     }

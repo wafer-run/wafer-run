@@ -59,7 +59,7 @@ pub async fn handle_message(
     match msg.kind.as_str() {
         ServiceOp::NETWORK_DO_REQUEST => {
             let wire_req = match decode_and_authorize::<WireRequest>(ctx, body, "network.do", |r| {
-                (r.url.clone(), ResourceType::Network, false)
+                (r.url.clone(), ResourceType::Network, ResourceAccess::Read)
             }) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -118,7 +118,7 @@ pub async fn handle_message(
             // be reached with a weaker grant than the buffered request.
             let wire_req =
                 match decode_and_authorize::<WireRequest>(ctx, body, "network.do_streaming", |r| {
-                    (r.url.clone(), ResourceType::Network, false)
+                    (r.url.clone(), ResourceType::Network, ResourceAccess::Read)
                 }) {
                     Ok(r) => r,
                     Err(out) => return out,
@@ -198,7 +198,7 @@ mod tests {
             &self,
             _resource: &str,
             _resource_type: ResourceType,
-            _is_write: bool,
+            _access: ResourceAccess,
         ) -> Result<(), WaferError> {
             Ok(())
         }

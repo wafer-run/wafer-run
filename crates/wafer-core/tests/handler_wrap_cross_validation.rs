@@ -25,7 +25,7 @@ use wafer_block::{
     context::Context,
     meta::{META_WRAP_ACCESS, META_WRAP_RESOURCE, META_WRAP_RESOURCE_TYPE},
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire, ErrorCode, Message, WaferError,
 };
 
@@ -95,7 +95,7 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
     }

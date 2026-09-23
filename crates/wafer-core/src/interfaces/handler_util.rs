@@ -10,7 +10,7 @@ use wafer_block::{
     context::Context,
     stream::{self, StreamEvent},
     streams::output::OutputStream,
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     WaferError,
 };
 
@@ -169,7 +169,7 @@ pub(crate) use decode_or_err;
 /// whenever the request targets a WRAP-governed resource.
 ///
 /// - `resource` receives the decoded request and returns
-///   `(resource_name, resource_type, is_write)`, which is passed straight to
+///   `(resource_name, resource_type, access)`, which is passed straight to
 ///   `ctx.check_resource_access`.
 /// - On decode failure, returns `Err(OutputStream::error(..))` with
 ///   `ErrorCode::InvalidArgument`, matching `decode_or_err!`'s message shape
@@ -182,7 +182,7 @@ pub fn decode_and_authorize<T>(
     ctx: &dyn Context,
     body: &[u8],
     op_name: &str,
-    resource: impl FnOnce(&T) -> (String, ResourceType, bool),
+    resource: impl FnOnce(&T) -> (String, ResourceType, ResourceAccess),
 ) -> Result<T, OutputStream>
 where
     T: serde::de::DeserializeOwned,
@@ -210,7 +210,7 @@ pub fn decode_and_authorize_checked<T>(
     ctx: &dyn Context,
     body: &[u8],
     op_name: &str,
-    resource: impl FnOnce(&T) -> Result<(String, ResourceType, bool), WaferError>,
+    resource: impl FnOnce(&T) -> Result<(String, ResourceType, ResourceAccess), WaferError>,
 ) -> Result<T, OutputStream>
 where
     T: serde::de::DeserializeOwned,
@@ -224,8 +224,8 @@ where
             )))
         }
     };
-    let (res, rt, is_write) = resource(&req).map_err(OutputStream::error)?;
-    ctx.check_resource_access(&res, rt, is_write)
+    let (res, rt, access) = resource(&req).map_err(OutputStream::error)?;
+    ctx.check_resource_access(&res, rt, access)
         .map_err(OutputStream::error)?;
     Ok(req)
 }
@@ -234,12 +234,14 @@ where
 /// `database.batch` spans collections): every resource `resources` returns is
 /// checked, in order, before the request is returned, and the first denial is
 /// returned instead. Same guarantee — the arm cannot obtain its typed request
-/// unless every check passed. A request naming no resource runs no check.
+/// unless every check passed. `resources` may instead reject the request, as
+/// in [`decode_and_authorize_checked`]; the rejection is returned before any
+/// check runs. A request naming no resource runs no check.
 pub fn decode_and_authorize_all<T>(
     ctx: &dyn Context,
     body: &[u8],
     op_name: &str,
-    resources: impl FnOnce(&T) -> Vec<(String, ResourceType, bool)>,
+    resources: impl FnOnce(&T) -> Result<Vec<(String, ResourceType, ResourceAccess)>, WaferError>,
 ) -> Result<T, OutputStream>
 where
     T: serde::de::DeserializeOwned,
@@ -253,8 +255,8 @@ where
             )))
         }
     };
-    for (res, rt, is_write) in resources(&req) {
-        ctx.check_resource_access(&res, rt, is_write)
+    for (res, rt, access) in resources(&req).map_err(OutputStream::error)? {
+        ctx.check_resource_access(&res, rt, access)
             .map_err(OutputStream::error)?;
     }
     Ok(req)
@@ -266,7 +268,7 @@ mod decode_and_authorize_tests {
 
     use wafer_block::{
         streams::{input::InputStream, output::TerminalNotResponse},
-        types::ResourceType,
+        types::{ResourceAccess, ResourceType},
         wafer_async_trait, Message,
     };
 
@@ -308,7 +310,7 @@ mod decode_and_authorize_tests {
             &self,
             _resource: &str,
             _resource_type: ResourceType,
-            _is_write: bool,
+            _access: ResourceAccess,
         ) -> Result<(), WaferError> {
             Ok(())
         }
@@ -345,7 +347,7 @@ mod decode_and_authorize_tests {
             &self,
             _resource: &str,
             _resource_type: ResourceType,
-            _is_write: bool,
+            _access: ResourceAccess,
         ) -> Result<(), WaferError> {
             Err(WaferError::new(
                 ErrorCode::PermissionDenied,
@@ -373,7 +375,7 @@ mod decode_and_authorize_tests {
         .expect("encode must succeed");
 
         let Ok(req) = decode_and_authorize::<TestReq>(&AllowCtx, &body, "test.op", |r| {
-            (r.name.clone(), ResourceType::Db, false)
+            (r.name.clone(), ResourceType::Db, ResourceAccess::Read)
         }) else {
             panic!("allow ctx must pass the request through")
         };
@@ -396,7 +398,7 @@ mod decode_and_authorize_tests {
         .expect("encode must succeed");
 
         let out = decode_and_authorize::<TestReq>(&DenyCtx, &body, "test.op", |r| {
-            (r.name.clone(), ResourceType::Db, false)
+            (r.name.clone(), ResourceType::Db, ResourceAccess::Read)
         })
         .expect_err("deny ctx must reject the request");
 

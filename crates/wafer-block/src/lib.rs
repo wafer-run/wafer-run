@@ -27,8 +27,8 @@ pub use meta::*;
 pub use types::{
     ActionSpec, AgentTool, AuthLevel, BlockCategory, BlockEndpoint, BlockInfo, BlockInfoError,
     BlockRuntime, CollectionSchema, ConfigVar, ExternalAsset, FieldSchema, HttpMethod, IndexSchema,
-    InputType, InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceGrant, ResourceType,
-    SkillTool, WAFER_RUN_SHARED_PREFIX,
+    InputType, InterfaceSpec, MetaGet, MetaSet, RequestAction, ResourceAccess, ResourceGrant,
+    ResourceType, SkillTool, WAFER_RUN_SHARED_PREFIX,
 };
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 

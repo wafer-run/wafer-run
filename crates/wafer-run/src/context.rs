@@ -464,8 +464,8 @@ impl Context for RuntimeContext {
         self.caller_id.as_deref()
     }
 
-    /// Authorize `self.caller_id()` to access `resource` of `resource_type`
-    /// for read/write. This is the SOLE WRAP resource-access enforcement
+    /// Authorize `self.caller_id()` to `access` `resource` of
+    /// `resource_type`. This is the SOLE WRAP resource-access enforcement
     /// point (grant check + resource-capability check) — `dispatch_call` no
     /// longer performs either check itself (removed in SP-A Stage 2; it used
     /// to run the same two checks from message metas as a fail-open backstop
@@ -487,7 +487,7 @@ impl Context for RuntimeContext {
         &self,
         resource: &str,
         resource_type: wafer_block::types::ResourceType,
-        is_write: bool,
+        access: wafer_block::types::ResourceAccess,
     ) -> Result<(), wafer_block::WaferError> {
         use wafer_block::types::ResourceType;
         let caller = self.caller_id.as_deref();
@@ -497,13 +497,15 @@ impl Context for RuntimeContext {
         wafer_block::wrap::check_access(
             caller,
             resource,
-            is_write,
+            access,
             Some(&resource_type),
             &self.wrap_grants,
             &self.wrap_admin_block,
         )
         .inspect_err(|_| {
-            tracing::warn!(caller = ?caller, %resource, %resource_type, "WRAP deny (grant)");
+            tracing::warn!(
+                caller = ?caller, %resource, %resource_type, %access, "WRAP deny (grant)"
+            );
         })?;
 
         // 2) Resource capability check — on the CALLER's declared
@@ -618,7 +620,7 @@ mod tests {
         capabilities::BlockCapabilities,
         core_types::{LifecycleEvent, Message, WaferError},
         streams::{input::InputStream, output::OutputStream},
-        types::{BlockInfo, ResourceType},
+        types::{BlockInfo, ResourceAccess, ResourceType},
         Block,
     };
     use wafer_block_macro::wafer_async_trait;
@@ -740,13 +742,17 @@ mod tests {
         ctx.caller_id = Some("restricted/block".to_string());
 
         assert_eq!(
-            ctx.check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
-                .unwrap_err()
-                .code,
+            ctx.check_resource_access(
+                wafer_block::wrap::RAW_SQL_RESOURCE,
+                ResourceType::Db,
+                ResourceAccess::Write
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::PermissionDenied
         );
         assert_eq!(
-            ctx.check_resource_access("other__block__t", ResourceType::Db, false)
+            ctx.check_resource_access("other__block__t", ResourceType::Db, ResourceAccess::Read)
                 .unwrap_err()
                 .code,
             ErrorCode::PermissionDenied
@@ -771,9 +777,13 @@ mod tests {
         ctx.caller_id = Some("restricted/block".to_string());
 
         assert_eq!(
-            ctx.check_resource_access("restricted__block__widgets", ResourceType::Db, false)
-                .unwrap_err()
-                .code,
+            ctx.check_resource_access(
+                "restricted__block__widgets",
+                ResourceType::Db,
+                ResourceAccess::Read
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::PermissionDenied
         );
     }
@@ -787,7 +797,11 @@ mod tests {
         let mut ctx = test_ctx(&w);
         ctx.caller_id = Some("my-org/admin".to_string());
         assert!(ctx
-            .check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
+            .check_resource_access(
+                wafer_block::wrap::RAW_SQL_RESOURCE,
+                ResourceType::Db,
+                ResourceAccess::Write
+            )
             .is_ok());
 
         // Unrestricted/native caller (registered, no capability override)
@@ -804,7 +818,11 @@ mod tests {
         let mut ctx2 = test_ctx(&w2);
         ctx2.caller_id = Some("my-org/auth".to_string());
         assert!(ctx2
-            .check_resource_access("my_org__auth__widgets", ResourceType::Db, false)
+            .check_resource_access(
+                "my_org__auth__widgets",
+                ResourceType::Db,
+                ResourceAccess::Read
+            )
             .is_ok());
     }
 
@@ -831,8 +849,12 @@ mod tests {
         ctx.caller_id = Some("my-org/auth".to_string());
 
         assert!(
-            ctx.check_resource_access(wafer_block::wrap::DDL_RESOURCE, ResourceType::Db, true)
-                .is_ok(),
+            ctx.check_resource_access(
+                wafer_block::wrap::DDL_RESOURCE,
+                ResourceType::Db,
+                ResourceAccess::Write
+            )
+            .is_ok(),
             "an attributable, non-admin caller must be allowed to run DDL \
              (own-table migrations at Init depend on this)"
         );
@@ -864,15 +886,23 @@ mod tests {
         let ctx = test_ctx(&w); // make_context always sets caller_id: None
         assert_eq!(ctx.caller_id, None);
         assert_eq!(
-            ctx.check_resource_access(wafer_block::wrap::RAW_SQL_RESOURCE, ResourceType::Db, true)
-                .unwrap_err()
-                .code,
+            ctx.check_resource_access(
+                wafer_block::wrap::RAW_SQL_RESOURCE,
+                ResourceType::Db,
+                ResourceAccess::Write
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::PermissionDenied
         );
         assert_eq!(
-            ctx.check_resource_access("my_org__auth__widgets", ResourceType::Db, false)
-                .unwrap_err()
-                .code,
+            ctx.check_resource_access(
+                "my_org__auth__widgets",
+                ResourceType::Db,
+                ResourceAccess::Read
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::PermissionDenied,
             "an anonymous top-level caller must not self-admit into any \
              namespaced resource, even one that superficially looks like \

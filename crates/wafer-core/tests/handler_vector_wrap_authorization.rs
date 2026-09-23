@@ -11,7 +11,7 @@ use wafer_block::{
     common::ServiceOp,
     context::Context,
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire::vector as wire,
     ErrorCode, Message, WaferError,
 };
@@ -51,40 +51,40 @@ macro_rules! ctx_boilerplate {
                 &self,
                 resource: &str,
                 _resource_type: ResourceType,
-                is_write: bool,
+                access: ResourceAccess,
             ) -> Result<(), WaferError> {
-                check_impl::<$name>(resource, is_write)
+                check_impl::<$name>(resource, access)
             }
         }
     };
 }
 
 trait Policy {
-    fn allow(is_write: bool) -> bool;
+    fn allow(access: ResourceAccess) -> bool;
 }
 impl Policy for AllowCtx {
-    fn allow(_is_write: bool) -> bool {
+    fn allow(_access: ResourceAccess) -> bool {
         true
     }
 }
 impl Policy for DenyCtx {
-    fn allow(_is_write: bool) -> bool {
+    fn allow(_access: ResourceAccess) -> bool {
         false
     }
 }
 impl Policy for ReadOnlyCtx {
-    fn allow(is_write: bool) -> bool {
-        !is_write
+    fn allow(access: ResourceAccess) -> bool {
+        access == ResourceAccess::Read
     }
 }
 
-fn check_impl<P: Policy>(resource: &str, is_write: bool) -> Result<(), WaferError> {
-    if P::allow(is_write) {
+fn check_impl<P: Policy>(resource: &str, access: ResourceAccess) -> Result<(), WaferError> {
+    if P::allow(access) {
         Ok(())
     } else {
         Err(WaferError::new(
             ErrorCode::PermissionDenied,
-            format!("WRAP: denied for resource '{resource}' (write={is_write})"),
+            format!("WRAP: denied for resource '{resource}' (access={access})"),
         ))
     }
 }

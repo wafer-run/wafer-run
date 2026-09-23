@@ -50,6 +50,9 @@ pub(crate) struct GrantValidationOutcome {
 ///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or
 ///   owned-by-other grants are pushed into `rejected` so `seal()`
 ///   surfaces them via `RuntimeError::GrantsRejected`.
+/// - Every grant must pass [`wafer_block::types::ResourceGrant::check_shape`]
+///   (an append-only grant is typed `Db` and not also read-write) before any
+///   other rule looks at it; a malformed grant is rejected the same way.
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
@@ -57,6 +60,20 @@ pub(crate) fn validate_and_collect_grants_for_block(
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for grant in &block_info.grants {
+        if let Err(shape) = grant.check_shape() {
+            tracing::error!(
+                block = %block_info.name,
+                resource = %grant.resource,
+                %shape,
+                "WRAP: rejecting malformed grant",
+            );
+            rejected.push(wafer_block::error::GrantValidationError {
+                block: block_info.name.to_string(),
+                grant: grant.clone(),
+                reason: shape.to_string(),
+            });
+            continue;
+        }
         // Network and Crypto resources aren't namespace-bound (URLs,
         // operation names), so they remain admin-only — without this,
         // any block could grant `*` Network / Crypto access and bypass

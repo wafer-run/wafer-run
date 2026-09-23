@@ -20,7 +20,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire::database as wire,
     ErrorCode, Message, WaferError,
 };
@@ -65,7 +65,7 @@ impl Context for OwnTablesCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db
             && (resource.starts_with("my_org__auth__")
@@ -111,7 +111,7 @@ impl Context for OwnTablesNoSchemaCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db && resource.starts_with("my_org__auth__") {
             Ok(())
@@ -156,7 +156,7 @@ impl Context for OwnTablesDdlOnlyCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db
             && (resource.starts_with("my_org__auth__")

@@ -21,10 +21,10 @@ use super::service::{EmbeddingService, VectorError, VectorService};
 use crate::interfaces::handler_util::{decode_and_authorize, decode_or_err, to_output};
 
 /// The read-only vector ops (query, count, list_indexes, describe_index,
-/// list_ids) authorize with `is_write = false`; every other op mutates the
-/// index and authorizes with `is_write = true`.
-const READ: bool = false;
-const WRITE: bool = true;
+/// list_ids) authorize for `ResourceAccess::Read`; every other op mutates
+/// the index and authorizes for `ResourceAccess::Write`.
+const READ: ResourceAccess = ResourceAccess::Read;
+const WRITE: ResourceAccess = ResourceAccess::Write;
 
 // --- Helpers ---
 

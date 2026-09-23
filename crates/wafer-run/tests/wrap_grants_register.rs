@@ -218,3 +218,82 @@ async fn add_wrap_grants_appends_after_register() {
     assert_eq!(grants[0].resource, "test__granter__foo");
     assert_eq!(grants[1].resource, "external/thing");
 }
+
+#[tokio::test]
+async fn append_grant_on_own_collection_is_kept() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![ResourceGrant::append("test/writer", "test__granter__audit")],
+            }),
+        )
+        .expect("register");
+
+    let grants = wafer.wrap_grants();
+    assert_eq!(grants.len(), 1, "append grant must be kept, got {grants:?}");
+    assert!(grants[0].append && !grants[0].write);
+    wafer
+        .seal()
+        .await
+        .expect("a well-formed append grant seals");
+}
+
+/// A grant that is both append-only and read-write, or append-only on a
+/// non-`Db` resource, is rejected at registration and fails `seal()` —
+/// it never reaches the WRAP check.
+#[tokio::test]
+async fn malformed_append_grants_are_rejected_via_seal() {
+    let both = ResourceGrant {
+        write: true,
+        ..ResourceGrant::append("test/writer", "test__granter__audit")
+    };
+    let untyped = ResourceGrant {
+        resource_type: None,
+        ..ResourceGrant::append("test/writer", "test__granter__audit")
+    };
+    let storage =
+        ResourceGrant::append("test/writer", "test/granter/logs").typed(ResourceType::Storage);
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![both, untyped, storage],
+            }),
+        )
+        .expect("register_block must succeed even for rejected grants");
+
+    assert!(
+        wafer.wrap_grants().is_empty(),
+        "no malformed grant may be installed, got {:?}",
+        wafer.wrap_grants()
+    );
+    match wafer.seal().await {
+        Err(wafer_run::RuntimeError::GrantsRejected(errors)) => {
+            let reasons: Vec<&str> = errors.iter().map(|e| e.reason.as_str()).collect();
+            assert_eq!(errors.len(), 3, "{reasons:?}");
+            assert!(
+                reasons[0].contains("either read-write or append-only"),
+                "{reasons:?}"
+            );
+            assert!(
+                reasons[1].contains("database collections only"),
+                "{reasons:?}"
+            );
+            assert!(
+                reasons[2].contains("database collections only"),
+                "{reasons:?}"
+            );
+        }
+        other => panic!(
+            "expected Err(RuntimeError::GrantsRejected), got {:?}",
+            other.map(|_| "Ok(_)")
+        ),
+    }
+}

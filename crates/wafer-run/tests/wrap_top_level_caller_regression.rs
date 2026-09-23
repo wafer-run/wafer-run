@@ -53,7 +53,7 @@ use wafer_block::{
     core_types::{LifecycleEvent, Message, WaferError},
     meta::{META_REQ_ACTION, META_REQ_RESOURCE},
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     Block, BlockInfo,
 };
 // Pull in the router crate purely for its `register_static_block!` linkme
@@ -116,7 +116,7 @@ impl Block for ResourceCheckerBlock {
         match ctx.check_resource_access(
             "test_org__business_block__widgets",
             ResourceType::Db,
-            false,
+            ResourceAccess::Read,
         ) {
             Ok(()) => OutputStream::respond(b"allowed".to_vec()),
             Err(e) => OutputStream::error(e),

@@ -26,7 +26,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire, ErrorCode, Message, WaferError,
 };
 
@@ -140,7 +140,7 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
     }

@@ -51,7 +51,9 @@ pub fn handle_message(
                 }
             };
 
-            if let Err(e) = ctx.check_resource_access(&key, ResourceType::Config, false) {
+            if let Err(e) =
+                ctx.check_resource_access(&key, ResourceType::Config, ResourceAccess::Read)
+            {
                 return OutputStream::error(e);
             }
             service.get(&key).map_or_else(
@@ -66,7 +68,7 @@ pub fn handle_message(
         }
         ServiceOp::CONFIG_SET => {
             let req = match decode_and_authorize::<wire::SetRequest>(ctx, body, "config.set", |r| {
-                (r.key.clone(), ResourceType::Config, true)
+                (r.key.clone(), ResourceType::Config, ResourceAccess::Write)
             }) {
                 Ok(r) => r,
                 Err(out) => return out,

@@ -19,7 +19,7 @@ use wafer_block::{
     common::ServiceOp,
     context::Context,
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire::database as wire,
     ErrorCode, Message, WaferError,
 };
@@ -53,7 +53,7 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
     }
@@ -84,7 +84,7 @@ impl Context for DenyCtx {
         &self,
         resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Err(WaferError::new(
             ErrorCode::PermissionDenied,
