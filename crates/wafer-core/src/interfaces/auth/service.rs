@@ -73,6 +73,14 @@ pub enum AuthError {
     NotFound,
     /// A lower-level call (database, storage, another block) failed; the
     /// auth handler answers with this error unchanged, code included.
+    ///
+    /// The code is the backend's, not a verdict on the caller: a backend
+    /// `PermissionDenied` (a WRAP refusal, e.g. under `require_role`) has the
+    /// same code as [`AuthError::Forbidden`], and a backend `Unauthenticated`
+    /// looks to a caller like a signed-out user, so a client that answers it
+    /// by sending the user to log in can loop. Code that holds an `AuthError`
+    /// tells `Forbidden` / `Unauthorized` from `Backend` by variant, never by
+    /// the wire code.
     #[error("{0}")]
     Backend(WaferError),
     /// An internal fault of the auth service itself.
