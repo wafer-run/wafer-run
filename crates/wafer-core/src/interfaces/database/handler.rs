@@ -654,6 +654,11 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 ///   reshapes the owner's table, which an append-only grant does not confer.
 ///   Columns are never dropped individually, so one present here is present
 ///   when the insert runs.
+///
+/// So a collection lacking any of `id`, `created_at` or `updated_at` refuses
+/// EVERY append-only insert — the server would stamp the missing column and,
+/// outside STRICT_SCHEMA, add it. An owner that grants append declares all
+/// three columns.
 async fn check_append_only_rows<'a>(
     service: &dyn DatabaseService,
     collection: &str,

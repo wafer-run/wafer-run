@@ -204,8 +204,13 @@
   `Context` implementation and every direct caller has to be updated.
   `decode_and_authorize_all`'s closure now returns a `Result`, so it can
   refuse a request before any check runs, as `decode_and_authorize_checked`'s
-  does. `Context` gains `resource_access_admitted` (default `false`); a mock
-  that admits every access should answer `true` there too.
+  does. `Context` gains a required `resource_access_admitted` — the same
+  decision as `check_resource_access`, without logging a denial. EVERY
+  implementation must add it: an enforcing context answers from its own
+  check, a context that forwards `check_resource_access` to an inner one
+  forwards this too, and a mock answers by its policy. It has no default
+  because a wrong `false` would silently hold every writer behind that
+  context to the append-only insert rules.
 - `ResourceGrant::write` is a `GrantWrite` (`None` / `Full` / `Append`)
   instead of a `bool`. `None` and `Full` encode as `false` and `true`, so
   every existing grant keeps its wire form and its meaning; code that reads
@@ -591,10 +596,11 @@
   whole batch before anything runs. An insert admitted only through an
   append grant (no `Write`) must also leave the table and the row identity to
   the server: naming `id`, `created_at` or `updated_at`, or a column the table
-  lacks, is `PermissionDenied` and nothing is written — so an append-only
+  lacks, is `PermissionDenied` and nothing is written. So an append-only
   grantee cannot forge or back-date an entry, and cannot add a column (which
   outside `STRICT_SCHEMA` the insert would otherwise do, typed by its first
-  value). An append grant must be typed `Db`; `ResourceGrant::check_shape`
+  value); and a collection without all three of `id`, `created_at` and
+  `updated_at` refuses every append-only insert. An append grant must be typed `Db`; `ResourceGrant::check_shape`
   enforces it at registration and in `Wafer::add_wrap_grants`, and an append
   grant of another type admits nothing. An append grant encodes `write` as
   the string `"append"`, which a runtime that predates append grants fails to

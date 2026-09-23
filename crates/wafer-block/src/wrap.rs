@@ -639,7 +639,8 @@ pub enum DatabaseOpAccess {
 /// An insert admitted through `Append` alone is further held, by the
 /// database handler, to the append-only insert rules: it may not name `id`,
 /// `created_at` or `updated_at` (the server assigns them) nor any column the
-/// table lacks (it may not reshape the table). With the id server-assigned,
+/// table lacks (it may not reshape the table) — so a table without all three
+/// of those columns refuses every append-only insert. With the id server-assigned,
 /// an append-only insert cannot collide with an existing row.
 pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
     use DatabaseOpAccess::{On, PerWrite};

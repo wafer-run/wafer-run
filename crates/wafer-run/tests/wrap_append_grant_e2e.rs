@@ -36,6 +36,8 @@ use wafer_run::{Context, Wafer};
 
 const OWNER: &str = "test-org/ledger";
 const AUDIT: &str = "test_org__ledger__audit";
+/// A collection of the same owner with no `created_at` / `updated_at`.
+const BARE: &str = "test_org__ledger__bare";
 /// Holds `ResourceGrant::append` on [`AUDIT`] and nothing else.
 const APPENDER: &str = "test-org/appender";
 /// Holds `ResourceGrant::append` AND `ResourceGrant::read` on [`AUDIT`].
@@ -52,6 +54,7 @@ impl Block for Ledger {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(OWNER, "0.1.0", "test/iface@v1", "owns the audit table").grants(vec![
             ResourceGrant::append(APPENDER, AUDIT),
+            ResourceGrant::append(APPENDER, BARE),
             ResourceGrant::append(READ_APPENDER, AUDIT),
             ResourceGrant::read(READ_APPENDER, AUDIT).typed(ResourceType::Db),
             ResourceGrant::read_write(WRITER, AUDIT).typed(ResourceType::Db),
@@ -493,6 +496,32 @@ async fn append_only_inserts_cannot_set_server_owned_columns() {
             }
         }
     }
+    // `insert_guarded` needs read as well, so it goes through the grantee
+    // holding both; it is still an append-only insert.
+    for (column, value) in [
+        ("id", json!("forged")),
+        ("created_at", json!("2000-01-01T00:00:00Z")),
+        ("updated_at", json!("2000-01-01T00:00:00Z")),
+    ] {
+        let request = json!({
+            "collection": AUDIT,
+            "data": { "action": "a", column: value },
+            "guards": [{ "CountBelow": { "filters": [], "cap": 1000 } }],
+        });
+        match call(
+            &wafer,
+            READ_APPENDER,
+            ServiceOp::DATABASE_INSERT_GUARDED,
+            &request,
+        )
+        .await
+        {
+            Err(ErrorCode::PermissionDenied) => {}
+            other => wrong.push(format!(
+                "insert_guarded setting `{column}`: expected PermissionDenied, got {other:?}"
+            )),
+        }
+    }
     assert!(
         wrong.is_empty(),
         "server-owned column:\n  {}",
@@ -536,4 +565,30 @@ async fn append_only_inserts_cannot_set_server_owned_columns() {
     );
     let row = sqlite.get(AUDIT, "chosen").await.expect("chosen row");
     assert_eq!(row.data["created_at"], json!("2000-01-01T00:00:00Z"));
+}
+
+/// A table missing any of `id`, `created_at`, `updated_at` refuses every
+/// append-only insert: the server would stamp the missing column, and
+/// outside STRICT_SCHEMA stamping it would add it to the table.
+#[tokio::test]
+async fn append_only_inserts_need_the_server_owned_columns() {
+    let (wafer, sqlite) = build().await;
+    sqlite
+        .ensure_schema_table(&Table {
+            name: BARE.to_string(),
+            columns: vec![pk("id"), Column::new("action", DataType::Text).null()],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        })
+        .await
+        .expect("create a table without timestamps");
+    let request = json!({ "collection": BARE, "data": { "action": "a" } });
+    assert_eq!(
+        call(&wafer, APPENDER, ServiceOp::DATABASE_CREATE, &request).await,
+        Err(ErrorCode::PermissionDenied)
+    );
+    let columns = sqlite.schema_columns(BARE).await.expect("columns");
+    assert!(!columns.contains(&"created_at".to_string()), "{columns:?}");
+    assert_eq!(sqlite.count(BARE, &[]).await.expect("count"), 0);
 }

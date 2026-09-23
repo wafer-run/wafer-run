@@ -222,8 +222,10 @@ impl ResourceGrant {
     /// insert rows (`database.create`, `create_many`, a `Create` inside
     /// `database.batch`) and nothing else — it cannot read, update, delete,
     /// upsert or consume a row, add a column, or choose a row's `id`,
-    /// `created_at` or `updated_at`. Pair it with [`Self::read`] on the same
-    /// resource when the grantee also needs to read.
+    /// `created_at` or `updated_at`. The collection must have all three of
+    /// those columns: a table lacking one refuses every append-only insert.
+    /// Pair it with [`Self::read`] on the same resource when the grantee also
+    /// needs to read.
     pub fn append(grantee: &str, resource: &str) -> Self {
         Self {
             grantee: grantee.to_string(),
