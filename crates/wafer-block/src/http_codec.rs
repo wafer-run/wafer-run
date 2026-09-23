@@ -265,6 +265,29 @@ pub fn response_meta_parts(meta: &[MetaEntry]) -> impl Iterator<Item = ResponseM
     meta.iter().filter_map(classify_response_meta)
 }
 
+/// The response-meta **projection**: the entries of a terminal's meta that
+/// may cross a transport boundary, in order, keys and values unchanged.
+///
+/// Exactly the entries [`classify_response_meta`] recognises — the canonical
+/// [`META_RESP_STATUS`], [`META_RESP_HEADER_PREFIX`]`*`,
+/// [`META_RESP_COOKIE_PREFIX`]`*` and [`META_RESP_CONTENT_TYPE`] keys.
+/// Everything else on a terminal is request or in-flight state
+/// (`http.header.authorization`, `http.header.cookie`, `auth.user_email`,
+/// `req.client.ip`, `req.query.*`, …): blocks legitimately carry it — a
+/// `Halt` built from the request message is what keeps the CORS and
+/// security headers a middleware set on that message — but it is not part of
+/// the response and must not leave the runtime.
+///
+/// Adapters that build a platform response classify with
+/// [`response_meta_parts`] instead. This is for boundaries that re-emit meta
+/// **as meta**, where the host applies the entries itself: the embedder wire
+/// format (`wafer_run::embed::output_to_json`) hands its host a `meta`
+/// object. Both projections admit the same key set, so no transport sees
+/// more than another.
+pub fn response_meta_entries(meta: &[MetaEntry]) -> impl Iterator<Item = &MetaEntry> {
+    meta.iter().filter(|e| classify_response_meta(e).is_some())
+}
+
 // ---------------------------------------------------------------------------
 // Status resolution
 // ---------------------------------------------------------------------------

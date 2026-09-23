@@ -10,45 +10,50 @@ const (
 	ActionRespond  Action = "respond"
 	ActionDrop     Action = "drop"
 	ActionError    Action = "error"
+	ActionHalt     Action = "halt"
 )
 
-// Message flows through the flow. A message contains a kind identifier,
-// payload data, and metadata.
+// MetaEntry is one key-value metadata entry. The runtime's Message carries
+// meta as an ordered list, not a map: a key may be set, replaced and read
+// back in flow order.
+type MetaEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// Message flows through the flow. It carries a kind identifier and metadata;
+// the body travels separately as an input stream, and Wafer.Run dispatches
+// with an empty one.
 type Message struct {
-	Kind string            `json:"kind"`
-	Data []byte            `json:"data"`
-	Meta map[string]string `json:"meta,omitempty"`
+	Kind string      `json:"kind"`
+	Meta []MetaEntry `json:"meta"`
 }
 
-// NewMessage creates a new Message with the given kind and data.
-func NewMessage(kind string, data []byte) *Message {
-	return &Message{
-		Kind: kind,
-		Data: data,
-		Meta: make(map[string]string),
-	}
+// NewMessage creates a new Message with the given kind and no metadata.
+func NewMessage(kind string) *Message {
+	return &Message{Kind: kind, Meta: []MetaEntry{}}
 }
 
-// SetMeta sets a metadata key-value pair on the message.
+// SetMeta sets a metadata key-value pair on the message, replacing any
+// existing entry with the same key (the runtime's replace-by-key semantics).
 func (m *Message) SetMeta(key, value string) {
-	if m.Meta == nil {
-		m.Meta = make(map[string]string)
+	for i := range m.Meta {
+		if m.Meta[i].Key == key {
+			m.Meta[i].Value = value
+			return
+		}
 	}
-	m.Meta[key] = value
+	m.Meta = append(m.Meta, MetaEntry{Key: key, Value: value})
 }
 
 // GetMeta returns a metadata value by key, or empty string if not found.
 func (m *Message) GetMeta(key string) string {
-	if m.Meta == nil {
-		return ""
+	for _, e := range m.Meta {
+		if e.Key == key {
+			return e.Value
+		}
 	}
-	return m.Meta[key]
-}
-
-// Response carries data back to the caller when a block short-circuits.
-type Response struct {
-	Data []byte            `json:"data,omitempty"`
-	Meta map[string]string `json:"meta,omitempty"`
+	return ""
 }
 
 // WaferError represents a structured error returned by a block.
@@ -67,11 +72,26 @@ func (e *WaferError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
 
-// Result is the outcome of a block processing a message.
+// Result is the outcome of running a flow — the embedder wire format the
+// runtime's embed::output_to_json produces.
+//
+// Body holds a Respond action's UTF-8 body; BodyBase64 holds it Base64-encoded
+// when the body is not valid UTF-8, and always for Halt. Kind names the
+// follow-up message on a Continue.
+//
+// Meta holds ONLY the canonical response keys — "resp.status",
+// "resp.header.*", "resp.cookie.*", "resp.content_type" — for the host to
+// apply to its response. Request state (headers, cookies, caller identity,
+// client IP, query) never crosses this boundary, even when the block built
+// its terminal from the request message. A Drop carries no Meta: it maps to
+// a bodiless, headerless 204.
 type Result struct {
-	Action   Action      `json:"action"`
-	Response *Response   `json:"response,omitempty"`
-	Error    *WaferError `json:"error,omitempty"`
+	Action     Action            `json:"action"`
+	Body       string            `json:"body,omitempty"`
+	BodyBase64 string            `json:"body_base64,omitempty"`
+	Kind       string            `json:"kind,omitempty"`
+	Meta       map[string]string `json:"meta,omitempty"`
+	Error      *WaferError       `json:"error,omitempty"`
 }
 
 // IsError returns true if the result represents an error.
@@ -87,6 +107,11 @@ func (r *Result) IsContinue() bool {
 // IsRespond returns true if the result represents a respond action.
 func (r *Result) IsRespond() bool {
 	return r.Action == ActionRespond
+}
+
+// IsHalt returns true if the result represents a halt action.
+func (r *Result) IsHalt() bool {
+	return r.Action == ActionHalt
 }
 
 // ffiError is the JSON error structure returned by FFI functions.

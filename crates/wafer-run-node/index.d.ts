@@ -58,7 +58,14 @@ export declare class WaferRuntime {
    * Takes the flow ID and a JSON message string. Returns a JSON result string:
    * `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`;
    * an `error` result carries
-   * `{"error":{"code":"...","message":"...","detail_code":"..."}}`.
+   * `{"error":{"code":"...","message":"...","detail_code":"..."}}`, and a
+   * `continue` result the follow-up message's `kind`.
+   *
+   * `meta` holds only the canonical response keys — `resp.status`,
+   * `resp.header.*`, `resp.cookie.*`, `resp.content_type` — for the caller to
+   * apply to its response. Request state (headers, cookies, caller identity,
+   * client IP, query) never crosses this boundary, even when the block built
+   * its terminal from the request message. `drop` carries no `meta`.
    *
    * Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead of
    * the `respond` action's `body` string — Halt may carry non-UTF-8 or empty bodies.

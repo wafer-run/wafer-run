@@ -8,13 +8,16 @@
 //! `.wasm`-extension dispatch rule each have exactly one implementation and
 //! one test suite instead of drifting copies per binding.
 
-use wafer_block::{core_types::MetaEntry, streams::output::TerminalNotResponse};
+use wafer_block::{
+    core_types::MetaEntry, http_codec::response_meta_entries, streams::output::TerminalNotResponse,
+};
 
 use crate::OutputStream;
 
-/// Convert collected meta entries into a JSON object of string values.
-fn meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
-    meta.iter()
+/// Project a terminal's meta onto the response entries a host may emit, as a
+/// JSON object of string values. See [`output_to_json`] for the contract.
+fn response_meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
+    response_meta_entries(meta)
         .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
         .collect::<serde_json::Map<_, _>>()
         .into()
@@ -23,12 +26,23 @@ fn meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 /// Collect an [`OutputStream`] and encode its terminal as the embedder JSON
 /// wire format: `{"action":"respond|error|drop|halt|continue", ...}`.
 ///
+/// Every arm but `drop` carries `meta`: a JSON object holding **only** the
+/// canonical response keys — `resp.status`, `resp.header.*`, `resp.cookie.*`,
+/// `resp.content_type` — under their own names. That is
+/// [`wafer_block::http_codec::response_meta_entries`], the projection the
+/// native HTTP boundary applies to the same terminals — so no embedder sees
+/// a key an HTTP client would not. Everything it drops is request or
+/// in-flight state: a block builds its terminal from the request message
+/// when it needs the headers a middleware set on it (see `wafer-run/cors`'s
+/// preflight `Halt`), and that message also carries
+/// `http.header.authorization`, `http.header.cookie`, `auth.*` identity,
+/// `req.client.ip` and the decoded query.
+///
 /// - `respond` carries `body` (a UTF-8 string) when the body is valid UTF-8
 ///   (the common case, human-readable wire shape); when it is not, it
 ///   carries `body_base64` (Base64-encoded bytes) instead so binary bodies
 ///   are never silently collapsed to `""`. Exactly one of `body` /
-///   `body_base64` is present on a `respond`. `meta` is a JSON object of
-///   string values.
+///   `body_base64` is present on a `respond`.
 /// - `halt` always uses `body_base64` — Halt may carry non-UTF-8 or empty
 ///   bodies. Carries `meta` like `respond`.
 /// - `error` carries
@@ -36,16 +50,19 @@ fn meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 ///   is the coarse [`wafer_block::ErrorCode`], `detail_code` the
 ///   application-level code set via
 ///   [`wafer_block::WaferError::with_detail_code`], omitted when none was
-///   set. The error's meta is never emitted — it can hold request meta
-///   (headers, cookies, caller identity), not only response meta.
-/// - `drop` carries no payload.
-/// - `continue` carries the follow-up `message` as a JSON object.
+///   set. Its `meta` sits beside `error`, like every other arm's, so an
+///   embedding host can emit the `Retry-After` / `X-RateLimit-*` headers a
+///   429 carries.
+/// - `drop` carries no payload — it maps to a bodiless, headerless `204`.
+/// - `continue` carries the follow-up message's `kind` plus its `meta`. The
+///   message itself does not cross the boundary: a host has nowhere further
+///   to forward it, and the flow's in-flight message is not a response.
 /// - A stream that ends without a terminal event encodes as an `error` with
-///   code `Internal`.
+///   code `Internal` and empty `meta`.
 pub async fn output_to_json(output: OutputStream) -> String {
     match output.collect_buffered().await {
         Ok(buf) => {
-            let meta_obj = meta_to_json(&buf.meta);
+            let meta_obj = response_meta_to_json(&buf.meta);
             match String::from_utf8(buf.body) {
                 Ok(body_str) => serde_json::json!({
                     "action": "respond",
@@ -73,7 +90,12 @@ pub async fn output_to_json(output: OutputStream) -> String {
             if let Some(detail) = err.detail_code() {
                 error["detail_code"] = serde_json::Value::String(detail.to_string());
             }
-            serde_json::json!({ "action": "error", "error": error }).to_string()
+            serde_json::json!({
+                "action": "error",
+                "error": error,
+                "meta": response_meta_to_json(&err.meta),
+            })
+            .to_string()
         }
         Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
         Err(TerminalNotResponse::Halt(buf)) => {
@@ -82,18 +104,20 @@ pub async fn output_to_json(output: OutputStream) -> String {
             serde_json::json!({
                 "action": "halt",
                 "body_base64": body_b64,
-                "meta": meta_to_json(&buf.meta),
+                "meta": response_meta_to_json(&buf.meta),
             })
             .to_string()
         }
         Err(TerminalNotResponse::Continue(msg)) => serde_json::json!({
             "action": "continue",
-            "message": serde_json::to_value(&msg).unwrap_or_default(),
+            "kind": msg.kind,
+            "meta": response_meta_to_json(&msg.meta),
         })
         .to_string(),
         Err(TerminalNotResponse::Malformed) => serde_json::json!({
             "action": "error",
-            "error": { "code": "Internal", "message": "stream ended without terminal event" }
+            "error": { "code": "Internal", "message": "stream ended without terminal event" },
+            "meta": {},
         })
         .to_string(),
     }
@@ -178,16 +202,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn respond_preserves_meta() {
+    async fn respond_preserves_response_meta() {
         let out = OutputStream::respond_with_meta(
             b"ok".to_vec(),
             vec![MetaEntry {
-                key: "x-test".into(),
+                key: "resp.header.x-test".into(),
                 value: "1".into(),
             }],
         );
         let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["meta"]["x-test"], "1");
+        assert_eq!(json["meta"]["resp.header.x-test"], "1");
     }
 
     #[tokio::test]
@@ -218,14 +242,15 @@ mod tests {
                     "message": "x",
                     "detail_code": "auth.invalid_email",
                 },
+                "meta": {},
             })
         );
     }
 
     /// Error meta may carry request meta (a block that builds its error from
-    /// the request message); none of it reaches the embedder.
+    /// the request message); only its response entries reach the embedder.
     #[tokio::test]
-    async fn error_terminal_never_emits_error_meta() {
+    async fn error_terminal_projects_error_meta() {
         let mut err = WaferError::new(ErrorCode::ResourceExhausted, "Too many requests");
         err.meta.push(MetaEntry {
             key: "http.header.authorization".into(),
@@ -242,6 +267,10 @@ mod tests {
             json["error"],
             serde_json::json!({ "code": "ResourceExhausted", "message": "Too many requests" })
         );
+        assert_eq!(
+            json["meta"],
+            serde_json::json!({ "resp.header.Retry-After": "30" })
+        );
     }
 
     #[tokio::test]
@@ -252,11 +281,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn halt_always_base64_encodes_body_and_keeps_meta() {
+    async fn halt_always_base64_encodes_body_and_keeps_response_meta() {
         let out = OutputStream::halt(
             b"stop".to_vec(),
             vec![MetaEntry {
-                key: "x-halt".into(),
+                key: "resp.header.x-halt".into(),
                 value: "y".into(),
             }],
         );
@@ -269,15 +298,23 @@ mod tests {
         use base64ct::{Base64, Encoding};
         let b64 = json["body_base64"].as_str().expect("body_base64 present");
         assert_eq!(Base64::decode_vec(b64).unwrap(), b"stop");
-        assert_eq!(json["meta"]["x-halt"], "y");
+        assert_eq!(json["meta"]["resp.header.x-halt"], "y");
     }
 
     #[tokio::test]
-    async fn continue_terminal_carries_message_object() {
-        let out = OutputStream::continue_with(Message::new("next"));
-        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json["action"], "continue");
-        assert_eq!(json["message"]["kind"], "next");
+    async fn continue_terminal_carries_kind_and_response_meta() {
+        let mut msg = Message::new("next");
+        msg.set_meta("resp.header.Vary", "Origin");
+        let json: serde_json::Value =
+            serde_json::from_str(&output_to_json(OutputStream::continue_with(msg)).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "action": "continue",
+                "kind": "next",
+                "meta": { "resp.header.Vary": "Origin" },
+            })
+        );
     }
 
     #[cfg(feature = "wasmi")]

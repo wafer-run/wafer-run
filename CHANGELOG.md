@@ -118,8 +118,10 @@
 - `wafer_sql_utils::aggregate::AggFunc` gains `SumOrZero`
   (`COALESCE(SUM(...), 0)`), so exhaustive matches need an arm.
 - Go SDK: `WaferError.Meta` is removed and `WaferError.DetailCode` added
-  (see **Fixed**). The embedder never emitted an error's meta, so code that
-  read `Meta` always saw no entries; read `DetailCode` instead.
+  (see **Fixed**). No merged version of the embedder emitted meta inside
+  the `error` object, so code that read `Meta` always saw no entries; read
+  `DetailCode` instead, and an error's response headers from `Result.Meta`
+  (see **Added**).
 - `DatabaseService` gains two REQUIRED methods, `create_many` and `batch`,
   with no defaults: a backend that cannot make the writes atomic must say so
   with an error rather than inherit a loop that leaves half of them applied.
@@ -134,9 +136,37 @@
   on every backend, and it accepts rows with different column sets instead
   of refusing them. `ServiceOp::DATABASE_OPS` gains `DATABASE_CREATE_MANY`
   and `DATABASE_BATCH`, so any table kept in step with it needs both.
+- The embedder wire format (`embed::output_to_json`, consumed by `wafer-ffi`,
+  `wafer-run-node` and the Go SDK) emits a **projection** of each terminal's
+  meta instead of all of it: every action but `drop` carries a `meta` object
+  holding only the canonical response keys — `resp.status`,
+  `resp.header.*`, `resp.cookie.*`, `resp.content_type` — under their own
+  names. A host that read any other key (`http.header.*`, `http.method`,
+  `http.path`, `req.*`, `auth.*`) off `meta` no longer finds it; those were
+  request state, never part of the response (see **Fixed**).
+- The `continue` action replaces its `message` object with the follow-up
+  message's `kind` at the top level: `{"action":"continue","kind":"...",
+  "meta":{...}}`. `message.meta` was also the one place the wire encoded meta
+  as a list of `{key,value}` objects rather than an object; there is now one
+  encoding. Read `kind` instead of `message.kind`.
+- Go SDK: `Message` matches the runtime's `Message` — `Kind` plus an ordered
+  `Meta []MetaEntry`, and no `Data` (the FFI's `wafer_run` is body-less).
+  `NewMessage` takes only a kind. The previous shape (`Data []byte`,
+  `Meta map[string]string`) could not be deserialized by the runtime at all,
+  so `Run` failed on every call that reached it.
+- Go SDK: `Result` matches the wire format — `Body` / `BodyBase64` / `Kind` /
+  `Meta` / `Error` at the top level, plus `ActionHalt` and `IsHalt()`. The
+  `Response` type and `Result.Response` field are removed; no runtime version
+  ever emitted a `response` object.
 
 ### Added
 
+- The embedder wire format's `error` action carries a top-level `meta`
+  beside `error`: the error's response-meta projection, the same keys every
+  other action carries. An embedding host can now emit the `Retry-After` /
+  `X-RateLimit-*` headers a 429 carries, as the native HTTP boundary does.
+  No merged version of the embedder emitted an error's meta in any form, so
+  this is new wire surface; request state in the error's meta never reaches it.
 - `database.aggregate` output casts: `AggregateColumnDef::Sum` takes an
   optional `cast_as` of `BIGINT` or `DOUBLE PRECISION`, `Avg` of
   `DOUBLE PRECISION` only (ASCII case-insensitive), rendered as
@@ -484,8 +514,26 @@
 - The embedder wire format (`embed::output_to_json`, used by `wafer-ffi` and
   `wafer-run-node`) carries the detail code as `detail_code` in an `error`
   result: `{"error": {"code", "message", "detail_code"}}`, omitted when
-  unset. The error's meta is never emitted there. The Go SDK's `WaferError`
-  gains `DetailCode` and drops `Meta`, a field no producer filled.
+  unset. The `error` object never carries the error's meta; only its
+  response-meta projection crosses, as the result's top-level `meta` (see
+  **Added**). The Go SDK's `WaferError` gains `DetailCode` and drops
+  `Meta`, a field no producer filled.
+- Request meta no longer leaves the runtime through an embedder. PR #338
+  closed the `error` arm of `embed::output_to_json`; the `respond`, `halt`
+  and `continue` arms still emitted the terminal's whole meta, and a
+  terminal legitimately carries the request message's meta — a block builds
+  it from the request to keep the CORS and security headers a middleware set
+  there. `wafer-run/cors`'s OPTIONS preflight `Halt` did exactly that, so a
+  `wafer-ffi` / `wafer-run-node` / Go host received
+  `http.header.authorization`, `http.header.cookie`, `auth.user_email`,
+  `auth.user_roles`, `req.client.ip` and the decoded query alongside the
+  `Access-Control-*` headers it was meant to apply. Every arm now runs its
+  meta through the new `wafer_block::http_codec::response_meta_entries` —
+  the same projection the native HTTP boundary has always applied — so no
+  transport sees a key another would not. `tests/embed_meta_projection.rs`
+  pins each arm, twice over: on hand-built terminals and on the real
+  `wafer-run/cors` block dispatched through a real `Wafer`.
+
 - `wafer-run/ip-rate-limit` built its 429 error from the whole request
   message, so the error's meta held the request's headers (including
   `Authorization` and `Cookie`), caller identity and client IP next to the

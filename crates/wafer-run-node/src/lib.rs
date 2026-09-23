@@ -137,10 +137,13 @@ mod bindings {
         /// Takes the flow ID and a JSON message string. Returns a JSON result string:
         /// `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`;
         /// an `error` result carries
-        /// `{"error":{"code":"...","message":"...","detail_code":"..."}}`.
+        /// `{"error":{"code":"...","message":"...","detail_code":"..."}}`, and a
+        /// `continue` result the follow-up message's `kind`.
         ///
-        /// The wire format (including the `body` vs `body_base64` rules for
-        /// `respond` and `halt`) is documented on
+        /// `meta` holds only the canonical response keys — `resp.status`,
+        /// `resp.header.*`, `resp.cookie.*`, `resp.content_type`. Request state
+        /// never crosses this boundary. The wire format (including the `body`
+        /// vs `body_base64` rules for `respond` and `halt`) is documented on
         /// [`wafer_run::embed::output_to_json`], which produces it.
         #[napi]
         pub async fn run(&self, flow_id: String, message_json: String) -> Result<String> {
