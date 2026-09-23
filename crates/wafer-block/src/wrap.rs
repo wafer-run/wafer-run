@@ -636,8 +636,11 @@ pub enum DatabaseOpAccess {
 /// - the schema ops — they reshape the table (and additionally need the
 ///   [`SCHEMA_RESOURCE`] sentinel).
 ///
-/// An insert that collides with an existing key fails, which tells an
-/// append-only caller that the key exists; that is inherent to inserting.
+/// Two effects are inherent to inserting: an insert that collides with an
+/// existing key fails, which tells an append-only caller that the key
+/// exists; and outside `STRICT_SCHEMA` an insert naming an unseen column adds
+/// it (nullable), as it does for any writer, leaving existing rows as they
+/// are.
 pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
     use DatabaseOpAccess::{On, PerWrite};
     use ResourceAccess::{Append, Read, Write};

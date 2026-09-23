@@ -194,6 +194,22 @@
   `AuthError::Internal(e.to_string())` turned every one of them into
   `Internal`. `Internal` is now for faults of the auth service itself.
 
+- WRAP checks name a `ResourceAccess` (`Read` / `Append` / `Write`) instead
+  of an `is_write: bool`: `Context::check_resource_access(resource,
+  resource_type, access)`, `wrap::check_access(caller, resource, access, ..)`,
+  and the `(resource, resource_type, access)` tuple the
+  `decode_and_authorize*` closures return. `false` becomes
+  `ResourceAccess::Read` and `true` becomes `ResourceAccess::Write`, which
+  authorize exactly as before; `Append` is new (see **Added**). Every
+  `Context` implementation and every direct caller has to be updated.
+  `decode_and_authorize_all`'s closure now returns a `Result`, so it can
+  refuse a request before any check runs, as `decode_and_authorize_checked`'s
+  does. `ResourceGrant` gains a public `append` field, so a struct literal
+  has to name it (`append: false` keeps a grant's meaning). No existing grant
+  changes meaning: `read` and `read_write` grants admit what they admitted,
+  and their serialized form is unchanged — `append` is omitted when false and
+  defaults to false when absent.
+
 ### Added
 
 - The embedder wire format's `error` action carries a top-level `meta`
@@ -552,6 +568,29 @@
   and live PostgreSQL, where a trigger-widened race (eight inserts under a
   cap of three, five updates under a byte cap) lands exactly the cap, with
   the session default at READ COMMITTED and at REPEATABLE READ.
+
+- Append-only WRAP grants: `ResourceGrant::append(grantee, collection)` lets
+  the grantee insert rows into a database collection it does not own and
+  nothing else — it cannot read, update, delete, upsert or consume a row, or
+  reshape the table. `database.create`, `database.create_many` and a
+  `Create` inside `database.batch` are the appends; every other write needs a
+  read-write grant, and `database.insert_guarded` needs a read grant as well,
+  because its guards measure existing rows and its refusal names the guard.
+  Read is a separate grant (`ResourceGrant::read`), so a grantee that must
+  read too declares both. The database handler authorizes every op from one
+  table, `wrap::DATABASE_OP_ACCESS`, and a test fails when an op in
+  `ServiceOp::DATABASE_OPS` is missing from it; a batch is authorized per
+  write (`BatchWrite::access`), so one `Update` behind a `Create` refuses the
+  whole batch before anything runs. An append grant must be typed `Db` and
+  must not also set `write`; `ResourceGrant::check_shape` enforces both at
+  registration, rejecting the grant through `RuntimeError::GrantsRejected`,
+  and a malformed grant that reaches the check another way admits nothing.
+  Two limits are inherent to inserting: an insert that collides with an
+  existing key fails, which tells the grantee the key exists; and outside
+  `STRICT_SCHEMA` an insert naming an unseen column adds it (nullable), as
+  for any writer — existing rows are left as they are. A runtime that
+  predates the `append` field ignores it, reading an append grant as
+  read-only.
 
 ### Fixed
 
