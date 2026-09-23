@@ -79,6 +79,16 @@ impl Context for OwnTablesCtx {
             ))
         }
     }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
+    }
 }
 
 /// Admits own tables but NOT `__schema__` — a guest with `schema: false`.
@@ -121,6 +131,16 @@ impl Context for OwnTablesNoSchemaCtx {
                 format!("denied: {resource}"),
             ))
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -169,6 +189,16 @@ impl Context for OwnTablesDdlOnlyCtx {
                 format!("denied: {resource}"),
             ))
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 

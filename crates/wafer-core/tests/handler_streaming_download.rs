@@ -174,6 +174,16 @@ impl Context for RecordingCtx {
             ))
         }
     }
+
+    // Same policy as `check_resource_access`, without recording a check.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        self.allow
+    }
 }
 
 // ---------------------------------------------------------------------------

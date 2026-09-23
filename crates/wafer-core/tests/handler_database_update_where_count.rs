@@ -102,6 +102,16 @@ impl Context for DenyCtx {
             format!("WRAP: no grant for resource '{resource}'"),
         ))
     }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
+    }
 }
 
 // ---------------------------------------------------------------------------

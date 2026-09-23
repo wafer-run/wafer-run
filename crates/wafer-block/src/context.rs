@@ -180,18 +180,17 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// not. It is never the authorization itself: call
     /// `check_resource_access` for that.
     ///
-    /// FAIL-CLOSED like `check_resource_access`: the default answers
-    /// `false`, so a Context that does not implement it gets the narrower
-    /// path.
+    /// No default: it must give the same answer `check_resource_access`
+    /// would, so every Context answers it — an enforcing context from its
+    /// own decision, a forwarding context by forwarding, a mock by its
+    /// policy. A default of `false` would quietly turn every writer behind a
+    /// context that forgot it into an append-only caller.
     fn resource_access_admitted(
         &self,
         resource: &str,
         resource_type: crate::types::ResourceType,
         access: crate::types::ResourceAccess,
-    ) -> bool {
-        let _ = (resource, resource_type, access);
-        false
-    }
+    ) -> bool;
 }
 
 #[cfg(test)]
@@ -231,6 +230,15 @@ mod tests {
 
         fn clone_arc(&self) -> Arc<dyn Context> {
             unimplemented!()
+        }
+        // Denies every access, as the trait's default `check_resource_access` does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _access: ResourceAccess,
+        ) -> bool {
+            false
         }
     }
 

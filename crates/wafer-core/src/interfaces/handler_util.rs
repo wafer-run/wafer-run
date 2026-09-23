@@ -362,6 +362,16 @@ mod decode_and_authorize_tests {
                 "denied by test ctx",
             ))
         }
+
+        fn resource_access_admitted(
+            &self,
+            resource: &str,
+            resource_type: ResourceType,
+            access: ResourceAccess,
+        ) -> bool {
+            self.check_resource_access(resource, resource_type, access)
+                .is_ok()
+        }
     }
 
     async fn expect_error_code(out: OutputStream, expected: ErrorCode) -> WaferError {
