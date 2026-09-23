@@ -155,7 +155,10 @@
   alike. A caller that treated a duplicate as `Internal` must match
   `AlreadyExists`. An out-of-tree adapter must map its driver's
   unique-violation the same way (D1 reports it only as the text
-  `UNIQUE constraint failed`). Other constraint violations stay `Internal`.
+  `UNIQUE constraint failed`). Other constraint violations stay `Internal`,
+  and so does a PostgreSQL `23505` on a `pg_catalog` index — two sessions
+  creating the same table at once collide on `pg_type_typname_nsp_index`,
+  which is a DDL race, not a taken key.
 - The embedder wire format (`embed::output_to_json`, consumed by `wafer-ffi`,
   `wafer-run-node` and the Go SDK) emits a **projection** of each terminal's
   meta instead of all of it: every action but `drop` carries a `meta` object
@@ -511,9 +514,9 @@
   was hit. A key that is already taken is an `AlreadyExists` error, not a
   refusal. An update that replaces a row the sum already counts excludes it
   with a filter (`id != …`). The check and the write are one step: one
-  transaction holding a probe of every guard's verdict and then one
-  `INSERT … SELECT … WHERE` / `UPDATE … WHERE` statement, which SQLite's
-  single writer (and D1's) already serialises. On PostgreSQL the transaction
+  transaction holding a probe of every guard's verdict, one
+  `INSERT … SELECT … WHERE` / `UPDATE … WHERE` statement and the probe
+  again, which SQLite's single writer (and D1's) already serialises. On PostgreSQL the transaction
   first sets `READ COMMITTED` — under a `default_transaction_isolation` of
   REPEATABLE READ or SERIALIZABLE the snapshot would be taken before the
   lock is granted — and then takes a transaction-scoped advisory lock keyed
@@ -523,9 +526,9 @@
   per-owner byte sum, or a sum that excludes a replaced row) must still
   exclude each other. A cap, and the refusal it reports, are exact against
   other guarded writes only: `create`, `update` and the other plain writes
-  do not take the lock (on PostgreSQL, one committing between the probe and
-  the write can refuse an insert the probe passed, which is then an
-  `Internal` error naming that race). The handler authorizes the collection
+  do not take the lock. The transaction probes every guard's verdict before
+  and after the write, so a write that an unguarded write refused after the
+  first probe is still reported as `Refused { guard }`, not `NoMatch`. The handler authorizes the collection
   for WRITE and validates every guard (filters as `update_where`'s, the
   `SumAtMost` field as a plain identifier, at most
   `wire::database::MAX_WRITE_GUARDS` = 16 guards) before the service runs.
