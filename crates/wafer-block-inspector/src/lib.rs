@@ -517,6 +517,15 @@ mod auth_tests {
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
             std::sync::Arc::new(self.clone())
         }
+        // Denies every access, as the trait's default `check_resource_access` does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_block::types::ResourceType,
+            _access: wafer_block::types::ResourceAccess,
+        ) -> bool {
+            false
+        }
     }
 
     async fn handle_code(msg: Message) -> ErrorCode {
@@ -613,6 +622,15 @@ mod webmcp_tests {
         }
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
             std::sync::Arc::new(self.clone())
+        }
+        // Denies every access, as the trait's default `check_resource_access` does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_block::types::ResourceType,
+            _access: wafer_block::types::ResourceAccess,
+        ) -> bool {
+            false
         }
     }
 

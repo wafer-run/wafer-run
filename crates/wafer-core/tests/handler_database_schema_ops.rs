@@ -20,7 +20,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire::database as wire,
     ErrorCode, Message, WaferError,
 };
@@ -65,7 +65,7 @@ impl Context for OwnTablesCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db
             && (resource.starts_with("my_org__auth__")
@@ -78,6 +78,16 @@ impl Context for OwnTablesCtx {
                 format!("denied: {resource}"),
             ))
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -111,7 +121,7 @@ impl Context for OwnTablesNoSchemaCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db && resource.starts_with("my_org__auth__") {
             Ok(())
@@ -121,6 +131,16 @@ impl Context for OwnTablesNoSchemaCtx {
                 format!("denied: {resource}"),
             ))
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -156,7 +176,7 @@ impl Context for OwnTablesDdlOnlyCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource_type == ResourceType::Db
             && (resource.starts_with("my_org__auth__")
@@ -169,6 +189,16 @@ impl Context for OwnTablesDdlOnlyCtx {
                 format!("denied: {resource}"),
             ))
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 

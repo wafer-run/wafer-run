@@ -279,6 +279,7 @@ forward_database_service! {
             ensure_schema_table: forward,
             ensure_schema_tables: inherit,
             schema_table_exists: forward,
+            schema_columns: forward,
             // `DbExec` has no schema-mutation primitives, and STRICT_SCHEMA is
             // per-backend state.
             schema_drop_table: custom,

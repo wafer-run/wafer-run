@@ -205,9 +205,33 @@ impl RegistrationCore {
     /// Add extra WRAP grants (e.g. loaded from a database). Appended to the
     /// existing grants and tracked separately so a later
     /// [`set_admin_block`](Self::set_admin_block) rescan does not drop them.
-    pub(crate) fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
+    ///
+    /// All-or-nothing: when any grant fails
+    /// [`check_shape`](wafer_block::types::ResourceGrant::check_shape), none
+    /// is added and every failure is returned.
+    pub(crate) fn add_wrap_grants(
+        &mut self,
+        grants: Vec<wafer_block::types::ResourceGrant>,
+    ) -> Result<(), RuntimeError> {
+        let rejected: Vec<wafer_block::error::GrantValidationError> = grants
+            .iter()
+            .filter_map(|grant| {
+                grant
+                    .check_shape()
+                    .err()
+                    .map(|shape| wafer_block::error::GrantValidationError {
+                        block: String::new(),
+                        grant: grant.clone(),
+                        reason: shape.to_string(),
+                    })
+            })
+            .collect();
+        if !rejected.is_empty() {
+            return Err(RuntimeError::GrantsRejected(rejected));
+        }
         self.wrap.grants_external.extend(grants.iter().cloned());
         self.wrap.append_grants(grants);
+        Ok(())
     }
 
     /// Shared registration tail used by both

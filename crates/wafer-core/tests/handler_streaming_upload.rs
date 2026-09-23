@@ -38,7 +38,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire, Block, ErrorCode, Message, WaferError,
 };
 use wafer_core::{
@@ -99,7 +99,7 @@ async fn expect_permission_denied(out: OutputStream) {
 
 struct RecordingCtx {
     allow: bool,
-    seen: Mutex<Vec<(String, ResourceType, bool)>>,
+    seen: Mutex<Vec<(String, ResourceType, ResourceAccess)>>,
 }
 
 impl RecordingCtx {
@@ -115,7 +115,7 @@ impl RecordingCtx {
             seen: Mutex::new(Vec::new()),
         }
     }
-    fn seen(&self) -> Vec<(String, ResourceType, bool)> {
+    fn seen(&self) -> Vec<(String, ResourceType, ResourceAccess)> {
         self.seen.lock().unwrap().clone()
     }
 }
@@ -147,12 +147,12 @@ impl Context for RecordingCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        is_write: bool,
+        access: ResourceAccess,
     ) -> Result<(), WaferError> {
         self.seen
             .lock()
             .unwrap()
-            .push((resource.to_string(), resource_type, is_write));
+            .push((resource.to_string(), resource_type, access));
         if self.allow {
             Ok(())
         } else {
@@ -161,6 +161,16 @@ impl Context for RecordingCtx {
                 "denied by test ctx",
             ))
         }
+    }
+
+    // Same policy as `check_resource_access`, without recording a check.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        self.allow
     }
 }
 
@@ -420,7 +430,11 @@ async fn put_streaming_requests_identical_write_grant_to_buffered_put() {
     // And concretely: a WRITE (is_write=true) of `{folder}/{key}` on Storage.
     assert_eq!(
         ctx_streaming.seen(),
-        vec![("uploads/big.bin".to_string(), ResourceType::Storage, true)],
+        vec![(
+            "uploads/big.bin".to_string(),
+            ResourceType::Storage,
+            ResourceAccess::Write
+        )],
     );
 }
 
@@ -454,7 +468,11 @@ async fn put_streaming_denied_without_the_write_grant() {
     // The denial consulted exactly the buffered op's write grant.
     assert_eq!(
         ctx.seen(),
-        vec![("uploads/big.bin".to_string(), ResourceType::Storage, true)],
+        vec![(
+            "uploads/big.bin".to_string(),
+            ResourceType::Storage,
+            ResourceAccess::Write
+        )],
     );
 }
 
@@ -469,7 +487,7 @@ async fn put_streaming_denied_without_the_write_grant() {
 /// records/allows the WRAP grant the handler consults.
 struct BlockRoutingCtx {
     block: Arc<StorageBlock>,
-    seen: Mutex<Vec<(String, ResourceType, bool)>>,
+    seen: Mutex<Vec<(String, ResourceType, ResourceAccess)>>,
 }
 
 #[wafer_block::wafer_async_trait]
@@ -499,13 +517,23 @@ impl Context for BlockRoutingCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        is_write: bool,
+        access: ResourceAccess,
     ) -> Result<(), WaferError> {
         self.seen
             .lock()
             .unwrap()
-            .push((resource.to_string(), resource_type, is_write));
+            .push((resource.to_string(), resource_type, access));
         Ok(())
+    }
+
+    // Same policy as `check_resource_access`, without recording a check.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
     }
 }
 
@@ -537,7 +565,11 @@ async fn client_put_stream_round_trips_header_and_body_into_put_streaming() {
     // the buffered put: a WRITE of `{folder}/{key}` on Storage.
     assert_eq!(
         *ctx.seen.lock().unwrap(),
-        vec![("uploads/media.bin".to_string(), ResourceType::Storage, true)],
+        vec![(
+            "uploads/media.bin".to_string(),
+            ResourceType::Storage,
+            ResourceAccess::Write
+        )],
     );
 }
 

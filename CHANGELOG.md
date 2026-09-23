@@ -194,6 +194,34 @@
   `AuthError::Internal(e.to_string())` turned every one of them into
   `Internal`. `Internal` is now for faults of the auth service itself.
 
+- WRAP checks name a `ResourceAccess` (`Read` / `Append` / `Write`) instead
+  of an `is_write: bool`: `Context::check_resource_access(resource,
+  resource_type, access)`, `wrap::check_access(caller, resource, access, ..)`,
+  and the `(resource, resource_type, access)` tuple the
+  `decode_and_authorize*` closures return. `false` becomes
+  `ResourceAccess::Read` and `true` becomes `ResourceAccess::Write`, which
+  authorize exactly as before; `Append` is new (see **Added**). Every
+  `Context` implementation and every direct caller has to be updated.
+  `decode_and_authorize_all`'s closure now returns a `Result`, so it can
+  refuse a request before any check runs, as `decode_and_authorize_checked`'s
+  does. `Context` gains a required `resource_access_admitted` — the same
+  decision as `check_resource_access`, without logging a denial. EVERY
+  implementation must add it: an enforcing context answers from its own
+  check, a context that forwards `check_resource_access` to an inner one
+  forwards this too, and a mock answers by its policy. It has no default
+  because a wrong `false` would silently hold every writer behind that
+  context to the append-only insert rules.
+- `ResourceGrant::write` is a `GrantWrite` (`None` / `Full` / `Append`)
+  instead of a `bool`. `None` and `Full` encode as `false` and `true`, so
+  every existing grant keeps its wire form and its meaning; code that reads
+  or builds the field changes (`write: true` → `write: GrantWrite::Full`).
+- `DatabaseService` gains a required `schema_columns(table)`, and
+  `forward_database_service!`'s ledger a `schema_columns` entry after
+  `schema_table_exists`. A `DbExec`-backed service forwards it.
+- `Wafer::add_wrap_grants` returns `Result<(), RuntimeError>`: it rejects the
+  whole call with `GrantsRejected` when any grant fails
+  `ResourceGrant::check_shape`, where it used to install grants unchecked.
+
 ### Added
 
 - The embedder wire format's `error` action carries a top-level `meta`
@@ -552,6 +580,32 @@
   and live PostgreSQL, where a trigger-widened race (eight inserts under a
   cap of three, five updates under a byte cap) lands exactly the cap, with
   the session default at READ COMMITTED and at REPEATABLE READ.
+
+- Append-only WRAP grants: `ResourceGrant::append(grantee, collection)` lets
+  the grantee insert rows into a database collection it does not own and
+  nothing else — it cannot read, update, delete, upsert or consume a row, or
+  reshape the table. `database.create`, `database.create_many` and a
+  `Create` inside `database.batch` are the appends; every other write needs a
+  read-write grant, and `database.insert_guarded` needs a read grant as well,
+  because its guards measure existing rows and its refusal names the guard.
+  Read is a separate grant (`ResourceGrant::read`), so a grantee that must
+  read too declares both. The database handler authorizes every op from one
+  table, `wrap::DATABASE_OP_ACCESS`, and a test fails when an op in
+  `ServiceOp::DATABASE_OPS` is missing from it; a batch is authorized per
+  write (`BatchWrite::access`), so one `Update` behind a `Create` refuses the
+  whole batch before anything runs. An insert admitted only through an
+  append grant (no `Write`) must also leave the table and the row identity to
+  the server: naming `id`, `created_at` or `updated_at`, or a column the table
+  lacks, is `PermissionDenied` and nothing is written. So an append-only
+  grantee cannot forge or back-date an entry, and cannot add a column (which
+  outside `STRICT_SCHEMA` the insert would otherwise do, typed by its first
+  value); and a collection without all three of `id`, `created_at` and
+  `updated_at` refuses every append-only insert. An append grant must be typed `Db`; `ResourceGrant::check_shape`
+  enforces it at registration and in `Wafer::add_wrap_grants`, and an append
+  grant of another type admits nothing. An append grant encodes `write` as
+  the string `"append"`, which a runtime that predates append grants fails to
+  decode, so it refuses the declaring block rather than reading the grant as
+  read-only.
 
 ### Fixed
 

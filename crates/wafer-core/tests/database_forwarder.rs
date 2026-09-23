@@ -257,6 +257,11 @@ impl DatabaseService for RecordingDb {
         Ok(true)
     }
 
+    async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
+        self.note("schema_columns");
+        Ok(Vec::new())
+    }
+
     async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
         self.note("schema_drop_table");
         Ok(())
@@ -316,6 +321,7 @@ wafer_core::forward_database_service! {
             ensure_schema_table: forward,
             ensure_schema_tables: forward,
             schema_table_exists: forward,
+            schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
             set_strict_schema: forward,
@@ -459,6 +465,7 @@ async fn the_rest_of_the_surface_forwards() {
     dec.query_raw("SELECT 1", &[]).await.expect("query_raw");
     dec.exec_raw("SELECT 1", &[]).await.expect("exec_raw");
     dec.schema_table_exists("t").await.expect("ste");
+    dec.schema_columns("t").await.expect("sc");
     dec.schema_drop_table("t").await.expect("sdt");
     assert_eq!(
         inner.calls(),
@@ -476,6 +483,7 @@ async fn the_rest_of_the_surface_forwards() {
             "query_raw".to_string(),
             "exec_raw".to_string(),
             "schema_table_exists".to_string(),
+            "schema_columns".to_string(),
             "schema_drop_table".to_string(),
         ]
     );

@@ -22,7 +22,7 @@ use wafer_block::{
     common::ServiceOp,
     context::Context,
     streams::{input::InputStream, output::OutputStream},
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire::database as wire,
     ErrorCode, Message, WaferError,
 };
@@ -56,9 +56,17 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
     }
 }
 
@@ -87,12 +95,22 @@ impl Context for DenyCtx {
         &self,
         resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Err(WaferError::new(
             ErrorCode::PermissionDenied,
             format!("WRAP: no grant for resource '{resource}'"),
         ))
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -268,6 +286,9 @@ mod db_fakes {
         }
         async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
             Ok(true)
+        }
+        async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
+            Ok(Vec::new())
         }
         async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
             Ok(())

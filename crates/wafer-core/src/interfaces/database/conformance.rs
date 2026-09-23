@@ -214,7 +214,8 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 ///
 /// Covers, in order: schema management (`ensure_schema_table[s]`,
 /// `schema_table_exists`, `schema_add_column`, `schema_drop_table`,
-/// `set_strict_schema`); `create`/`get`; `count`/`sum` across the full
+/// `set_strict_schema`); `create`/`get` (a taken id refused, the row
+/// untouched) and `schema_columns`; `count`/`sum` across the full
 /// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
 /// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
 /// ordered by the primary key — single-column, composite, or none);
@@ -464,6 +465,47 @@ async fn check_create_get(svc: &dyn DatabaseService) {
         matches!(err, DatabaseError::NotFound),
         "expected NotFound, got: {err:?}"
     );
+
+    // A create naming an id that is already taken fails as AlreadyExists and
+    // leaves the stored row exactly as it was — an insert never overwrites.
+    let before = svc.get("conf_read", "r1").await.expect("get r1");
+    let taken = svc
+        .create(
+            "conf_read",
+            row([
+                ("id", serde_json::json!("r1")),
+                ("name", serde_json::json!("overwritten")),
+                ("score", serde_json::json!(999)),
+            ]),
+        )
+        .await;
+    assert!(
+        matches!(taken, Err(DatabaseError::AlreadyExists(_))),
+        "a create with a taken id must fail as AlreadyExists: {taken:?}"
+    );
+    let after = svc.get("conf_read", "r1").await.expect("get r1 again");
+    assert_eq!(
+        after.data, before.data,
+        "a refused create must not touch the row"
+    );
+
+    // `schema_columns` lists the table's columns, lowercased; a missing table
+    // has none.
+    let columns = svc
+        .schema_columns("conf_read")
+        .await
+        .expect("schema_columns");
+    for column in ["id", "name", "score", "created_at", "updated_at"] {
+        assert!(
+            columns.iter().any(|c| c == column),
+            "schema_columns must list `{column}`: {columns:?}"
+        );
+    }
+    assert!(svc
+        .schema_columns("conf_no_such_table")
+        .await
+        .expect("schema_columns of a missing table")
+        .is_empty());
 
     // Remove the extra auto row so the shared fixture is back to five rows.
     svc.delete("conf_read", &auto.id)

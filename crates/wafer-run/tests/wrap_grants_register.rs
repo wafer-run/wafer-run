@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use wafer_block::{
     core_types::{LifecycleEvent, Message, WaferError},
     streams::{input::InputStream, output::OutputStream},
-    types::{ResourceGrant, ResourceType},
+    types::{GrantWrite, ResourceGrant, ResourceType},
     Block, BlockInfo,
 };
 use wafer_run::{Context, StaticConfigSource, Wafer};
@@ -181,7 +181,9 @@ async fn set_admin_block_preserves_external_grants() {
             }),
         )
         .expect("register");
-    wafer.add_wrap_grants(vec![ResourceGrant::read("test/other", "external/thing")]);
+    wafer
+        .add_wrap_grants(vec![ResourceGrant::read("test/other", "external/thing")])
+        .expect("a well-formed external grant is added");
 
     // Setting admin block triggers a rescan that must keep both grants.
     wafer.set_admin_block("my-org/admin");
@@ -212,9 +214,107 @@ async fn add_wrap_grants_appends_after_register() {
         .expect("register");
 
     // External grants (e.g., from DB) still append on top.
-    wafer.add_wrap_grants(vec![ResourceGrant::read("test/other", "external/thing")]);
+    wafer
+        .add_wrap_grants(vec![ResourceGrant::read("test/other", "external/thing")])
+        .expect("a well-formed external grant is added");
     let grants = wafer.wrap_grants();
     assert_eq!(grants.len(), 2, "got {grants:?}");
     assert_eq!(grants[0].resource, "test__granter__foo");
     assert_eq!(grants[1].resource, "external/thing");
+}
+
+#[tokio::test]
+async fn append_grant_on_own_collection_is_kept() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![ResourceGrant::append("test/writer", "test__granter__audit")],
+            }),
+        )
+        .expect("register");
+
+    let grants = wafer.wrap_grants();
+    assert_eq!(grants.len(), 1, "append grant must be kept, got {grants:?}");
+    assert_eq!(grants[0].write, GrantWrite::Append);
+    wafer
+        .seal()
+        .await
+        .expect("a well-formed append grant seals");
+}
+
+/// An append-only grant not typed `Db` is rejected at registration and
+/// fails `seal()` — it never reaches the WRAP check.
+#[tokio::test]
+async fn append_grants_not_typed_db_are_rejected_via_seal() {
+    let untyped = ResourceGrant {
+        resource_type: None,
+        ..ResourceGrant::append("test/writer", "test__granter__audit")
+    };
+    let storage =
+        ResourceGrant::append("test/writer", "test/granter/logs").typed(ResourceType::Storage);
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![untyped, storage],
+            }),
+        )
+        .expect("register_block must succeed even for rejected grants");
+
+    assert!(
+        wafer.wrap_grants().is_empty(),
+        "no malformed grant may be installed, got {:?}",
+        wafer.wrap_grants()
+    );
+    match wafer.seal().await {
+        Err(wafer_run::RuntimeError::GrantsRejected(errors)) => {
+            let reasons: Vec<&str> = errors.iter().map(|e| e.reason.as_str()).collect();
+            assert_eq!(errors.len(), 2, "{reasons:?}");
+            assert!(
+                reasons
+                    .iter()
+                    .all(|r| r.contains("database collections only")),
+                "{reasons:?}"
+            );
+        }
+        other => panic!(
+            "expected Err(RuntimeError::GrantsRejected), got {:?}",
+            other.map(|_| "Ok(_)")
+        ),
+    }
+}
+
+/// `add_wrap_grants` skips the per-block ownership rules, but not the shape
+/// check: a malformed grant fails the call and nothing from it is installed.
+#[tokio::test]
+async fn add_wrap_grants_rejects_malformed_grants_whole() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    let untyped = ResourceGrant {
+        resource_type: None,
+        ..ResourceGrant::append("test/writer", "test__granter__audit")
+    };
+    match wafer.add_wrap_grants(vec![
+        ResourceGrant::read("test/other", "external/thing"),
+        untyped,
+    ]) {
+        Err(wafer_run::RuntimeError::GrantsRejected(errors)) => {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(errors[0].reason.contains("database collections only"));
+        }
+        other => panic!("expected GrantsRejected, got {other:?}"),
+    }
+    assert!(
+        wafer.wrap_grants().is_empty(),
+        "a rejected call installs nothing, got {:?}",
+        wafer.wrap_grants()
+    );
+    wafer.seal().await.expect("nothing malformed was installed");
 }

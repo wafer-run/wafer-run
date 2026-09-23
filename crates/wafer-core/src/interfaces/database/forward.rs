@@ -114,6 +114,7 @@
 //!             ensure_schema_table: forward,
 //!             ensure_schema_tables: inherit,
 //!             schema_table_exists: forward,
+//!             schema_columns: forward,
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
 //!             set_strict_schema: forward,
@@ -270,6 +271,7 @@ macro_rules! __forward_database_ledger {
             ensure_schema_table: $m_ensure_schema_table:ident,
             ensure_schema_tables: $m_ensure_schema_tables:ident,
             schema_table_exists: $m_schema_table_exists:ident,
+            schema_columns: $m_schema_columns:ident,
             schema_drop_table: $m_schema_drop_table:ident,
             schema_add_column: $m_schema_add_column:ident,
             set_strict_schema: $m_set_strict_schema:ident $(,)?
@@ -303,6 +305,7 @@ macro_rules! __forward_database_ledger {
                 (ensure_schema_table, $m_ensure_schema_table)
                 (ensure_schema_tables, $m_ensure_schema_tables)
                 (schema_table_exists, $m_schema_table_exists)
+                (schema_columns, $m_schema_columns)
                 (schema_drop_table, $m_schema_drop_table)
                 (schema_add_column, $m_schema_add_column)
                 (set_strict_schema, $m_set_strict_schema)
@@ -320,6 +323,7 @@ macro_rules! __forward_database_ledger {
              \x20   exec_raw, delete_where, delete_where_count, take_where, update_where,\n\
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
+             \x20   schema_columns,\n\
              \x20   schema_drop_table, schema_add_column, set_strict_schema\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
@@ -878,6 +882,26 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::schema_table_exists($recv(self), name).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (schema_columns, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn schema_columns(
+                    &self,
+                    table: &str,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<::std::string::String>,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::schema_columns($recv(self), table).await
                 }
             ]
         );

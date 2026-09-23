@@ -4,7 +4,11 @@
 //! Client wrappers set `wrap.resource` meta on the message; the runtime reads it
 //! and calls `check_access()` before dispatching to the handler.
 
-use crate::{types::ResourceGrant, ErrorCode, WaferError};
+use crate::{
+    common::ServiceOp,
+    types::{ResourceAccess, ResourceGrant},
+    ErrorCode, WaferError,
+};
 
 /// Sentinel `wrap.resource` value for raw-SQL access. Admin-only.
 ///
@@ -161,7 +165,8 @@ pub fn typed_resource_owner(
 /// 3. `WAFER_RUN_SHARED__*` → any block reads, admin-only writes
 /// 4. Own resource (`resource_owner(resource) == caller_id`) → Ok
 /// 5. Admin (`caller_id == admin_block`) → Ok
-/// 6. Grant match (grantee + resource pattern + write flag) → Ok
+/// 6. Grant match (grantee + resource pattern + [`ResourceGrant::admits`]
+///    the requested `access` + resource type) → Ok
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
@@ -190,7 +195,7 @@ pub fn typed_resource_owner(
 pub fn check_access(
     caller_id: Option<&str>,
     resource: &str,
-    is_write: bool,
+    access: ResourceAccess,
     resource_type: Option<&crate::types::ResourceType>,
     grants: &[ResourceGrant],
     admin_block: &str,
@@ -244,7 +249,7 @@ pub fn check_access(
 
         // Rule 2: WAFER_RUN_SHARED__ resources
         //
-        // Writes: admin only.
+        // Writes (append included): admin only.
         // Reads: any *attributable* caller (caller_id.is_some()). Anonymous
         // callers (None) are denied — shared config may carry secrets and
         // there is no reason an unauthenticated context should read them.
@@ -252,7 +257,7 @@ pub fn check_access(
             .get(..crate::types::WAFER_RUN_SHARED_PREFIX.len())
             .is_some_and(|p| p.eq_ignore_ascii_case(crate::types::WAFER_RUN_SHARED_PREFIX))
         {
-            if is_write {
+            if access != ResourceAccess::Read {
                 return match caller_id {
                     Some(c) if c == admin_block => Ok(()),
                     _ => Err(WaferError::new(
@@ -291,7 +296,7 @@ pub fn check_access(
         if let Some(caller) = caller_id {
             if grants
                 .iter()
-                .any(|g| grant_allows(g, caller, resource, is_write, resource_type))
+                .any(|g| grant_allows(g, caller, resource, access, resource_type))
             {
                 return Ok(());
             }
@@ -385,7 +390,7 @@ pub fn check_access(
     if let Some(caller) = caller_id {
         if grants
             .iter()
-            .any(|g| grant_allows(g, caller, canonical_resource, is_write, resource_type))
+            .any(|g| grant_allows(g, caller, canonical_resource, access, resource_type))
         {
             return Ok(());
         }
@@ -407,14 +412,14 @@ fn grant_matches_grantee(grantee: &str, caller: &str) -> bool {
 
 /// Whether a single grant admits `caller` to `resource` — the one place that
 /// encodes the four grant-matching conditions (grantee, resource pattern,
-/// write flag, resource-type guard). Used by both the namespace-resource and
+/// access kind, resource-type guard). Used by both the namespace-resource and
 /// storage/network/crypto branches of [`check_access`]; the latter passes the
 /// canonicalized (`@`-stripped) resource.
 fn grant_allows(
     grant: &ResourceGrant,
     caller: &str,
     resource: &str,
-    is_write: bool,
+    access: ResourceAccess,
     resource_type: Option<&crate::types::ResourceType>,
 ) -> bool {
     if !grant_matches_grantee(&grant.grantee, caller) {
@@ -423,7 +428,7 @@ fn grant_allows(
     if !grant_matches_resource(&grant.resource, resource) {
         return false;
     }
-    if is_write && !grant.write {
+    if !grant.admits(access) {
         return false;
     }
     if let Some(ref grant_type) = grant.resource_type {
@@ -605,6 +610,81 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     pattern == path
 }
 
+/// What a `database.*` op asks of the resource it is authorized against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseOpAccess {
+    /// Every listed access is checked on the op's resource — its collection
+    /// or table, or the raw-SQL / DDL sentinel for `query_raw`, `exec_raw`
+    /// and `ddl` — and all of them must be admitted.
+    On(&'static [ResourceAccess]),
+    /// `database.batch`: each write is checked on its own collection with
+    /// the access [`crate::wire::database::BatchWrite::access`] names.
+    PerWrite,
+}
+
+/// The access every `database.*` op needs — the ONE classification the
+/// database handler authorizes from. A test fails when an op in
+/// [`ServiceOp::DATABASE_OPS`] is missing here, so a new op cannot ship
+/// unclassified.
+///
+/// [`ResourceAccess::Append`] is reserved for writes that only ever insert
+/// new rows and return nothing about existing ones. That excludes:
+/// - `insert_guarded` — its guards count and sum existing rows, and the
+///   response names the guard that refused, so it needs `Read` as well;
+/// - `upsert` — its conflict branch updates the existing row;
+/// - `take_where` — it deletes the rows it returns;
+/// - the schema ops — they reshape the table (and additionally need the
+///   [`SCHEMA_RESOURCE`] sentinel).
+///
+/// An insert admitted through `Append` alone is further held, by the
+/// database handler, to the append-only insert rules: it may not name `id`,
+/// `created_at` or `updated_at` (the server assigns them) nor any column the
+/// table lacks (it may not reshape the table) — so a table without all three
+/// of those columns refuses every append-only insert. With the id server-assigned,
+/// an append-only insert cannot collide with an existing row.
+pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
+    use DatabaseOpAccess::{On, PerWrite};
+    use ResourceAccess::{Append, Read, Write};
+    &[
+        (ServiceOp::DATABASE_GET, On(&[Read])),
+        (ServiceOp::DATABASE_LIST, On(&[Read])),
+        (ServiceOp::DATABASE_CREATE, On(&[Append])),
+        (ServiceOp::DATABASE_CREATE_MANY, On(&[Append])),
+        (ServiceOp::DATABASE_BATCH, PerWrite),
+        (ServiceOp::DATABASE_INSERT_GUARDED, On(&[Append, Read])),
+        (ServiceOp::DATABASE_UPDATE_GUARDED, On(&[Write])),
+        (ServiceOp::DATABASE_UPDATE, On(&[Write])),
+        (ServiceOp::DATABASE_UPDATE_WHERE, On(&[Write])),
+        (ServiceOp::DATABASE_UPDATE_WHERE_COUNT, On(&[Write])),
+        (ServiceOp::DATABASE_DELETE, On(&[Write])),
+        (ServiceOp::DATABASE_DELETE_WHERE, On(&[Write])),
+        (ServiceOp::DATABASE_DELETE_WHERE_COUNT, On(&[Write])),
+        (ServiceOp::DATABASE_TAKE_WHERE, On(&[Write])),
+        (ServiceOp::DATABASE_COUNT, On(&[Read])),
+        (ServiceOp::DATABASE_SUM, On(&[Read])),
+        (ServiceOp::DATABASE_AGGREGATE, On(&[Read])),
+        (ServiceOp::DATABASE_INCREMENT_FIELD_WHERE, On(&[Write])),
+        (ServiceOp::DATABASE_UPSERT, On(&[Write])),
+        (ServiceOp::DATABASE_QUERY_RAW, On(&[Read])),
+        (ServiceOp::DATABASE_EXEC_RAW, On(&[Write])),
+        (ServiceOp::DATABASE_DDL, On(&[Write])),
+        (ServiceOp::DATABASE_ENSURE_TABLE, On(&[Write])),
+        (ServiceOp::DATABASE_ADD_COLUMN, On(&[Write])),
+        (ServiceOp::DATABASE_DROP_TABLE, On(&[Write])),
+        (ServiceOp::DATABASE_TABLE_EXISTS, On(&[Read])),
+    ]
+};
+
+/// Look `op` up in [`DATABASE_OP_ACCESS`]. `None` for an op the table does
+/// not classify — a caller must treat that as a denial.
+#[must_use]
+pub fn database_op_access(op: &str) -> Option<DatabaseOpAccess> {
+    DATABASE_OP_ACCESS
+        .iter()
+        .find(|(name, _)| *name == op)
+        .map(|(_, access)| *access)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,7 +697,7 @@ mod tests {
         assert!(check_access(
             Some(admin),
             STORAGE_LIST_ALL_RESOURCE,
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Storage),
             &[],
             admin
@@ -629,7 +709,7 @@ mod tests {
         assert!(check_access(
             Some("files/block"),
             STORAGE_LIST_ALL_RESOURCE,
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Storage),
             &grants,
             admin
@@ -639,7 +719,7 @@ mod tests {
         assert!(check_access(
             None,
             STORAGE_LIST_ALL_RESOURCE,
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Storage),
             &[],
             admin
@@ -654,7 +734,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/vector"),
             "my_org__vector__docs",
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Vector),
             &[],
             admin
@@ -663,7 +743,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/vector"),
             "my_org__vector__docs",
-            true,
+            ResourceAccess::Write,
             Some(&ResourceType::Vector),
             &[],
             admin
@@ -673,7 +753,7 @@ mod tests {
         assert!(check_access(
             Some("evil/block"),
             "my_org__vector__docs",
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Vector),
             &[],
             admin
@@ -683,7 +763,7 @@ mod tests {
         assert!(check_access(
             Some("evil/block"),
             "pwned",
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Vector),
             &[],
             admin
@@ -701,7 +781,7 @@ mod tests {
         assert!(check_access(
             Some("reader/block"),
             "my_org__vector__docs",
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Vector),
             &grants,
             admin
@@ -712,7 +792,7 @@ mod tests {
         assert!(check_access(
             Some("reader/block"),
             "my_org__vector__docs",
-            false,
+            ResourceAccess::Read,
             Some(&ResourceType::Db),
             &grants,
             admin
@@ -752,13 +832,39 @@ mod tests {
         let grants = vec![];
         let admin = "my-org/admin";
         // Non-admin block can DDL its own tables (write).
-        assert!(check_access(Some("my-org/auth"), "__ddl__", true, None, &grants, admin).is_ok());
+        assert!(check_access(
+            Some("my-org/auth"),
+            "__ddl__",
+            ResourceAccess::Write,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
         // Another non-admin block likewise.
-        assert!(check_access(Some("my-org/files"), "__ddl__", true, None, &grants, admin).is_ok());
+        assert!(check_access(
+            Some("my-org/files"),
+            "__ddl__",
+            ResourceAccess::Write,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
         // Admin too (sanity).
-        assert!(check_access(Some(admin), "__ddl__", true, None, &grants, admin).is_ok());
+        assert!(check_access(
+            Some(admin),
+            "__ddl__",
+            ResourceAccess::Write,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
         // Anonymous (no caller) is still denied — DDL needs an attributable caller.
-        assert!(check_access(None, "__ddl__", true, None, &grants, admin).is_err());
+        assert!(
+            check_access(None, "__ddl__", ResourceAccess::Write, None, &grants, admin).is_err()
+        );
     }
 
     /// `__schema__` follows the SAME rule 1a as `__ddl__` — any attributable
@@ -771,7 +877,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "__schema__",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -780,15 +886,30 @@ mod tests {
         assert!(check_access(
             Some("my-org/files"),
             "__schema__",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
         )
         .is_ok());
-        assert!(check_access(Some(admin), "__schema__", true, None, &grants, admin).is_ok());
-        let err = check_access(None, "__schema__", true, None, &grants, admin)
-            .expect_err("anonymous callers cannot reshape a schema");
+        assert!(check_access(
+            Some(admin),
+            "__schema__",
+            ResourceAccess::Write,
+            None,
+            &grants,
+            admin
+        )
+        .is_ok());
+        let err = check_access(
+            None,
+            "__schema__",
+            ResourceAccess::Write,
+            None,
+            &grants,
+            admin,
+        )
+        .expect_err("anonymous callers cannot reshape a schema");
         assert!(
             err.message.contains("schema ops"),
             "the denial must name the sentinel it refused, got: {}",
@@ -821,7 +942,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "__raw_sql__",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             "my-org/admin"
@@ -831,14 +952,22 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "__raw_sql__",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             "my-org/admin"
         )
         .is_err());
         // No caller cannot
-        assert!(check_access(None, "__raw_sql__", false, None, &grants, "my-org/admin").is_err());
+        assert!(check_access(
+            None,
+            "__raw_sql__",
+            ResourceAccess::Read,
+            None,
+            &grants,
+            "my-org/admin"
+        )
+        .is_err());
     }
 
     #[test]
@@ -849,7 +978,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "WAFER_RUN_SHARED__APP_NAME",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -861,7 +990,7 @@ mod tests {
         assert!(check_access(
             None,
             "WAFER_RUN_SHARED__APP_NAME",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -871,7 +1000,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "WAFER_RUN_SHARED__APP_NAME",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -880,7 +1009,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "WAFER_RUN_SHARED__APP_NAME",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -896,7 +1025,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "my_org__auth__users",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -906,7 +1035,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "my_org__admin__roles",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -921,7 +1050,7 @@ mod tests {
         assert!(check_access(
             Some(admin),
             "my_org__auth__users",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -937,7 +1066,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "my_org__auth__users",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             "some-other/admin" // not admin for this test
@@ -947,7 +1076,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "my_org__auth__users",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             "some-other/admin"
@@ -959,7 +1088,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "my_org__auth__users",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             "some-other/admin"
@@ -968,7 +1097,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/admin"),
             "my_org__auth__tokens",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             "some-other/admin"
@@ -980,7 +1109,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/files"),
             "my_org__admin__network_rules",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -996,7 +1125,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "auth_users",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -1147,7 +1276,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "my_org__admin__user_roles",
-            false,
+            ResourceAccess::Read,
             None,
             &grants,
             admin
@@ -1157,7 +1286,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "my_org__admin__user_roles",
-            true,
+            ResourceAccess::Write,
             None,
             &grants,
             admin
@@ -1174,7 +1303,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
-            false,
+            ResourceAccess::Read,
             net,
             &[],
             admin
@@ -1186,7 +1315,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
-            false,
+            ResourceAccess::Read,
             net,
             &grants,
             admin
@@ -1201,7 +1330,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/products"),
             "https://api.stripe.com/v1/charges",
-            false,
+            ResourceAccess::Read,
             net,
             &grants,
             admin
@@ -1211,7 +1340,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "https://api.stripe.com/v1/charges",
-            false,
+            ResourceAccess::Read,
             net,
             &grants,
             admin
@@ -1221,7 +1350,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/products"),
             "https://evil.com/steal",
-            false,
+            ResourceAccess::Read,
             net,
             &grants,
             admin
@@ -1229,14 +1358,22 @@ mod tests {
         .is_err());
 
         // Admin always allowed
-        assert!(check_access(Some(admin), "https://anything.com", false, net, &[], admin).is_ok());
+        assert!(check_access(
+            Some(admin),
+            "https://anything.com",
+            ResourceAccess::Read,
+            net,
+            &[],
+            admin
+        )
+        .is_ok());
 
         // Network grant doesn't satisfy Db request
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Network)];
         assert!(check_access(
             Some("my-org/auth"),
             "auth_users",
-            false,
+            ResourceAccess::Read,
             None, // untyped / Db
             &grants,
             admin
@@ -1250,15 +1387,31 @@ mod tests {
         let crypto = Some(&ResourceType::Crypto);
 
         // No grants → denied (default deny for crypto, like network/storage)
-        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &[], admin).is_err());
+        assert!(check_access(
+            Some("my-org/auth"),
+            "sign",
+            ResourceAccess::Read,
+            crypto,
+            &[],
+            admin
+        )
+        .is_err());
 
         // Wildcard grant for all blocks on all crypto ops → allowed
         let grants = vec![ResourceGrant::read("*", "*").typed(ResourceType::Crypto)];
-        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &grants, admin).is_ok());
+        assert!(check_access(
+            Some("my-org/auth"),
+            "sign",
+            ResourceAccess::Read,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_ok());
         assert!(check_access(
             Some("my-org/auth"),
             "random_bytes",
-            false,
+            ResourceAccess::Read,
             crypto,
             &grants,
             admin
@@ -1271,16 +1424,32 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "random_bytes",
-            false,
+            ResourceAccess::Read,
             crypto,
             &grants,
             admin
         )
         .is_ok());
-        assert!(check_access(Some("my-org/auth"), "sign", false, crypto, &grants, admin).is_err());
+        assert!(check_access(
+            Some("my-org/auth"),
+            "sign",
+            ResourceAccess::Read,
+            crypto,
+            &grants,
+            admin
+        )
+        .is_err());
 
         // Admin always allowed
-        assert!(check_access(Some(admin), "sign", false, crypto, &[], admin).is_ok());
+        assert!(check_access(
+            Some(admin),
+            "sign",
+            ResourceAccess::Read,
+            crypto,
+            &[],
+            admin
+        )
+        .is_ok());
 
         // Crypto grant doesn't satisfy a Db request — the typed match fails
         // and there's no namespace fallback for an unnamespaced resource like
@@ -1289,7 +1458,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/auth"),
             "sign",
-            false,
+            ResourceAccess::Read,
             None, // untyped / Db
             &grants,
             admin
@@ -1306,7 +1475,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/files"),
             "@wafer-run/web/public",
-            false,
+            ResourceAccess::Read,
             storage,
             &[],
             admin
@@ -1320,7 +1489,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/files"),
             "@wafer-run/web/public",
-            false,
+            ResourceAccess::Read,
             storage,
             &grants,
             admin
@@ -1330,7 +1499,7 @@ mod tests {
         assert!(check_access(
             Some("my-org/files"),
             "@wafer-run/web/public",
-            true,
+            ResourceAccess::Write,
             storage,
             &grants,
             admin
@@ -1343,7 +1512,7 @@ mod tests {
         assert!(check_access(
             Some("wafer-run/web"),
             "wafer-run/web/public",
-            false,
+            ResourceAccess::Read,
             storage,
             &[],
             admin
@@ -1353,7 +1522,7 @@ mod tests {
         assert!(check_access(
             Some("wafer-run/web"),
             "wafer-run/web/public/index.html",
-            true,
+            ResourceAccess::Write,
             storage,
             &[],
             admin
@@ -1364,11 +1533,19 @@ mod tests {
         // them to `{caller}/...` before any backend write. The previous
         // `wrap.resource` was set by the client wrapper BEFORE the rewrite,
         // so check_access has to trust the convention.
-        assert!(check_access(Some("wafer-run/web"), "photos", true, storage, &[], admin).is_ok());
+        assert!(check_access(
+            Some("wafer-run/web"),
+            "photos",
+            ResourceAccess::Write,
+            storage,
+            &[],
+            admin
+        )
+        .is_ok());
         assert!(check_access(
             Some("my-org/files"),
             "photos/a.png",
-            true,
+            ResourceAccess::Write,
             storage,
             &[],
             admin
@@ -1378,7 +1555,7 @@ mod tests {
         assert!(check_access(
             Some("wafer-run/web"),
             "@my-org/files/photos/a.png",
-            false,
+            ResourceAccess::Read,
             storage,
             &[],
             admin
@@ -1390,14 +1567,22 @@ mod tests {
         assert!(check_access(
             Some("wafer-run/web"),
             "my-org/files/photos/a.png",
-            false,
+            ResourceAccess::Read,
             storage,
             &[],
             admin
         )
         .is_ok());
         // Anonymous caller is still denied without a grant.
-        assert!(check_access(None, "photos/a.png", false, storage, &[], admin).is_err());
+        assert!(check_access(
+            None,
+            "photos/a.png",
+            ResourceAccess::Read,
+            storage,
+            &[],
+            admin
+        )
+        .is_err());
     }
 
     #[test]
@@ -1446,5 +1631,84 @@ mod tests {
             typed_resource_owner("my_org__auth__users", Some(&ResourceType::Storage)),
             None
         );
+    }
+
+    #[test]
+    fn database_op_access_classifies_every_database_op_once() {
+        for op in ServiceOp::DATABASE_OPS {
+            let hits = DATABASE_OP_ACCESS.iter().filter(|(n, _)| n == op).count();
+            assert_eq!(
+                hits, 1,
+                "database op `{op}` is classified {hits} times in DATABASE_OP_ACCESS — \
+                 give every op in ServiceOp::DATABASE_OPS exactly one entry"
+            );
+        }
+        for (op, _) in DATABASE_OP_ACCESS {
+            assert!(
+                ServiceOp::DATABASE_OPS.contains(op),
+                "DATABASE_OP_ACCESS classifies `{op}`, which is not in ServiceOp::DATABASE_OPS"
+            );
+        }
+    }
+
+    #[test]
+    fn append_is_named_only_by_pure_inserts() {
+        // The ops an append-only grant admits alone. A change here widens or
+        // narrows what an append-only grantee can do — review it as such.
+        let append_alone: Vec<&str> = DATABASE_OP_ACCESS
+            .iter()
+            .filter(|(_, a)| *a == DatabaseOpAccess::On(&[ResourceAccess::Append]))
+            .map(|(op, _)| *op)
+            .collect();
+        assert_eq!(
+            append_alone,
+            [ServiceOp::DATABASE_CREATE, ServiceOp::DATABASE_CREATE_MANY]
+        );
+    }
+
+    #[test]
+    fn append_grant_admits_only_append_on_its_collection() {
+        let admin = "my-org/admin";
+        let grants = vec![ResourceGrant::append(
+            "my-org/portal",
+            "my_org__admin__audit",
+        )];
+        let db = Some(&ResourceType::Db);
+        let check = |caller, resource, access| {
+            check_access(Some(caller), resource, access, db, &grants, admin)
+        };
+        assert!(check(
+            "my-org/portal",
+            "my_org__admin__audit",
+            ResourceAccess::Append
+        )
+        .is_ok());
+        for denied in [ResourceAccess::Read, ResourceAccess::Write] {
+            let err = check("my-org/portal", "my_org__admin__audit", denied).unwrap_err();
+            assert_eq!(err.code, ErrorCode::PermissionDenied);
+        }
+        // Another collection, and another caller, gain nothing.
+        assert!(check(
+            "my-org/portal",
+            "my_org__admin__roles",
+            ResourceAccess::Append
+        )
+        .is_err());
+        assert!(check("evil/block", "my_org__admin__audit", ResourceAccess::Append).is_err());
+        // The owner keeps full access regardless of the grant.
+        assert!(check(
+            "my-org/admin",
+            "my_org__admin__audit",
+            ResourceAccess::Write
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn append_to_shared_resources_is_admin_only() {
+        let admin = "my-org/admin";
+        let res = "WAFER_RUN_SHARED__APP_NAME";
+        assert!(check_access(Some("a/b"), res, ResourceAccess::Append, None, &[], admin).is_err());
+        assert!(check_access(Some(admin), res, ResourceAccess::Append, None, &[], admin).is_ok());
     }
 }

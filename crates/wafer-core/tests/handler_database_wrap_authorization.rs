@@ -26,7 +26,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire, ErrorCode, Message, WaferError,
 };
 
@@ -71,6 +71,15 @@ impl Context for DenyCtx {
     }
 
     // `check_resource_access` uses the trait's fail-closed default (deny).
+    // Denies every access, as the trait's default `check_resource_access` does.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> bool {
+        false
+    }
 }
 
 /// `Context` stub that grants every resource-access check — models a caller
@@ -104,9 +113,17 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
     }
 }
 
@@ -635,7 +652,7 @@ impl Context for OwnNamespaceCtx {
         &self,
         resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         if resource.starts_with("my_org__auth__") {
             Ok(())
@@ -645,6 +662,15 @@ impl Context for OwnNamespaceCtx {
                 format!("no grant for {resource}"),
             ))
         }
+    }
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -678,9 +704,9 @@ impl Context for ReadOnlyCtx {
         &self,
         resource: &str,
         _resource_type: ResourceType,
-        is_write: bool,
+        access: ResourceAccess,
     ) -> Result<(), WaferError> {
-        if is_write {
+        if access != ResourceAccess::Read {
             Err(WaferError::new(
                 ErrorCode::PermissionDenied,
                 format!("read-only grant on {resource}"),
@@ -688,6 +714,16 @@ impl Context for ReadOnlyCtx {
         } else {
             Ok(())
         }
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 

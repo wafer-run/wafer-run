@@ -423,7 +423,7 @@ pub const MAX_BATCH_WRITES: usize = 1000;
 
 /// Request for `database.create_many`: insert every row of `rows` into
 /// `collection` in one transaction — all of them or, when any insert fails,
-/// none. Rows may carry different column sets. WRAP-authorized (write)
+/// none. Rows may carry different column sets. WRAP-authorized (append)
 /// against `collection`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateManyRequest {
@@ -435,8 +435,9 @@ pub struct CreateManyRequest {
 }
 
 /// Request for `database.batch`: apply `ops` in order as one transaction —
-/// all of them or, when any statement fails, none. Every op's collection is
-/// WRAP-authorized (write) before anything runs.
+/// all of them or, when any statement fails, none. Every op is
+/// WRAP-authorized on its collection, with the access
+/// [`BatchWrite::access`] names, before anything runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRequest {
     /// The writes, applied in order. At most [`MAX_BATCH_WRITES`].
@@ -498,6 +499,20 @@ impl BatchWrite {
             Self::Upsert(req) => &req.collection,
         }
     }
+
+    /// The access this write needs on its collection: `Create` only
+    /// inserts, so it is an append; every other variant changes existing
+    /// rows.
+    #[must_use]
+    pub fn access(&self) -> crate::types::ResourceAccess {
+        match self {
+            Self::Create { .. } => crate::types::ResourceAccess::Append,
+            Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::UpdateWhere { .. }
+            | Self::Upsert(_) => crate::types::ResourceAccess::Write,
+        }
+    }
 }
 
 /// Most cap guards one `database.insert_guarded` or `database.update_guarded`
@@ -534,8 +549,8 @@ pub enum CapGuard {
 }
 
 /// Request for `database.insert_guarded`: insert `data` into `collection`
-/// only while every guard holds. WRAP-authorized (write) against
-/// `collection`.
+/// only while every guard holds. WRAP-authorized (append and read — the
+/// guards measure existing rows) against `collection`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InsertGuardedRequest {
     /// Collection (table) name.

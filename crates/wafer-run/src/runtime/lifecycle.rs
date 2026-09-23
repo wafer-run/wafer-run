@@ -50,6 +50,9 @@ pub(crate) struct GrantValidationOutcome {
 ///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or
 ///   owned-by-other grants are pushed into `rejected` so `seal()`
 ///   surfaces them via `RuntimeError::GrantsRejected`.
+/// - Every grant must pass [`wafer_block::types::ResourceGrant::check_shape`]
+///   (an append-only grant is typed `Db`) before any other rule looks at it;
+///   a malformed grant is rejected the same way.
 pub(crate) fn validate_and_collect_grants_for_block(
     block_info: &BlockInfo,
     admin_block: &str,
@@ -57,6 +60,20 @@ pub(crate) fn validate_and_collect_grants_for_block(
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for grant in &block_info.grants {
+        if let Err(shape) = grant.check_shape() {
+            tracing::error!(
+                block = %block_info.name,
+                resource = %grant.resource,
+                %shape,
+                "WRAP: rejecting malformed grant",
+            );
+            rejected.push(wafer_block::error::GrantValidationError {
+                block: block_info.name.to_string(),
+                grant: grant.clone(),
+                reason: shape.to_string(),
+            });
+            continue;
+        }
         // Network and Crypto resources aren't namespace-bound (URLs,
         // operation names), so they remain admin-only — without this,
         // any block could grant `*` Network / Crypto access and bypass
@@ -174,8 +191,17 @@ impl Wafer {
     /// loaded from a DB at boot). The caller is responsible for vetting
     /// any typed Network/Storage/Crypto grants added through this method —
     /// no admin-block check is applied.
-    pub fn add_wrap_grants(&mut self, grants: Vec<wafer_block::types::ResourceGrant>) {
-        self.registration.add_wrap_grants(grants);
+    ///
+    /// Every grant must still pass
+    /// [`ResourceGrant::check_shape`](wafer_block::types::ResourceGrant::check_shape);
+    /// when any fails, NONE of `grants` is added and the call returns
+    /// [`RuntimeError::GrantsRejected`] naming each failure (with an empty
+    /// `block`, as no block declared them).
+    pub fn add_wrap_grants(
+        &mut self,
+        grants: Vec<wafer_block::types::ResourceGrant>,
+    ) -> Result<(), RuntimeError> {
+        self.registration.add_wrap_grants(grants)
     }
 
     /// Eagerly run `lifecycle(Init)` on every registered block. Lazy init

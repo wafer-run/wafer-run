@@ -36,7 +36,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     wire, ErrorCode, Message, WaferError,
 };
 use wafer_core::interfaces::{
@@ -111,7 +111,7 @@ async fn expect_permission_denied(out: OutputStream) {
 
 struct RecordingCtx {
     allow: bool,
-    seen: Mutex<Vec<(String, ResourceType, bool)>>,
+    seen: Mutex<Vec<(String, ResourceType, ResourceAccess)>>,
 }
 
 impl RecordingCtx {
@@ -127,7 +127,7 @@ impl RecordingCtx {
             seen: Mutex::new(Vec::new()),
         }
     }
-    fn seen(&self) -> Vec<(String, ResourceType, bool)> {
+    fn seen(&self) -> Vec<(String, ResourceType, ResourceAccess)> {
         self.seen.lock().unwrap().clone()
     }
 }
@@ -159,12 +159,12 @@ impl Context for RecordingCtx {
         &self,
         resource: &str,
         resource_type: ResourceType,
-        is_write: bool,
+        access: ResourceAccess,
     ) -> Result<(), WaferError> {
         self.seen
             .lock()
             .unwrap()
-            .push((resource.to_string(), resource_type, is_write));
+            .push((resource.to_string(), resource_type, access));
         if self.allow {
             Ok(())
         } else {
@@ -173,6 +173,16 @@ impl Context for RecordingCtx {
                 "denied by test ctx",
             ))
         }
+    }
+
+    // Same policy as `check_resource_access`, without recording a check.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        self.allow
     }
 }
 
@@ -370,7 +380,11 @@ async fn storage_get_streaming_requests_identical_grant_to_buffered_get() {
     // And concretely: a read (is_write=false) of `{folder}/{key}` on Storage.
     assert_eq!(
         ctx_streaming.seen(),
-        vec![("uploads/big.bin".to_string(), ResourceType::Storage, false)],
+        vec![(
+            "uploads/big.bin".to_string(),
+            ResourceType::Storage,
+            ResourceAccess::Read
+        )],
     );
 }
 
@@ -397,7 +411,11 @@ async fn storage_get_streaming_denied_without_the_grant() {
     // The denial consulted exactly the buffered op's grant — read of the object.
     assert_eq!(
         ctx.seen(),
-        vec![("uploads/big.bin".to_string(), ResourceType::Storage, false)],
+        vec![(
+            "uploads/big.bin".to_string(),
+            ResourceType::Storage,
+            ResourceAccess::Read
+        )],
     );
 }
 
@@ -559,7 +577,7 @@ async fn network_do_streaming_requests_identical_grant_to_buffered_do() {
         vec![(
             "https://example.test/media".to_string(),
             ResourceType::Network,
-            false
+            ResourceAccess::Read
         )],
     );
 }
@@ -589,7 +607,7 @@ async fn network_do_streaming_denied_without_the_grant() {
         vec![(
             "https://example.test/media".to_string(),
             ResourceType::Network,
-            false
+            ResourceAccess::Read
         )],
     );
 }

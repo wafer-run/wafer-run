@@ -14,7 +14,7 @@ use wafer_block::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
-    types::ResourceType,
+    types::{ResourceAccess, ResourceType},
     ErrorCode, Message, WaferError,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
@@ -49,9 +49,17 @@ impl Context for AllowCtx {
         &self,
         _resource: &str,
         _resource_type: ResourceType,
-        _is_write: bool,
+        _access: ResourceAccess,
     ) -> Result<(), WaferError> {
         Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
     }
 }
 

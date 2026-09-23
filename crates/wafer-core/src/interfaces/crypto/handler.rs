@@ -53,7 +53,11 @@ pub fn handle_message(
         ServiceOp::CRYPTO_HASH => {
             let req =
                 match decode_and_authorize::<wire::HashRequest>(ctx, body, "crypto.hash", |_r| {
-                    ("hash".to_string(), ResourceType::Crypto, false)
+                    (
+                        "hash".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
                 }) {
                     Ok(r) => r,
                     Err(out) => return out,
@@ -68,7 +72,13 @@ pub fn handle_message(
                 ctx,
                 body,
                 "crypto.compare_hash",
-                |_r| ("compare_hash".to_string(), ResourceType::Crypto, false),
+                |_r| {
+                    (
+                        "compare_hash".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -84,7 +94,11 @@ pub fn handle_message(
         ServiceOp::CRYPTO_SIGN => {
             let req =
                 match decode_and_authorize::<wire::SignRequest>(ctx, body, "crypto.sign", |_r| {
-                    ("sign".to_string(), ResourceType::Crypto, false)
+                    (
+                        "sign".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
                 }) {
                     Ok(r) => r,
                     Err(out) => return out,
@@ -104,7 +118,13 @@ pub fn handle_message(
                 ctx,
                 body,
                 "crypto.verify",
-                |_r| ("verify".to_string(), ResourceType::Crypto, false),
+                |_r| {
+                    (
+                        "verify".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -123,7 +143,13 @@ pub fn handle_message(
                 ctx,
                 body,
                 "crypto.random_bytes",
-                |_r| ("random_bytes".to_string(), ResourceType::Crypto, false),
+                |_r| {
+                    (
+                        "random_bytes".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
@@ -201,7 +227,11 @@ pub async fn handle_message_native(
         ServiceOp::CRYPTO_HASH => {
             let req =
                 match decode_and_authorize::<wire::HashRequest>(ctx, body, "crypto.hash", |_r| {
-                    ("hash".to_string(), ResourceType::Crypto, false)
+                    (
+                        "hash".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
                 }) {
                     Ok(r) => r,
                     Err(out) => return out,
@@ -217,7 +247,13 @@ pub async fn handle_message_native(
                 ctx,
                 body,
                 "crypto.compare_hash",
-                |_r| ("compare_hash".to_string(), ResourceType::Crypto, false),
+                |_r| {
+                    (
+                        "compare_hash".to_string(),
+                        ResourceType::Crypto,
+                        ResourceAccess::Read,
+                    )
+                },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,

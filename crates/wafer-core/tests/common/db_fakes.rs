@@ -236,6 +236,10 @@ impl DatabaseService for RecordingDb {
         self.record("schema_table_exists");
         Ok(true)
     }
+    async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
+        self.record("schema_columns");
+        Ok(Vec::new())
+    }
     async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
         self.record("schema_drop_table");
         Ok(())

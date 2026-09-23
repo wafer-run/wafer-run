@@ -152,8 +152,8 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         crate::validation::ValidationReport::default()
     }
 
-    /// Authorize the CALLER (host-trusted identity) to access `resource` of
-    /// `resource_type` for read/write. Runs the full WRAP grant + capability check.
+    /// Authorize the CALLER (host-trusted identity) to `access` `resource` of
+    /// `resource_type`. Runs the full WRAP grant + capability check.
     ///
     /// FAIL-CLOSED: the default DENIES. A Context that legitimately does not enforce
     /// WRAP (test mocks, forwarders) must EXPLICITLY override this so the enforcing
@@ -162,14 +162,35 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         &self,
         resource: &str,
         resource_type: crate::types::ResourceType,
-        is_write: bool,
+        access: crate::types::ResourceAccess,
     ) -> Result<(), crate::WaferError> {
-        let _ = (resource, resource_type, is_write);
+        let _ = (resource, resource_type, access);
         Err(crate::WaferError::new(
             crate::ErrorCode::PermissionDenied,
             "WRAP: context does not implement resource-access enforcement",
         ))
     }
+
+    /// Whether [`Self::check_resource_access`] would admit the caller to
+    /// `access` `resource`, asked without recording a denial.
+    ///
+    /// For a handler choosing between two paths it is ALREADY authorized for
+    /// — e.g. the database handler asking whether an admitted insert also
+    /// holds `Write`, and applying the append-only insert rules when it does
+    /// not. It is never the authorization itself: call
+    /// `check_resource_access` for that.
+    ///
+    /// No default: it must give the same answer `check_resource_access`
+    /// would, so every Context answers it — an enforcing context from its
+    /// own decision, a forwarding context by forwarding, a mock by its
+    /// policy. A default of `false` would quietly turn every writer behind a
+    /// context that forgot it into an append-only caller.
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: crate::types::ResourceType,
+        access: crate::types::ResourceAccess,
+    ) -> bool;
 }
 
 #[cfg(test)]
@@ -177,7 +198,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{types::ResourceType, ErrorCode};
+    use crate::{
+        types::{ResourceAccess, ResourceType},
+        ErrorCode,
+    };
 
     /// Minimal `Context` impl that only implements the methods without a
     /// default (`call_block`, `is_cancelled`, `config_get`, `clone_arc`) and
@@ -207,13 +231,22 @@ mod tests {
         fn clone_arc(&self) -> Arc<dyn Context> {
             unimplemented!()
         }
+        // Denies every access, as the trait's default `check_resource_access` does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: ResourceType,
+            _access: ResourceAccess,
+        ) -> bool {
+            false
+        }
     }
 
     #[test]
     fn check_resource_access_defaults_to_deny() {
         let ctx = DefaultCtx;
         let err = ctx
-            .check_resource_access("any", ResourceType::Db, false)
+            .check_resource_access("any", ResourceType::Db, ResourceAccess::Read)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::PermissionDenied);
     }
