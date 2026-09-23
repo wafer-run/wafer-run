@@ -102,7 +102,7 @@ mod tests {
         block::Block,
         context::Context,
         streams::{input::InputStream, output::OutputStream},
-        Message,
+        ErrorCode, Message, WaferError,
     };
 
     use crate::{
@@ -225,6 +225,69 @@ mod tests {
         assert_eq!(profile.id, "u-1");
         assert_eq!(profile.email, "alice@example.test");
         assert_eq!(profile.role, "user");
+    }
+
+    /// Context standing in for a database that WRAP refuses: every call to
+    /// `wafer-run/database` answers `PermissionDenied`.
+    #[derive(Clone)]
+    struct RefusingDatabaseCtx;
+
+    #[async_trait::async_trait]
+    impl Context for RefusingDatabaseCtx {
+        async fn call_block(
+            &self,
+            block_name: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            assert_eq!(block_name, "wafer-run/database");
+            OutputStream::error(WaferError::new(
+                ErrorCode::PermissionDenied,
+                "wafer-run/auth may not read wafer_run__auth__users",
+            ))
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
+        }
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
+        }
+    }
+
+    /// `AuthService` that resolves the user through the database, the way a
+    /// real implementation looks up sessions and tokens.
+    struct DatabaseBackedAuth {
+        db: RefusingDatabaseCtx,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthService for DatabaseBackedAuth {
+        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+            let row = crate::clients::database::get(&self.db, "wafer_run__auth__users", "u-1")
+                .await
+                .map_err(AuthError::Backend)?;
+            Ok(UserId(row.id))
+        }
+    }
+
+    #[tokio::test]
+    async fn require_user_surfaces_a_database_refusal_with_its_code() {
+        let ctx = SingleAuthBlockCtx {
+            block: Arc::new(AuthBlock::new(Arc::new(DatabaseBackedAuth {
+                db: RefusingDatabaseCtx,
+            }))),
+        };
+        let err = super::require_user(&ctx, &Message::new("incoming.req"))
+            .await
+            .expect_err("a refused database read must fail require_user");
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "got {err:?}");
+        assert_eq!(
+            err.message,
+            "wafer-run/auth may not read wafer_run__auth__users"
+        );
     }
 
     #[test]

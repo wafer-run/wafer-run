@@ -24,6 +24,7 @@ fn err_to_wafer(e: AuthError) -> WaferError {
         AuthError::Forbidden => WaferError::new(ErrorCode::PermissionDenied, "forbidden"),
         AuthError::ProviderDown(m) => WaferError::new(ErrorCode::Unavailable, m),
         AuthError::NotFound => WaferError::new(ErrorCode::NotFound, "not found"),
+        AuthError::Backend(e) => e,
         AuthError::Internal(m) => WaferError::new(ErrorCode::Internal, m),
     }
 }

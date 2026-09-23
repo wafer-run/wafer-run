@@ -182,6 +182,17 @@
   `Meta` / `Error` at the top level, plus `ActionHalt` and `IsHalt()`. The
   `Response` type and `Result.Response` field are removed; no runtime version
   ever emitted a `response` object.
+- `wafer_core::interfaces::auth::service::AuthError` gains a
+  `Backend(WaferError)` variant, and a `match` over `AuthError` must handle
+  it. An `AuthService` implementation wraps a failed lower-level call
+  (database, storage, another block) in it — `.map_err(AuthError::Backend)`
+  — and the auth block answers with that `WaferError` unchanged, code,
+  message and meta included; the `Init` lifecycle hook passes it through the
+  same way. A WRAP `PermissionDenied` or a `ResourceExhausted` from the
+  database under `auth.require_user` / `require_token` / `require_role` /
+  `user_profile` now reaches the caller with its code, where
+  `AuthError::Internal(e.to_string())` turned every one of them into
+  `Internal`. `Internal` is now for faults of the auth service itself.
 
 ### Added
 

@@ -27,6 +27,7 @@ crate::service_block! {
         if matches!(event.event_type, LifecycleType::Init) {
             this.service.init(ctx).await.map_err(|e| match e {
                 AuthError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
+                AuthError::Backend(e) => e,
                 other => WaferError::new(ErrorCode::Internal, format!("auth init: {other}")),
             })?;
         }
@@ -124,6 +125,34 @@ mod tests {
             0,
             "service.init should NOT be called for Start/Stop"
         );
+    }
+
+    /// Stub service whose `init()` fails on a refused database call.
+    struct RefusedInitService;
+
+    #[wafer_async_trait]
+    impl AuthService for RefusedInitService {
+        async fn init(&self, _ctx: &dyn wafer_block::Context) -> Result<(), AuthError> {
+            Err(AuthError::Backend(WaferError::new(
+                ErrorCode::PermissionDenied,
+                "wafer-run/auth may not write wafer_run__auth__users",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn init_lifecycle_keeps_a_backend_error_code() {
+        let block = AuthBlock::new(Arc::new(RefusedInitService));
+        let ctx = crate::test_support::noop_context();
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        };
+        let err = block
+            .lifecycle(&*ctx, event)
+            .await
+            .expect_err("a refused init must fail the lifecycle event");
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "got {err:?}");
     }
 
     /// Stub service whose `grants()` returns one read-only ResourceGrant.
