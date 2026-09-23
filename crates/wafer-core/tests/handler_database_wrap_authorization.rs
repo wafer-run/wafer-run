@@ -598,3 +598,238 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
         "every op should have reached the service exactly once, in order"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Multi-row / multi-op writes — `database.create_many` and `database.batch`.
+// ---------------------------------------------------------------------------
+
+/// `Context` stub that grants access to the caller's own collections
+/// (`my_org__auth__*`), for read and write, and denies everything else —
+/// models a block holding a WRAP grant on its own namespace only.
+struct OwnNamespaceCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for OwnNamespaceCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        _resource_type: ResourceType,
+        _is_write: bool,
+    ) -> Result<(), WaferError> {
+        if resource.starts_with("my_org__auth__") {
+            Ok(())
+        } else {
+            Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                format!("no grant for {resource}"),
+            ))
+        }
+    }
+}
+
+/// `Context` stub that grants every READ and denies every write.
+struct ReadOnlyCtx;
+
+#[wafer_block::wafer_async_trait]
+impl Context for ReadOnlyCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn is_cancelled(&self) -> bool {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        unimplemented!("not exercised by the database handler")
+    }
+
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        _resource_type: ResourceType,
+        is_write: bool,
+    ) -> Result<(), WaferError> {
+        if is_write {
+            Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                format!("read-only grant on {resource}"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn own_and_foreign_batch() -> Vec<u8> {
+    codec::encode(&wire::database::BatchRequest {
+        ops: vec![
+            wire::database::BatchWrite::Create {
+                collection: "my_org__auth__users".into(),
+                data: Default::default(),
+            },
+            wire::database::BatchWrite::Delete {
+                collection: "my_org__other_block__secrets".into(),
+                id: "1".into(),
+            },
+        ],
+    })
+    .unwrap()
+}
+
+/// A batch is authorized op by op: an own-namespace write FIRST does not let a
+/// foreign-collection write ride along behind it. Nothing runs.
+#[tokio::test]
+async fn batch_with_one_foreign_collection_is_denied_and_never_reaches_service() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &OwnNamespaceCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_BATCH),
+        &own_and_foreign_batch(),
+    )
+    .await;
+    expect_permission_denied(out).await;
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "no op of a partly-foreign batch may run; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+/// Every op of a batch is a write: a read-only grant on the collections
+/// does not authorize one.
+#[tokio::test]
+async fn batch_is_authorized_as_a_write() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let body = codec::encode(&wire::database::BatchRequest {
+        ops: vec![wire::database::BatchWrite::Update {
+            collection: "my_org__auth__users".into(),
+            id: "1".into(),
+            data: Default::default(),
+        }],
+    })
+    .unwrap();
+
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &ReadOnlyCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_BATCH),
+        &body,
+    )
+    .await;
+    expect_permission_denied(out).await;
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+/// A batch confined to the caller's own collections reaches the service once.
+#[tokio::test]
+async fn batch_on_own_collections_reaches_service() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let body = codec::encode(&wire::database::BatchRequest {
+        ops: vec![
+            wire::database::BatchWrite::Create {
+                collection: "my_org__auth__users".into(),
+                data: Default::default(),
+            },
+            wire::database::BatchWrite::Delete {
+                collection: "my_org__auth__sessions".into(),
+                id: "1".into(),
+            },
+        ],
+    })
+    .unwrap();
+
+    expect_success(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &OwnNamespaceCtx,
+            &msg_without_wrap_meta(ServiceOp::DATABASE_BATCH),
+            &body,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec!["batch"]);
+}
+
+/// `create_many` is authorized as a write on its collection.
+#[tokio::test]
+async fn create_many_is_authorized_as_a_write_on_its_collection() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let foreign = codec::encode(&wire::database::CreateManyRequest {
+        collection: "my_org__other_block__secrets".into(),
+        rows: vec![Default::default()],
+    })
+    .unwrap();
+    let own = codec::encode(&wire::database::CreateManyRequest {
+        collection: "my_org__auth__users".into(),
+        rows: vec![Default::default()],
+    })
+    .unwrap();
+    let msg = msg_without_wrap_meta(ServiceOp::DATABASE_CREATE_MANY);
+
+    expect_permission_denied(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &OwnNamespaceCtx,
+            &msg,
+            &foreign,
+        )
+        .await,
+    )
+    .await;
+    expect_permission_denied(
+        wafer_core::interfaces::database::handler::handle_message(&svc, &ReadOnlyCtx, &msg, &own)
+            .await,
+    )
+    .await;
+    assert!(calls.lock().unwrap().is_empty());
+
+    expect_success(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &OwnNamespaceCtx,
+            &msg,
+            &own,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec!["create_many"]);
+}

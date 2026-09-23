@@ -12,7 +12,7 @@ use wafer_core::{
     forward_database_service,
     interfaces::database::{
         codec,
-        exec::DbExec,
+        exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
         service::{Column, DatabaseError, Record},
     },
@@ -195,6 +195,47 @@ impl DbExec for PostgresDatabaseService {
             .map_err(|e| DatabaseError::Internal(e.to_string()))
     }
 
+    /// One pooled connection for the whole transaction. Returning early on a
+    /// failed statement drops the uncommitted [`sqlx::Transaction`], which
+    /// rolls it back (sqlx issues the `ROLLBACK` when the connection returns
+    /// to the pool).
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::Internal(format!("begin transaction: {e}")))?;
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            let (sql, params) = op.sql_params();
+            let mut q = sqlx::query(sql);
+            for p in params {
+                q = bind_json_value_query(q, p);
+            }
+            let result = match op {
+                TxOp::Execute { .. } => {
+                    let done = q
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                    TxResult::Execute(done.rows_affected() as i64)
+                }
+                TxOp::Returning { .. } => {
+                    let rows = q
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                    TxResult::Returning(rows.iter().map(row_to_record).collect::<Result<_, _>>()?)
+                }
+            };
+            results.push(result);
+        }
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Internal(format!("commit transaction: {e}")))?;
+        Ok(results)
+    }
+
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
         let (sql, params) = introspect::build_table_exists(table, Backend::Postgres);
         let mut q = sqlx::query_scalar::<_, bool>(&sql);
@@ -215,6 +256,7 @@ forward_database_service! {
             get: forward,
             list: forward,
             create: forward,
+            create_many: forward,
             update: forward,
             delete: forward,
             count: forward,
@@ -229,6 +271,7 @@ forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
+            batch: forward,
             // The shared default is CREATE → add missing declared columns →
             // indexes → FK indexes, and it invalidates this backend's schema
             // cache on both the success and failure paths. The hand-written

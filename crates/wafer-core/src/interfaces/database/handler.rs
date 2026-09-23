@@ -19,7 +19,7 @@ use super::{
     schema_wire,
     service::{self, DatabaseError, DatabaseService},
 };
-use crate::interfaces::handler_util::{decode_and_authorize, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize, decode_and_authorize_all, to_output};
 
 // --- Helpers ---
 
@@ -267,6 +267,62 @@ pub fn to_upsert_spec(
             on_conflict,
         },
     ))
+}
+
+/// Convert one wire [`wire::BatchWrite`] into the service's
+/// [`WriteOp`](service::WriteOp), validating it exactly as its single-op arm
+/// does: `UpdateWhere` filters are bounded and flattened to AND-of-leaves (a
+/// group or a column-to-column leaf is `InvalidArgument`, as for
+/// `database.update_where`), and `Upsert` goes through [`to_upsert_spec`].
+fn to_write_op(write: wire::BatchWrite) -> Result<service::WriteOp, WaferError> {
+    Ok(match write {
+        wire::BatchWrite::Create { collection, data } => {
+            service::WriteOp::Create { collection, data }
+        }
+        wire::BatchWrite::Update {
+            collection,
+            id,
+            data,
+        } => service::WriteOp::Update {
+            collection,
+            id,
+            data,
+        },
+        wire::BatchWrite::Delete { collection, id } => service::WriteOp::Delete { collection, id },
+        wire::BatchWrite::UpdateWhere {
+            collection,
+            filters,
+            data,
+        } => service::WriteOp::UpdateWhere {
+            collection,
+            filters: flatten_leaves(&convert_filter_tree(filters)?)?,
+            data,
+        },
+        wire::BatchWrite::Upsert(req) => {
+            let (collection, spec) = to_upsert_spec(req)?;
+            service::WriteOp::Upsert { collection, spec }
+        }
+    })
+}
+
+fn write_outcome_to_wire(outcome: service::WriteOutcome) -> wire::BatchWriteResult {
+    match outcome {
+        service::WriteOutcome::Created(r) => {
+            wire::BatchWriteResult::Created(service_record_to_wire(r))
+        }
+        service::WriteOutcome::Updated(r) => {
+            wire::BatchWriteResult::Updated(r.map(service_record_to_wire))
+        }
+        service::WriteOutcome::Deleted { rows_affected } => {
+            wire::BatchWriteResult::Deleted { rows_affected }
+        }
+        service::WriteOutcome::UpdatedWhere { rows_affected } => {
+            wire::BatchWriteResult::UpdatedWhere { rows_affected }
+        }
+        service::WriteOutcome::Upserted { rows_affected } => {
+            wire::BatchWriteResult::Upserted { rows_affected }
+        }
+    }
 }
 
 /// Convert a wire [`wire::AggregateRequest`] into a `(collection,
@@ -580,6 +636,75 @@ pub async fn handle_message(
             };
             match service.create(&req.collection, req.data).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_CREATE_MANY => {
+            let req = match decode_and_authorize::<wire::CreateManyRequest>(
+                ctx,
+                body,
+                "database.create_many",
+                |r| (r.collection.clone(), ResourceType::Db, true),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            if req.rows.len() > wire::MAX_BATCH_WRITES {
+                return OutputStream::error(invalid(format!(
+                    "create_many carries {} rows; at most {} per call",
+                    req.rows.len(),
+                    wire::MAX_BATCH_WRITES
+                )));
+            }
+            match service.create_many(&req.collection, req.rows).await {
+                Ok(rows_affected) => to_output(&wire::CreateManyResponse { rows_affected }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_BATCH => {
+            // Every op's collection is authorized for write before any op is
+            // validated or run, so a batch naming one collection the caller
+            // may not write never touches the service.
+            let req = match decode_and_authorize_all::<wire::BatchRequest>(
+                ctx,
+                body,
+                "database.batch",
+                |r| {
+                    let mut collections: Vec<&str> = Vec::new();
+                    for op in &r.ops {
+                        if !collections.contains(&op.collection()) {
+                            collections.push(op.collection());
+                        }
+                    }
+                    collections
+                        .into_iter()
+                        .map(|c| (c.to_string(), ResourceType::Db, true))
+                        .collect()
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            if req.ops.len() > wire::MAX_BATCH_WRITES {
+                return OutputStream::error(invalid(format!(
+                    "batch carries {} ops; at most {} per call",
+                    req.ops.len(),
+                    wire::MAX_BATCH_WRITES
+                )));
+            }
+            let ops = match req
+                .ops
+                .into_iter()
+                .map(to_write_op)
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(ops) => ops,
+                Err(e) => return OutputStream::error(e),
+            };
+            match service.batch(ops).await {
+                Ok(outcomes) => to_output(&wire::BatchResponse {
+                    results: outcomes.into_iter().map(write_outcome_to_wire).collect(),
+                }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }

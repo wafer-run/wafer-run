@@ -46,8 +46,8 @@
 //! - `forward_to DbExec;` — the implementor is a SQL backend that implements
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
-//!   the method being defined. `DbExec` provides eighteen of the operations;
-//!   the other five must be `custom` or `inherit`.
+//!   the method being defined. `DbExec` provides twenty-one of the operations;
+//!   the other four must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
 //!   service; `forward` entries call it.
@@ -68,7 +68,7 @@
 //! use wafer_block::db::{Filter, ListOptions};
 //! use wafer_core::interfaces::database::service::{
 //!     AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-//!     UpsertSpec,
+//!     UpsertSpec, WriteOp, WriteOutcome,
 //! };
 //!
 //! struct ReadOnlyGuard {
@@ -93,6 +93,7 @@
 //!             get: forward,
 //!             list: forward,
 //!             create: custom,
+//!             create_many: custom,
 //!             update: forward,
 //!             delete: forward,
 //!             count: forward,
@@ -107,6 +108,7 @@
 //!             increment_field_where: forward,
 //!             upsert: forward,
 //!             aggregate: forward,
+//!             batch: custom,
 //!             ensure_schema_table: forward,
 //!             ensure_schema_tables: inherit,
 //!             schema_table_exists: forward,
@@ -121,6 +123,18 @@
 //!             _data: HashMap<String, serde_json::Value>,
 //!         ) -> Result<Record, DatabaseError> {
 //!             Err(Self::refuse("create"))
+//!         }
+//!
+//!         async fn create_many(
+//!             &self,
+//!             _collection: &str,
+//!             _rows: Vec<HashMap<String, serde_json::Value>>,
+//!         ) -> Result<i64, DatabaseError> {
+//!             Err(Self::refuse("create_many"))
+//!         }
+//!
+//!         async fn batch(&self, _ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+//!             Err(Self::refuse("batch"))
 //!         }
 //!     }
 //! }
@@ -214,6 +228,7 @@ macro_rules! __forward_database_ledger {
             get: $m_get:ident,
             list: $m_list:ident,
             create: $m_create:ident,
+            create_many: $m_create_many:ident,
             update: $m_update:ident,
             delete: $m_delete:ident,
             count: $m_count:ident,
@@ -228,6 +243,7 @@ macro_rules! __forward_database_ledger {
             increment_field_where: $m_increment_field_where:ident,
             upsert: $m_upsert:ident,
             aggregate: $m_aggregate:ident,
+            batch: $m_batch:ident,
             ensure_schema_table: $m_ensure_schema_table:ident,
             ensure_schema_tables: $m_ensure_schema_tables:ident,
             schema_table_exists: $m_schema_table_exists:ident,
@@ -243,6 +259,7 @@ macro_rules! __forward_database_ledger {
                 (get, $m_get)
                 (list, $m_list)
                 (create, $m_create)
+                (create_many, $m_create_many)
                 (update, $m_update)
                 (delete, $m_delete)
                 (count, $m_count)
@@ -257,6 +274,7 @@ macro_rules! __forward_database_ledger {
                 (increment_field_where, $m_increment_field_where)
                 (upsert, $m_upsert)
                 (aggregate, $m_aggregate)
+                (batch, $m_batch)
                 (ensure_schema_table, $m_ensure_schema_table)
                 (ensure_schema_tables, $m_ensure_schema_tables)
                 (schema_table_exists, $m_schema_table_exists)
@@ -273,9 +291,9 @@ macro_rules! __forward_database_ledger {
             "forward_database_service!'s `ops { … }` ledger must name EVERY \
              DatabaseService operation exactly once, in this order, each as \
              `forward`, `custom` or `inherit`:\n\
-             \x20   get, list, create, update, delete, count, sum, query_raw, exec_raw,\n\
-             \x20   delete_where, delete_where_count, take_where, update_where,\n\
-             \x20   update_where_count, increment_field_where, upsert, aggregate,\n\
+             \x20   get, list, create, create_many, update, delete, count, sum, query_raw,\n\
+             \x20   exec_raw, delete_where, delete_where_count, take_where, update_where,\n\
+             \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_drop_table, schema_add_column, set_strict_schema\n\
              The listing is the point: an operation left out of a decorator \
@@ -386,6 +404,29 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::create($recv(self), collection, data).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (create_many, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn create_many(
+                    &self,
+                    collection: &str,
+                    rows: ::std::vec::Vec<
+                        ::std::collections::HashMap<::std::string::String, ::serde_json::Value>,
+                    >,
+                ) -> ::core::result::Result<
+                    i64,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::create_many($recv(self), collection, rows).await
                 }
             ]
         );
@@ -686,6 +727,26 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::aggregate($recv(self), collection, spec).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (batch, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn batch(
+                    &self,
+                    ops: ::std::vec::Vec<$crate::interfaces::database::service::WriteOp>,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<$crate::interfaces::database::service::WriteOutcome>,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::batch($recv(self), ops).await
                 }
             ]
         );

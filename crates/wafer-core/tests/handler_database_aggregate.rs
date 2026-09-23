@@ -153,6 +153,22 @@ mod db_fakes {
                 data,
             })
         }
+        async fn create_many(
+            &self,
+            _collection: &str,
+            _rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "fixture: create_many not needed".into(),
+            ))
+        }
+        async fn batch(
+            &self,
+            _ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::WriteOutcome>, DatabaseError>
+        {
+            Err(DatabaseError::Internal("fixture: batch not needed".into()))
+        }
         async fn update(
             &self,
             _collection: &str,

@@ -230,6 +230,36 @@ where
     Ok(req)
 }
 
+/// [`decode_and_authorize`] for an op that names SEVERAL resources (a
+/// `database.batch` spans collections): every resource `resources` returns is
+/// checked, in order, before the request is returned, and the first denial is
+/// returned instead. Same guarantee — the arm cannot obtain its typed request
+/// unless every check passed. A request naming no resource runs no check.
+pub fn decode_and_authorize_all<T>(
+    ctx: &dyn Context,
+    body: &[u8],
+    op_name: &str,
+    resources: impl FnOnce(&T) -> Vec<(String, ResourceType, bool)>,
+) -> Result<T, OutputStream>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let req = match codec::decode::<T>(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(OutputStream::error(WaferError::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid {op_name} request: {}", e.message),
+            )))
+        }
+    };
+    for (res, rt, is_write) in resources(&req) {
+        ctx.check_resource_access(&res, rt, is_write)
+            .map_err(OutputStream::error)?;
+    }
+    Ok(req)
+}
+
 #[cfg(test)]
 mod decode_and_authorize_tests {
     use std::sync::Arc;

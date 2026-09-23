@@ -82,6 +82,28 @@ impl DatabaseService for RecordingDb {
             data,
         })
     }
+    async fn create_many(
+        &self,
+        _collection: &str,
+        rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError> {
+        self.record("create_many");
+        Ok(rows.len() as i64)
+    }
+    async fn batch(
+        &self,
+        ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+    ) -> Result<Vec<wafer_core::interfaces::database::service::WriteOutcome>, DatabaseError> {
+        self.record("batch");
+        Ok(ops
+            .iter()
+            .map(
+                |_| wafer_core::interfaces::database::service::WriteOutcome::Deleted {
+                    rows_affected: 1,
+                },
+            )
+            .collect())
+    }
     async fn update(
         &self,
         _collection: &str,

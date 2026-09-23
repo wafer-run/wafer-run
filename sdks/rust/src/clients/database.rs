@@ -12,9 +12,10 @@
 
 use wafer_block::{
     wire::database::{
-        AddColumnRequest, AggregateRequest, CountRequest, CountResponse, CreateRequest,
-        DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest,
-        DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse, GetRequest,
+        AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, CountRequest,
+        CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest, DeleteRequest,
+        DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest,
+        EnsureTableRequest, ExecRawRequest, ExecRawResponse, GetRequest,
         IncrementFieldWhereRequest, ListRequest, QueryRawRequest, Record, RecordList,
         SchemaOpResponse, SumRequest, SumResponse, TableExistsRequest, TableExistsResponse,
         TakeWhereRequest, TakeWhereResponse, UpdateRequest, UpdateWhereCountRequest,
@@ -42,6 +43,19 @@ pub fn list(request: &ListRequest) -> Result<RecordList, WaferError> {
 /// (including any server-generated id / timestamps).
 pub fn create(request: &CreateRequest) -> Result<Record, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_CREATE, request)
+}
+
+/// Buffered: insert every row of the request into its collection in one
+/// transaction — all of them, or none when any insert fails. Returns the
+/// number inserted.
+pub fn create_many(request: &CreateManyRequest) -> Result<CreateManyResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_CREATE_MANY, request)
+}
+
+/// Buffered: apply the request's writes in order in one transaction — all of
+/// them, or none when any statement fails. Returns one result per op.
+pub fn batch(request: &BatchRequest) -> Result<BatchResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_BATCH, request)
 }
 
 /// Buffered: update a record by id. Returns the updated [`Record`].
@@ -174,6 +188,8 @@ const SUPPORTED_DATABASE_OPS: &[&str] = &[
     ServiceOp::DATABASE_GET,
     ServiceOp::DATABASE_LIST,
     ServiceOp::DATABASE_CREATE,
+    ServiceOp::DATABASE_CREATE_MANY,
+    ServiceOp::DATABASE_BATCH,
     ServiceOp::DATABASE_UPDATE,
     ServiceOp::DATABASE_UPDATE_WHERE,
     ServiceOp::DATABASE_UPDATE_WHERE_COUNT,

@@ -21,7 +21,10 @@ use wafer_sql_utils::{ddl, ident::sanitize_ident, introspect, value::sea_values_
 
 use super::{
     schema_cache::SchemaCache,
-    service::{AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec},
+    service::{
+        AggregateSpec, DatabaseError, Record, RecordList, UpsertConflict, UpsertSpec, WriteOp,
+        WriteOutcome,
+    },
 };
 
 /// Sanitize keys and sort `data` into deterministic `(column, value)` pairs.
@@ -71,8 +74,8 @@ fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
 /// Mint the `id` of a record created without one: a UUIDv7.
 ///
 /// This is the record-id policy for every [`DbExec`] backend. The shared
-/// [`create`](DbExec::create) and [`create_many`](DbExec::create_many) call
-/// it, and a backend that inserts rows through its own path (a native batch
+/// [`create`](DbExec::create), [`create_many`](DbExec::create_many) and
+/// [`batch`](DbExec::batch) call it, and a backend that inserts rows through its own path (a native batch
 /// API, say) must call it too, so every backend's ids sort the same way.
 ///
 /// A v7 id leads with its creation time in milliseconds and, within one
@@ -112,6 +115,18 @@ fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_creat
     if !data.contains_key("updated_at") {
         data.insert("updated_at".to_string(), serde_json::Value::String(now));
     }
+}
+
+/// Apply [`DbExec::create`]'s per-row policy to `data`: mint an `id` unless the
+/// row carries one or the table generates its own, then stamp the timestamps.
+fn prepare_created_row(data: &mut HashMap<String, serde_json::Value>, autogenerates_id: bool) {
+    if !data.contains_key("id") && !autogenerates_id {
+        data.insert(
+            "id".to_string(),
+            serde_json::Value::String(mint_record_id()),
+        );
+    }
+    stamp_timestamps(data, true);
 }
 
 /// Extract the `id` and `key` string values from an upsert `data` list for the
@@ -233,6 +248,49 @@ fn batch_shape_error(what: &str, got: Option<&BatchResult>) -> DatabaseError {
     DatabaseError::Internal(format!(
         "run_batch returned an unexpected result shape for {what}: {got:?}"
     ))
+}
+
+/// One statement in a [`DbExec::run_transaction`] call.
+///
+/// `sql` + `params` are what the single-statement primitives take: `params` is
+/// the JSON form [`sea_values_to_json`]`(stmt.values)` produces.
+#[derive(Clone, Copy, Debug)]
+pub enum TxOp<'a> {
+    /// A write whose affected-row count is the result (like
+    /// [`DbExec::run_execute`]).
+    Execute {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+    /// A write that returns rows (`… RETURNING *`), decoded to [`Record`]s
+    /// (like [`DbExec::run_execute_returning`]).
+    Returning {
+        /// Rendered SQL for this statement.
+        sql: &'a str,
+        /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
+        params: &'a [serde_json::Value],
+    },
+}
+
+impl<'a> TxOp<'a> {
+    /// The `(sql, params)` pair every variant carries.
+    #[must_use]
+    pub fn sql_params(&self) -> (&'a str, &'a [serde_json::Value]) {
+        match *self {
+            TxOp::Execute { sql, params } | TxOp::Returning { sql, params } => (sql, params),
+        }
+    }
+}
+
+/// The result of one [`TxOp`], returned in the same position as the op.
+#[derive(Debug)]
+pub enum TxResult {
+    /// Affected-row count of a [`TxOp::Execute`].
+    Execute(i64),
+    /// Rows returned by a [`TxOp::Returning`].
+    Returning(Vec<Record>),
 }
 
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
@@ -367,6 +425,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn table_autogenerates_id(&self, _table: &str) -> bool {
         false
     }
+
+    /// Run `ops` as ONE transaction on the write path, returning one
+    /// [`TxResult`] per op in the same order.
+    ///
+    /// All or nothing: when a statement fails, every statement before it is
+    /// rolled back and that failure is returned. The statements run in order
+    /// on one connection, so each sees the writes of the ones before it, and
+    /// no other writer's statements interleave with them.
+    ///
+    /// No default. Running the statements one by one, as
+    /// [`run_batch`](Self::run_batch)'s default does, would leave the earlier
+    /// ones applied when a later one fails — exactly what
+    /// [`create_many`](Self::create_many) and [`batch`](Self::batch) promise
+    /// not to do. A backend with a native atomic multi-statement API (D1's
+    /// `batch()`) implements this with it.
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError>;
 
     /// Run `ops` as one backend round-trip when the backend can, returning one
     /// [`BatchResult`] per op **in the same order**.
@@ -839,13 +913,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sanitize_ident(collection);
         let mut data = data;
 
-        if !data.contains_key("id") && !self.table_autogenerates_id(&table).await {
-            data.insert(
-                "id".to_string(),
-                serde_json::Value::String(mint_record_id()),
-            );
-        }
-        stamp_timestamps(&mut data, true);
+        // The key probe only matters for a row without an id.
+        let autogenerates_id =
+            !data.contains_key("id") && self.table_autogenerates_id(&table).await;
+        prepare_created_row(&mut data, autogenerates_id);
 
         // Ensure any new columns exist. Table creation itself is the block
         // migration's job; a failure here is a real DDL error and propagates
@@ -1092,6 +1163,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// `extract_windowed_id_key` handling below is a defensive fallback, not
     /// the primary validation.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        let stmt = Self::upsert_statement(collection, spec)?;
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
+            .await
+    }
+
+    /// Render the single `INSERT … ON CONFLICT …` statement behind
+    /// [`upsert`](Self::upsert) — shared with [`batch`](Self::batch)'s
+    /// `Upsert` op, so the two cannot drift.
+    fn upsert_statement(
+        collection: &str,
+        spec: UpsertSpec,
+    ) -> Result<wafer_sql_utils::Statement, DatabaseError> {
         let table = sanitize_ident(collection);
         let stmt = match spec.on_conflict {
             UpsertConflict::SetColumns(update_cols) => {
@@ -1145,8 +1228,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 .map_err(|e| DatabaseError::Internal(e.to_string()))?
             }
         };
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        Ok(stmt)
     }
 
     /// Shared `aggregate`: render the validated [`AggregateSpec`] into a
@@ -1294,23 +1376,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Insert `rows` into `collection` as **one** [`run_batch`](Self::run_batch),
-    /// applying [`create`](Self::create)'s per-row policy (a synthesized UUID
-    /// `id` when absent, `created_at`/`updated_at` stamps when absent).
+    /// Insert `rows` into `collection` as **one**
+    /// [`run_transaction`](Self::run_transaction), applying
+    /// [`create`](Self::create)'s per-row policy (a minted `id` when absent,
+    /// `created_at`/`updated_at` stamps when absent).
     ///
-    /// Returns the number of rows the backend reports as affected.
-    ///
-    /// This plans one INSERT *shape* for the whole batch, so every row must
-    /// resolve to the same column set after stamping. A row that does not is
-    /// rejected: silently planning per row would defeat the point, and reusing
-    /// the first row's shape would produce a misaligned INSERT. Missing columns
-    /// are added once, from the first row, which is representative for the same
-    /// reason.
-    ///
-    /// The only reason this lives beside [`create`](Self::create) rather than
-    /// being N `create` calls is the round trip: on a backend with a native
-    /// multi-statement API this is one, and on every other backend `run_batch`'s
-    /// sequential default makes it exactly the N it already was.
+    /// Returns the number of rows the backend reports as inserted. Rows may
+    /// carry different column sets: each gets its own INSERT, and every column
+    /// any row names is lazily added (typed from the first non-null value
+    /// written to it) before the transaction starts. That schema step is not
+    /// part of the transaction, so a failed insert can leave an added column
+    /// behind, never a row.
     async fn create_many(
         &self,
         collection: &str,
@@ -1322,60 +1398,204 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sanitize_ident(collection);
         let autogenerates_id = self.table_autogenerates_id(&table).await;
 
-        let mut prepared: Vec<Vec<(String, serde_json::Value)>> = Vec::with_capacity(rows.len());
-        let mut shape: Option<Vec<String>> = None;
+        // One representative value per column across every row, for the lazy
+        // column-add's type choice.
+        let mut columns: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
         for mut data in rows {
-            if !data.contains_key("id") && !autogenerates_id {
-                data.insert(
-                    "id".to_string(),
-                    serde_json::Value::String(mint_record_id()),
-                );
-            }
-            stamp_timestamps(&mut data, true);
-
-            let pairs = sorted_pairs(&data);
-            let columns: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
-            match &shape {
-                None => shape = Some(columns),
-                Some(expected) if *expected == columns => {}
-                Some(expected) => {
-                    return Err(DatabaseError::Internal(format!(
-                        "create_many into {table}: every row must share one column set; \
-                         expected {expected:?}, got {columns:?}"
-                    )));
+            prepare_created_row(&mut data, autogenerates_id);
+            for (key, value) in &data {
+                match columns.get(key) {
+                    Some(seen) if !seen.is_null() || value.is_null() => {}
+                    _ => {
+                        columns.insert(key.clone(), value.clone());
+                    }
                 }
             }
-            prepared.push(pairs);
+            let stmt =
+                wafer_sql_utils::query::build_insert(&table, &sorted_pairs(&data), Self::BACKEND);
+            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
+        self.ensure_data_columns(&table, &columns).await?;
 
-        // One lazy column-add for the batch — every row has the same shape, so
-        // the first is representative.
-        if let Some(first) = prepared.first() {
-            let sample: HashMap<String, serde_json::Value> = first.iter().cloned().collect();
-            self.ensure_data_columns(&table, &sample).await?;
-        }
-
-        let statements: Vec<(String, Vec<serde_json::Value>)> = prepared
+        let ops: Vec<TxOp<'_>> = statements
             .iter()
-            .map(|pairs| {
-                let stmt = wafer_sql_utils::query::build_insert(&table, pairs, Self::BACKEND);
-                (stmt.sql, sea_values_to_json(stmt.values))
-            })
+            .map(|(sql, params)| TxOp::Execute { sql, params })
             .collect();
-        let ops: Vec<BatchOp<'_>> = statements
-            .iter()
-            .map(|(sql, params)| BatchOp::Execute { sql, params })
-            .collect();
-
-        let results = self.run_batch(&ops).await?;
-        let mut affected = 0;
-        for result in &results {
+        let mut inserted = 0;
+        for result in self.run_transaction(&ops).await? {
             match result {
-                BatchResult::Execute(n) => affected += *n,
-                other => return Err(batch_shape_error("create_many insert", Some(other))),
+                TxResult::Execute(n) => inserted += n,
+                other @ TxResult::Returning(_) => {
+                    return Err(DatabaseError::Internal(format!(
+                        "run_transaction returned {other:?} for a create_many insert"
+                    )))
+                }
             }
         }
-        Ok(affected)
+        Ok(inserted)
+    }
+
+    /// Shared `batch`: plan every op's statement (the same statement its
+    /// single-op method runs, except that `Create` and `Update` return the
+    /// stored row via `RETURNING *`), lazily add the columns the ops name,
+    /// then run every statement as ONE
+    /// [`run_transaction`](Self::run_transaction).
+    ///
+    /// An `UpdateWhere` against a missing table settles as
+    /// `UpdatedWhere { rows_affected: 0 }` without a statement, exactly as
+    /// [`update_where_count`](Self::update_where_count) returns 0; every other
+    /// op fails on a missing table, as its single op does.
+    ///
+    /// The lazy column-adds run before the transaction and are not rolled
+    /// back with it. An empty `ops` runs nothing.
+    async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+        /// How the statement planned for an op decodes back into its outcome,
+        /// or the outcome of an op that needs no statement.
+        enum Planned {
+            Created,
+            Updated,
+            Deleted,
+            UpdatedWhere,
+            Upserted,
+            Settled(WriteOutcome),
+        }
+
+        let mut planned = Vec::with_capacity(ops.len());
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let (kind, stmt) = match op {
+                WriteOp::Create {
+                    collection,
+                    mut data,
+                } => {
+                    let table = sanitize_ident(&collection);
+                    let autogenerates_id = self.table_autogenerates_id(&table).await;
+                    prepare_created_row(&mut data, autogenerates_id);
+                    self.ensure_data_columns(&table, &data).await?;
+                    let stmt = wafer_sql_utils::query::build_insert_returning(
+                        &table,
+                        &sorted_pairs(&data),
+                        Self::BACKEND,
+                    );
+                    (Planned::Created, stmt)
+                }
+                WriteOp::Update {
+                    collection,
+                    id,
+                    mut data,
+                } => {
+                    let table = sanitize_ident(&collection);
+                    stamp_timestamps(&mut data, false);
+                    self.ensure_data_columns(&table, &data).await?;
+                    let stmt = wafer_sql_utils::query::build_update_by_id_returning(
+                        &table,
+                        &id,
+                        &sorted_pairs(&data),
+                        Self::BACKEND,
+                    );
+                    (Planned::Updated, stmt)
+                }
+                WriteOp::Delete { collection, id } => {
+                    let stmt =
+                        wafer_sql_utils::query::build_delete_by_id(&collection, &id, Self::BACKEND);
+                    (Planned::Deleted, stmt)
+                }
+                WriteOp::UpdateWhere {
+                    collection,
+                    filters,
+                    mut data,
+                } => {
+                    let table = sanitize_ident(&collection);
+                    if !self.table_present_for_op(&table).await? {
+                        planned.push(Planned::Settled(WriteOutcome::UpdatedWhere {
+                            rows_affected: 0,
+                        }));
+                        continue;
+                    }
+                    stamp_timestamps(&mut data, false);
+                    self.ensure_data_columns(&table, &data).await?;
+                    self.ensure_query_columns(&table, &filters, &[], None)
+                        .await?;
+                    let stmt = wafer_sql_utils::query::build_update_where(
+                        &table,
+                        &sorted_pairs(&data),
+                        &filters,
+                        Self::BACKEND,
+                    );
+                    (Planned::UpdatedWhere, stmt)
+                }
+                WriteOp::Upsert { collection, spec } => (
+                    Planned::Upserted,
+                    Self::upsert_statement(&collection, spec)?,
+                ),
+            };
+            planned.push(kind);
+            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
+        }
+        if statements.is_empty() {
+            return Ok(planned
+                .into_iter()
+                .filter_map(|kind| match kind {
+                    Planned::Settled(outcome) => Some(outcome),
+                    _ => None,
+                })
+                .collect());
+        }
+
+        let tx_ops: Vec<TxOp<'_>> = statements
+            .iter()
+            .zip(planned.iter().filter(|k| !matches!(k, Planned::Settled(_))))
+            .map(|((sql, params), kind)| match kind {
+                Planned::Created | Planned::Updated => TxOp::Returning { sql, params },
+                _ => TxOp::Execute { sql, params },
+            })
+            .collect();
+        let results = self.run_transaction(&tx_ops).await?;
+        if results.len() != statements.len() {
+            return Err(DatabaseError::Internal(format!(
+                "run_transaction returned {} results for {} statements",
+                results.len(),
+                statements.len()
+            )));
+        }
+
+        let mut results = results.into_iter();
+        planned
+            .into_iter()
+            .map(|kind| {
+                if let Planned::Settled(outcome) = kind {
+                    return Ok(outcome);
+                }
+                let result = results.next().ok_or_else(|| {
+                    DatabaseError::Internal("run_transaction returned too few results".into())
+                })?;
+                match (kind, result) {
+                    (Planned::Created, TxResult::Returning(rows)) => rows
+                        .into_iter()
+                        .next()
+                        .map(WriteOutcome::Created)
+                        .ok_or_else(|| {
+                            DatabaseError::Internal("INSERT … RETURNING returned no row".into())
+                        }),
+                    (Planned::Updated, TxResult::Returning(rows)) => {
+                        Ok(WriteOutcome::Updated(rows.into_iter().next()))
+                    }
+                    (Planned::Deleted, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::Deleted { rows_affected })
+                    }
+                    (Planned::UpdatedWhere, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::UpdatedWhere { rows_affected })
+                    }
+                    (Planned::Upserted, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::Upserted { rows_affected })
+                    }
+                    (_, other) => Err(DatabaseError::Internal(format!(
+                        "run_transaction returned {other:?} for a statement of the other kind"
+                    ))),
+                }
+            })
+            .collect()
     }
 }
 
@@ -1472,6 +1692,12 @@ mod tests {
             _params: &[serde_json::Value],
         ) -> Result<f64, DatabaseError> {
             Ok(0.0)
+        }
+
+        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "run_transaction is not exercised by this mock".into(),
+            ))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -1618,6 +1844,12 @@ mod tests {
         ) -> Result<f64, DatabaseError> {
             self.record(format!("scalar_f64:{sql}"));
             Ok(2.5)
+        }
+
+        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "run_transaction is not exercised by this mock".into(),
+            ))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -1793,6 +2025,7 @@ mod tests {
     struct BatchMock {
         canned_count: i64,
         batch_calls: Mutex<Vec<Vec<(String, String)>>>,
+        tx_calls: Mutex<Vec<Vec<(String, String)>>>,
         fetch_calls: Mutex<Vec<String>>,
     }
 
@@ -1801,6 +2034,7 @@ mod tests {
             Self {
                 canned_count,
                 batch_calls: Mutex::new(Vec::new()),
+                tx_calls: Mutex::new(Vec::new()),
                 fetch_calls: Mutex::new(Vec::new()),
             }
         }
@@ -1877,6 +2111,29 @@ mod tests {
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
             Ok(true)
+        }
+
+        async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+            let recorded: Vec<(String, String)> = ops
+                .iter()
+                .map(|op| {
+                    let name = match op {
+                        TxOp::Execute { .. } => "Execute",
+                        TxOp::Returning { .. } => "Returning",
+                    };
+                    (name.to_string(), op.sql_params().0.to_string())
+                })
+                .collect();
+            self.tx_calls.lock().unwrap().push(recorded);
+            Ok(ops
+                .iter()
+                .map(|op| match op {
+                    TxOp::Execute { .. } => TxResult::Execute(1),
+                    TxOp::Returning { .. } => {
+                        TxResult::Returning(vec![Self::canned_rows().swap_remove(0)])
+                    }
+                })
+                .collect())
         }
 
         async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
@@ -2082,6 +2339,12 @@ mod tests {
             _params: &[serde_json::Value],
         ) -> Result<f64, DatabaseError> {
             Ok(0.0)
+        }
+
+        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "run_transaction is not exercised by this mock".into(),
+            ))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -2329,6 +2592,12 @@ mod tests {
             Ok(0.0)
         }
 
+        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "run_transaction is not exercised by this mock".into(),
+            ))
+        }
+
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
             Ok(true)
         }
@@ -2411,11 +2680,11 @@ mod tests {
         );
     }
 
-    /// `create_many` must reach the backend as ONE `run_batch`, which is the
-    /// only reason it exists: a batching backend collapses it into a single
-    /// round trip, and a non-batching one still gets the sequential default.
+    /// `create_many` must reach the backend as ONE `run_transaction`: that is
+    /// what makes it all-or-nothing, and on a backend with a native atomic
+    /// multi-statement API it is also one round trip.
     #[tokio::test]
-    async fn create_many_issues_exactly_one_batch_of_inserts() {
+    async fn create_many_issues_exactly_one_transaction_of_inserts() {
         let mock = BatchMock::new(0);
         let rows = vec![
             HashMap::from([("name".to_string(), serde_json::json!("a"))]),
@@ -2426,9 +2695,13 @@ mod tests {
             .expect("create_many succeeds");
         assert_eq!(n, 2);
 
-        let calls = mock.batch_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1, "one batch, not one statement per row");
-        assert_eq!(calls[0].len(), 2, "one op per row");
+        assert!(
+            mock.batch_calls.lock().unwrap().is_empty(),
+            "the inserts must not go through the non-atomic run_batch"
+        );
+        let calls = mock.tx_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one transaction, not one per row");
+        assert_eq!(calls[0].len(), 2, "one statement per row");
         for (kind, sql) in &calls[0] {
             assert_eq!(kind, "Execute");
             assert!(sql.to_uppercase().contains("INSERT"), "{sql}");
@@ -2445,24 +2718,115 @@ mod tests {
         DbExec::create_many(&mock, "widgets", rows)
             .await
             .expect("create_many succeeds");
-        let calls = mock.batch_calls.lock().unwrap().clone();
+        let calls = mock.tx_calls.lock().unwrap().clone();
         let sql = &calls[0][0].1;
         for column in ["id", "created_at", "updated_at", "name"] {
             assert!(sql.contains(column), "{column} missing from {sql}");
         }
     }
 
+    /// Each row gets its own INSERT, so rows naming different columns each
+    /// insert exactly the columns they carry.
     #[tokio::test]
-    async fn create_many_refuses_rows_with_different_column_sets() {
+    async fn create_many_inserts_rows_with_different_column_sets() {
         let mock = BatchMock::new(0);
         let rows = vec![
             HashMap::from([("name".to_string(), serde_json::json!("a"))]),
             HashMap::from([("other".to_string(), serde_json::json!("b"))]),
         ];
-        let err = DbExec::create_many(&mock, "widgets", rows)
+        let n = DbExec::create_many(&mock, "widgets", rows)
             .await
-            .expect_err("a ragged batch must be refused, not silently misaligned");
-        assert!(format!("{err}").contains("column set"), "{err}");
+            .expect("sparse rows insert");
+        assert_eq!(n, 2);
+        let calls = mock.tx_calls.lock().unwrap().clone();
+        let (first, second) = (&calls[0][0].1, &calls[0][1].1);
+        assert!(
+            first.contains("\"name\"") && !first.contains("\"other\""),
+            "{first}"
+        );
+        assert!(
+            second.contains("\"other\"") && !second.contains("\"name\""),
+            "{second}"
+        );
+    }
+
+    /// `batch` plans every op into ONE `run_transaction`, in order, with the
+    /// row-returning form for `Create`/`Update`, and maps each result back to
+    /// its op's outcome.
+    #[tokio::test]
+    async fn batch_runs_every_op_as_one_transaction_in_order() {
+        let mock = BatchMock::new(0);
+        let ops = vec![
+            WriteOp::Create {
+                collection: "widgets".into(),
+                data: HashMap::from([("name".to_string(), serde_json::json!("a"))]),
+            },
+            WriteOp::Update {
+                collection: "widgets".into(),
+                id: "r1".into(),
+                data: HashMap::from([("name".to_string(), serde_json::json!("b"))]),
+            },
+            WriteOp::Delete {
+                collection: "widgets".into(),
+                id: "r2".into(),
+            },
+            WriteOp::UpdateWhere {
+                collection: "widgets".into(),
+                filters: vec![Filter {
+                    field: "name".into(),
+                    operator: wafer_block::db::FilterOp::Equal,
+                    value: serde_json::json!("b"),
+                }],
+                data: HashMap::from([("name".to_string(), serde_json::json!("c"))]),
+            },
+            WriteOp::Upsert {
+                collection: "widgets".into(),
+                spec: UpsertSpec {
+                    data: vec![("id".into(), serde_json::json!("r3"))],
+                    conflict_columns: vec!["id".into()],
+                    on_conflict: UpsertConflict::SetColumns(Vec::new()),
+                },
+            },
+        ];
+        let outcomes = DbExec::batch(&mock, ops).await.expect("batch succeeds");
+
+        let calls = mock.tx_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one transaction for the whole batch");
+        let kinds: Vec<&str> = calls[0].iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["Returning", "Returning", "Execute", "Execute", "Execute"]
+        );
+        let verbs: Vec<&str> = calls[0]
+            .iter()
+            .map(|(_, sql)| sql.split_whitespace().next().unwrap_or(""))
+            .collect();
+        assert_eq!(verbs, ["INSERT", "UPDATE", "DELETE", "UPDATE", "INSERT"]);
+
+        assert!(matches!(&outcomes[0], WriteOutcome::Created(r) if r.id == "r1"));
+        assert!(matches!(&outcomes[1], WriteOutcome::Updated(Some(r)) if r.id == "r1"));
+        assert!(matches!(
+            outcomes[2],
+            WriteOutcome::Deleted { rows_affected: 1 }
+        ));
+        assert!(matches!(
+            outcomes[3],
+            WriteOutcome::UpdatedWhere { rows_affected: 1 }
+        ));
+        assert!(matches!(
+            outcomes[4],
+            WriteOutcome::Upserted { rows_affected: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn batch_with_no_ops_runs_nothing() {
+        let mock = BatchMock::new(0);
+        assert!(DbExec::batch(&mock, Vec::new())
+            .await
+            .expect("empty batch")
+            .is_empty());
+        assert!(mock.tx_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2475,5 +2839,6 @@ mod tests {
             0
         );
         assert!(mock.batch_calls.lock().unwrap().is_empty());
+        assert!(mock.tx_calls.lock().unwrap().is_empty());
     }
 }

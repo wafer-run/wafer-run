@@ -11,11 +11,12 @@ pub use wafer_block::wire::database::{Record, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
-        AddColumnRequest, AggregateRequest, ColumnDef, CountRequest, CountResponse, CreateRequest,
-        DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest,
-        DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
-        FilterDef as WireFilterDef, FilterNode, GetRequest, IncrementFieldWhereRequest,
-        ListRequest, OnConflict, QueryRawRequest, SchemaOpResponse,
+        AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, BatchWrite,
+        BatchWriteResult, ColumnDef, CountRequest, CountResponse, CreateManyRequest,
+        CreateManyResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
+        DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest, EnsureTableRequest,
+        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
+        IncrementFieldWhereRequest, ListRequest, OnConflict, QueryRawRequest, SchemaOpResponse,
         SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TableDef, TableExistsRequest,
         TableExistsResponse, TakeWhereRequest, TakeWhereResponse, UpdateRequest,
         UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest,
@@ -170,6 +171,43 @@ dual_api! {
             Some("db")
         )?;
         decode(&resp)
+    }
+
+    /// Insert every row of `rows` into `collection` in one transaction — all
+    /// of them or, when any insert fails, none — and return the number
+    /// inserted. Each row is stamped like [`create`]'s; rows may carry
+    /// different columns. WRAP-authorized (write) against `collection`.
+    pub fn create_many(
+        ctx,
+        collection: &str,
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, WaferError> {
+        let req = CreateManyRequest { collection: collection.to_string(), rows };
+        let resp = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_CREATE_MANY,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: CreateManyResponse = decode(&resp)?;
+        Ok(resp.rows_affected)
+    }
+
+    /// Apply `ops` in order in one transaction — all of them or, when any
+    /// statement fails, none — and return one result per op, in order. An
+    /// `Update`/`Delete` whose id matches no row is reported in its result
+    /// rather than failing the batch.
+    ///
+    /// The ops may span collections, so the message carries no single WRAP
+    /// resource: the database handler authorizes every op's collection for
+    /// write before anything runs.
+    pub fn batch(ctx, ops: Vec<BatchWrite>) -> Result<Vec<BatchWriteResult>, WaferError> {
+        let req = BatchRequest { ops };
+        let resp = svc!(ctx, BLOCK, ServiceOp::DATABASE_BATCH, &req, None, true, Some("db"))?;
+        let resp: BatchResponse = decode(&resp)?;
+        Ok(resp.results)
     }
 
     /// Update the record `id` in `collection` with the fields in `data` and return the result.

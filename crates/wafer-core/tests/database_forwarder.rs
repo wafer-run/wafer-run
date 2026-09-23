@@ -21,6 +21,7 @@ use std::{
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec,
+    WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,23 @@ impl DatabaseService for RecordingDb {
     ) -> Result<Record, DatabaseError> {
         self.note("create");
         Ok(row("r1"))
+    }
+
+    async fn create_many(
+        &self,
+        _collection: &str,
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError> {
+        self.note("create_many");
+        Ok(rows.len() as i64)
+    }
+
+    async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+        self.note("batch");
+        Ok(ops
+            .iter()
+            .map(|_| WriteOutcome::Deleted { rows_affected: 1 })
+            .collect())
     }
 
     async fn update(
@@ -253,6 +271,7 @@ wafer_core::forward_database_service! {
             get: forward,
             list: forward,
             create: forward,
+            create_many: forward,
             update: forward,
             delete: forward,
             count: custom,
@@ -267,6 +286,7 @@ wafer_core::forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
+            batch: forward,
             ensure_schema_table: forward,
             ensure_schema_tables: forward,
             schema_table_exists: forward,
@@ -379,6 +399,22 @@ async fn the_rest_of_the_surface_forwards() {
     dec.get("t", "r1").await.expect("get");
     dec.list("t", &ListOptions::default()).await.expect("list");
     dec.create("t", HashMap::new()).await.expect("create");
+    assert_eq!(
+        dec.create_many("t", vec![HashMap::new(), HashMap::new()])
+            .await
+            .expect("create_many"),
+        2
+    );
+    assert_eq!(
+        dec.batch(vec![WriteOp::Delete {
+            collection: "t".into(),
+            id: "r1".into(),
+        }])
+        .await
+        .expect("batch")
+        .len(),
+        1
+    );
     dec.update("t", "r1", HashMap::new()).await.expect("update");
     dec.delete("t", "r1").await.expect("delete");
     dec.sum("t", "n", &[]).await.expect("sum");
@@ -392,6 +428,8 @@ async fn the_rest_of_the_surface_forwards() {
             "get".to_string(),
             "list".to_string(),
             "create".to_string(),
+            "create_many".to_string(),
+            "batch".to_string(),
             "update".to_string(),
             "delete".to_string(),
             "sum".to_string(),

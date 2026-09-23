@@ -68,6 +68,95 @@ pub enum UpsertConflict {
     },
 }
 
+/// One write in a [`DatabaseService::batch`] — the plain-data twin of the wire
+/// [`BatchWrite`](wafer_block::wire::database::BatchWrite).
+///
+/// Each variant has the semantics of the single-op method it is named after,
+/// with one difference: an `Update` or `Delete` whose `id` matches no row is
+/// not an error inside a batch, it is reported in that op's [`WriteOutcome`].
+/// Only a failing statement aborts a batch.
+#[derive(Debug, Clone)]
+pub enum WriteOp {
+    /// Insert a row, as [`DatabaseService::create`].
+    Create {
+        /// Target collection.
+        collection: String,
+        /// Column → value map; `id` and timestamps are stamped when absent.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// Update one row by id, as [`DatabaseService::update`].
+    Update {
+        /// Target collection.
+        collection: String,
+        /// Primary-key id of the row.
+        id: String,
+        /// Column → value map to set.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// Delete one row by id, as [`DatabaseService::delete`].
+    Delete {
+        /// Target collection.
+        collection: String,
+        /// Primary-key id of the row.
+        id: String,
+    },
+    /// Update every row matching `filters`, as
+    /// [`DatabaseService::update_where_count`].
+    UpdateWhere {
+        /// Target collection.
+        collection: String,
+        /// AND-combined predicates.
+        filters: Vec<Filter>,
+        /// Column → value map to set.
+        data: HashMap<String, serde_json::Value>,
+    },
+    /// Insert-or-resolve one row, as [`DatabaseService::upsert`].
+    Upsert {
+        /// Target collection.
+        collection: String,
+        /// Validated upsert specification.
+        spec: UpsertSpec,
+    },
+}
+
+impl WriteOp {
+    /// The collection this write targets — what the handler authorizes.
+    #[must_use]
+    pub fn collection(&self) -> &str {
+        match self {
+            Self::Create { collection, .. }
+            | Self::Update { collection, .. }
+            | Self::Delete { collection, .. }
+            | Self::UpdateWhere { collection, .. }
+            | Self::Upsert { collection, .. } => collection,
+        }
+    }
+}
+
+/// The result of one [`WriteOp`], in the same position as the op.
+#[derive(Debug, Clone)]
+pub enum WriteOutcome {
+    /// The inserted row as stored, including its id.
+    Created(Record),
+    /// The updated row, or `None` when the id matched no row.
+    Updated(Option<Record>),
+    /// Rows deleted: `1`, or `0` when the id matched no row.
+    Deleted {
+        /// Number of rows deleted.
+        rows_affected: i64,
+    },
+    /// Rows the filtered update changed.
+    UpdatedWhere {
+        /// Number of rows updated.
+        rows_affected: i64,
+    },
+    /// Rows the upsert inserted or updated.
+    Upserted {
+        /// Rows affected by the insert/update.
+        rows_affected: i64,
+    },
+}
+
 /// Plain-data grouped-aggregate specification handed to
 /// [`DatabaseService::aggregate`].
 ///
@@ -311,6 +400,29 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError>;
+
+    /// Insert every row of `rows` into `collection` in one transaction and
+    /// return the number inserted. Each row gets [`create`](Self::create)'s
+    /// stamping; rows may carry different column sets. Either every row is
+    /// stored or, when any insert fails, none is. No default: a backend that
+    /// cannot make the inserts atomic must say so with an error. The database
+    /// handler refuses a call carrying more than
+    /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
+    /// rows before it reaches this method.
+    async fn create_many(
+        &self,
+        collection: &str,
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError>;
+
+    /// Apply `ops` in order as one transaction, returning one
+    /// [`WriteOutcome`] per op in the same order. Either every op is applied
+    /// or, when any statement fails, none is. An `Update`/`Delete` whose id
+    /// matches no row is an outcome, not a failure. No default, for the same
+    /// reason as [`create_many`](Self::create_many); the handler caps `ops` at
+    /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
+    /// the same way.
+    async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
 
     /// Update modifies an existing record by ID.
     async fn update(

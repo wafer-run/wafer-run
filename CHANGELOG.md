@@ -120,6 +120,20 @@
 - Go SDK: `WaferError.Meta` is removed and `WaferError.DetailCode` added
   (see **Fixed**). The embedder never emitted an error's meta, so code that
   read `Meta` always saw no entries; read `DetailCode` instead.
+- `DatabaseService` gains two REQUIRED methods, `create_many` and `batch`,
+  with no defaults: a backend that cannot make the writes atomic must say so
+  with an error rather than inherit a loop that leaves half of them applied.
+  Every implementor must add both — out-of-tree adapters (a Cloudflare D1 or
+  browser sql.js service) and test fakes included — and a
+  `forward_database_service!` ledger must list `create_many` (after `create`)
+  and `batch` (after `aggregate`). `DbExec` gains a required
+  `run_transaction(&[TxOp]) -> Vec<TxResult>` primitive: run the statements
+  in one transaction, all or nothing (a backend with an atomic native batch,
+  like D1's `batch()`, implements it with that). `DbExec::create_many` now
+  runs as one `run_transaction` instead of one `run_batch`, so it is atomic
+  on every backend, and it accepts rows with different column sets instead
+  of refusing them. `ServiceOp::DATABASE_OPS` gains `DATABASE_CREATE_MANY`
+  and `DATABASE_BATCH`, so any table kept in step with it needs both.
 
 ### Added
 
@@ -404,6 +418,34 @@
   PBKDF2 at a shorter `dkLen` returns a prefix of the longer output, so
   deriving `stored.len()` bytes would let a truncated stored hash verify at
   reduced strength.
+- `database.create_many {collection, rows} → {rows_affected}` inserts many
+  rows into one collection, and `database.batch {ops} → {results}` applies a
+  list of writes — `Create`, `Update`, `Delete`, `UpdateWhere`, `Upsert`,
+  across collections — in order. Each runs as ONE transaction on SQLite and
+  PostgreSQL: every write lands, or none does when any statement fails. A
+  batch op has its single op's semantics, except that an `Update` or
+  `Delete` whose id matches no row is reported in its result
+  (`Updated(None)`, `Deleted { rows_affected: 0 }`) instead of failing the
+  batch; `Created`/`Updated` carry the row as stored (`RETURNING *`). The
+  handler authorizes every op's collection for WRITE before anything runs,
+  and validates every op (filters, upsert identifiers) before any SQL, so a
+  batch naming one collection the caller may not write, or one malformed op,
+  touches nothing. One call carries at most `wire::database::MAX_BATCH_WRITES`
+  (1000) ops or rows — Cloudflare's per-invocation D1 query limit on Workers
+  Paid (the Free plan allows 50), which also bounds how long one call holds
+  SQLite's single write connection; a larger call is `InvalidArgument`. An
+  `UpdateWhere` against a missing table matches nothing
+  (`UpdatedWhere { rows_affected: 0 }`), as `update_where_count` returns 0.
+  Lazily added columns are created before the transaction and are not
+  rolled back with it. Guest clients:
+  `wafer_core::clients::database::{create_many, batch}` and
+  `wafer_sdk::clients::database::{create_many, batch}`; builders
+  `wafer_sql_utils::query::{build_insert_returning,
+  build_update_by_id_returning}`. An older runtime refuses both ops — the
+  dispatcher's action check answers `InvalidArgument` ("does not expose
+  action"), a database handler that predates them `Unimplemented` — so
+  nothing is written. The shared conformance suite covers both, on SQLite
+  and on the live-PostgreSQL CI job.
 
 ### Fixed
 

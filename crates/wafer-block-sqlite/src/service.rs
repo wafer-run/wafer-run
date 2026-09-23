@@ -4,7 +4,7 @@ use std::{
 };
 
 use base64ct::{Base64, Encoding};
-use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row};
+use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row, TransactionBehavior};
 use wafer_block_macro::wafer_async_trait;
 #[cfg(test)]
 use wafer_core::interfaces::database::service::{pk, DataType};
@@ -12,7 +12,7 @@ use wafer_core::{
     forward_database_service,
     interfaces::database::{
         codec,
-        exec::DbExec,
+        exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
         service::{Column, DatabaseError, Record, Table},
     },
@@ -230,7 +230,7 @@ impl SQLiteDatabaseService {
     /// `rusqlite::Result<Vec<Record>>` (instead of filter-mapping per row)
     /// makes that propagate instead of being logged and dropped.
     fn fetch_rows(
-        db: &mut Connection,
+        db: &Connection,
         sql: &str,
         sql_params: &[SqlValue],
     ) -> Result<Vec<Record>, DatabaseError> {
@@ -448,6 +448,45 @@ impl DbExec for SQLiteDatabaseService {
         .await?
     }
 
+    /// One write-worker job: the transaction holds the only writable
+    /// connection from `BEGIN IMMEDIATE` to `COMMIT`, so no other write
+    /// interleaves with it, and returning early on a failed statement drops
+    /// the uncommitted [`rusqlite::Transaction`], which rolls it back.
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+        let statements: Vec<(bool, String, Vec<SqlValue>)> = ops
+            .iter()
+            .map(|op| {
+                let (sql, params) = op.sql_params();
+                (
+                    matches!(op, TxOp::Returning { .. }),
+                    sql.to_string(),
+                    params.iter().map(json_to_sql_value).collect(),
+                )
+            })
+            .collect();
+        self.on_write(move |db| {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| DatabaseError::Internal(format!("begin transaction: {e}")))?;
+            let mut results = Vec::with_capacity(statements.len());
+            for (returning, sql, params) in &statements {
+                let result = if *returning {
+                    TxResult::Returning(Self::fetch_rows(&tx, sql, params)?)
+                } else {
+                    let rows = tx
+                        .execute(sql, as_params(params).as_slice())
+                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                    TxResult::Execute(rows as i64)
+                };
+                results.push(result);
+            }
+            tx.commit()
+                .map_err(|e| DatabaseError::Internal(format!("commit transaction: {e}")))?;
+            Ok(results)
+        })
+        .await?
+    }
+
     /// Tables with `INTEGER PRIMARY KEY` autoincrement generate their own id;
     /// `create` must not synthesize a UUID for them.
     async fn table_autogenerates_id(&self, table: &str) -> bool {
@@ -554,6 +593,7 @@ forward_database_service! {
             get: forward,
             list: forward,
             create: forward,
+            create_many: forward,
             update: forward,
             delete: forward,
             count: forward,
@@ -568,6 +608,7 @@ forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
+            batch: forward,
             // The four below are not `DbExec` operations: the shared executor
             // has no schema-mutation primitives, and STRICT_SCHEMA is per-backend
             // state.
