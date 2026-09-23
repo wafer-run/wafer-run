@@ -13,6 +13,9 @@ pub use wafer_schema::{
     DataType, DefaultVal, DefaultValue, Index, Reference, Table,
 };
 use wafer_sql_utils::aggregate::CastType;
+/// A count or sum cap a guarded write must stay within — see
+/// [`DatabaseService::insert_guarded`].
+pub use wafer_sql_utils::guard::CapGuard;
 
 /// Errors returned by [`DatabaseService`] operations.
 #[derive(Error, Debug)]
@@ -20,6 +23,14 @@ pub enum DatabaseError {
     /// No record with the requested id exists.
     #[error("record not found")]
     NotFound,
+    /// A write would duplicate a primary or unique key. Every backend maps
+    /// its driver's unique-violation to this — SQLite's
+    /// `SQLITE_CONSTRAINT_UNIQUE`/`_PRIMARYKEY`, PostgreSQL's SQLSTATE
+    /// `23505`, and an adapter whose driver reports it only as text (D1:
+    /// `UNIQUE constraint failed`) by matching that text — so callers can
+    /// tell "taken" from a fault. Other constraint violations stay `Internal`.
+    #[error("unique constraint violated: {0}")]
+    AlreadyExists(String),
     /// Backend-internal failure.
     #[error("database error: {0}")]
     Internal(String),
@@ -155,6 +166,40 @@ pub enum WriteOutcome {
         /// Rows affected by the insert/update.
         rows_affected: i64,
     },
+}
+
+/// What [`DatabaseService::insert_guarded`] did.
+#[derive(Debug, Clone)]
+pub enum GuardedInsert {
+    /// Every guard held; the row as stored.
+    Inserted(Record),
+    /// The guard at this index of the call's `guards` refused the insert (the
+    /// first that did, when several would); nothing was written.
+    Refused {
+        /// Index into the call's `guards`.
+        guard: usize,
+    },
+}
+
+/// What [`DatabaseService::update_guarded`] did.
+#[derive(Debug, Clone)]
+pub enum GuardedUpdate {
+    /// Every guard held and this many rows matched and were updated (at
+    /// least one).
+    Updated {
+        /// Rows updated.
+        rows_affected: i64,
+    },
+    /// The guard at this index of the call's `guards` refused the update (the
+    /// first that did); nothing was written. Guards are checked before the
+    /// filters, so a refused update may also have matched no row.
+    Refused {
+        /// Index into the call's `guards`.
+        guard: usize,
+    },
+    /// Every guard held but no row matched the filters (or the table does not
+    /// exist); nothing was written.
+    NoMatch,
 }
 
 /// Plain-data grouped-aggregate specification handed to
@@ -423,6 +468,44 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`MAX_BATCH_WRITES`](wafer_block::wire::database::MAX_BATCH_WRITES)
     /// the same way.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
+
+    /// Insert `data` into `collection` only while every guard in `guards`
+    /// holds over the table as it stands before the insert, returning the
+    /// stored row, or which guard refused it. The row gets
+    /// [`create`](Self::create)'s stamping. A key that is already taken is
+    /// [`DatabaseError::AlreadyExists`].
+    ///
+    /// The check and the insert are ONE atomic step: no other guarded write
+    /// to `collection` can land between them, so N concurrent inserts under a
+    /// `CountBelow { cap }` leave at most `cap` rows. The refusal is computed
+    /// in the same step, so the reported guard is the one that refused. A
+    /// write through any other method is not serialised against it. No default: a backend must
+    /// make the step atomic itself (the shared
+    /// [`DbExec`](super::exec::DbExec) default renders one conditional
+    /// statement and, on PostgreSQL, takes a per-table advisory lock first).
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<GuardedInsert, DatabaseError>;
+
+    /// Set `data` on the rows of `collection` matching `filters` only while
+    /// every guard in `guards` holds over the table as it stands before the
+    /// update: [`GuardedUpdate::Updated`], [`GuardedUpdate::Refused`] naming
+    /// the guard, or [`GuardedUpdate::NoMatch`] when no row matched (a
+    /// missing table matches nothing, as
+    /// [`update_where_count`](Self::update_where_count)). A guard that should
+    /// not count a row the update replaces excludes it with a filter. Atomic
+    /// as [`insert_guarded`](Self::insert_guarded) is; no default, for the
+    /// same reason.
+    async fn update_guarded(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<GuardedUpdate, DatabaseError>;
 
     /// Update modifies an existing record by ID.
     async fn update(

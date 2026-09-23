@@ -20,8 +20,8 @@ use std::{
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec,
-    WriteOp, WriteOutcome,
+    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
+    RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -98,6 +98,30 @@ impl DatabaseService for RecordingDb {
             .collect())
     }
 
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: std::collections::HashMap<String, serde_json::Value>,
+        _guards: &[wafer_core::interfaces::database::service::CapGuard],
+    ) -> Result<wafer_core::interfaces::database::service::GuardedInsert, DatabaseError> {
+        self.note("insert_guarded");
+        Ok(
+            wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
+                id: collection.to_string(),
+                data,
+            }),
+        )
+    }
+    async fn update_guarded(
+        &self,
+        _collection: &str,
+        _filters: &[wafer_block::db::Filter],
+        _data: std::collections::HashMap<String, serde_json::Value>,
+        _guards: &[wafer_core::interfaces::database::service::CapGuard],
+    ) -> Result<wafer_core::interfaces::database::service::GuardedUpdate, DatabaseError> {
+        self.note("update_guarded");
+        Ok(wafer_core::interfaces::database::service::GuardedUpdate::Updated { rows_affected: 1 })
+    }
     async fn update(
         &self,
         _collection: &str,
@@ -287,6 +311,8 @@ wafer_core::forward_database_service! {
             upsert: forward,
             aggregate: forward,
             batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
             ensure_schema_table: forward,
             ensure_schema_tables: forward,
             schema_table_exists: forward,
@@ -415,6 +441,18 @@ async fn the_rest_of_the_surface_forwards() {
         .len(),
         1
     );
+    assert!(matches!(
+        dec.insert_guarded("t", HashMap::new(), &[])
+            .await
+            .expect("insert_guarded"),
+        GuardedInsert::Inserted(_)
+    ));
+    assert!(matches!(
+        dec.update_guarded("t", &[], HashMap::new(), &[])
+            .await
+            .expect("update_guarded"),
+        GuardedUpdate::Updated { rows_affected: 1 }
+    ));
     dec.update("t", "r1", HashMap::new()).await.expect("update");
     dec.delete("t", "r1").await.expect("delete");
     dec.sum("t", "n", &[]).await.expect("sum");
@@ -430,6 +468,8 @@ async fn the_rest_of_the_surface_forwards() {
             "create".to_string(),
             "create_many".to_string(),
             "batch".to_string(),
+            "insert_guarded".to_string(),
+            "update_guarded".to_string(),
             "update".to_string(),
             "delete".to_string(),
             "sum".to_string(),

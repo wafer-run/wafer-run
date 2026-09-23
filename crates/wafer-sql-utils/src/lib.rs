@@ -12,6 +12,10 @@ pub mod aggregate;
 /// DDL builders — `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD
 /// COLUMN`, `DROP TABLE`, with dialect-specific type mapping.
 pub mod ddl;
+/// Guarded-write builders — an `INSERT … SELECT … WHERE` / `UPDATE … WHERE`
+/// that writes only while a count or sum cap holds, and the lock that makes
+/// it exact on PostgreSQL.
+pub mod guard;
 /// Identifier helpers — a runtime [`sea_query::Iden`] implementation and
 /// a fail-closed validator for table / column names that have to be
 /// interpolated rather than parameter-bound.

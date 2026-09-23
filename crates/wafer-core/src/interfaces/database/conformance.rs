@@ -101,8 +101,9 @@ use wafer_block::db::{
 use wafer_sql_utils::aggregate::CastType;
 
 use super::service::{
-    pk, AggregateColumnSpec, AggregateSpec, Column, DataType, DatabaseError, DatabaseService,
-    GroupBySpec, Record, Table, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+    pk, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
+    DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, Record, Table, UpsertConflict,
+    UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,10 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `take_where`; `create_many` (a hundred sparse rows land; a failing row
 /// lands none) and `batch` (mixed ops across collections apply in order and
 /// report per-op outcomes; one failing op rolls every op back);
+/// `insert_guarded`/`update_guarded` (count and sum caps, landing exactly on
+/// a sum cap, the refusing guard named, a replaced row excluded by a filter,
+/// no match told apart from a refusal, a taken key as `AlreadyExists`, and ten
+/// concurrent inserts under a cap of three leaving exactly three);
 /// `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
 /// `WindowedCounter`); `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
@@ -247,6 +252,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_take_where(svc).await;
     check_create_many(svc).await;
     check_batch(svc).await;
+    check_guarded_writes(svc).await;
     check_increment(svc).await;
     check_upsert_set_columns(svc).await;
     check_upsert_windowed_counter(svc).await;
@@ -1309,7 +1315,10 @@ async fn check_create_many(svc: &dyn DatabaseService) {
             ],
         )
         .await;
-    assert!(err.is_err(), "a duplicate key fails the call: {err:?}");
+    assert!(
+        matches!(err, Err(DatabaseError::AlreadyExists(_))),
+        "a duplicate key fails the call as AlreadyExists: {err:?}"
+    );
     assert_eq!(
         svc.count("conf_create_many", &[]).await.expect("count"),
         101,
@@ -1602,6 +1611,265 @@ async fn check_batch(svc: &dyn DatabaseService) {
     svc.get("conf_batch", "beside_missing")
         .await
         .expect("the op beside it committed");
+}
+
+// ---------------------------------------------------------------------------
+// insert_guarded / update_guarded (the check and the write are one step)
+// ---------------------------------------------------------------------------
+
+/// The quota-shaped table the guarded-write checks write to: an owner, a
+/// bucket and a byte size per row.
+fn guarded_table() -> Table {
+    Table {
+        name: "conf_guarded".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("owner", DataType::Text).null(),
+            Column::new("bucket", DataType::Text).null(),
+            // BIGINT: `SUM(<bigint>)` is NUMERIC on Postgres, which the guard
+            // compares against bound BIGINT caps.
+            Column::new("size", DataType::Int64).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    }
+}
+
+/// At most `cap` rows per `(owner, bucket)`.
+fn files_per_bucket(owner: &str, bucket: &str, cap: i64) -> CapGuard {
+    CapGuard::CountBelow {
+        filters: vec![
+            eq("owner", serde_json::json!(owner)),
+            eq("bucket", serde_json::json!(bucket)),
+        ],
+        cap,
+    }
+}
+
+/// At most `cap` bytes per owner once `add` more land, not counting the rows
+/// `except` names (the row an update replaces).
+fn bytes_per_owner(owner: &str, except: Option<&str>, add: i64, cap: i64) -> CapGuard {
+    let mut filters = vec![eq("owner", serde_json::json!(owner))];
+    if let Some(id) = except {
+        filters.push(filt("id", FilterOp::NotEqual, serde_json::json!(id)));
+    }
+    CapGuard::SumAtMost {
+        field: "size".into(),
+        filters,
+        add,
+        cap,
+    }
+}
+
+fn guarded_row(owner: &str, bucket: &str, size: i64) -> HashMap<String, serde_json::Value> {
+    row([
+        ("owner", serde_json::json!(owner)),
+        ("bucket", serde_json::json!(bucket)),
+        ("size", serde_json::json!(size)),
+    ])
+}
+
+/// The row an admitted guarded insert stored; panics on a refusal.
+fn inserted(outcome: &GuardedInsert) -> &Record {
+    match outcome {
+        GuardedInsert::Inserted(record) => record,
+        GuardedInsert::Refused { guard } => panic!("expected an insert, guard {guard} refused it"),
+    }
+}
+
+/// The index of the guard that refused an insert; `None` when it landed.
+fn refused_by(outcome: &GuardedInsert) -> Option<usize> {
+    match outcome {
+        GuardedInsert::Inserted(_) => None,
+        GuardedInsert::Refused { guard } => Some(*guard),
+    }
+}
+
+async fn check_guarded_writes(svc: &dyn DatabaseService) {
+    reset(svc, &guarded_table()).await;
+    let t = "conf_guarded";
+
+    // CountBelow: the third file in one (owner, bucket) is refused by that
+    // guard; another bucket of the same owner is its own count.
+    let mut landed = Vec::new();
+    for _ in 0..3 {
+        landed.push(
+            svc.insert_guarded(
+                t,
+                guarded_row("c", "b1", 1),
+                &[files_per_bucket("c", "b1", 2)],
+            )
+            .await
+            .expect("insert_guarded (count)"),
+        );
+    }
+    let verdicts: Vec<Option<usize>> = landed.iter().map(refused_by).collect();
+    assert_eq!(
+        verdicts,
+        [None, None, Some(0)],
+        "the third file passes a cap of two"
+    );
+    let first = inserted(&landed[0]);
+    assert!(!first.id.is_empty(), "a minted id");
+    assert_eq!(field_i64(first, "size"), 1, "the stored row comes back");
+    assert!(
+        first.data["created_at"].is_string() && first.data["updated_at"].is_string(),
+        "rows are stamped like create: {:?}",
+        first.data
+    );
+    inserted(
+        &svc.insert_guarded(
+            t,
+            guarded_row("c", "b2", 1),
+            &[files_per_bucket("c", "b2", 2)],
+        )
+        .await
+        .expect("insert_guarded (other bucket)"),
+    );
+    assert_eq!(
+        svc.count(t, &[eq("owner", serde_json::json!("c"))])
+            .await
+            .expect("count"),
+        3,
+        "exactly the admitted rows landed"
+    );
+
+    // SumAtMost: landing exactly on the cap is admitted, one byte past it is
+    // not.
+    for (id, size, verdict) in [("s1", 60, None), ("s2", 40, None), ("s3", 1, Some(0))] {
+        let mut data = guarded_row("s", "b1", size);
+        data.insert("id".into(), serde_json::json!(id));
+        let got = svc
+            .insert_guarded(t, data, &[bytes_per_owner("s", None, size, 100)])
+            .await
+            .expect("insert_guarded (sum)");
+        assert_eq!(refused_by(&got), verdict, "{id} of {size} bytes: {got:?}");
+    }
+    assert!(
+        matches!(svc.get(t, "s3").await, Err(DatabaseError::NotFound)),
+        "the refused row is not stored"
+    );
+
+    // The refusal names the guard that failed: the byte cap in second place
+    // here, the file cap in first place when both fail.
+    let two_guards = |files: i64| {
+        [
+            files_per_bucket("s", "b1", files),
+            bytes_per_owner("s", None, 5, 100),
+        ]
+    };
+    for (files, verdict) in [(10, Some(1)), (1, Some(0))] {
+        let got = svc
+            .insert_guarded(t, guarded_row("s", "b1", 5), &two_guards(files))
+            .await
+            .expect("insert_guarded (two guards)");
+        assert_eq!(refused_by(&got), verdict, "file cap {files}: {got:?}");
+    }
+    // No guards: an unconditional insert.
+    inserted(
+        &svc.insert_guarded(t, guarded_row("n", "b1", 1), &[])
+            .await
+            .expect("insert_guarded (no guards)"),
+    );
+    // A taken key is AlreadyExists — not a refusal, not an internal fault —
+    // whether or not guards are given, and for a plain create too.
+    for guards in [Vec::new(), vec![files_per_bucket("x", "b1", 10)]] {
+        let mut data = guarded_row("x", "b1", 1);
+        data.insert("id".into(), serde_json::json!("s1"));
+        let got = svc.insert_guarded(t, data, &guards).await;
+        assert!(
+            matches!(got, Err(DatabaseError::AlreadyExists(_))),
+            "a duplicate id with {} guard(s): {got:?}",
+            guards.len()
+        );
+    }
+    let got = svc.create(t, row([("id", serde_json::json!("s1"))])).await;
+    assert!(
+        matches!(got, Err(DatabaseError::AlreadyExists(_))),
+        "create of a duplicate id: {got:?}"
+    );
+
+    // update_guarded replacing s1 (60 of the owner's 100 bytes): the sum
+    // excludes s1 itself, so 40 + 60 fits exactly and 40 + 61 does not.
+    let replace = |id: &str, size: i64| {
+        (
+            vec![eq("id", serde_json::json!(id))],
+            row([("size", serde_json::json!(size))]),
+            [bytes_per_owner("s", Some(id), size, 100)],
+        )
+    };
+    let (filters, data, guards) = replace("s1", 61);
+    let got = svc
+        .update_guarded(t, &filters, data, &guards)
+        .await
+        .expect("update_guarded (refused)");
+    assert!(
+        matches!(got, GuardedUpdate::Refused { guard: 0 }),
+        "40 + 61 > 100: {got:?}"
+    );
+    assert_eq!(field_i64(&svc.get(t, "s1").await.expect("s1"), "size"), 60);
+    let (filters, data, guards) = replace("s1", 55);
+    let got = svc
+        .update_guarded(t, &filters, data, &guards)
+        .await
+        .expect("update_guarded");
+    assert!(
+        matches!(got, GuardedUpdate::Updated { rows_affected: 1 }),
+        "{got:?}"
+    );
+    assert_eq!(field_i64(&svc.get(t, "s1").await.expect("s1"), "size"), 55);
+    // Every guard holds but no row matches: NoMatch, not a refusal — the
+    // row a takeover expected is gone.
+    let (filters, data, guards) = replace("gone", 1);
+    let got = svc
+        .update_guarded(t, &filters, data, &guards)
+        .await
+        .expect("update_guarded (no match)");
+    assert!(matches!(got, GuardedUpdate::NoMatch), "{got:?}");
+    let got = svc
+        .update_guarded(
+            "conf_guarded_missing",
+            &[],
+            row([("size", serde_json::json!(1))]),
+            &[],
+        )
+        .await
+        .expect("update_guarded (missing table)");
+    assert!(
+        matches!(got, GuardedUpdate::NoMatch),
+        "a missing table matches nothing, as update_where_count: {got:?}"
+    );
+
+    // Ten concurrent inserts under a cap of three: the check and the insert
+    // are one step, so exactly three land. (Every write waits on SQLite's one
+    // writer; on PostgreSQL the per-table guard lock is what serialises them
+    // — see wafer-block-postgres's conformance test, which forces the race.)
+    let cap_of_three = [files_per_bucket("r", "b1", 3)];
+    let racers = (0..10).map(|_| svc.insert_guarded(t, guarded_row("r", "b1", 30), &cap_of_three));
+    let results = futures::future::join_all(racers).await;
+    let admitted = results
+        .iter()
+        .filter(|r| refused_by(r.as_ref().expect("concurrent insert_guarded")).is_none())
+        .count();
+    assert_eq!(admitted, 3, "exactly the cap is admitted: {results:?}");
+    assert_eq!(
+        svc.count(t, &[eq("owner", serde_json::json!("r"))])
+            .await
+            .expect("count"),
+        3
+    );
+    // The same for a byte cap: ten concurrent 30-byte uploads under 100.
+    let hundred_bytes = [bytes_per_owner("q", None, 30, 100)];
+    let racers = (0..10).map(|_| svc.insert_guarded(t, guarded_row("q", "b1", 30), &hundred_bytes));
+    let admitted = futures::future::join_all(racers)
+        .await
+        .into_iter()
+        .filter(|r| refused_by(r.as_ref().expect("concurrent insert_guarded")).is_none())
+        .count();
+    assert_eq!(admitted, 3, "30 * 3 <= 100 < 30 * 4");
 }
 
 // ---------------------------------------------------------------------------

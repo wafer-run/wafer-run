@@ -174,3 +174,276 @@ async fn an_included_column_is_not_part_of_the_primary_key() {
         .expect("drop");
     assert_eq!(key, ["a", "b"], "the INCLUDE column c is not a key column");
 }
+
+/// Concurrent guarded writes cannot overshoot their cap on PostgreSQL.
+///
+/// Under READ COMMITTED a guarded statement counts only committed rows, so
+/// two statements that run side by side each miss the other's row. The
+/// shared conformance suite races ten inserts, but nothing makes them
+/// overlap; here a trigger holds every writing transaction open for 200 ms
+/// after its row is written, so every racer's guard runs while the first
+/// admitted write is still uncommitted. Only the per-table guard lock, which
+/// makes each racer wait for the one before it to commit, keeps the count at
+/// the cap. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn racing_guarded_writes_cannot_overshoot_the_cap() {
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres guarded-write race: set {URL_ENV} to run");
+        return;
+    };
+    race_guarded_writes(&url, "conf_guarded_race", None).await;
+}
+
+/// The same race on a server whose sessions default to REPEATABLE READ.
+///
+/// A REPEATABLE READ transaction takes its one snapshot at its first
+/// statement — the lock statement, BEFORE the lock is granted — so a guard
+/// run after waiting would still miss the writes it waited for. The guarded
+/// transaction sets READ COMMITTED itself, so the session default cannot
+/// reopen the race. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_repeatable_read_session_default_cannot_reopen_the_race() {
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres guarded-write race (repeatable read): set {URL_ENV} to run");
+        return;
+    };
+    race_guarded_writes(&url, "conf_guarded_race_rr", Some("repeatable read")).await;
+}
+
+/// Race eight guarded inserts under a cap of three files and five guarded
+/// updates under a 60-byte cap on `table`, with every writing transaction
+/// held open by a trigger, the service's sessions defaulting to
+/// `isolation` when given; exactly the caps must land.
+async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
+    use std::collections::HashMap;
+
+    use sqlx::postgres::{PgPool, PgPoolOptions};
+    use wafer_block::db::{Filter, FilterOp};
+    use wafer_core::interfaces::database::service::{
+        pk, CapGuard, Column, DataType, DatabaseService, GuardedInsert, GuardedUpdate, Table,
+    };
+
+    let admin = PgPool::connect(url).await.expect("connect as admin");
+    let session_default =
+        isolation.map(|level| format!("SET default_transaction_isolation = '{level}'"));
+    let pool = PgPoolOptions::new()
+        .after_connect(move |conn, _| {
+            let session_default = session_default.clone();
+            Box::pin(async move {
+                if let Some(stmt) = session_default {
+                    sqlx::Executor::execute(conn, stmt.as_str()).await?;
+                }
+                Ok(())
+            })
+        })
+        .connect(url)
+        .await
+        .expect("connect the service");
+    if let Some(level) = isolation {
+        let current: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&pool)
+            .await
+            .expect("read the session isolation");
+        assert_eq!(current, level, "the session default took effect");
+    }
+    let svc = PostgresDatabaseService::from_pool(pool);
+
+    svc.schema_drop_table(table).await.expect("drop");
+    svc.ensure_schema_table(&Table {
+        name: table.into(),
+        columns: vec![
+            pk("id"),
+            Column::new("owner", DataType::Text).null(),
+            Column::new("size", DataType::Int64).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    })
+    .await
+    .expect("create");
+    for stmt in [
+        format!(
+            "CREATE OR REPLACE FUNCTION {table}_linger() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER {table}_linger AFTER INSERT OR UPDATE ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {table}_linger()"
+        ),
+    ] {
+        sqlx::query(&stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let owner = |o: &str| Filter {
+        field: "owner".into(),
+        operator: FilterOp::Equal,
+        value: serde_json::json!(o),
+    };
+    let data = |pairs: &[(&str, serde_json::Value)]| -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    };
+
+    // Eight inserts under a cap of three files.
+    let cap = [CapGuard::CountBelow {
+        filters: vec![owner("u")],
+        cap: 3,
+    }];
+    let inserts = (0..8).map(|_| {
+        svc.insert_guarded(
+            table,
+            data(&[
+                ("owner", serde_json::json!("u")),
+                ("size", serde_json::json!(1)),
+            ]),
+            &cap,
+        )
+    });
+    let inserts = futures::future::join_all(inserts).await;
+    let admitted = inserts
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedInsert::Inserted(_))))
+        .count();
+    let refused = inserts
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedInsert::Refused { guard: 0 })))
+        .count();
+    let files = svc.count(table, &[owner("u")]).await.expect("count");
+
+    // Five 10-byte rows (50 of a 60-byte cap); five updates each grow a
+    // different row to 20 bytes, its own old size excluded from the sum. Only
+    // one fits: 40 + 20 = 60.
+    for i in 0..5 {
+        svc.create(
+            table,
+            data(&[
+                ("id", serde_json::json!(format!("v{i}"))),
+                ("owner", serde_json::json!("v")),
+                ("size", serde_json::json!(10)),
+            ]),
+        )
+        .await
+        .expect("seed");
+    }
+    let guards: Vec<[CapGuard; 1]> = (0..5)
+        .map(|i| {
+            [CapGuard::SumAtMost {
+                field: "size".into(),
+                filters: vec![
+                    owner("v"),
+                    Filter {
+                        field: "id".into(),
+                        operator: FilterOp::NotEqual,
+                        value: serde_json::json!(format!("v{i}")),
+                    },
+                ],
+                add: 20,
+                cap: 60,
+            }]
+        })
+        .collect();
+    let filters: Vec<[Filter; 1]> = (0..5)
+        .map(|i| {
+            [Filter {
+                field: "id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(format!("v{i}")),
+            }]
+        })
+        .collect();
+    let updates = (0..5).map(|i| {
+        svc.update_guarded(
+            table,
+            &filters[i],
+            data(&[("size", serde_json::json!(20))]),
+            &guards[i],
+        )
+    });
+    let updates = futures::future::join_all(updates).await;
+    let grown = updates
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedUpdate::Updated { rows_affected: 1 })))
+        .count();
+    let refused_updates = updates
+        .iter()
+        .filter(|r| matches!(r, Ok(GuardedUpdate::Refused { guard: 0 })))
+        .count();
+    let bytes = svc.sum(table, "size", &[owner("v")]).await.expect("sum");
+
+    svc.schema_drop_table(table).await.expect("drop");
+    sqlx::query(&format!("DROP FUNCTION {table}_linger()"))
+        .execute(&admin)
+        .await
+        .expect("drop function");
+
+    assert_eq!(
+        (admitted, refused, files),
+        (3, 5, 3),
+        "eight racing inserts under a cap of three: {inserts:?}"
+    );
+    assert_eq!(
+        (grown, refused_updates, bytes),
+        (1, 4, 60.0),
+        "five racing updates under a 60-byte cap: {updates:?}"
+    );
+}
+
+/// Two sessions creating the same table at once collide on a catalog index
+/// (`pg_type_typname_nsp_index`, SQLSTATE 23505) even under `IF NOT EXISTS`.
+/// That is a DDL race, not a duplicate row: it must stay `Internal`, never
+/// `AlreadyExists`. An uncommitted `CREATE TABLE` in another session forces
+/// the collision: the service's create waits on it, then fails once it
+/// commits. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_catalog_collision_is_not_already_exists() {
+    use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres catalog-collision check: set {URL_ENV} to run");
+        return;
+    };
+    let table = "conf_catalog_race";
+    let admin = PgPool::connect(&url).await.expect("connect as admin");
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(&admin)
+        .await
+        .expect("drop");
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect the service");
+
+    let mut other = admin.begin().await.expect("begin the other session");
+    sqlx::query(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY)"))
+        .execute(&mut *other)
+        .await
+        .expect("create in the other session");
+    // Through `exec_raw`, the path a migration runner takes: the driver's
+    // error reaches the classifier unwrapped.
+    let statement = format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)");
+    let create = svc.exec_raw(&statement, &[]);
+    let commit = async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        other.commit().await.expect("commit the other session");
+    };
+    let (created, ()) = tokio::join!(create, commit);
+
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+        .execute(&admin)
+        .await
+        .expect("drop");
+    match created {
+        Err(DatabaseError::Internal(msg)) => assert!(
+            msg.contains("23505") || msg.contains("duplicate key"),
+            "{msg}"
+        ),
+        other => panic!("a catalog collision must be Internal, got {other:?}"),
+    }
+}

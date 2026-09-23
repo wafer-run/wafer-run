@@ -421,6 +421,29 @@ mod db_fakes {
         {
             Err(DatabaseError::Internal("fixture: batch not needed".into()))
         }
+        async fn insert_guarded(
+            &self,
+            _collection: &str,
+            _data: std::collections::HashMap<String, serde_json::Value>,
+            _guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<wafer_core::interfaces::database::service::GuardedInsert, DatabaseError>
+        {
+            Err(DatabaseError::Internal(
+                "fixture: insert_guarded not needed".into(),
+            ))
+        }
+        async fn update_guarded(
+            &self,
+            _collection: &str,
+            _filters: &[wafer_block::db::Filter],
+            _data: std::collections::HashMap<String, serde_json::Value>,
+            _guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<wafer_core::interfaces::database::service::GuardedUpdate, DatabaseError>
+        {
+            Err(DatabaseError::Internal(
+                "fixture: update_guarded not needed".into(),
+            ))
+        }
         async fn update(
             &self,
             _collection: &str,

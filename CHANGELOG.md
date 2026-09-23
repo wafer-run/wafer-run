@@ -136,6 +136,29 @@
   on every backend, and it accepts rows with different column sets instead
   of refusing them. `ServiceOp::DATABASE_OPS` gains `DATABASE_CREATE_MANY`
   and `DATABASE_BATCH`, so any table kept in step with it needs both.
+- `DatabaseService` gains two more REQUIRED methods, `insert_guarded` and
+  `update_guarded`, again with no defaults: the check-and-write must be
+  atomic, and only the backend knows how. Every implementor must add both,
+  out-of-tree adapters and test fakes included; a `DbExec` backend forwards
+  to the shared defaults, which run through its `run_transaction` (so a D1 or
+  sql.js adapter gets them once `run_transaction` is atomic). A
+  `forward_database_service!` ledger lists them after `batch`, in that order.
+  `ServiceOp::DATABASE_OPS` gains `DATABASE_INSERT_GUARDED` and
+  `DATABASE_UPDATE_GUARDED`.
+- `DatabaseError` gains `AlreadyExists(String)`, so an exhaustive `match` on
+  it needs an arm. A write that duplicates a primary or unique key is now
+  that variant on SQLite (`SQLITE_CONSTRAINT_UNIQUE`/`_PRIMARYKEY`) and
+  PostgreSQL (SQLSTATE `23505`), and reaches the caller as
+  `ErrorCode::AlreadyExists` ("a record with this key already exists")
+  instead of `ErrorCode::Internal` ("internal database error") — for
+  `create`, `create_many`, `batch`, `upsert`, `update` and the guarded ops
+  alike. A caller that treated a duplicate as `Internal` must match
+  `AlreadyExists`. An out-of-tree adapter must map its driver's
+  unique-violation the same way (D1 reports it only as the text
+  `UNIQUE constraint failed`). Other constraint violations stay `Internal`,
+  and so does a PostgreSQL `23505` on a `pg_catalog` index — two sessions
+  creating the same table at once collide on `pg_type_typname_nsp_index`,
+  which is a DDL race, not a taken key.
 - The embedder wire format (`embed::output_to_json`, consumed by `wafer-ffi`,
   `wafer-run-node` and the Go SDK) emits a **projection** of each terminal's
   meta instead of all of it: every action but `drop` carries a `meta` object
@@ -477,6 +500,47 @@
   action"), a database handler that predates them `Unimplemented` — so
   nothing is written. The shared conformance suite covers both, on SQLite
   and on the live-PostgreSQL CI job.
+- `database.insert_guarded {collection, data, guards}` and
+  `database.update_guarded {collection, filters, data, guards}` write only
+  while every cap guard holds over the collection as it stands before the
+  write: `CountBelow { filters, cap }` (fewer than `cap` matching rows) and
+  `SumAtMost { field, filters, add, cap }` (`SUM(field)` of the matching rows
+  plus `add` is at most `cap`, so landing exactly on the cap is admitted).
+  The response says what happened: an insert is `Inserted { record }` or
+  `Refused { guard }`; an update is `Updated { rows_affected }`,
+  `Refused { guard }` or `NoMatch` (every guard held, no row matched — a
+  takeover whose row is gone). `guard` is the index, in the request's
+  `guards`, of the first guard that refused, so a caller can say which cap
+  was hit. A key that is already taken is an `AlreadyExists` error, not a
+  refusal. An update that replaces a row the sum already counts excludes it
+  with a filter (`id != …`). The check and the write are one step: one
+  transaction holding a probe of every guard's verdict, one
+  `INSERT … SELECT … WHERE` / `UPDATE … WHERE` statement and the probe
+  again, which SQLite's single writer (and D1's) already serialises. On PostgreSQL the transaction
+  first sets `READ COMMITTED` — under a `default_transaction_isolation` of
+  REPEATABLE READ or SERIALIZABLE the snapshot would be taken before the
+  lock is granted — and then takes a transaction-scoped advisory lock keyed
+  by the TABLE, so guarded writes to one table run one at a time there. The
+  key is the table rather than the guard's filters because guards with
+  different filters over the same rows (a per-bucket file count and a
+  per-owner byte sum, or a sum that excludes a replaced row) must still
+  exclude each other. A cap, and the refusal it reports, are exact against
+  other guarded writes only: `create`, `update` and the other plain writes
+  do not take the lock. The transaction probes every guard's verdict before
+  and after the write, so a write that an unguarded write refused after the
+  first probe is still reported as `Refused { guard }`, not `NoMatch`. The handler authorizes the collection
+  for WRITE and validates every guard (filters as `update_where`'s, the
+  `SumAtMost` field as a plain identifier, at most
+  `wire::database::MAX_WRITE_GUARDS` = 16 guards) before the service runs.
+  Guest clients: `wafer_core::clients::database::{insert_guarded,
+  update_guarded}` (taking `CapGuard`) and
+  `wafer_sdk::clients::database::{insert_guarded, update_guarded}`; builders
+  `wafer_sql_utils::guard::{build_insert_guarded, build_update_guarded,
+  build_guard_probe, build_guard_preamble}`. An older runtime refuses both
+  ops, as for `batch`. The conformance suite covers every outcome on SQLite
+  and live PostgreSQL, where a trigger-widened race (eight inserts under a
+  cap of three, five updates under a byte cap) lands exactly the cap, with
+  the session default at READ COMMITTED and at REPEATABLE READ.
 
 ### Fixed
 

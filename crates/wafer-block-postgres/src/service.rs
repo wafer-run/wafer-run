@@ -110,7 +110,7 @@ impl DbExec for PostgresDatabaseService {
         let rows = q
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            .map_err(|e| statement_error(&e))?;
         let mut records = Vec::with_capacity(rows.len());
         for row in &rows {
             records.push(row_to_record(row)?);
@@ -129,7 +129,7 @@ impl DbExec for PostgresDatabaseService {
         }
         let row = q.fetch_one(&self.pool).await.map_err(|e| match e {
             sqlx::Error::RowNotFound => DatabaseError::NotFound,
-            _ => DatabaseError::Internal(e.to_string()),
+            _ => statement_error(&e),
         })?;
         row_to_record(&row)
     }
@@ -146,7 +146,7 @@ impl DbExec for PostgresDatabaseService {
         let result = q
             .execute(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+            .map_err(|e| statement_error(&e))?;
         Ok(result.rows_affected() as i64)
     }
 
@@ -178,7 +178,7 @@ impl DbExec for PostgresDatabaseService {
         }
         q.fetch_one(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+            .map_err(|e| statement_error(&e))
     }
 
     async fn run_scalar_f64(
@@ -192,7 +192,7 @@ impl DbExec for PostgresDatabaseService {
         }
         q.fetch_one(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(e.to_string()))
+            .map_err(|e| statement_error(&e))
     }
 
     /// One pooled connection for the whole transaction. Returning early on a
@@ -214,17 +214,14 @@ impl DbExec for PostgresDatabaseService {
             }
             let result = match op {
                 TxOp::Execute { .. } => {
-                    let done = q
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                    let done = q.execute(&mut *tx).await.map_err(|e| statement_error(&e))?;
                     TxResult::Execute(done.rows_affected() as i64)
                 }
                 TxOp::Returning { .. } => {
                     let rows = q
                         .fetch_all(&mut *tx)
                         .await
-                        .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+                        .map_err(|e| statement_error(&e))?;
                     TxResult::Returning(rows.iter().map(row_to_record).collect::<Result<_, _>>()?)
                 }
             };
@@ -272,6 +269,8 @@ forward_database_service! {
             upsert: forward,
             aggregate: forward,
             batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
             // The shared default is CREATE → add missing declared columns →
             // indexes → FK indexes, and it invalidates this backend's schema
             // cache on both the success and failure paths. The hand-written
@@ -451,6 +450,28 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     }
 
     Ok(Record { id, data })
+}
+
+/// A failed statement as a [`DatabaseError`]: a unique violation (SQLSTATE
+/// `23505`, primary keys included) on a row of a user table is
+/// [`DatabaseError::AlreadyExists`]; anything else is `Internal`.
+///
+/// A `23505` on a `pg_catalog` table is not a duplicate row: two sessions
+/// creating the same table at once collide on a catalog index
+/// (`pg_type_typname_nsp_index`) even under `IF NOT EXISTS`. That is a DDL
+/// race, and reporting it as a taken key would misdirect the caller.
+fn statement_error(e: &sqlx::Error) -> DatabaseError {
+    let duplicate_row = e.as_database_error().is_some_and(|db| {
+        db.is_unique_violation()
+            && db
+                .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+                .is_some_and(|pg| pg.schema().is_some_and(|schema| schema != "pg_catalog"))
+    });
+    if duplicate_row {
+        DatabaseError::AlreadyExists(e.to_string())
+    } else {
+        DatabaseError::Internal(e.to_string())
+    }
 }
 
 /// `sqlx::query` and `sqlx::query_scalar` builders expose an identical `bind`

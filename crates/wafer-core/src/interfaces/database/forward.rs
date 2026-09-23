@@ -46,7 +46,7 @@
 //! - `forward_to DbExec;` — the implementor is a SQL backend that implements
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
-//!   the method being defined. `DbExec` provides twenty-one of the operations;
+//!   the method being defined. `DbExec` provides twenty-three of the operations;
 //!   the other four must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
@@ -67,8 +67,8 @@
 //!
 //! use wafer_block::db::{Filter, ListOptions};
 //! use wafer_core::interfaces::database::service::{
-//!     AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-//!     UpsertSpec, WriteOp, WriteOutcome,
+//!     AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
+//!     GuardedUpdate, Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
 //! };
 //!
 //! struct ReadOnlyGuard {
@@ -109,6 +109,8 @@
 //!             upsert: forward,
 //!             aggregate: forward,
 //!             batch: custom,
+//!             insert_guarded: custom,
+//!             update_guarded: custom,
 //!             ensure_schema_table: forward,
 //!             ensure_schema_tables: inherit,
 //!             schema_table_exists: forward,
@@ -135,6 +137,25 @@
 //!
 //!         async fn batch(&self, _ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
 //!             Err(Self::refuse("batch"))
+//!         }
+//!
+//!         async fn insert_guarded(
+//!             &self,
+//!             _collection: &str,
+//!             _data: HashMap<String, serde_json::Value>,
+//!             _guards: &[CapGuard],
+//!         ) -> Result<GuardedInsert, DatabaseError> {
+//!             Err(Self::refuse("insert_guarded"))
+//!         }
+//!
+//!         async fn update_guarded(
+//!             &self,
+//!             _collection: &str,
+//!             _filters: &[Filter],
+//!             _data: HashMap<String, serde_json::Value>,
+//!             _guards: &[CapGuard],
+//!         ) -> Result<GuardedUpdate, DatabaseError> {
+//!             Err(Self::refuse("update_guarded"))
 //!         }
 //!     }
 //! }
@@ -244,6 +265,8 @@ macro_rules! __forward_database_ledger {
             upsert: $m_upsert:ident,
             aggregate: $m_aggregate:ident,
             batch: $m_batch:ident,
+            insert_guarded: $m_insert_guarded:ident,
+            update_guarded: $m_update_guarded:ident,
             ensure_schema_table: $m_ensure_schema_table:ident,
             ensure_schema_tables: $m_ensure_schema_tables:ident,
             schema_table_exists: $m_schema_table_exists:ident,
@@ -275,6 +298,8 @@ macro_rules! __forward_database_ledger {
                 (upsert, $m_upsert)
                 (aggregate, $m_aggregate)
                 (batch, $m_batch)
+                (insert_guarded, $m_insert_guarded)
+                (update_guarded, $m_update_guarded)
                 (ensure_schema_table, $m_ensure_schema_table)
                 (ensure_schema_tables, $m_ensure_schema_tables)
                 (schema_table_exists, $m_schema_table_exists)
@@ -294,7 +319,7 @@ macro_rules! __forward_database_ledger {
              \x20   get, list, create, create_many, update, delete, count, sum, query_raw,\n\
              \x20   exec_raw, delete_where, delete_where_count, take_where, update_where,\n\
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
-             \x20   ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
+             \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_drop_table, schema_add_column, set_strict_schema\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
@@ -747,6 +772,52 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::batch($recv(self), ops).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (insert_guarded, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn insert_guarded(
+                    &self,
+                    collection: &str,
+                    data: ::std::collections::HashMap<::std::string::String, ::serde_json::Value>,
+                    guards: &[$crate::interfaces::database::service::CapGuard],
+                ) -> ::core::result::Result<
+                    $crate::interfaces::database::service::GuardedInsert,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::insert_guarded($recv(self), collection, data, guards).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (update_guarded, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn update_guarded(
+                    &self,
+                    collection: &str,
+                    filters: &[::wafer_block::db::Filter],
+                    data: ::std::collections::HashMap<::std::string::String, ::serde_json::Value>,
+                    guards: &[$crate::interfaces::database::service::CapGuard],
+                ) -> ::core::result::Result<
+                    $crate::interfaces::database::service::GuardedUpdate,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::update_guarded($recv(self), collection, filters, data, guards)
+                        .await
                 }
             ]
         );
