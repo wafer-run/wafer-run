@@ -442,10 +442,34 @@ fn body_timeout_response(timeout: Duration) -> axum::http::Response<Body> {
         .unwrap_or_else(|_| internal_error_response())
 }
 
+/// `400 Bad Request` for a request that repeats a header which may appear
+/// only once ([`http_codec::SINGLETON_REQUEST_HEADERS`]). `Connection: close`
+/// because the request's intent is ambiguous. (hyper refuses differing
+/// `Content-Length` lines before the request reaches here, and folds
+/// identical ones into one, as RFC 9112 §6.3 permits.)
+fn repeated_singleton_header_response(name: &'static str) -> axum::http::Response<Body> {
+    tracing::warn!(
+        header = name,
+        "request repeats a single-valued header; returning 400"
+    );
+    axum::http::Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(axum::http::header::CONNECTION, "close")
+        .body(Body::from(
+            "request repeats a header that may appear only once",
+        ))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
 /// Turn one HTTP request into a WAFER dispatch and its output into the
 /// response.
 async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::Response<Body> {
     let (parts, body) = req.into_parts();
+    if let Some(name) =
+        http_codec::repeated_singleton_header(parts.headers.iter().map(|(name, _)| name.as_str()))
+    {
+        return repeated_singleton_header_response(name);
+    }
     // Buffer the request body up to `max_body_bytes` within
     // `body_read_timeout`. A read failure must NOT be collapsed into an empty
     // body: that would mask "too large", "too slow" and "connection dropped"

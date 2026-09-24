@@ -7,15 +7,24 @@
 - The HTTP codec (`wafer_block::http_codec`) refuses response meta no
   transport can send, instead of handing it to the adapter.
   `classify_response_meta` now returns
-  `Result<Option<ResponseMetaPart>, InvalidResponseMeta>`: `Err` for a
-  `resp.status` outside `100..=999`, a header name that is not an RFC 9110
-  token, a header, cookie or content-type value holding a control or
-  non-ASCII character, or a transport-owned header
-  (`TRANSPORT_OWNED_RESPONSE_HEADERS`: `Connection`, `Content-Length`,
+  `Result<Option<ResponseMetaPart>, InvalidResponseMeta>`, whose `kind` is
+  `Unsendable` for a `resp.status` outside `100..=999`, a header name that
+  is not an RFC 9110 token, or a header, cookie or content-type value
+  holding a control or non-ASCII character, and `TransportOwned` for
+  `TRANSPORT_OWNED_RESPONSE_HEADERS` (`Connection`, `Content-Length`,
   `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`,
-  `Upgrade`). `response_meta_parts` and `response_meta_entries` log each
-  refused entry at `warn` and skip it. Before, the native listener turned a
-  CR/LF in any header value into a 500 for the whole response. Header names
+  `Upgrade`). A transport-owned header is dropped with a `warn` log. An
+  unsendable entry fails the response closed: `response_meta_parts` and
+  `response_meta_entries` now return a `Result`, and every buffered path
+  answers `unsendable_response` — a 500 with the JSON `Internal` error body
+  and none of the terminal's headers, logged by key — rather than serve the
+  page without, say, its `Content-Security-Policy`. The embedder wire format
+  encodes such a terminal as an `Internal` error with empty meta. The flow
+  executor fails a step whose output carries an unsendable entry with
+  `Internal` (whatever `on_error` says) before laying any of it over the
+  flow message, so a malformed value never displaces a middleware's valid
+  one and the 500 keeps the middleware's headers. Before, the native
+  listener turned a CR/LF in any header value into a bare 500. Header names
   are case-insensitive end to end: any case of `resp.header.content-type`
   is the response content type and any case of `resp.header.set-cookie` a
   `Set-Cookie`; the buffered codec emits one header per case-insensitive
@@ -26,6 +35,10 @@
   §5.3); `http.content_type`, `http.host` and `req.content_type` carry the
   same joined value. Before, the mirrors kept the first line and
   `http.header.*` the last (every `X-Forwarded-For` line but the last was
+  lost). A single-valued header (`SINGLETON_REQUEST_HEADERS`: `Host`,
+  `Authorization`, `Content-Type`, `Content-Length`) is not joined:
+  `wafer-run/http-listener` answers a request repeating one with
+  `400 Bad Request` (`repeated_singleton_header`).
   lost). `ResponseBuilder::set_cookie` keys a cookie by its identity —
   `http_codec::cookie_meta_key`: `resp.set_cookie.{name}`, plus
   `;Domain=…`/`;Path=…` when set — instead of its position

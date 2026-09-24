@@ -23,7 +23,10 @@ use std::collections::HashMap;
 
 use wafer_block::{
     core_types::MetaEntry,
-    http_codec::{classify_response_meta, cookie_id, CookieId, ResponseMetaPart},
+    http_codec::{
+        classify_response_meta, cookie_id, CookieId, InvalidResponseMeta, InvalidResponseMetaKind,
+        ResponseMetaPart,
+    },
     meta::META_RESP_COOKIE_PREFIX,
 };
 
@@ -52,6 +55,23 @@ fn is_listed(list: &[&str], name: &str) -> bool {
     list.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
+/// The first entry of `entries` no transport can send
+/// ([`InvalidResponseMetaKind::Unsendable`]). The executor fails a step that
+/// produced one before its meta is laid over anything, so an unsendable
+/// value never displaces a valid one — a responder's malformed
+/// `Content-Security-Policy` must not replace the security-headers
+/// middleware's.
+pub(super) fn first_unsendable<'a>(
+    entries: impl IntoIterator<Item = &'a MetaEntry>,
+) -> Option<InvalidResponseMeta> {
+    entries
+        .into_iter()
+        .find_map(|e| match classify_response_meta(e) {
+            Err(invalid) if invalid.kind == InvalidResponseMetaKind::Unsendable => Some(invalid),
+            _ => None,
+        })
+}
+
 /// What a meta entry is, for overlay purposes.
 enum Kind {
     Cookie,
@@ -60,7 +80,9 @@ enum Kind {
 }
 
 fn kind(entry: &MetaEntry) -> Kind {
-    // An entry the codec refuses never reaches the wire; it merges by key.
+    // A step's unsendable entry never gets here (the executor fails the step,
+    // see `first_unsendable`); a transport-owned one merges by key and is
+    // dropped at the boundary.
     match classify_response_meta(entry) {
         Ok(Some(ResponseMetaPart::SetCookie(_))) => Kind::Cookie,
         Ok(Some(ResponseMetaPart::Header { name, .. })) => Kind::Header {
