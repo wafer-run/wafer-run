@@ -1,0 +1,6 @@
+{
+  "id": "broken",
+  "name": "FFI flow naming an unregistered block",
+  "version": "0.1.0",
+  "steps": [{ "id": "root", "block": "missing" }]
+}

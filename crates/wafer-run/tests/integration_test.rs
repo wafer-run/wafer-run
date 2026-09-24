@@ -1110,7 +1110,8 @@ async fn test_drop_action() {
 
 #[tokio::test]
 async fn test_execute_nonexistent_flow() {
-    let w = empty_wafer();
+    let mut w = empty_wafer();
+    w.seal().await.expect("seal");
 
     let result = run_flow(&w, "nonexistent", Message::new("test"), b"data".to_vec()).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
@@ -1864,7 +1865,8 @@ async fn test_waferflow_max_steps_limit() {
 
 #[tokio::test]
 async fn test_waferflow_not_found() {
-    let w = empty_wafer();
+    let mut w = empty_wafer();
+    w.seal().await.expect("seal");
     let result = run_flow(&w, "nonexistent", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(

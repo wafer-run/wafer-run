@@ -49,11 +49,19 @@ pub struct WasmiBlock {
     module: Module,
     linker: Linker<WasmiHostState>,
     info_cache: Mutex<Option<BlockInfo>>,
-    /// Interior-mutable capabilities field so the runtime can propagate the
-    /// effective set (`declared ∩ config`) after `resolve()` without reloading
-    /// the WASM module.  Reads are lock-free on uncontended RwLock; the write
-    /// path is exercised at most once per block lifetime (startup).
+    /// The capabilities every host call is checked against. Interior-mutable
+    /// so `seal()` can install the effective set without reloading the WASM
+    /// module. Reads are lock-free on uncontended RwLock; the write path is
+    /// exercised at most once per block lifetime (startup).
     capabilities: parking_lot::RwLock<BlockCapabilities>,
+    /// The upper bound the embedder loaded this block with, if it gave one
+    /// (the `load_with_*` constructors). Fixed at load: every set installed
+    /// through `runtime_capabilities_mut` is intersected with it, so the
+    /// guest's own `BlockInfo::capabilities` declaration can narrow it but
+    /// never widen it. `None` leaves the bound to `seal()`, which takes the
+    /// operator's statement (`capabilities` block config), `none()` when
+    /// there is none.
+    bound: Option<BlockCapabilities>,
     /// Warn-once flag for outbound stripped headers.
     warned_outbound: std::sync::atomic::AtomicBool,
     /// Warn-once flag for inbound stripped headers.
@@ -99,6 +107,13 @@ pub struct WasmiBlock {
 unsafe impl Send for WasmiBlock {}
 unsafe impl Sync for WasmiBlock {}
 
+/// A fresh engine whose `consume_fuel` flag matches `limits.fuel`.
+fn engine_for(limits: ResourceLimits) -> Engine {
+    let mut config = wasmi::Config::default();
+    config.consume_fuel(limits.fuel.consume_fuel());
+    Engine::new(&config)
+}
+
 impl WasmiBlock {
     /// Read a WASM module from disk and compile it (native-only convenience wrapper).
     #[cfg(not(target_arch = "wasm32"))]
@@ -108,15 +123,27 @@ impl WasmiBlock {
         Self::load_from_bytes(&bytes)
     }
 
-    /// Compile a WASM module from raw bytes with unrestricted host capabilities
+    /// Compile a WASM module from raw bytes with no embedder capability bound
     /// and the default per-call resource limits ([`ResourceLimits::default`]:
     /// 100M fuel, 256-page / 16 MiB memory).
+    ///
+    /// The guest's own `BlockInfo::capabilities` declaration is a request,
+    /// never a grant. Without an embedder bound, the guest runs with
+    /// [`BlockCapabilities::none`] until [`Wafer::seal`](crate::Wafer::seal),
+    /// which bounds it by what the operator stated in the block's
+    /// `capabilities` config — every field left out is denied, so with no
+    /// statement it keeps `none()` — and installs that ∩ the declaration.
+    /// An embedder states the bound itself with
+    /// [`load_with_capabilities`](Self::load_with_capabilities), or approves
+    /// exactly what the guest declares with
+    /// [`load_approving_declaration`](Self::load_approving_declaration).
     pub fn load_from_bytes(wasm_bytes: &[u8]) -> Result<Self, RuntimeError> {
         Self::load_from_bytes_with_limits(wasm_bytes, ResourceLimits::default())
     }
 
-    /// Compile a WASM module from raw bytes with unrestricted host capabilities
-    /// and an explicit per-call [`FuelLimit`] (default memory cap).
+    /// Compile a WASM module from raw bytes with no embedder capability bound
+    /// (see [`load_from_bytes`](Self::load_from_bytes)) and an explicit
+    /// per-call [`FuelLimit`] (default memory cap).
     ///
     /// Thin wrapper over [`load_from_bytes_with_limits`](Self::load_from_bytes_with_limits)
     /// for callers that only need to tune fuel. To raise the memory cap as
@@ -134,9 +161,9 @@ impl WasmiBlock {
         )
     }
 
-    /// Compile a WASM module from raw bytes with unrestricted host capabilities
-    /// and explicit per-call [`ResourceLimits`] (fuel budget + linear-memory
-    /// page cap).
+    /// Compile a WASM module from raw bytes with no embedder capability bound
+    /// (see [`load_from_bytes`](Self::load_from_bytes)) and explicit per-call
+    /// [`ResourceLimits`] (fuel budget + linear-memory page cap).
     ///
     /// This is the single entry point for trusted single-user embedders (e.g.
     /// gizza's native CLI and browser runtime) to set both bounds in one call —
@@ -150,15 +177,23 @@ impl WasmiBlock {
         wasm_bytes: &[u8],
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
-        Self::load_with_capabilities_and_limits(
+        Self::compile(
+            &engine_for(limits),
             wasm_bytes,
-            BlockCapabilities::unrestricted(),
+            BlockCapabilities::none(),
+            None,
             limits,
         )
     }
 
-    /// Compile a WASM module with a custom capability set (filters host imports)
-    /// and the default per-call resource limits ([`ResourceLimits::default`]).
+    /// Compile a WASM module under the capability set `caps` and the default
+    /// per-call resource limits ([`ResourceLimits::default`]).
+    ///
+    /// `caps` is the guest's upper bound for its whole lifetime: it is what
+    /// the guest runs under until [`Wafer::seal`](crate::Wafer::seal), and
+    /// `seal()` narrows it to `caps ∩ declared ∩ config`, where `declared` is
+    /// the guest's own `BlockInfo::capabilities`. A guest cannot declare its
+    /// way past `caps`.
     pub fn load_with_capabilities(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
@@ -166,23 +201,22 @@ impl WasmiBlock {
         Self::load_with_capabilities_and_limits(wasm_bytes, caps, ResourceLimits::default())
     }
 
-    /// Compile a WASM module with a custom capability set and explicit per-call
-    /// [`ResourceLimits`]. Creates a fresh engine whose `consume_fuel` flag
-    /// matches the requested fuel mode.
+    /// Compile a WASM module under the capability bound `caps` (see
+    /// [`load_with_capabilities`](Self::load_with_capabilities)) and explicit
+    /// per-call [`ResourceLimits`]. Creates a fresh engine whose
+    /// `consume_fuel` flag matches the requested fuel mode.
     pub fn load_with_capabilities_and_limits(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
-        let mut config = wasmi::Config::default();
-        config.consume_fuel(limits.fuel.consume_fuel());
-        let engine = Engine::new(&config);
-        Self::load_with_engine_and_limits(&engine, wasm_bytes, caps, limits)
+        Self::load_with_engine_and_limits(&engine_for(limits), wasm_bytes, caps, limits)
     }
 
-    /// Compile a WASM module reusing an existing `wasmi::Engine` (lets callers
-    /// share fuel config) with the default per-call resource limits
-    /// ([`ResourceLimits::default`]).
+    /// Compile a WASM module under the capability bound `caps` (see
+    /// [`load_with_capabilities`](Self::load_with_capabilities)), reusing an
+    /// existing `wasmi::Engine` (lets callers share fuel config), with the
+    /// default per-call resource limits ([`ResourceLimits::default`]).
     ///
     /// The passed-in engine must already have `consume_fuel(true)` (the default
     /// for engines created by this loader and by `Wafer::wasm_engine`).
@@ -194,8 +228,9 @@ impl WasmiBlock {
         Self::load_with_engine_and_limits(engine, wasm_bytes, caps, ResourceLimits::default())
     }
 
-    /// Compile a WASM module reusing an existing `wasmi::Engine` with explicit
-    /// per-call [`ResourceLimits`].
+    /// Compile a WASM module under the capability bound `caps` (see
+    /// [`load_with_capabilities`](Self::load_with_capabilities)), reusing an
+    /// existing `wasmi::Engine`, with explicit per-call [`ResourceLimits`].
     ///
     /// The caller is responsible for ensuring the engine's `consume_fuel` flag
     /// matches `limits.fuel` (`true` for [`FuelLimit::Metered`], `false` for
@@ -207,6 +242,59 @@ impl WasmiBlock {
         engine: &Engine,
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
+        limits: ResourceLimits,
+    ) -> Result<Self, RuntimeError> {
+        Self::compile(engine, wasm_bytes, caps.clone(), Some(caps), limits)
+    }
+
+    /// Compile a WASM module whose embedder approves exactly the capabilities
+    /// the guest declares in its `BlockInfo::capabilities` (`none()` when it
+    /// declares none): the declaration becomes the bound, as if passed to
+    /// [`load_with_capabilities_and_limits`](Self::load_with_capabilities_and_limits).
+    ///
+    /// This trusts the guest's request, so it is for guests the embedder
+    /// has vetted or built itself — never for untrusted uploads, which must
+    /// be loaded with a bound the embedder chose.
+    pub fn load_approving_declaration(
+        wasm_bytes: &[u8],
+        limits: ResourceLimits,
+    ) -> Result<Self, RuntimeError> {
+        let mut block = Self::compile(
+            &engine_for(limits),
+            wasm_bytes,
+            BlockCapabilities::none(),
+            None,
+            limits,
+        )?;
+        let declared = block
+            .info()
+            .capabilities
+            .unwrap_or_else(BlockCapabilities::none);
+        *block.capabilities.get_mut() = declared.clone();
+        block.bound = Some(declared);
+        Ok(block)
+    }
+
+    /// Compile a block `seal()` downloaded from the registry. No embedder
+    /// chose its capabilities, so, like
+    /// [`load_from_bytes`](Self::load_from_bytes), it runs with none until
+    /// `seal()` bounds it by the operator's `capabilities` config.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn load_downloaded(
+        engine: &Engine,
+        wasm_bytes: &[u8],
+        limits: ResourceLimits,
+    ) -> Result<Self, RuntimeError> {
+        Self::compile(engine, wasm_bytes, BlockCapabilities::none(), None, limits)
+    }
+
+    /// The one constructor body: `caps` is what the guest runs under until
+    /// `seal()`, `bound` what `runtime_capabilities_mut` intersects with.
+    fn compile(
+        engine: &Engine,
+        wasm_bytes: &[u8],
+        caps: BlockCapabilities,
+        bound: Option<BlockCapabilities>,
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
         let module = Module::new(engine, wasm_bytes)
@@ -221,6 +309,7 @@ impl WasmiBlock {
             linker,
             info_cache: Mutex::new(None),
             capabilities: parking_lot::RwLock::new(caps),
+            bound,
             warned_outbound: std::sync::atomic::AtomicBool::new(false),
             warned_inbound: std::sync::atomic::AtomicBool::new(false),
             warned_forged_identity: std::sync::atomic::AtomicBool::new(false),
@@ -1143,8 +1232,16 @@ impl Block for WasmiBlock {
         Some(self.capabilities.read().clone())
     }
 
+    fn capability_bound(&self) -> Option<BlockCapabilities> {
+        self.bound.clone()
+    }
+
     fn runtime_capabilities_mut(&self, new: BlockCapabilities) {
-        *self.capabilities.write() = new;
+        let enforced = match &self.bound {
+            Some(bound) => bound.intersect(&new),
+            None => new,
+        };
+        *self.capabilities.write() = enforced;
     }
 
     /// Expose `self` as `&dyn Any` so the runtime can downcast `Arc<dyn Block>`
@@ -1224,6 +1321,45 @@ mod capabilities_update_tests {
         );
     }
 
+    fn minimal_guest() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+              (memory (export "memory") 1)
+              (func (export "__wafer_info") (result i64) i64.const 0))"#,
+        )
+        .expect("WAT should parse")
+    }
+
+    /// The capabilities an embedder loads a block with are an upper bound:
+    /// installing a wider set leaves the block at the bound.
+    #[test]
+    fn runtime_capabilities_mut_never_widens_past_the_load_bound() {
+        use wafer_block::Block;
+        let block = WasmiBlock::load_with_capabilities(&minimal_guest(), BlockCapabilities::none())
+            .expect("minimal WAT module should load");
+
+        let mut wider = BlockCapabilities::unrestricted();
+        wider.headers.readable = vec!["authorization".to_string()];
+        block.runtime_capabilities_mut(wider);
+
+        assert_eq!(block.block_capabilities(), Some(BlockCapabilities::none()));
+    }
+
+    /// Without a load bound the block enforces the set installed as given
+    /// (header opt-ins included): `seal()` has already bounded it by the
+    /// operator's statement.
+    #[test]
+    fn runtime_capabilities_mut_installs_the_set_on_an_unbounded_block() {
+        use wafer_block::Block;
+        let block = WasmiBlock::load_from_bytes(&minimal_guest()).expect("loads");
+
+        let mut declared = BlockCapabilities::none();
+        declared.headers.readable = vec!["authorization".to_string()];
+        block.runtime_capabilities_mut(declared.clone());
+
+        assert_eq!(block.block_capabilities(), Some(declared));
+    }
+
     /// A guest that imports `wasi_snapshot_preview1::sched_yield` (pulled in by
     /// pure-Rust crates whose spin/back-off paths reference
     /// `std::thread::yield_now`, e.g. `scraper`/`ahash`) must link and
@@ -1282,7 +1418,8 @@ mod capabilities_update_tests {
             (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
         )"#;
         let wasm = wat::parse_str(wat).unwrap();
-        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted()).unwrap();
         let (store, _inst) = block.instantiate_for_test().unwrap();
         assert_eq!(store.data().host_codec, HostCodec::Rmp);
     }
@@ -1297,7 +1434,8 @@ mod capabilities_update_tests {
             (func (export "__wafer_host_codec") (result i32) i32.const 1)
         )"#;
         let wasm = wat::parse_str(wat).unwrap();
-        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted()).unwrap();
         let (store, _inst) = block.instantiate_for_test().unwrap();
         assert_eq!(store.data().host_codec, HostCodec::Json);
     }
@@ -1328,7 +1466,8 @@ mod capabilities_update_tests {
                 (i32.const 1))
         )"#;
         let wasm = wat::parse_str(wat).unwrap();
-        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted()).unwrap();
         let (store, _inst) = block.instantiate_for_test().unwrap();
         assert_eq!(store.data().host_codec, HostCodec::Json);
         assert_eq!(
@@ -1388,7 +1527,8 @@ mod capabilities_update_tests {
 
     /// Run the attach probe and return the status code the guest observed.
     fn run_attach_probe(wasm: &[u8]) -> i32 {
-        let block = WasmiBlock::load_from_bytes(wasm).expect("probe module should load");
+        let block = WasmiBlock::load_with_capabilities(wasm, BlockCapabilities::unrestricted())
+            .expect("probe module should load");
         let (mut store, instance) = block
             .instantiate_for_test()
             .expect("probe module should instantiate");
@@ -1461,7 +1601,8 @@ mod capabilities_update_tests {
         };
 
         let run = |wasm: &[u8]| -> i64 {
-            let block = WasmiBlock::load_from_bytes(wasm).expect("probe module should load");
+            let block = WasmiBlock::load_with_capabilities(wasm, BlockCapabilities::unrestricted())
+                .expect("probe module should load");
             let (mut store, instance) = block
                 .instantiate_for_test()
                 .expect("probe module should instantiate");
@@ -1570,7 +1711,8 @@ mod capabilities_update_tests {
                 i64.const 0)
         )"#;
         let wasm = wat::parse_str(wat).expect("WAT should parse");
-        let block = WasmiBlock::load_from_bytes(&wasm).expect("probe module should load");
+        let block = WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted())
+            .expect("probe module should load");
         let (mut store, instance) = block
             .instantiate_for_test()
             .expect("probe module should instantiate");
@@ -1626,7 +1768,8 @@ mod capabilities_update_tests {
             (func (export "__wafer_host_codec") (result i32) i32.const 7)
         )"#;
         let wasm = wat::parse_str(wat).unwrap();
-        let block = WasmiBlock::load_from_bytes(&wasm).unwrap();
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted()).unwrap();
         let err = block.instantiate_for_test().err().expect("must refuse");
         assert!(err.to_string().contains("__wafer_host_codec"), "{err}");
     }

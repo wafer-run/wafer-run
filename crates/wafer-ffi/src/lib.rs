@@ -26,7 +26,7 @@ use std::{
 };
 
 use tokio::sync::RwLock;
-use wafer_run::{Message, StaticConfigSource, Wafer};
+use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 
 /// Callback invoked when an async FFI op completes.
 ///
@@ -186,14 +186,18 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 }
 
 /// Shared body of `wafer_resolve` / `wafer_start`: spawn `seal()` on the
-/// internal tokio runtime and report completion via the callback. The two
-/// exports are ABI-stable aliases for the same operation; `panic_label`
-/// keeps their panic messages distinguishable.
+/// internal tokio runtime and report completion via the callback.
+/// `wafer_resolve` always seals (`only_if_unsealed = false`), so a second
+/// resolve reports `AlreadySealed`; `wafer_start` seals only a runtime that
+/// is not sealed yet, so resolve-then-start seals once, and re-reports the
+/// failure of a resolve that failed. `panic_label` keeps their panic
+/// messages distinguishable.
 unsafe fn spawn_seal(
     w: *mut WaferRuntime,
     cb: WaferDoneCb,
     user_data: *mut c_void,
     panic_label: &str,
+    only_if_unsealed: bool,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
@@ -207,10 +211,16 @@ unsafe fn spawn_seal(
         let inner = runtime.inner.clone();
         let ud = UserData(user_data);
         runtime.rt.spawn(async move {
-            let result = inner.write().await.seal().await;
+            let mut wafer = inner.write().await;
+            let result = match (only_if_unsealed, wafer.seal_state().clone()) {
+                (true, SealState::Sealed) => Ok(()),
+                (true, SealState::Failed(reason)) => Err(reason),
+                _ => wafer.seal().await.map_err(|e| e.to_string()),
+            };
+            drop(wafer);
             let err = match result {
                 Ok(()) => None,
-                Err(e) => Some(error_cstring(&e.to_string())),
+                Err(reason) => Some(error_cstring(&reason)),
             };
             invoke_done(cb, err, ud);
         });
@@ -225,7 +235,8 @@ unsafe fn spawn_seal(
 }
 
 /// Resolve all block references in registered flows (async). This is the
-/// canonical seal entry point; `wafer_start` is an ABI-compatible alias.
+/// canonical seal entry point. A runtime is sealed once: a second
+/// `wafer_resolve` reports an error.
 ///
 /// Returns immediately; invokes `cb` when resolution (`seal()`) completes.
 /// On success the callback's `result` is NULL; on failure it is a JSON
@@ -244,23 +255,24 @@ pub unsafe extern "C" fn wafer_resolve(
     cb: WaferDoneCb,
     user_data: *mut c_void,
 ) {
-    spawn_seal(w, cb, user_data, "wafer_resolve");
+    spawn_seal(w, cb, user_data, "wafer_resolve", false);
 }
 
 /// Start the runtime without spawning block listeners (async).
 ///
-/// ABI-compatible alias of [`wafer_resolve`] — both perform `seal()` and
-/// report completion identically. The alias is kept because existing
-/// embedders (e.g. the Go binding, `go/wafer-run-go`) link against both
-/// symbols. Prefer `wafer_resolve` in new code; this alias may be dropped
-/// in the next ABI revision.
+/// Seals the runtime unless [`wafer_resolve`] already did, and reports
+/// completion the same way — so resolve-then-start seals once. After a
+/// failed `wafer_resolve` it reports that failure again. Kept because
+/// existing embedders (e.g. the Go binding, `go/wafer-run-go`) link against
+/// both symbols. Prefer `wafer_resolve` in new code; this entry point may be
+/// dropped in the next ABI revision.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(
     w: *mut WaferRuntime,
     cb: WaferDoneCb,
     user_data: *mut c_void,
 ) {
-    spawn_seal(w, cb, user_data, "wafer_start");
+    spawn_seal(w, cb, user_data, "wafer_start", true);
 }
 
 /// Stop the runtime and shut down all block instances (async).

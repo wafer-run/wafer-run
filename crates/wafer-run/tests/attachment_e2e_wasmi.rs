@@ -44,7 +44,8 @@ fn attachment_dispatch_guest_wasm() -> Vec<u8> {
 #[tokio::test]
 async fn wasmi_guest_attaches_and_callee_looks_up() {
     let wasm = attachment_dispatch_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load attachment-dispatch guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load attachment-dispatch guest wasm");
 
     let mut wafer = Wafer::builder()
         .disable_inventory()

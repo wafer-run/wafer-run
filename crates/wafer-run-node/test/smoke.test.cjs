@@ -22,11 +22,11 @@ const FLOW = {
   steps: [{ id: 'root', block: 'example/echo' }],
 };
 
-function writeFlow(t) {
+function writeFlow(t, flow = FLOW) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wafer-run-node-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'flow.json');
-  fs.writeFileSync(file, JSON.stringify(FLOW));
+  fs.writeFileSync(file, JSON.stringify(flow));
   return file;
 }
 
@@ -66,4 +66,39 @@ test('register, resolve, run and stop round-trip through the addon', async (t) =
 test('run rejects a message that is not the runtime Message shape', async () => {
   const w = new WaferRuntime();
   await assert.rejects(w.run('smoke', '{"kind":"x"}'), /invalid Message JSON/);
+});
+
+test('start after a failed resolve rejects with the same failure', async (t) => {
+  const w = new WaferRuntime();
+  // The one step names a block nobody registers, so resolving fails.
+  await w.register(
+    'broken',
+    writeFlow(t, { ...FLOW, id: 'broken', steps: [{ id: 'root', block: 'missing' }] }),
+  );
+  const resolveErr = await w.resolve().then(
+    () => assert.fail('resolve must fail'),
+    (e) => e,
+  );
+  await assert.rejects(w.start(), (e) => e.message === resolveErr.message);
+});
+
+test('run refuses a runtime that did not seal', async (t) => {
+  const message = JSON.stringify({ kind: 'smoke.kind', meta: [] });
+
+  const w = new WaferRuntime();
+  await w.register('example/echo', ECHO_WASM);
+  await w.register('smoke', writeFlow(t));
+  const unsealed = JSON.parse(await w.run('smoke', message));
+  assert.equal(unsealed.action, 'error', JSON.stringify(unsealed));
+  assert.match(unsealed.error.message, /not sealed/);
+
+  const broken = new WaferRuntime();
+  await broken.register(
+    'broken',
+    writeFlow(t, { ...FLOW, id: 'broken', steps: [{ id: 'root', block: 'missing' }] }),
+  );
+  await assert.rejects(broken.resolve());
+  const failed = JSON.parse(await broken.run('broken', message));
+  assert.equal(failed.action, 'error', JSON.stringify(failed));
+  assert.match(failed.error.message, /failed to seal/);
 });

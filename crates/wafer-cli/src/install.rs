@@ -145,6 +145,7 @@ pub(crate) fn lockfile_entry(
         sha256: sha256.into(),
         wasm_sha256: wasm_sha256.into(),
         source: format!("registry+{registry}"),
+        capabilities: None,
     }
 }
 
@@ -398,7 +399,7 @@ pub async fn install_cache_only(
     // Step 5: update lockfile. This must happen while we still hold the
     // flock, otherwise another installer could acquire the lock, write its
     // own entry, and our write below would silently overwrite it.
-    lf.insert_or_replace(lockfile_entry(
+    lf.record_resolved(lockfile_entry(
         registry,
         org,
         block,
@@ -754,6 +755,7 @@ mod tests {
             sha256: "zzz".into(),
             wasm_sha256: "www".into(),
             source: "registry+https://x".into(),
+            capabilities: None,
         });
         assert_eq!(
             cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap(),

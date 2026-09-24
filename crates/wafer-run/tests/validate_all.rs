@@ -103,7 +103,7 @@ async fn context_validate_skips_alias_entries() {
         .unwrap();
     wafer.add_alias("@a", "test/a").expect("add_alias");
     // Populate all_blocks (registered blocks + the "@a" alias key).
-    wafer.rebuild_all_blocks();
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     let out = wafer

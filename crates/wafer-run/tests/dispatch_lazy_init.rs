@@ -80,9 +80,8 @@ async fn run_block_initializes_target_on_first_call() {
     let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
     wafer.register_block("test/foo", block).expect("register");
-    // run_block resolves through all_blocks; populate it without going
-    // through seal() so this test exercises lazy init in isolation.
-    wafer.rebuild_all_blocks();
+    // seal() dispatches no Init — the first run_block below is what inits.
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     // First dispatch: triggers init then handle.
@@ -119,7 +118,7 @@ async fn run_block_skips_handle_if_init_fails() {
     let cfg_src: Arc<dyn ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
     wafer.register_block("test/bad", block).expect("register");
-    wafer.rebuild_all_blocks();
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     let out = wafer
@@ -203,7 +202,7 @@ async fn call_block_initializes_callee_lazily() {
     wafer
         .register_block("test/callee", callee)
         .expect("register callee");
-    wafer.rebuild_all_blocks();
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     let _out = wafer
@@ -351,7 +350,7 @@ async fn aliased_callee_node_id_is_resolved_canonical_name() {
     wafer
         .add_alias("@callee-alias", "test/callee")
         .expect("alias");
-    wafer.rebuild_all_blocks();
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     let _out = wafer
@@ -450,7 +449,7 @@ async fn transitive_init_cycle_surfaces_failed_precondition() {
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
     wafer.register_block("test/a", a).expect("register a");
     wafer.register_block("test/b", b).expect("register b");
-    wafer.rebuild_all_blocks();
+    wafer.seal().await.expect("seal");
     let wafer = Arc::new(wafer);
 
     let out = wafer

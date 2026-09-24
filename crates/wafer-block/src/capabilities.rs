@@ -184,7 +184,7 @@ pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
 /// declares it here, in its `BlockInfo::capabilities`, so the need is visible
 /// wherever the block's `BlockInfo` is shown and operators can narrow it
 /// through the `capabilities` block-config subkey.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderPolicy {
     /// Sensitive inbound headers the block may READ.
     /// Example: `["authorization"]`.
@@ -206,7 +206,7 @@ pub struct HeaderPolicy {
 }
 
 /// BlockCapabilities declares what platform services a WASM block may access.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockCapabilities {
     /// Allowed database collections: `None` = none, `Any` = all, `Only([...])`
     /// = exactly these (empty `Only` = none). Replaces the old `HashSet` where
@@ -603,6 +603,38 @@ pub struct ConfigCapabilityOverrides {
     pub headers: Option<HeaderPolicyOverrides>,
 }
 
+impl ConfigCapabilityOverrides {
+    /// These overrides read as the operator's full statement of what a block
+    /// may have: every field the operator wrote, and
+    /// [`BlockCapabilities::none`]'s value for every field they did not.
+    ///
+    /// This is the bound of a WASM block no embedder bounded (see
+    /// `WasmiBlock::load_from_bytes`) — omitting a field denies it, whereas
+    /// a narrowing of a declaration ([`BlockCapabilities::apply_config_overrides`])
+    /// omitting a field keeps it. An empty statement is `none()`.
+    pub fn as_stated_bound(&self) -> BlockCapabilities {
+        let none = BlockCapabilities::none();
+        let h = self.headers.as_ref();
+        BlockCapabilities {
+            collections: self.collections.clone().unwrap_or(none.collections),
+            raw_sql: self.raw_sql.unwrap_or(none.raw_sql),
+            ddl: self.ddl.unwrap_or(none.ddl),
+            schema: self.schema.unwrap_or(none.schema),
+            storage_folders: self.storage_folders.clone().unwrap_or(none.storage_folders),
+            crypto: self.crypto.unwrap_or(none.crypto),
+            network: self.network.clone().unwrap_or(none.network),
+            config: self.config.clone().unwrap_or(none.config),
+            vector_indexes: self.vector_indexes.clone().unwrap_or(none.vector_indexes),
+            callable_blocks: self.callable_blocks.clone().unwrap_or(none.callable_blocks),
+            headers: HeaderPolicy {
+                readable: h.and_then(|h| h.readable.clone()).unwrap_or_default(),
+                writable: h.and_then(|h| h.writable.clone()).unwrap_or_default(),
+                masked: h.and_then(|h| h.masked.clone()).unwrap_or_default(),
+            },
+        }
+    }
+}
+
 /// Sparse header-policy overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HeaderPolicyOverrides {
@@ -678,6 +710,24 @@ fn union_vec(a: &[String], b: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An omitted field is denied, a stated one is taken as written.
+    #[test]
+    fn a_stated_bound_denies_what_it_does_not_state() {
+        assert_eq!(
+            ConfigCapabilityOverrides::default().as_stated_bound(),
+            BlockCapabilities::none()
+        );
+        let stated: ConfigCapabilityOverrides = serde_json::from_value(serde_json::json!({
+            "collections": { "Only": ["acme__w__items"] },
+            "headers": { "readable": ["Authorization"] },
+        }))
+        .unwrap();
+        let mut expected = BlockCapabilities::none();
+        expected.collections = Allowlist::Only(["acme__w__items".to_string()].into());
+        expected.headers.readable = vec!["authorization".to_string()];
+        assert_eq!(stated.as_stated_bound(), expected);
+    }
 
     #[test]
     fn header_policy_defaults_empty() {

@@ -44,7 +44,7 @@ pub use runtime::{
     },
     slot::{BlockSlot, InitError, InitializedState},
     wasm_state::{FuelLimit, ResourceLimits, DEFAULT_FUEL, DEFAULT_MAX_WASM_MEMORY_PAGES},
-    BrokenBlock, ValidationReport, Wafer,
+    BrokenBlock, SealState, ValidationReport, Wafer,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use wafer_block::expand_env_vars;

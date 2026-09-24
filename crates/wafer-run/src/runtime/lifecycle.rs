@@ -7,11 +7,9 @@ use super::Wafer;
 /// Collect the `BlockInfo` of every registered block into a Vec sorted by
 /// registration name, so consumers (admin pages, snapshot consumers) see
 /// deterministic order regardless of the underlying HashMap's SipHash
-/// randomisation. `register_block` refuses any block whose `info().name`
-/// differs from its registration name, so each such entry's `name` is that
-/// key. A block `seal()` downloaded from the registry is the exception:
-/// `register_remote_block` skips that check, so its entry carries whatever
-/// name it reports.
+/// randomisation. Registration — of a code-registered block or one `seal()`
+/// downloads — refuses any block whose `info().name` differs from its
+/// registration name, so each entry's `name` is that key.
 pub(crate) fn sorted_snapshot<'a>(
     blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn Block>)>,
 ) -> Vec<BlockInfo> {
@@ -283,6 +281,10 @@ impl Wafer {
     /// `wafer-run/http-listener` read configuration in `Init` and use it in
     /// `bind()` (e.g. the TCP listen address), so `start()` must guarantee
     /// every block is fully initialized before `bind()` runs.
+    ///
+    /// `start()` seals the runtime itself, so it is called on an unsealed
+    /// runtime: after a direct [`Wafer::seal`] it returns
+    /// [`RuntimeError::AlreadySealed`].
     ///
     /// Lazy init semantics still apply to the dispatch paths
     /// ([`Wafer::run_block`], `call_block`) and to consumers that call

@@ -85,6 +85,14 @@ pub struct LockfilePackage {
     pub wasm_sha256: String,
     /// Provenance in Cargo convention: `registry+<base-url>` or `path+<dir>`.
     pub source: String,
+    /// The capabilities the operator approves for this block: the upper
+    /// bound the runtime loads it with, which the guest's own declaration
+    /// can only narrow. Absent, the block's bound is its `capabilities`
+    /// block config, and `none()` without one. Written by the operator, not
+    /// by `wafer install`, which carries it forward when it reinstalls or
+    /// upgrades the block ([`Lockfile::record_resolved`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::BlockCapabilities>,
 }
 
 /// In-memory form of a `wafer.lock` file.
@@ -106,6 +114,20 @@ impl Lockfile {
             version: SCHEMA_VERSION,
             packages: Vec::new(),
         }
+    }
+
+    /// Record a package an installer just resolved: [`insert_or_replace`]
+    /// with the operator-owned fields of an existing entry for the same name
+    /// carried forward — its `capabilities` bound, which no installer
+    /// writes, so installing or upgrading a block keeps what the operator
+    /// approved for it.
+    ///
+    /// [`insert_or_replace`]: Self::insert_or_replace
+    pub fn record_resolved(&mut self, mut pkg: LockfilePackage) {
+        if let Some(existing) = self.packages.iter().find(|p| p.name == pkg.name) {
+            pkg.capabilities = existing.capabilities.clone();
+        }
+        self.insert_or_replace(pkg);
     }
 
     /// Insert or replace a package entry (keyed by `name`), keeping
@@ -165,6 +187,7 @@ mod tests {
             sha256: "a".repeat(64),
             wasm_sha256: "b".repeat(64),
             source: "registry+https://wafer.run".into(),
+            capabilities: None,
         }
     }
 

@@ -45,7 +45,7 @@ async fn start_with(limits: ResourceLimits) -> Arc<Wafer> {
         .disable_lockfile()
         .build()
         .expect("Wafer::build");
-    let block = WasmiBlock::load_from_bytes_with_limits(&guest_wasm(), limits)
+    let block = WasmiBlock::load_approving_declaration(&guest_wasm(), limits)
         .expect("load hostile-boundary-guest wasm");
     wafer
         .register_block(GUEST, Arc::new(block))

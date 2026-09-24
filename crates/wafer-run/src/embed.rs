@@ -128,7 +128,11 @@ pub async fn output_to_json(output: OutputStream) -> String {
 /// If `path` ends with `.wasm`, loads the file as a WASM block and registers
 /// it under `name`, which must equal the name the guest reports from
 /// `__wafer_info` (registration refuses a mismatch); otherwise reads the file as a WaferFlow JSON definition
-/// (the flow's id comes from the JSON itself, not from `name`). This
+/// (the flow's id comes from the JSON itself, not from `name`). A WASM block
+/// loaded here has no embedder capability bound
+/// ([`WasmiBlock::load`](crate::WasmiBlock::load)), and the bindings have no
+/// way to state its `capabilities` config, so it runs with
+/// `BlockCapabilities::none()` whatever it declares. This
 /// extension-dispatch rule is owned here so every embedder binding resolves
 /// paths identically.
 ///

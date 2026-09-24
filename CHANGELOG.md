@@ -127,10 +127,95 @@
   it is a request, not a grant: an embedder that loads untrusted guests MUST
   approve or narrow it (the `capabilities` block-config subkey, or refusing
   the guest — impresspress refuses any sandbox guest that declares one,
-  `CAP_HEADERS`). Note that `Wafer::seal` currently replaces the
-  capabilities passed to `WasmiBlock::load_with_capabilities*` with the
-  guest's declared ones (∩ config), so a loader-supplied cap does not bound
-  the declaration yet; WR-09 fixes that.
+  `CAP_HEADERS`), or load it with `WasmiBlock::load_with_capabilities*`,
+  whose capabilities bound what the guest's declaration can obtain (see the
+  capability-bound entry below).
+- The capabilities an embedder loads a WASM guest with are an upper bound.
+  `Wafer::seal` computed each block's capabilities from the guest's own
+  `__wafer_info` declaration (∩ config) and installed them, replacing the set
+  passed to `WasmiBlock::load_with_capabilities*` /
+  `load_with_engine*` — so a guest loaded with `BlockCapabilities::none()`
+  that declared `collections: Any`, raw SQL or a header opt-in ran with them.
+  Every WASM guest now has a bound someone other than the guest stated, and
+  enforces `bound ∩ declared ∩ config`; `Wafer::effective_capabilities`
+  reports that set. The bound is the embedder's load capabilities
+  (`load_with_capabilities*`, `load_with_engine*`), or a `wafer.lock`
+  entry's new optional `capabilities` table (`LockfilePackage::capabilities`,
+  written by the operator, not `wafer install`); a guest with neither —
+  `WasmiBlock::load`, `load_from_bytes*`, a lockfile entry without
+  `capabilities`, a block `seal()` downloads, and every `.wasm` registered
+  through the Node/Go/C bindings — is bounded by its `capabilities` block
+  config read as a full statement
+  (`ConfigCapabilityOverrides::as_stated_bound`: an omitted field is denied),
+  and runs with `BlockCapabilities::none()` when there is none. Such a guest
+  also runs with `none()` before `seal()` (it ran `unrestricted()`).
+  **An existing `capabilities` narrowing on such a guest changes meaning**:
+  `{ "collections": { "Only": [...] } }` used to narrow only `collections`
+  and leave every other declared field as declared; it is now the whole
+  bound, so every field it does not list — storage, config, network,
+  `callable_blocks`, headers, `schema` — is denied. Restate each field the
+  guest needs. **An
+  embedder that loaded guests with `load_from_bytes*` and relied on their
+  declared capabilities must now state them**: pass a bound to
+  `load_with_capabilities*`, state them in the block's `capabilities`
+  config, or — for a guest it vetted or built — use the new
+  `WasmiBlock::load_approving_declaration(bytes, limits)`, which makes the
+  declaration the bound. Native discovery that loads its own built blocks
+  with `load_from_bytes` — impresspress's
+  (`impresspress-core/src/builder/registration.rs`) — must switch to
+  `WasmiBlock::load_approving_declaration(bytes, wafer.resource_limits())`,
+  or its blocks lose every capability. `wafer install` carries an entry's
+  `capabilities` forward when it reinstalls or upgrades the block
+  (`Lockfile::record_resolved`). New `Block::capability_bound` (default `None`)
+  reports a block's embedder bound; `runtime_capabilities_mut` documents
+  the rule. `BlockCapabilities` and `HeaderPolicy` derive `PartialEq`/`Eq`.
+- `Wafer::seal` runs once. A second call — after a successful seal or a
+  failed one — returns the new `RuntimeError::AlreadySealed`, and
+  `Wafer::start`/`start_with_priority`, which seal, refuse a runtime already
+  sealed. A second pass recomputed capabilities after the first had consumed
+  each block config's `capabilities` narrowing, widening every narrowed WASM
+  block back to its declaration; and a seal refused for rejected grants could
+  be retried into success, since the refusal drained the rejections. New
+  `Wafer::seal_state()` returns the outcome (`SealState::Unsealed`, `Sealed`
+  or `Failed(reason)`). The Node binding's `start()` and the C ABI's
+  `wafer_start` (Go `Start`) seal only a runtime `resolve()` has not, and
+  after a failed `resolve()` report that failure again rather than start; a
+  second `resolve()` / `wafer_resolve` reports `AlreadySealed`. Top-level
+  dispatch — `Wafer::run`, `Wafer::run_block` (so `RuntimeHandle`, the
+  Node `run()` and the C `wafer_run` / Go `Run`) — now answers a
+  `FailedPrecondition` error unless `seal()` succeeded: an unsealed runtime
+  ran blocks under their load-time capabilities with no grant gate, and a
+  failed seal left it half-built. Embedders and tests that dispatched
+  without sealing must call `seal()` (or `start()`) first.
+  `Wafer::rebuild_all_blocks`, whose only use was populating the dispatch
+  map without sealing, is removed; `seal()` does it.
+- A block `seal()` downloads from the registry is admitted like a
+  code-registered one. It is registered under its unversioned `{org}/{block}`
+  (a version selects the artifact; the block's tables, config keys and grants
+  belong to `{org}/{block}` whatever version runs), must report that name
+  (`BlockNameMismatch`), and passes `BlockInfo::validate`, including the
+  config-key prefix rule — it could declare another block's secret, or an
+  unprefixed infrastructure key, and receive its value in its `Init`
+  payload. A versioned reference (`acme/widget@1.2.0`) becomes an alias of
+  the identity, aliases that targeted it are retargeted, and block config
+  written under it becomes the block's config (config under both names is a
+  `Config` error). One runtime holds one version of a block: a second
+  version, or a reference whose name a registered block already has, is
+  `DuplicateBlock` — refused before anything is fetched, as are a reference
+  naming the admin block and one whose name or versioned reference is
+  already an operator alias (`Config`; an alias is never overwritten). Blocks named only by a flow step, route or block config
+  are now downloaded and registered before the grant gate and the capability
+  computation, so their rejected grants refuse boot (`GrantsRejected`)
+  instead of being dropped, and they get effective capabilities (they kept
+  none). `block_infos()` and the startup snapshot therefore carry the
+  registration name for every block.
+- The `{ORG}__{BLOCK}__` config-key prefix rule moved into
+  `BlockInfo::validate`, which now takes the registration name:
+  `validate(&self, registered_name: &str)`, failing with the new
+  `BlockInfoError::ConfigVarPrefix { block, key, prefix }`.
+  `RuntimeError::ConfigVarPrefix` is removed — registration reports the
+  failure as `RuntimeError::InvalidBlockInfo`. The prefix derivation is public
+  as `BlockInfo::config_var_prefix(block_name)`.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`

@@ -8,13 +8,14 @@
 /// The variants fall into three domains, marked by the section comments below:
 ///
 /// - **Registration** (`DuplicateBlock`, `InvalidBlockName`, `BlockNameMismatch`,
-///   `ConfigVarPrefix`, `Inventory`): raised while blocks are being added to a [`crate`]-level
-///   registry, before the runtime is sealed. They name the offending block so
-///   the misconfiguration can be fixed at its source.
-/// - **Boot / seal-time** (`GrantsRejected`, `BlocksNotFound`,
-///   `DuplicateToolNames`): raised once,
+///   `InvalidBlockInfo`, `Inventory`): raised while blocks are being added to a [`crate`]-level
+///   registry — by the embedder, or by `seal()` for a block it downloads. They
+///   name the offending block so the misconfiguration can be fixed at its
+///   source.
+/// - **Boot / seal-time** (`AlreadySealed`, `GrantsRejected`, `BlocksNotFound`,
+///   `DuplicateToolNames`): raised
 ///   during `Wafer::start()` / `seal()`, after all blocks are registered and
-///   the link graph is validated as a whole. These are the *aggregating*
+///   the link graph is validated as a whole. All but `AlreadySealed` are the *aggregating*
 ///   variants: each wraps a `Vec` and renders every item through
 ///   [`render_boot_error_list`] so an operator sees all rejections /
 ///   unresolved references in a single error rather than fixing them one at a
@@ -56,22 +57,11 @@ pub enum RuntimeError {
         reported: String,
     },
 
-    /// A block's config var doesn't match its expected prefix.
-    #[error("block '{name}' declares config var '{var}' which doesn't match prefix '{prefix}'")]
-    ConfigVarPrefix {
-        /// Block name.
-        name: String,
-        /// The declared config key.
-        var: String,
-        /// The expected `{ORG}__{BLOCK}__` prefix.
-        prefix: String,
-    },
-
     /// A block's declarations did not survive [`crate::BlockInfo::validate`]
     /// — a config var under a platform-reserved prefix (e.g.
-    /// `WAFER_RUN_SHARED__`), or an agent-tool name an MCP client would
-    /// reject. Wraps the typed failure so callers can match on the specific
-    /// cause.
+    /// `WAFER_RUN_SHARED__`) or outside the block's own `{ORG}__{BLOCK}__`
+    /// prefix, or an agent-tool name an MCP client would reject. Wraps the
+    /// typed failure so callers can match on the specific cause.
     ///
     /// Boxed deliberately. This fires once, at registration, and its payload
     /// is the largest in the enum; storing it inline would widen every
@@ -137,6 +127,14 @@ pub enum RuntimeError {
         #[source]
         source: Box<RuntimeError>,
     },
+
+    // ── Seal ────────────────────────────────────────────────────────────
+    /// `seal()` was called on a runtime it had already run on, successfully
+    /// or not. Sealing computes each block's capabilities once, from inputs
+    /// the first pass consumes, so a second pass cannot reproduce the first;
+    /// build a new runtime instead.
+    #[error("seal() already ran on this runtime; build a new runtime to seal again")]
+    AlreadySealed,
 
     // ── Grant validation ────────────────────────────────────────────────
     /// One or more block grant declarations were rejected during validation.

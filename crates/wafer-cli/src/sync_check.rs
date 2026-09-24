@@ -84,6 +84,7 @@ mod tests {
             sha256: "a".repeat(64),
             wasm_sha256: "b".repeat(64),
             source: "registry+https://wafer.run".into(),
+            capabilities: None,
         }
     }
 

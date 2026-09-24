@@ -176,7 +176,9 @@ async fn build_wafer_with_real_services(config: &[(&str, &str)]) -> Wafer {
 /// Register the guest, start the runtime, and drive one `kind` through it.
 async fn run(kind: &str) -> wafer_block::streams::output::BufferedResponse {
     let mut wafer = build_wafer_with_real_services(&[(CONFIG_KEY, CONFIG_VALUE)]).await;
-    let block = WasmiBlock::load_from_bytes(&guest_wasm()).expect("load json-host-guest wasm");
+    let block =
+        WasmiBlock::load_approving_declaration(&guest_wasm(), wafer_run::ResourceLimits::default())
+            .expect("load json-host-guest wasm");
     wafer
         .register_block(GUEST, Arc::new(block))
         .expect("register json-host-guest");
@@ -298,7 +300,9 @@ async fn json_guest_cannot_attach() {
 #[tokio::test]
 async fn json_guest_cannot_touch_another_table() {
     let mut wafer = build_wafer_with_real_services(&[]).await;
-    let block = WasmiBlock::load_from_bytes(&guest_wasm()).expect("load json-host-guest wasm");
+    let block =
+        WasmiBlock::load_approving_declaration(&guest_wasm(), wafer_run::ResourceLimits::default())
+            .expect("load json-host-guest wasm");
     wafer
         .register_block(GUEST, Arc::new(block))
         .expect("register json-host-guest");

@@ -17,30 +17,38 @@ impl Wafer {
     /// Finalize runtime configuration before serving traffic.
     ///
     /// `seal()` performs the once-per-boot operations that lazy init does
-    /// **not** subsume:
+    /// **not** subsume. Every block reaches the grant gate and the capability
+    /// computation — the ones the embedder registered and the ones `seal()`
+    /// downloads — so both run after the last registration:
     ///
-    /// 1. Refuse boot if any WRAP grants were rejected during registration.
-    /// 2. Resolve remote entries (download `.flow.json` / `.wasm` for
+    /// 1. Resolve remote entries (download `.flow.json` / `.wasm` for
     ///    deferred registrations).
-    /// 3. Expand composite configs (e.g. `wafer-run/http-server` →
+    /// 2. Expand composite configs (e.g. `wafer-run/http-server` →
     ///    `http-listener` + `router`), declarative flow `config_map` /
     ///    `config_defaults`, and `"uses"` contributions across all block
     ///    configs.
-    /// 4. Compute effective capabilities per block (declared ∩ config ∩ host)
-    ///    and propagate them into each block. Then resolve the wasm
-    ///    instance-pooling policy: validate the host kill switch
-    ///    (`WAFER_RUN_WASM_POOLING` — invalid values refuse boot) and log
-    ///    each WASM block whose declared `Singleton`/`PerFlow` instance mode
-    ///    opts it into warm instance pooling (PERF-01).
-    /// 5. Resolve remote blocks referenced by flow steps and router routes.
-    ///    Aggregates every missing reference into one
+    /// 3. Resolve remote blocks referenced by flow steps, router routes and
+    ///    other block configs. Aggregates every missing reference into one
     ///    `RuntimeError::BlocksNotFound` so operators see the full punch
     ///    list with each missing block's source.
+    /// 4. Refuse boot if any WRAP grants were rejected during registration.
+    /// 5. Compute effective capabilities per block (declared ∩ config, and
+    ///    for a WASM block ∩ the bound its embedder or operator stated) and
+    ///    propagate them into each
+    ///    block. Then resolve the wasm instance-pooling policy: validate the
+    ///    host kill switch (`WAFER_RUN_WASM_POOLING` — invalid values refuse
+    ///    boot) and log each WASM block whose declared `Singleton`/`PerFlow`
+    ///    instance mode opts it into warm instance pooling (PERF-01).
     /// 6. Refuse boot if two endpoints — in the same block or across blocks
-    ///    — declare the same WebMCP agent-tool name. Runs after step 5 so
-    ///    downloaded remote blocks are covered too.
+    ///    — declare the same WebMCP agent-tool name.
     /// 7. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
     ///    every [`crate::runtime::RuntimeContext`].
+    ///
+    /// A runtime is sealed once: a second call returns
+    /// [`RuntimeError::AlreadySealed`], whether the first succeeded or not.
+    /// Step 5 consumes each block config's `capabilities` narrowing, so a
+    /// second pass would recompute capabilities without it. The outcome is
+    /// kept in [`seal_state`](Self::seal_state).
     ///
     /// Block `Init` lifecycle events are **not** dispatched here. Each block
     /// is initialized on first dispatch via [`Wafer::init_block`] (lazy
@@ -48,8 +56,24 @@ impl Wafer {
     /// broken paths surface as 5xx on first invocation. Use
     /// [`Wafer::validate_all_block_configs`] for proactive health checks.
     pub async fn seal(&mut self) -> Result<(), RuntimeError> {
-        self.fail_on_rejected_grants()?;
+        if self.seal_state != super::SealState::Unsealed {
+            return Err(RuntimeError::AlreadySealed);
+        }
+        let result = self.seal_once().await;
+        self.seal_state = match &result {
+            Ok(()) => super::SealState::Sealed,
+            Err(e) => super::SealState::Failed(e.to_string()),
+        };
+        result
+    }
 
+    /// The outcome of [`seal`](Self::seal): not run, succeeded, or failed.
+    pub fn seal_state(&self) -> &super::SealState {
+        &self.seal_state
+    }
+
+    /// The seal pipeline [`seal`](Self::seal) runs once.
+    async fn seal_once(&mut self) -> Result<(), RuntimeError> {
         #[cfg(feature = "wasm")]
         self.resolve_remote_entries().await?;
 
@@ -57,12 +81,14 @@ impl Wafer {
         self.expand_declarative_flow_configs();
         self.gather_uses_configs();
 
+        self.resolve_block_references().await?;
+
+        self.fail_on_rejected_grants()?;
+
         self.compute_effective_capabilities()?;
 
         #[cfg(feature = "wasmi")]
         self.log_wasm_instance_pooling()?;
-
-        self.resolve_block_references().await?;
 
         self.fail_on_duplicate_tool_names()?;
 
@@ -152,11 +178,12 @@ impl Wafer {
         }
     }
 
-    /// Drain the grant-validation accumulator before sealing. This is the
-    /// common boot funnel: both `start_with_priority()` (native) and direct
-    /// `seal()` callers (Cloudflare Workers, browser WASM) pass through here.
-    /// If any typed grants were rejected during register_block /
-    /// set_admin_block, refuse boot with all rejections listed in one error.
+    /// Drain the grant-validation accumulator. This is the common boot
+    /// funnel: both `start_with_priority()` (native) and direct `seal()`
+    /// callers (Cloudflare Workers, browser WASM) pass through here, after
+    /// `seal()` has registered every block it downloads. If any grants were
+    /// rejected during registration or `set_admin_block`, refuse boot with
+    /// all rejections listed in one error.
     fn fail_on_rejected_grants(&mut self) -> Result<(), RuntimeError> {
         if self.registration.wrap.validation_errors.is_empty() {
             return Ok(());
@@ -165,7 +192,15 @@ impl Wafer {
         Err(RuntimeError::GrantsRejected(errors))
     }
 
-    /// Compute effective capabilities per block: declared ∩ config ∩ host.
+    /// Compute effective capabilities per block and install them in the
+    /// block: declared ∩ config, and for a WASM block ∩ its bound. The bound
+    /// is what someone other than the guest stated — the embedder's load
+    /// capabilities (`WasmiBlock::load_with_*`, a lockfile entry's
+    /// `capabilities`), else the operator's `capabilities` block config read
+    /// as a full statement, which is `none()` when absent. The guest's own
+    /// declaration only narrows it. What the block reports enforcing is what
+    /// is recorded in `effective_capabilities`. Native blocks are compiled
+    /// into the host and have no bound.
     /// Also strips the reserved `capabilities` subkey from each block config
     /// so it doesn't leak into `ctx.config_get(...)`.
     ///
@@ -198,18 +233,27 @@ impl Wafer {
             let config_overrides =
                 take_capability_overrides(name, self.registration.block_configs.get_mut(name))?;
 
-            let effective = declared.apply_config_overrides(&config_overrides);
+            let mut effective = declared.apply_config_overrides(&config_overrides);
+            if info.runtime == wafer_block::BlockRuntime::Wasm {
+                let bound = block
+                    .capability_bound()
+                    .unwrap_or_else(|| config_overrides.as_stated_bound());
+                effective = bound.intersect(&effective);
+            }
 
             // Warn on widening attempts (fields where config > declared).
             log_widening_attempts(name, &config_overrides, &effective);
 
             // Propagate effective caps into the block for runtime enforcement.
-            // Native blocks ignore this call (default no-op); WASM blocks update
-            // their interior-mutable capabilities field so that every subsequent
-            // host-import check and sanitizer uses the narrowed effective set.
+            // Native blocks ignore this call (default no-op) and report no
+            // capabilities, so the computed set is recorded. WASM blocks
+            // install it — within their load bound, if they have one — and
+            // every subsequent host-import check and sanitizer uses what they
+            // report back.
             block.runtime_capabilities_mut(effective.clone());
+            let enforced = block.block_capabilities().unwrap_or(effective);
 
-            eff.insert(name.clone(), effective);
+            eff.insert(name.clone(), enforced);
         }
         self.registration.wrap.effective_capabilities = Arc::new(eff);
         Ok(())
@@ -268,8 +312,11 @@ impl Wafer {
         }
     }
 
-    /// Resolve remote blocks referenced by flow steps and router routes.
-    /// Collect every reference + its source, then resolve-or-aggregate-fail.
+    /// Resolve remote blocks referenced by flow steps, router routes and
+    /// other block configs. Collect every reference + its source, then
+    /// resolve-or-aggregate-fail. A downloaded block goes through
+    /// `register_remote_block`'s admission checks and is registered before
+    /// `seal()` runs the grant gate and the capability computation.
     ///
     /// PR A landed the flow-step half of the walk. PR B (Wave 16) extended
     /// the collection to also include router routes; Wave 19 routed that
@@ -325,6 +372,7 @@ impl Wafer {
             }
             #[cfg(feature = "wasm")]
             {
+                self.registration.check_downloadable(&canonical)?;
                 match self.resolve_remote_block(&client, &canonical).await {
                     Ok(Some(block)) => {
                         tracing::info!(block = %canonical, "downloaded remote block");
@@ -370,7 +418,7 @@ impl Wafer {
     /// from the snapshot (PERF-03): parsed block configs, `requires`
     /// allowlists, and compiled flows for the dispatch hot paths.
     fn finalize_snapshot(&mut self) {
-        self.rebuild_all_blocks();
+        self.registration.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
             blocks: super::lifecycle::sorted_snapshot(&self.registration.blocks),
             flow_infos: self.flows_info(),

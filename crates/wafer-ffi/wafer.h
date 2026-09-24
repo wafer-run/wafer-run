@@ -64,7 +64,8 @@ WaferRuntime* wafer_new(void);
 void wafer_free(WaferRuntime* w);
 
 /*
- * Resolve all block references in registered flows (async).
+ * Resolve all block references in registered flows (async). A runtime is
+ * resolved once: a second call reports an error.
  *
  * Returns immediately. Invokes `cb` with NULL on success, or a JSON error
  * string on failure.
@@ -72,7 +73,9 @@ void wafer_free(WaferRuntime* w);
 void wafer_resolve(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /*
- * Start the runtime without spawning block listeners (async).
+ * Start the runtime without spawning block listeners (async). Resolves the
+ * runtime first unless wafer_resolve already did; after a failed
+ * wafer_resolve it reports that failure again.
  *
  * Returns immediately. Invokes `cb` with NULL on success, or a JSON error
  * string on failure.
