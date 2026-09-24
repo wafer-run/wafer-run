@@ -168,38 +168,41 @@ impl Wafer {
         <Self as wafer_block::registry::BlockRegistry>::register_block(self, &name, block)
     }
 
-    /// Register a WaferFlow definition.
-    pub fn add_flow(&mut self, flow: wafer_flow::WaferFlow) {
+    /// Validate and register a WaferFlow definition.
+    ///
+    /// Refused with [`RuntimeError::Flow`] naming every problem
+    /// [`wafer_flow::validate`] finds; the flow is not registered then.
+    pub fn add_flow(&mut self, flow: wafer_flow::WaferFlow) -> Result<(), RuntimeError> {
+        wafer_flow::validate(&flow).map_err(|errors| {
+            RuntimeError::Flow(format!(
+                "flow '{}' is invalid: {}",
+                flow.id,
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })?;
         let flow_id = flow.id.clone();
         self.flows.insert(flow_id.clone(), flow);
         // CONTRACT: See lifecycle.rs::start for the full description. This
         // event must remain target = "wafer.runtime", event = "flow_registered",
         // with a `flow` field carrying the flow id. Consumed by `wafer dev`'s
-        // boot summary in wafer-cli/src/commands/dev/summary.rs. Mirrors the
-        // emit previously only in add_flow_json so consumers using the typed
-        // API are also visible to `wafer dev`'s boot summary.
+        // boot summary in wafer-cli/src/commands/dev/summary.rs.
         tracing::info!(
             target: "wafer.runtime",
             event = "flow_registered",
             flow = %flow_id,
             "registered flow"
         );
+        Ok(())
     }
 
     /// Parse, validate, and register a WaferFlow from a JSON string.
     pub fn add_flow_json(&mut self, json: &str) -> Result<(), RuntimeError> {
         let flow = wafer_flow::parse(json).map_err(|e| RuntimeError::Flow(e.to_string()))?;
-        wafer_flow::validate(&flow).map_err(|errors| {
-            RuntimeError::Flow(
-                errors
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })?;
-        self.add_flow(flow);
-        Ok(())
+        self.add_flow(flow)
     }
 }
 

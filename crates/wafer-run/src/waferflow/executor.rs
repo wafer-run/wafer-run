@@ -28,8 +28,8 @@
 //!    per item, sequentially in input order, with `$.each.item` and
 //!    `$.each.index` bound for the duration of the iteration. A failing
 //!    item fails the step fail-fast (later items are not invoked) under
-//!    `on_error = "stop"`; other `on_error` modes record `null` for the
-//!    failed item and continue. Without an `input` template the item itself
+//!    `on_error = "stop"`; under `on_error = "continue"` the failed item's
+//!    result is `null` and the fan-out goes on. Without an `input` template the item itself
 //!    is the block's input body. The step's accumulator entry (and the
 //!    pipeline body) is the array of per-item outputs; the transient `each`
 //!    binding is removed afterwards.
@@ -117,7 +117,7 @@ use wafer_block::{
         output::{BufferedResponse, OutputStream, TerminalNotResponse},
     },
 };
-use wafer_flow::Accumulator;
+use wafer_flow::{Accumulator, OnError};
 
 use super::{
     plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget},
@@ -157,8 +157,9 @@ struct ExecState {
 enum InvocationOutcome {
     /// The block produced a `Response`; `ExecState::body` holds it.
     Responded,
-    /// The block was middleware (`Continue`) or errored under a non-`stop`
-    /// `on_error` policy; `ExecState::body` holds the restored input.
+    /// The block was middleware (`Continue`), and `ExecState::body` holds
+    /// its input; or it errored under `on_error = "continue"`, and the body
+    /// is empty.
     NoOutput,
 }
 
@@ -750,14 +751,14 @@ async fn run_invocation(
             );
             Ok(InvocationOutcome::Responded)
         }
-        Err(TerminalNotResponse::Error(e)) => {
-            if env.flow.on_error_stop {
-                return Err(ShortCircuit::Error(e));
+        Err(TerminalNotResponse::Error(e)) => match env.flow.on_error {
+            OnError::Stop => Err(ShortCircuit::Error(e)),
+            OnError::Continue => {
+                // Clear the body and fall through to the next step.
+                state.body = Arc::new(Vec::new());
+                Ok(InvocationOutcome::NoOutput)
             }
-            // on_error=continue: clear body, fall through
-            state.body = Arc::new(Vec::new());
-            Ok(InvocationOutcome::NoOutput)
-        }
+        },
         Err(TerminalNotResponse::Drop { meta }) => {
             // Short-circuit: block requested drop
             Err(ShortCircuit::Drop(meta))

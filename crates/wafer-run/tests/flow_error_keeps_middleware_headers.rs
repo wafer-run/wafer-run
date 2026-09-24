@@ -287,7 +287,7 @@ async fn start(flows: &[serde_json::Value]) -> Arc<Wafer> {
     }
     for flow in flows {
         let flow: WaferFlow = serde_json::from_value(flow.clone()).expect("valid flow JSON");
-        w.add_flow(flow);
+        w.add_flow(flow).unwrap();
     }
     w.start().await.expect("start runtime")
 }
@@ -766,7 +766,8 @@ async fn a_guest_error_keeps_host_headers_and_stays_sanitized() {
             ],
         ))
         .expect("valid flow JSON"),
-    );
+    )
+    .unwrap();
     let wafer = w.start().await.expect("start runtime");
 
     let mut msg = cross_origin_request();

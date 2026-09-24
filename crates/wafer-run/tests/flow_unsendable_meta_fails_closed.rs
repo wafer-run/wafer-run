@@ -72,7 +72,7 @@ async fn a_malformed_responder_csp_is_a_500_keeping_the_middleware_csp() {
         ],
     }))
     .expect("valid flow JSON");
-    w.add_flow(flow);
+    w.add_flow(flow).unwrap();
     let wafer = w.start().await.expect("start runtime");
 
     let parts = collect_http_response(

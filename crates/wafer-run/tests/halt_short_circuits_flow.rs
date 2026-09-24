@@ -129,7 +129,8 @@ async fn halt_short_circuits_flow_at_executor() {
             step("halt-step", "test/halt-sc"),
             step("assert-step", "test/assert-not-called-sc"),
         ],
-    ));
+    ))
+    .unwrap();
 
     w.seal().await.expect("seal failed");
 

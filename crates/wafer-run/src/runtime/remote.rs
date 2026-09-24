@@ -315,7 +315,7 @@ impl Wafer {
                             }
                         }
                     }
-                    self.add_flow(*flow);
+                    self.add_flow(*flow)?;
                 }
                 FetchedCandidate::Wasm(bytes) => {
                     let block = self.load_wasm_block(&bytes, &name)?;

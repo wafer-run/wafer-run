@@ -168,10 +168,12 @@ async fn seal_router_route_walks_aliased_router() {
 async fn seal_router_route_rejects_flow_target() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
-    wafer.add_flow(flow_with_steps(
-        "my-flow",
-        vec![step("only", "example/present")],
-    ));
+    wafer
+        .add_flow(flow_with_steps(
+            "my-flow",
+            vec![step("only", "example/present")],
+        ))
+        .unwrap();
     wafer
         .register_block("example/present", Arc::new(NoopBlock("example/present")))
         .expect("register noop");
@@ -205,10 +207,12 @@ async fn seal_collapses_flow_and_router_refs_to_same_missing_block() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
     // `wafer-run/router` is already registered via linkme.
-    wafer.add_flow(flow_with_steps(
-        "my-flow",
-        vec![step("from-flow", "example/missing")],
-    ));
+    wafer
+        .add_flow(flow_with_steps(
+            "my-flow",
+            vec![step("from-flow", "example/missing")],
+        ))
+        .unwrap();
     wafer.add_block_config(
         "wafer-run/router",
         json!({

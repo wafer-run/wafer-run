@@ -213,7 +213,7 @@ async fn sealed_wafer(flows: Vec<WaferFlow>) -> Wafer {
     w.register_block("bench/passthrough", Arc::new(PassThroughBlock))
         .expect("register passthrough");
     for flow in flows {
-        w.add_flow(flow);
+        w.add_flow(flow).unwrap();
     }
     w.seal().await.expect("seal");
     w

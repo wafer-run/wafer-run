@@ -30,7 +30,10 @@ pub mod validate;
 
 pub use accumulator::Accumulator;
 pub use compiled::{CompiledCondition, CompiledPath, CompiledTemplate};
-pub use error::{ExprError, ParseError, ValidationError};
+pub use error::{ExprError, InvalidTimeout, ParseError, ValidationError};
 pub use parser::parse;
-pub use types::{ConfigMapEntry, FlowConfig, FlowInfo, NextEntry, PortSchema, Step, WaferFlow};
+pub use types::{
+    ConfigMapEntry, FlowConfig, FlowInfo, FlowTimeout, NextEntry, OnError, PortSchema, Step,
+    WaferFlow,
+};
 pub use validate::validate;

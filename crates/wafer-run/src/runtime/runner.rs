@@ -194,8 +194,9 @@ impl Wafer {
         let start = Instant::now();
 
         // Set up flow-level timeout via deadline (parsed once at compile).
+        // A timeout too large to add to now is never reached: no deadline.
         let cancelled = Arc::new(AtomicBool::new(false));
-        let deadline = plan.timeout.map(|t| Instant::now() + t);
+        let deadline = plan.timeout.and_then(|t| Instant::now().checked_add(t));
 
         let result = crate::waferflow::execute_waferflow(
             plan,

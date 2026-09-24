@@ -84,7 +84,7 @@ async fn cookies_from_independent_producers_all_reach_the_response() {
         ],
     }))
     .expect("valid flow JSON");
-    w.add_flow(flow);
+    w.add_flow(flow).unwrap();
     let wafer = w.start().await.expect("start runtime");
 
     let parts = collect_http_response(
