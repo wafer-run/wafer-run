@@ -246,6 +246,15 @@ mod tests {
     }
 
     #[test]
+    fn case_variants_of_a_registry_share_one_token() {
+        let mut cf = CredentialsFile::default();
+        cf.set_token(&Registry::new("https://Wafer.run"), "first".into());
+        cf.set_token(&Registry::new("HTTPS://wafer.RUN/"), "second".into());
+        assert_eq!(cf.tokens.len(), 1);
+        assert_eq!(cf.token(&Registry::new(WAFER)), Some("second"));
+    }
+
+    #[test]
     fn token_is_none_when_url_not_present() {
         let mut cf = CredentialsFile::default();
         cf.set_token(&Registry::new(WAFER), "token1".into());
