@@ -274,18 +274,23 @@ async fn flow_added_after_seal_still_runs() {
 // 3. Multi-block sequential flow (a -> b -> c) — middleware mode
 // ===========================================================================
 
-struct AppendBlock(String);
+/// Appends `suffix` to its input. Registered once per suffix, so each
+/// instance reports the name it is registered under.
+struct AppendBlock {
+    name: &'static str,
+    suffix: &'static str,
+}
 
 #[async_trait::async_trait]
 impl Block for AppendBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("test/append", "0.0.1", "http-handler@v1", "Append")
+        BlockInfo::new(self.name, "0.0.1", "http-handler@v1", "Append")
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
         let bytes = input.collect_to_bytes().await;
         let mut text = String::from_utf8_lossy(&bytes).to_string();
-        text.push_str(&self.0);
+        text.push_str(self.suffix);
         OutputStream::respond(text.into_bytes())
     }
 }
@@ -295,14 +300,32 @@ async fn test_sequential_flow() {
     let mut w = empty_wafer();
 
     // Block A: append "-A"
-    w.register_block("test/append-a", Arc::new(AppendBlock("-A".to_string())))
-        .unwrap();
+    w.register_block(
+        "test/append-a",
+        Arc::new(AppendBlock {
+            name: "test/append-a",
+            suffix: "-A",
+        }),
+    )
+    .unwrap();
     // Block B: append "-B"
-    w.register_block("test/append-b", Arc::new(AppendBlock("-B".to_string())))
-        .unwrap();
+    w.register_block(
+        "test/append-b",
+        Arc::new(AppendBlock {
+            name: "test/append-b",
+            suffix: "-B",
+        }),
+    )
+    .unwrap();
     // Block C: append "-C"
-    w.register_block("test/append-c", Arc::new(AppendBlock("-C".to_string())))
-        .unwrap();
+    w.register_block(
+        "test/append-c",
+        Arc::new(AppendBlock {
+            name: "test/append-c",
+            suffix: "-C",
+        }),
+    )
+    .unwrap();
 
     // Build flow: A -> B -> C (sequential steps)
     w.add_flow(make_flow(
@@ -859,17 +882,14 @@ impl Block for ShouldNotRunBlock {
 async fn test_drop_short_circuits_flow() {
     let mut w = empty_wafer();
 
-    w.register_block("test/dropper-2", Arc::new(DropperBlock))
+    w.register_block("test/dropper", Arc::new(DropperBlock))
         .unwrap();
-    w.register_block("test/should-not-run-2", Arc::new(ShouldNotRunBlock))
+    w.register_block("test/should-not-run", Arc::new(ShouldNotRunBlock))
         .unwrap();
 
     w.add_flow(make_flow(
         "drop-short-circuit",
-        vec![
-            step("d", "test/dropper-2"),
-            step("s", "test/should-not-run-2"),
-        ],
+        vec![step("d", "test/dropper"), step("s", "test/should-not-run")],
     ));
     w.seal().await.expect("seal failed");
 
@@ -885,11 +905,10 @@ async fn test_drop_short_circuits_flow() {
 async fn test_flow_reference_not_found() {
     let mut w = empty_wafer();
 
-    w.register_block("test/noop-2", Arc::new(NoopBlock))
-        .unwrap();
+    w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
     // Create a flow with next routing to non-existent flow
-    let mut s = step("root", "test/noop-2");
+    let mut s = step("root", "test/noop");
     s.next = Some(vec![wafer_flow::NextEntry {
         when: None,
         step: None,
@@ -991,14 +1010,14 @@ async fn test_on_error_continue() {
 
     w.register_block("test/fail-counting", Arc::new(CountingFailBlock(fc)))
         .unwrap();
-    w.register_block("test/after-fail-2", Arc::new(AfterFailBlock))
+    w.register_block("test/after-fail", Arc::new(AfterFailBlock))
         .unwrap();
 
     w.add_flow(make_flow_with_on_error(
         "cont-flow",
         vec![
             step("f", "test/fail-counting"),
-            step("a", "test/after-fail-2"),
+            step("a", "test/after-fail"),
         ],
         "continue",
     ));
@@ -1072,15 +1091,12 @@ async fn test_drop_action() {
 
     w.register_block("test/dropper", Arc::new(DropperBlock))
         .unwrap();
-    w.register_block("test/unreachable-after-drop", Arc::new(ShouldNotRunBlock))
+    w.register_block("test/should-not-run", Arc::new(ShouldNotRunBlock))
         .unwrap();
 
     w.add_flow(make_flow(
         "drop-flow",
-        vec![
-            step("d", "test/dropper"),
-            step("u", "test/unreachable-after-drop"),
-        ],
+        vec![step("d", "test/dropper"), step("u", "test/should-not-run")],
     ));
     w.seal().await.expect("seal failed");
 
@@ -1213,15 +1229,14 @@ async fn test_resolve_missing_block() {
 async fn test_add_flow_json() {
     let mut w = empty_wafer();
 
-    w.register_block("test/echo-2", Arc::new(EchoBlock))
-        .unwrap();
+    w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
 
     w.add_flow_json(
         r#"{
         "id": "from-json",
         "name": "From JSON",
         "version": "0.1.0",
-        "steps": [{ "id": "root", "block": "test/echo-2" }],
+        "steps": [{ "id": "root", "block": "test/echo" }],
         "config": { "on_error": "stop", "timeout": "30s" }
     }"#,
     )
@@ -1277,11 +1292,10 @@ async fn test_panic_recovery() {
 fn test_flows_info() {
     let mut w = empty_wafer();
 
-    w.register_block("test/noop-3", Arc::new(NoopBlock))
-        .unwrap();
+    w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
-    w.add_flow(single_step_flow("flow-a", "test/noop-3"));
-    w.add_flow(single_step_flow("flow-b", "test/noop-3"));
+    w.add_flow(single_step_flow("flow-a", "test/noop"));
+    w.add_flow(single_step_flow("flow-b", "test/noop"));
 
     let info = w.flows_info();
     assert_eq!(info.len(), 2);

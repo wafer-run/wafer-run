@@ -21,7 +21,7 @@ use wafer_run::{RuntimeError, StaticConfigSource, Wafer};
 
 /// Block that declares a namespace grant for a resource owned by another
 /// block. Will be rejected by validate_and_collect_grants_for_block with
-/// `Some(owner)` where owner != block_info.name.
+/// `Some(owner)` where owner != the registration name.
 struct OtherOwnerOffender;
 
 #[async_trait]

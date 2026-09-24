@@ -16,7 +16,8 @@ use wafer_block::{BlockInfo, InterfaceSpec};
 /// [`crate::runtime::Wafer::seal`].
 #[derive(Default, Clone)]
 pub struct StartupSnapshot {
-    /// Public metadata for every registered block, in registration order.
+    /// Public metadata for every registered block, sorted by registration
+    /// name. Each entry's `name` is the name the block is registered under.
     pub blocks: Vec<BlockInfo>,
     /// Metadata for every loaded flow (id, description, declared interfaces).
     pub flow_infos: Vec<wafer_flow::FlowInfo>,

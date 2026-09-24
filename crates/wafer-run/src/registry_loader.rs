@@ -470,6 +470,24 @@ mod tests {
     /// Minimal valid wasm module bytes ("\0asm" magic + version 1).
     const MINIMAL_WASM: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
+    /// A wasm module whose only behavior is reporting `BlockInfo { name }`
+    /// from `__wafer_info` — enough to be registered, which refuses a block
+    /// whose reported name differs from the name it is registered under.
+    fn block_wasm(name: &str) -> Vec<u8> {
+        let info = format!(
+            r#"{{"name":"{name}","version":"0.1.0","interface":"handler@v1","summary":""}}"#
+        );
+        let packed = (64u64 << 32) | info.len() as u64;
+        let escaped = info.replace('"', "\\\"");
+        wat::parse_str(format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 64) "{escaped}")
+                (func (export "__wafer_info") (result i64) (i64.const {packed})))"#
+        ))
+        .expect("block_wasm WAT parses")
+    }
+
     fn mk_lockfile(body: &str) -> (PathBuf, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let p = dir.path().join("wafer.lock");
@@ -485,7 +503,7 @@ mod tests {
             // Default to the digest of the wasm `seed_cache` writes, so any
             // test that seeds the cache and loads passes the SEC-05 integrity
             // check; tests exercising a mismatch override this field.
-            wasm_sha256: wafer_block::lockfile::sha256_hex(MINIMAL_WASM),
+            wasm_sha256: wafer_block::lockfile::sha256_hex(&block_wasm(name)),
             source: source.into(),
         }
     }
@@ -500,7 +518,11 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(dir.join(format!("{name}.wasm")), MINIMAL_WASM).unwrap();
+        fs::write(
+            dir.join(format!("{name}.wasm")),
+            block_wasm(&format!("{org}/{name}")),
+        )
+        .unwrap();
     }
 
     // SEC-05: a lockfile whose coordinates contain path-traversal must be
@@ -654,7 +676,7 @@ source = "registry+https://wafer.run"
     #[test]
     fn load_lockfile_happy_path_registers_block() {
         let tmp = tempdir().unwrap();
-        let wasm_sha = wafer_block::lockfile::sha256_hex(MINIMAL_WASM);
+        let wasm_sha = wafer_block::lockfile::sha256_hex(&block_wasm("acme/widget"));
         let lock_body = format!(
             r#"version = 2
 
@@ -750,7 +772,7 @@ source = "registry+https://wafer.run"
     #[test]
     fn load_lockfile_duplicate_name_errors() {
         let tmp = tempdir().unwrap();
-        let wasm_sha = wafer_block::lockfile::sha256_hex(MINIMAL_WASM);
+        let wasm_sha = wafer_block::lockfile::sha256_hex(&block_wasm("acme/widget"));
         let lock_body = format!(
             r#"version = 2
 

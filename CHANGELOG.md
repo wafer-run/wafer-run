@@ -4,6 +4,23 @@
 
 ### Breaking changes
 
+- A block is the name it is registered under. `register_block` (and every
+  path built on it: `load_inventory_blocks`, the lockfile loader,
+  `embed::register_path` behind the Node/Go/C bindings) refuses a block whose
+  `info().name` differs from the registration name, with the new
+  `RuntimeError::BlockNameMismatch { registered, reported }`. Before, the two
+  could differ, and WRAP grant ownership and the admin-block match were
+  decided against the reported name while `check_access` attributed calls to
+  the registration name — so a WASM guest registered as `x/attacker` that
+  reported itself as `a/victim` could grant itself read-write on
+  `a__victim__*`, or claim the admin block's name and declare typed
+  Network/Crypto grants. Grant validation (at registration and on the
+  `set_admin_block` rescan), `requires` resolution and the `block_infos` /
+  startup-snapshot order now key on the registration name only. Embedders that
+  registered a block under a different name must register it under the name it
+  reports (for a WASM guest, the `name` its `__wafer_info` returns). A WASM
+  module whose `__wafer_info` fails reports the placeholder `unknown` and is
+  therefore refused too, where it used to register and never route.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`

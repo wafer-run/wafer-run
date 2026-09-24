@@ -39,8 +39,13 @@ struct RequestLoggerBlock;
 #[async_trait::async_trait]
 impl Block for RequestLoggerBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("request-logger", "0.0.1", "middleware@v1", "Request logger")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/request-logger",
+            "0.0.1",
+            "middleware@v1",
+            "Request logger",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
@@ -60,8 +65,13 @@ struct ApiKeyCheckBlock;
 #[async_trait::async_trait]
 impl Block for ApiKeyCheckBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("api-key-check", "0.0.1", "middleware@v1", "API key check")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/api-key-check",
+            "0.0.1",
+            "middleware@v1",
+            "API key check",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
@@ -107,8 +117,13 @@ struct EchoHandlerBlock;
 #[async_trait::async_trait]
 impl Block for EchoHandlerBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("echo-handler", "0.0.1", "http-handler@v1", "Echo handler")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/echo-handler",
+            "0.0.1",
+            "http-handler@v1",
+            "Echo handler",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
@@ -136,8 +151,13 @@ struct StatsBlock;
 #[async_trait::async_trait]
 impl Block for StatsBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("stats", "0.0.1", "http-handler@v1", "Stats endpoint")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/stats",
+            "0.0.1",
+            "http-handler@v1",
+            "Stats endpoint",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
@@ -155,8 +175,13 @@ struct FallbackBlock;
 #[async_trait::async_trait]
 impl Block for FallbackBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("fallback", "0.0.1", "http-handler@v1", "404 fallback")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/fallback",
+            "0.0.1",
+            "http-handler@v1",
+            "404 fallback",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

@@ -221,7 +221,12 @@ mod tests {
     #[wafer_async_trait]
     impl wafer_block::Block for NoopBlock {
         fn info(&self) -> BlockInfo {
-            BlockInfo::new("noop", "0.0.1", "noop.handle", "noop block for testing")
+            BlockInfo::new(
+                "my-org/block",
+                "0.0.1",
+                "noop.handle",
+                "noop block for testing",
+            )
         }
         async fn handle(
             &self,

@@ -1,16 +1,20 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
-use wafer_block::{core_types::*, error::RuntimeError, types::*};
+use wafer_block::{core_types::*, error::RuntimeError, types::*, Block};
 
 use super::Wafer;
 
-/// Collect `BlockInfo`s into a Vec sorted by their stable `name`, so consumers
-/// (admin pages, snapshot consumers) see deterministic order regardless of the
-/// underlying HashMap's SipHash randomisation.
-pub(crate) fn sorted_snapshot(iter: impl IntoIterator<Item = BlockInfo>) -> Vec<BlockInfo> {
-    let mut v: Vec<_> = iter.into_iter().collect();
-    v.sort_by(|a, b| a.name.cmp(&b.name));
-    v
+/// Collect the `BlockInfo` of every registered block into a Vec sorted by
+/// registration name, so consumers (admin pages, snapshot consumers) see
+/// deterministic order regardless of the underlying HashMap's SipHash
+/// randomisation. Registration refused any block whose `info().name` differs
+/// from its registration name, so each entry's `name` is that key.
+pub(crate) fn sorted_snapshot<'a>(
+    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn Block>)>,
+) -> Vec<BlockInfo> {
+    let mut v: Vec<_> = blocks.into_iter().collect();
+    v.sort_by(|a, b| a.0.cmp(b.0));
+    v.into_iter().map(|(_, block)| block.info()).collect()
 }
 
 /// Return value of [`validate_and_collect_grants_for_block`].
@@ -34,6 +38,10 @@ pub(crate) struct GrantValidationOutcome {
 /// from `Wafer::set_admin_block` to (re-)collect typed grants from blocks
 /// that were registered before the admin block was known.
 ///
+/// `block_name` is the name the block is registered under — the identity
+/// `check_access` attributes its calls to — never the name its `info()`
+/// reports, which for a WASM guest is guest-written data.
+///
 /// Rules:
 /// - Typed Network/Crypto grants may only be declared by the admin block
 ///   (their resources — URLs and operation names — aren't namespaced).
@@ -44,31 +52,31 @@ pub(crate) struct GrantValidationOutcome {
 ///   point. This accommodates the common pattern of constructing a
 ///   `Wafer` (which auto-registers linkme-collected blocks during
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
-/// - Storage grants (Wave 26 / c18) and Db / untyped grants are
-///   namespace-based: a grant must target a resource owned by the
-///   declaring block, per
-///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or
-///   owned-by-other grants are pushed into `rejected` so `seal()`
-///   surfaces them via `RuntimeError::GrantsRejected`.
+/// - Storage grants and Db / untyped grants are namespace-based: every
+///   resource a grant can match must be owned by the declaring block, per
+///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or owned-by-other grants are
+///   pushed into `rejected` so `seal()` surfaces them via
+///   `RuntimeError::GrantsRejected`.
 /// - Every grant must pass [`wafer_block::types::ResourceGrant::check_shape`]
 ///   (an append-only grant is typed `Db`) before any other rule looks at it;
 ///   a malformed grant is rejected the same way.
 pub(crate) fn validate_and_collect_grants_for_block(
-    block_info: &BlockInfo,
+    block_name: &str,
+    grants: &[ResourceGrant],
     admin_block: &str,
 ) -> GrantValidationOutcome {
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
-    for grant in &block_info.grants {
+    for grant in grants {
         if let Err(shape) = grant.check_shape() {
             tracing::error!(
-                block = %block_info.name,
+                block = %block_name,
                 resource = %grant.resource,
                 %shape,
                 "WRAP: rejecting malformed grant",
             );
             rejected.push(wafer_block::error::GrantValidationError {
-                block: block_info.name.to_string(),
+                block: block_name.to_string(),
                 grant: grant.clone(),
                 reason: shape.to_string(),
             });
@@ -91,25 +99,25 @@ pub(crate) fn validate_and_collect_grants_for_block(
                 // `set_admin_block` re-runs this collector for every
                 // registered block once admin is known.
                 tracing::debug!(
-                    block = %block_info.name,
+                    block = %block_name,
                     resource = %grant.resource,
                     resource_type = ?grant.resource_type,
                     "WRAP: typed grant deferred — admin block not yet set; will be re-collected by set_admin_block",
                 );
                 continue;
             }
-            if block_info.name == admin_block {
+            if block_name == admin_block {
                 accepted.push(grant.clone());
             } else {
                 tracing::error!(
-                    block = %block_info.name,
+                    block = %block_name,
                     resource = %grant.resource,
                     resource_type = ?grant.resource_type,
                     admin = %admin_block,
                     "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
                 );
                 rejected.push(wafer_block::error::GrantValidationError {
-                    block: block_info.name.to_string(),
+                    block: block_name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
                         "typed {:?} grants may only be declared by the admin block",
@@ -121,9 +129,9 @@ pub(crate) fn validate_and_collect_grants_for_block(
         }
 
         // SECURITY: namespace-based grants — blocks can only grant
-        // access to resources they own. Dispatches to the right parser
-        // based on resource type (Storage uses `{org}/{block}/...`,
-        // Db / untyped use `{org}__{block}__...`).
+        // access to resources they own.
+        // Dispatches to the right parser based on resource type (Storage uses
+        // `{org}/{block}/...`, Db / untyped use `{org}__{block}__...`).
         let grant_owner = if grant.resource.ends_with('*') {
             let base = grant.resource.trim_end_matches('*');
             wafer_block::wrap::typed_resource_owner(
@@ -134,14 +142,14 @@ pub(crate) fn validate_and_collect_grants_for_block(
             wafer_block::wrap::typed_resource_owner(&grant.resource, grant.resource_type.as_ref())
         };
         match grant_owner {
-            Some(owner) if owner == block_info.name => accepted.push(grant.clone()),
+            Some(owner) if owner == block_name => accepted.push(grant.clone()),
             Some(owner) => {
                 tracing::error!(
-                    block = %block_info.name, resource = %grant.resource, owner = %owner,
+                    block = %block_name, resource = %grant.resource, owner = %owner,
                     "WRAP: rejecting grant for resource not owned by declaring block"
                 );
                 rejected.push(wafer_block::error::GrantValidationError {
-                    block: block_info.name.to_string(),
+                    block: block_name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
                         "resource `{}` is owned by `{owner}`, not by declaring block",
@@ -151,7 +159,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             }
             None => {
                 tracing::error!(
-                    block = %block_info.name, resource = %grant.resource,
+                    block = %block_name, resource = %grant.resource,
                     "WRAP: rejecting grant with unnamespaced resource"
                 );
                 // Shape the hint to the resource type. Storage grants
@@ -164,7 +172,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     _ => "`{org}__{block}__*` (Db tables)",
                 };
                 rejected.push(wafer_block::error::GrantValidationError {
-                    block: block_info.name.to_string(),
+                    block: block_name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
                         "resource `{}` is unnamespaced — namespace-based grants must target {expected_shape}",
@@ -415,16 +423,37 @@ impl Wafer {
 
 #[cfg(test)]
 mod sorted_snapshot_tests {
+    use wafer_block::{
+        streams::{input::InputStream, output::OutputStream},
+        Context,
+    };
+
     use super::*;
 
+    struct Named(&'static str);
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for Named {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(self.0, "0.1.0", "test@v1", self.0)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(Vec::new())
+        }
+    }
+
     #[test]
-    fn sorted_snapshot_orders_by_name() {
-        let infos = vec![
-            BlockInfo::new("zeta", "0.1.0", "test@v1", "z"),
-            BlockInfo::new("alpha", "0.1.0", "test@v1", "a"),
-            BlockInfo::new("mu", "0.1.0", "test@v1", "m"),
-        ];
-        let out = sorted_snapshot(infos);
+    fn sorted_snapshot_orders_by_registration_name() {
+        let blocks: Vec<(String, Arc<dyn Block>)> = ["zeta", "alpha", "mu"]
+            .into_iter()
+            .map(|n| (n.to_string(), Arc::new(Named(n)) as Arc<dyn Block>))
+            .collect();
+        let out = sorted_snapshot(blocks.iter().map(|(n, b)| (n, b)));
         let names: Vec<&str> = out.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }

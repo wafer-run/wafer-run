@@ -92,7 +92,8 @@ void wafer_stop(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /*
  * Register a block or flow definition from a file path.
- * If path ends with .wasm, registers a WASM block with the given name.
+ * If path ends with .wasm, registers a WASM block with the given name, which
+ * must be the name the block reports in its BlockInfo (a mismatch is refused).
  * Otherwise, reads the file as a JSON flow definition.
  * name: identifier (block type name for .wasm, ignored for flow defs)
  * path: filesystem path to the .wasm or .json file

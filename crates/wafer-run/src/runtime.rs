@@ -314,21 +314,19 @@ impl Wafer {
     /// generate discovery documents (e.g., OpenAPI, A2A agent.json) without
     /// having to maintain a duplicate registry.
     ///
-    /// Sorted by block `name` for deterministic order across processes
-    /// (independent of HashMap's SipHash randomisation). The returned list
-    /// is a snapshot — later registrations are not reflected.
+    /// Sorted by registration name for deterministic order across processes
+    /// (independent of HashMap's SipHash randomisation). Each entry's `name`
+    /// is the block's registration name: registration refuses a block whose
+    /// `info().name` differs ([`RuntimeError::BlockNameMismatch`]). The
+    /// returned list is a snapshot — later registrations are not reflected.
     pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
-        lifecycle::sorted_snapshot(self.registration.blocks.values().map(|b| b.info()))
+        lifecycle::sorted_snapshot(&self.registration.blocks)
     }
 
     /// Return the registration key of every registered block, sorted for
-    /// deterministic order across processes.
-    ///
-    /// Unlike [`Wafer::block_infos`] — which reports each block's
-    /// self-declared `info().name` — these are the names registration
-    /// validated and `init_block` / `call_block` resolve, so they are the
-    /// correct iteration set for whole-runtime lifecycle drivers (e.g. a
-    /// deploy-time init funnel).
+    /// deterministic order across processes. These are the names
+    /// `init_block` / `call_block` resolve, so they are the iteration set for
+    /// whole-runtime lifecycle drivers (e.g. a deploy-time init funnel).
     pub fn block_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.registration.blocks.keys().cloned().collect();
         names.sort();
@@ -473,27 +471,21 @@ impl Wafer {
         }
     }
 
-    /// Uncompiled `requires` resolution: prefer the immutable startup
-    /// snapshot; fall back to `block.info()` for a block registered after
-    /// `seal()`. An empty or absent list yields `None` — an undeclared
-    /// `requires` leaves the block's `call_block` set unrestricted, matching
-    /// [`RuntimeContext::caller_requires`] semantics. Run once per block at
-    /// seal time to populate the plan, and directly only on plan misses.
+    /// Uncompiled `requires` resolution: the `requires` of the block
+    /// registered under `resolved_block_name`, looked up by registration name
+    /// and never by any block's reported name. An empty or absent list yields
+    /// `None` — an undeclared `requires` leaves the block's `call_block` set
+    /// unrestricted, matching [`RuntimeContext::caller_requires`] semantics.
+    /// Run once per block at seal time to populate the plan, and directly only
+    /// on plan misses.
     pub(crate) fn resolve_block_requires_uncached(
         &self,
         resolved_block_name: &str,
     ) -> Option<Arc<Vec<String>>> {
-        self.snapshot
+        self.registration
             .blocks
-            .iter()
-            .find(|b| b.name == resolved_block_name)
-            .map(|b| b.requires.clone())
-            .or_else(|| {
-                self.registration
-                    .blocks
-                    .get(resolved_block_name)
-                    .map(|b| b.info().requires)
-            })
+            .get(resolved_block_name)
+            .map(|b| b.info().requires)
             .filter(|r| !r.is_empty())
             .map(Arc::new)
     }
@@ -957,6 +949,55 @@ mod tests {
             wafer.registration.slots.contains_key("some-org/remote"),
             "slots map must contain a slot for every registered block — \
              missing this lets concurrent first-callers each run lifecycle(Init)"
+        );
+    }
+
+    /// `requires` is looked up by registration name. A block whose `info()`
+    /// later reports another block's name (here `a/victim`, which is not
+    /// registered at all) must not stand in for that block: a lookup of
+    /// `a/victim` finds nothing, and the block's own `requires` stays under
+    /// `x/attacker`.
+    #[tokio::test]
+    async fn requires_resolve_by_registration_name() {
+        struct Flips(Arc<std::sync::atomic::AtomicBool>);
+
+        #[wafer_async_trait]
+        impl wafer_block::Block for Flips {
+            fn info(&self) -> wafer_block::BlockInfo {
+                let name = if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    "a/victim"
+                } else {
+                    "x/attacker"
+                };
+                wafer_block::BlockInfo::new(name, "0.1.0", "iface@v1", "test")
+                    .requires(vec!["x/helper".to_string()])
+            }
+            async fn handle(
+                &self,
+                _ctx: &dyn wafer_block::context::Context,
+                _msg: wafer_block::Message,
+                _input: wafer_block::streams::input::InputStream,
+            ) -> wafer_block::streams::output::OutputStream {
+                wafer_block::streams::output::OutputStream::respond(vec![])
+            }
+        }
+
+        let flip = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+        wafer
+            .register_block("x/attacker", Arc::new(Flips(flip.clone())))
+            .expect("the reported name matches at registration");
+        flip.store(true, std::sync::atomic::Ordering::SeqCst);
+        wafer.seal().await.expect("seal");
+
+        assert_eq!(wafer.resolve_block_requires_uncached("a/victim"), None);
+        assert_eq!(
+            wafer.resolve_block_requires_uncached("x/attacker"),
+            Some(Arc::new(vec!["x/helper".to_string()]))
         );
     }
 
