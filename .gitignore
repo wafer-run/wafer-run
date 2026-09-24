@@ -7,6 +7,8 @@
 # Node
 node_modules/
 dist/
+# wafer-run-node's `npm run build-test` output (scripts/check.sh bindings)
+crates/wafer-run-node/test-build/
 
 # WASM
 *.wasm
