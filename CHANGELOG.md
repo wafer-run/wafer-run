@@ -48,7 +48,22 @@
   With an empty endpoint the block uses the AWS SDK's default config, so
   its region comes from the AWS environment or profile, not from
   `WAFER_RUN__S3__REGION` (which applies only with an endpoint).
-
+- `clients::database::list_all` and `list_sorted` no longer return a
+  silent prefix. They asked for 10 000 rows and returned whatever came back,
+  so a caller over a larger table saw the first 10 000 as if they were all.
+  They now ask for one row more than `LIST_ALL_MAX_ROWS` (10 000, newly
+  public) and fail with `ErrorCode::OutOfRange` when that row exists; read
+  such a table with `paginated_list`. `DatabaseService::take_where` and
+  `update_where` lose their trait defaults, which listed at most 10 000
+  matching rows and then deleted or updated only those, one at a time: a
+  backend (or a `forward_database_service!` ledger entry marked `inherit`)
+  must implement them. Every in-tree backend already does, through
+  `DbExec`. `wafer_sql_utils::aggregate::build_grouped_query` returns
+  `Result<Statement, SqlBuildError>` and refuses a `DateBucketGroup::field`
+  that is not a plain identifier with `InvalidIdentifier`, the rule
+  `build_daily_count` applies; the field is spliced into the `date(…)` /
+  `to_char(…)` expression text, and the builder used to trust its caller to
+  have checked it.
 - `NotFound` only ever comes from a service saying the thing a request
   names does not exist; the runtime no longer answers `NotFound` for "no
   such block". A client that reads `NotFound` as "unset" or "no row"
