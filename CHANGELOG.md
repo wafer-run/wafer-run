@@ -1561,6 +1561,15 @@
 
 ### Fixed
 
+- `wafer-run/network` starts when `WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS`
+  is unset. The key was declared with an empty default and without
+  `.optional()`, which the config resolver reads as required, so every
+  embedder whose `ConfigSource` did not set it had the network block fail
+  Init permanently. Unset means "no total", so the key is now optional. A new
+  test boots every in-tree block that declares config over an empty
+  `ConfigSource` and allows only a genuinely required key
+  (`WAFER_RUN__POSTGRES__DATABASE_URL`) to be missing.
+
 - `wafer-run/ip-rate-limit` charges an IPv6 client per /64 (the new
   `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
   rotating its own interface id used to get a fresh budget per request;

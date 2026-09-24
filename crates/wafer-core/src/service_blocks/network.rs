@@ -61,7 +61,11 @@ crate::service_block! {
              value fails service construction (requires restart to apply).",
             "",
         )
-        .name("Streaming Request Timeout (s)"),
+        .name("Streaming Request Timeout (s)")
+        // Unset means "no total", a value of its own: without `optional` an
+        // empty default makes the key required, and every source that
+        // leaves it unset fails this block's Init.
+        .optional(),
     ]),
     handle: |this, ctx, msg, body| {
         handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
