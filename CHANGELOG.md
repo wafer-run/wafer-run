@@ -66,6 +66,23 @@
   `ensure_query_columns` is replaced by `require_columns`, and
   `wafer_sql_utils::ddl::build_add_text_column` (used only by the removed
   path) is removed — `build_add_column_with_type` covers it.
+- A WASM guest no longer receives the request's `Cookie` or `Authorization`
+  header unless it names the header in its declared
+  `BlockCapabilities.headers.readable` (in `BlockInfo::capabilities`, which is
+  what the inspector's `/blocks/{name}` shows; operators narrow it with the
+  `capabilities` block-config subkey). The inbound filter matched request
+  headers under a `req.header.` prefix that nothing produces, so every
+  request header the HTTP codec writes (`http.header.*`), session cookies
+  included, reached every guest. On the way out, `headers.writable` now
+  applies to every guest egress: an `Error` result's meta and a `Continue`
+  message skipped it and could set cookies, `Location`, CORS and the other
+  sensitive response headers; a nested `call_block` message gets it too. A
+  `Continue` message also keeps the host's value of every sensitive request
+  header the guest may not write, so a guest can neither forge nor drop the
+  credentials the next flow step sees. A guest that reads a credential
+  header, or sets a sensitive header on an error, must declare it. The
+  default sensitive set is now public as
+  `wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS`.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`
@@ -701,6 +718,12 @@
 
 ### Fixed
 
+- `__wafer_host_stream_init` charges the target name and the message it
+  copies out of guest memory against the per-call host-byte budget
+  (`ResourceLimits::max_host_bytes`) before copying. Each open stream holds
+  its decoded message until it closes, and only request-body chunks and
+  attachments were charged, so a guest could hold up to the live-stream cap
+  of full-size messages in host memory.
 - CI now builds the feature and target shapes downstream embedders ship,
   which no workspace member enables: `wafer-block --features json-schema`
   and `wafer-block-sqlite --features vectors` are linted with clippy, the
