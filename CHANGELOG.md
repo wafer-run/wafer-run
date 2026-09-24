@@ -483,6 +483,33 @@
 - `Wafer::add_wrap_grants` returns `Result<(), RuntimeError>`: it rejects the
   whole call with `GrantsRejected` when any grant fails
   `ResourceGrant::check_shape`, where it used to install grants unchecked.
+- `CryptoService` has no master-key `sign` / `verify`, and `sign_for` /
+  `verify_for` are required. Their defaults fell back to the shared master
+  key, so an implementation that forgot them signed every block's tokens
+  under one key without a compile error. Implementations delete `sign` /
+  `verify` and implement `sign_for` / `verify_for` (a derived key per
+  `block_id`; `wafer_block_crypto::primitives::derive_block_key` is the
+  shared derivation). The crypto handler answers a `crypto.sign` /
+  `crypto.verify` that arrives with no calling block `PermissionDenied`
+  instead of using the master key.
+- `CryptoError` gains `MalformedHash`: a stored password hash that is
+  malformed, names an unsupported scheme, or carries costs above the new
+  ceilings. The crypto handler maps it to `Internal`, so `crypto.compare_hash`
+  answers `Unauthenticated` only for a wrong password; an unsupported or
+  corrupt stored hash (a bcrypt row, a truncated PBKDF2 digest) used to be
+  `Unauthenticated` too. `wafer_block_crypto::primitives` returns it where it
+  returned `VerifyError` (`pbkdf2_verify`, `verify_password_any_scheme`) and
+  `HashError` (`verify_password`); `VerifyError` is JWT-only. Callers that
+  treat every `compare_hash` error as bad credentials should branch on the
+  code.
+- Stored-hash verification refuses costs above ten times the strongest
+  preset this crate writes: argon2 `m` > `ARGON2_MAX_M_COST` (194560 KiB),
+  `t` > `ARGON2_MAX_T_COST` (20), `p` > `ARGON2_MAX_P_COST` (10), PBKDF2
+  `i` > `PBKDF2_SHA256_MAX_ITERATIONS` (6,000,000), as `MalformedHash`
+  before any derivation runs. The costs come from the stored string: `t` or
+  `i` at `u32::MAX` pinned a thread for hours, and `m` at `u32::MAX` asked
+  for terabytes. `pbkdf2_hash` refuses the same ceiling (`HashError`), so a
+  `PasswordScheme::Pbkdf2Sha256` above it fails at hash time.
 
 ### Added
 
@@ -983,6 +1010,16 @@
   `Authorization` and `Cookie`), caller identity and client IP next to the
   `Retry-After` / `X-RateLimit-*` headers. The error now carries only those
   three `resp.header.*` entries.
+
+- `jwt_sign` panicked on an expiry that `chrono::Duration::from_std` admits
+  but that lands past chrono's last date (year 262143, about 8.2e12 s from
+  now); `crypto.sign` takes `expiry_secs` from the wire, so one request
+  panicked the handler, which aborts an embedder built with
+  `panic = "abort"`. It returns `SignError` now.
+- The native crypto handler's Argon2 offload released its semaphore permit
+  when the caller's future was dropped (a client disconnect) while the
+  blocking job kept running, so the concurrency cap stopped holding. The
+  permit now moves into the blocking job and is released when it returns.
 
 ### Refactored
 
