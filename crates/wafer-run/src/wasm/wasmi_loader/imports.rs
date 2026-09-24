@@ -222,10 +222,9 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
     // Decodes a rmp-encoded (id: String, attachment: Attachment) tuple from
     // guest memory and adds it to the caller StreamState's attachments map.
     // Returns 0 on success, negative ErrorCode sentinel on error:
-    //   - NotFound: stream handle invalid
     //   - FailedPrecondition: stream not in WritingRequest phase
-    //   - InvalidArgument: payload undecodable, or the guest negotiated the
-    //     JSON host codec (attachments are rmp-only)
+    //   - InvalidArgument: stream handle unknown, payload undecodable, or
+    //     the guest negotiated the JSON host codec (attachments are rmp-only)
     //   - Internal: unrecoverable host-side error
     linker
         .func_wrap(
@@ -277,7 +276,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "__wafer_host_stream_finish",
             |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i32, WasmiError> {
                 if caller.data_mut().streams.get_mut(handle as u64).is_none() {
-                    return Ok(error_code_to_neg_i32(ErrorCode::NotFound));
+                    return Ok(error_code_to_neg_i32(ErrorCode::InvalidArgument));
                 }
                 caller.data_mut().pending_stream_finish = Some(handle as u64);
                 Err(WasmiError::host(StreamFinishTrap))
@@ -298,7 +297,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "__wafer_host_stream_read_chunk",
             |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i64, WasmiError> {
                 if caller.data_mut().streams.get_mut(handle as u64).is_none() {
-                    return Ok(error_code_to_neg_i64(ErrorCode::NotFound));
+                    return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument));
                 }
                 caller.data_mut().pending_stream_read = Some(handle as u64);
                 Err(WasmiError::host(StreamReadTrap))
@@ -317,7 +316,7 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
             "__wafer_host_stream_take_error",
             |mut caller: Caller<WasmiHostState>, handle: i64| -> Result<i64, WasmiError> {
                 if caller.data_mut().streams.get_mut(handle as u64).is_none() {
-                    return Ok(error_code_to_neg_i64(ErrorCode::NotFound));
+                    return Ok(error_code_to_neg_i64(ErrorCode::InvalidArgument));
                 }
                 caller.data_mut().pending_stream_take_error = Some(handle as u64);
                 Err(WasmiError::host(StreamTakeErrorTrap))

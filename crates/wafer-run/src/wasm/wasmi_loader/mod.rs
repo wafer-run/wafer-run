@@ -864,7 +864,7 @@ impl WasmiBlock {
                         }
                         error_code_to_neg_i32(code)
                     }
-                    None => error_code_to_neg_i32(ErrorCode::NotFound),
+                    None => error_code_to_neg_i32(ErrorCode::InvalidArgument),
                 };
 
                 (Val::I32(resume_code), "stream_finish")
@@ -886,7 +886,7 @@ impl WasmiBlock {
                     }
                     None => (
                         Err(WaferError::new(
-                            ErrorCode::NotFound,
+                            ErrorCode::InvalidArgument,
                             "unknown stream handle",
                         )),
                         false,

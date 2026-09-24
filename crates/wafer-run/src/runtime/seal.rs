@@ -31,9 +31,11 @@ impl Wafer {
     ///    `config_defaults`, and `"uses"` contributions across all block
     ///    configs.
     /// 3. Check the blocks referenced by flow steps, router routes and
-    ///    other block configs are registered. Aggregates every missing
-    ///    reference into one `RuntimeError::BlocksNotFound` so operators see
-    ///    the full punch list with each missing block's source.
+    ///    other block configs are registered, and so is every block named in
+    ///    a registered block's `requires` (`optional_requires` is not
+    ///    checked). Aggregates every missing reference into one
+    ///    `RuntimeError::BlocksNotFound` so operators see the full punch
+    ///    list with each missing block's source.
     /// 4. Refuse boot if any WRAP grants were rejected during registration.
     /// 5. Compute effective capabilities per block (declared ∩ config, and
     ///    for a WASM block ∩ the bound its embedder or operator stated) and
@@ -85,7 +87,11 @@ impl Wafer {
         self.expand_declarative_flow_configs();
         self.gather_uses_configs();
 
-        self.resolve_block_references()?;
+        let mut missing = self.unregistered_block_references();
+        self.collect_unmet_requires(&mut missing);
+        if !missing.is_empty() {
+            return Err(RuntimeError::BlocksNotFound(missing));
+        }
 
         self.fail_on_rejected_grants()?;
 
@@ -124,9 +130,8 @@ impl Wafer {
     /// Neither is a property the deployment should have. So the ambiguity is
     /// made impossible to declare instead: one loud error at boot, listing
     /// every colliding name and every endpoint claiming it, the same shape
-    /// [`Self::fail_on_rejected_grants`] and
-    /// [`Self::resolve_block_references`] use for their own cross-block
-    /// verdicts. `wafer_core::discovery`'s per-manifest census stays where it
+    /// [`Self::fail_on_rejected_grants`] and the missing-block check
+    /// (`BlocksNotFound`) use for their own cross-block verdicts. `wafer_core::discovery`'s per-manifest census stays where it
     /// is as a safety net for consumers that project `BlockInfo`s this gate
     /// never saw, and in a runtime that went through `seal()` it never fires.
     ///
@@ -340,14 +345,14 @@ impl Wafer {
         }
     }
 
-    /// Check every block referenced by flow steps, router routes and other
-    /// block configs is registered. Collect every reference + its source,
-    /// then aggregate the missing ones into one `BlocksNotFound`. A missing
-    /// reference is never downloaded: a registry block reaches the runtime
-    /// only pinned in `wafer.lock` (step 1). Router routes and other
-    /// config-held references come from `Block::collect_block_refs`, so
-    /// every block type declares its own.
-    fn resolve_block_references(&self) -> Result<(), RuntimeError> {
+    /// The blocks referenced by flow steps, router routes and other block
+    /// configs that are not registered, each with every source that
+    /// references it, sorted by name. A missing reference is never
+    /// downloaded: a registry block reaches the runtime only pinned in
+    /// `wafer.lock` (step 1). Router routes and other config-held references
+    /// come from `Block::collect_block_refs`, so every block type declares
+    /// its own.
+    fn unregistered_block_references(&self) -> Vec<BlockReferenceError> {
         // BTreeMap (vs HashMap) so iteration over missing references yields
         // canonical-name-sorted order, giving stable `Display` output for
         // `BlocksNotFound` across boots.
@@ -380,17 +385,45 @@ impl Wafer {
             }
         }
 
-        let not_found: Vec<BlockReferenceError> = references
+        references
             .into_iter()
             .filter(|(canonical, _)| !self.registration.blocks.contains_key(canonical))
             .map(|(name, sources)| BlockReferenceError { name, sources })
-            .collect();
+            .collect()
+    }
 
-        if not_found.is_empty() {
-            Ok(())
-        } else {
-            Err(RuntimeError::BlocksNotFound(not_found))
+    /// Add to `missing` every block named in a registered block's
+    /// `requires` that is not registered, with a
+    /// [`BlockReferenceSource::Requires`] source per requiring block. A
+    /// `requires` entry may be an alias; it is resolved first. `missing`
+    /// stays sorted by name so `BlocksNotFound` renders the same across
+    /// boots.
+    ///
+    /// Without this, an absent dependency surfaces only when a call to it
+    /// fails at request time.
+    fn collect_unmet_requires(&self, missing: &mut Vec<BlockReferenceError>) {
+        let mut requiring: Vec<(&String, &Arc<dyn wafer_block::Block>)> =
+            self.registration.blocks.iter().collect();
+        requiring.sort_by(|a, b| a.0.cmp(b.0));
+        for (from_block, block) in requiring {
+            for required in block.info().requires {
+                let canonical = self.canonicalize(&required).to_string();
+                if self.registration.blocks.contains_key(&canonical) {
+                    continue;
+                }
+                let source = BlockReferenceSource::Requires {
+                    from_block: from_block.clone(),
+                };
+                match missing.iter_mut().find(|e| e.name == canonical) {
+                    Some(entry) => entry.sources.push(source),
+                    None => missing.push(BlockReferenceError {
+                        name: canonical,
+                        sources: vec![source],
+                    }),
+                }
+            }
         }
+        missing.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
     /// Finalize the startup snapshot. Block configs survive in

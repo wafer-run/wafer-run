@@ -11,8 +11,9 @@
 //! Every flow reaching compilation passed [`wafer_flow::validate`] in
 //! [`Wafer::add_flow`], so its jump targets name top-level steps and its
 //! expressions parse. A block missing at seal time compiles to a form that
-//! reproduces the runtime "block not found" error if — and only if — that
-//! step actually runs. Nothing new fails at seal time.
+//! reproduces the runtime `Unimplemented` "block is not registered" error
+//! if — and only if — that step actually runs. Nothing new fails at seal
+//! time.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -48,7 +49,7 @@ pub(crate) struct CompiledStep {
     /// error messages), possibly an alias.
     pub(crate) block_label: String,
     /// Seal-time resolved dispatch target. `None` preserves the runtime
-    /// "block '…' not found in step '…'" error for flows compiled while the
+    /// "block '…' in step '…' is not registered" error for flows compiled while the
     /// referenced block is unregistered (e.g. a flow added after `seal()`).
     pub(crate) target: Option<StepTarget>,
     /// Compiled `input` template (pipeline mode when present).
@@ -106,7 +107,7 @@ pub(crate) enum NextTarget {
     Step(usize),
     /// `step` names an id that is not a top-level step. `validate` refuses
     /// such a flow at `add_flow`; if one is compiled regardless, taking the
-    /// entry fails with `NotFound` rather than jumping anywhere.
+    /// entry fails with `Unimplemented` rather than jumping anywhere.
     MissingStep(String),
     /// Transfer control to another flow.
     Flow(String),

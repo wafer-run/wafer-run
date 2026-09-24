@@ -95,7 +95,7 @@ pub async fn handle_message(
         ServiceOp::IMAGE_LOAD_MODEL => load_model(service, ctx, block, body),
         ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service.as_ref(), ctx, block, body).await,
         other => OutputStream::error(WaferError::new(
-            ErrorCode::InvalidArgument,
+            ErrorCode::Unimplemented,
             format!("unknown image operation: {other}"),
         )),
     }

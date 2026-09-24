@@ -379,8 +379,8 @@ pub(crate) async fn execute<'w>(
                         NextTarget::MissingStep(target_step) => {
                             return FlowOutcome::Done(
                                 ShortCircuit::Error(WaferError::new(
-                                    ErrorCode::NotFound,
-                                    format!("next target step '{target_step}' not found"),
+                                    ErrorCode::Unimplemented,
+                                    format!("next target step '{target_step}' does not exist"),
                                 ))
                                 .into_output(&state),
                             );
@@ -724,9 +724,9 @@ async fn run_invocation(
     //     false denials. ---
     let Some(target) = &step.target else {
         return Err(ShortCircuit::Error(WaferError::new(
-            ErrorCode::NotFound,
+            ErrorCode::Unimplemented,
             format!(
-                "block '{}' not found in step '{}'",
+                "block '{}' in step '{}' is not registered",
                 step.block_label, step.id
             ),
         )));

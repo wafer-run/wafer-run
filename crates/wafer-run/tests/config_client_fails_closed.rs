@@ -8,6 +8,10 @@
 //! default standing in for it would hand a block the fallback value of a
 //! setting it was never allowed to read, and hide the refusal from the
 //! operator.
+//!
+//! The same holds when there is no config block to ask: the runtime's
+//! `Unimplemented` for an unregistered block is not the config block's
+//! `NotFound` for an unset key.
 
 use std::sync::Arc;
 
@@ -132,5 +136,41 @@ async fn get_optional_is_none_only_when_the_key_is_not_set() {
     assert_eq!(
         read(&wafer, "optional", OWN_SET).await,
         Ok("some:hello".into())
+    );
+}
+
+/// The reader registered with no `wafer-run/config` block at all. The reader
+/// declares no `requires`, so `seal()` has nothing to check it against: the
+/// absence surfaces on the call.
+async fn build_without_config() -> Wafer {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    wafer
+        .register_block(READER, Arc::new(Reader))
+        .expect("register reader");
+    wafer.seal().await.expect("seal");
+    wafer
+}
+
+/// With the config block absent the runtime has nothing to dispatch to. That
+/// is not "the key is not set", so it must not become the default.
+#[tokio::test]
+async fn get_default_fails_when_the_config_block_is_absent() {
+    let wafer = build_without_config().await;
+    assert_eq!(
+        read(&wafer, "default", OWN_UNSET).await,
+        Err(ErrorCode::Unimplemented)
+    );
+}
+
+#[tokio::test]
+async fn get_optional_fails_when_the_config_block_is_absent() {
+    let wafer = build_without_config().await;
+    assert_eq!(
+        read(&wafer, "optional", OWN_UNSET).await,
+        Err(ErrorCode::Unimplemented)
     );
 }

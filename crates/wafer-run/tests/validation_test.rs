@@ -193,8 +193,8 @@ async fn call_block_rejects_wrong_action_for_interface() {
         Err(TerminalNotResponse::Error(e)) => {
             assert_eq!(
                 e.code,
-                ErrorCode::InvalidArgument,
-                "expected InvalidArgument, got: {:?}",
+                ErrorCode::Unimplemented,
+                "expected Unimplemented, got: {:?}",
                 e.code
             );
             // Error should mention the block name and/or the action
@@ -440,8 +440,8 @@ async fn call_block_rejects_removed_raw_execute_query_ops() {
             Err(other) => {
                 let msg = format!("{other:?}");
                 assert!(
-                    msg.contains("InvalidArgument"),
-                    "removed op '{op}' should be rejected with INVALID_ARGUMENT, got: {msg}"
+                    msg.contains("Unimplemented"),
+                    "removed op '{op}' should be rejected with UNIMPLEMENTED, got: {msg}"
                 );
             }
         }

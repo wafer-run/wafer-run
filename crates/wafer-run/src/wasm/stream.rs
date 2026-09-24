@@ -386,7 +386,7 @@ impl StreamRegistry {
     pub(crate) fn write_chunk(&mut self, handle: u64, chunk: &[u8]) -> Result<(), WaferError> {
         if !self.states.contains_key(&handle) {
             return Err(WaferError::new(
-                ErrorCode::NotFound,
+                ErrorCode::InvalidArgument,
                 "unknown stream handle",
             ));
         }
@@ -408,7 +408,7 @@ impl StreamRegistry {
     ) -> Result<(), WaferError> {
         if !self.states.contains_key(&handle) {
             return Err(WaferError::new(
-                ErrorCode::NotFound,
+                ErrorCode::InvalidArgument,
                 "unknown stream handle",
             ));
         }

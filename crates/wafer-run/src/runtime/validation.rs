@@ -17,7 +17,8 @@ pub enum ActionCheck {
     Valid,
     /// The action is not listed in the interface's action map.
     ///
-    /// Message is pre-formatted for use in a `WaferError::invalid_argument`.
+    /// Message is pre-formatted for the `ErrorCode::Unimplemented` error
+    /// `call_block` returns.
     Invalid {
         /// Pre-formatted, human-readable error message suitable for surfacing to callers.
         message: String,

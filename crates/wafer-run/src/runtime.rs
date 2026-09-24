@@ -494,11 +494,13 @@ impl Wafer {
         }
     }
 
-    /// Uncompiled `requires` resolution: the `requires` of the block
-    /// registered under `resolved_block_name`, looked up by registration name
-    /// and never by any block's reported name. An empty or absent list yields
-    /// `None` — an undeclared `requires` leaves the block's `call_block` set
-    /// unrestricted, matching [`RuntimeContext::caller_requires`] semantics.
+    /// Uncompiled `requires` resolution: the
+    /// [`call_allowlist`](wafer_block::BlockInfo::call_allowlist) (`requires`
+    /// plus `optional_requires`) of the block registered under
+    /// `resolved_block_name`, looked up by registration name and never by any
+    /// block's reported name. Both lists empty, or no such block, yields
+    /// `None` — the block's `call_block` set is unrestricted, matching
+    /// [`RuntimeContext::caller_requires`] semantics.
     /// Run once per block at seal time to populate the plan, and directly only
     /// on plan misses.
     pub(crate) fn resolve_block_requires_uncached(
@@ -508,8 +510,7 @@ impl Wafer {
         self.registration
             .blocks
             .get(resolved_block_name)
-            .map(|b| b.info().requires)
-            .filter(|r| !r.is_empty())
+            .and_then(|b| b.info().call_allowlist())
             .map(Arc::new)
     }
 
@@ -948,6 +949,24 @@ mod tests {
             }
         }
 
+        /// The block `x/attacker` requires, so `seal()` accepts it.
+        struct Helper;
+
+        #[wafer_async_trait]
+        impl wafer_block::Block for Helper {
+            fn info(&self) -> wafer_block::BlockInfo {
+                wafer_block::BlockInfo::new("x/helper", "0.1.0", "iface@v1", "test")
+            }
+            async fn handle(
+                &self,
+                _ctx: &dyn wafer_block::context::Context,
+                _msg: wafer_block::Message,
+                _input: wafer_block::streams::input::InputStream,
+            ) -> wafer_block::streams::output::OutputStream {
+                wafer_block::streams::output::OutputStream::respond(vec![])
+            }
+        }
+
         let flip = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut wafer = Wafer::builder()
             .disable_inventory()
@@ -957,6 +976,9 @@ mod tests {
         wafer
             .register_block("x/attacker", Arc::new(Flips(flip.clone())))
             .expect("the reported name matches at registration");
+        wafer
+            .register_block("x/helper", Arc::new(Helper))
+            .expect("register the required block");
         flip.store(true, std::sync::atomic::Ordering::SeqCst);
         wafer.seal().await.expect("seal");
 
