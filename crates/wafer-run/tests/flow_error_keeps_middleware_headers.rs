@@ -667,7 +667,7 @@ async fn a_transfer_to_an_unknown_flow_keeps_the_headers() {
 
     let parts = run_http(&wafer, "outer").await;
 
-    assert_eq!(parts.status, 404, "{parts:?}");
+    assert_eq!(parts.status, 501, "{parts:?}");
     assert_middleware_headers(&parts);
 }
 

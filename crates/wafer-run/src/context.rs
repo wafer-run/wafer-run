@@ -135,7 +135,7 @@ impl RuntimeContext {
         block: &dyn Block,
         attempt: crate::runtime::init_waits::InitAttempt,
     ) -> Self {
-        let requires = block.info().requires;
+        let allowlist = block.info().call_allowlist();
         Self {
             flow_id: "init".to_string(),
             node_id: block_name.to_string(),
@@ -143,7 +143,7 @@ impl RuntimeContext {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deadline: None,
             call_depth: 0,
-            caller_requires: (!requires.is_empty()).then(|| Arc::new(requires)),
+            caller_requires: allowlist.map(Arc::new),
             caller_id: None,
             current_attachments: Arc::default(),
             init_attempt: Some(attempt),
@@ -247,8 +247,8 @@ impl RuntimeContext {
             Some(b) => b.clone(),
             None => {
                 return err_output(
-                    ErrorCode::NotFound,
-                    format!("block '{block_name}' not found"),
+                    ErrorCode::Unimplemented,
+                    format!("block '{block_name}' is not registered"),
                 );
             }
         };
@@ -283,7 +283,7 @@ impl RuntimeContext {
             ) {
                 crate::runtime::validation::ActionCheck::Valid => {}
                 crate::runtime::validation::ActionCheck::Invalid { message } => {
-                    return err_output(ErrorCode::InvalidArgument, message);
+                    return err_output(ErrorCode::Unimplemented, message);
                 }
                 crate::runtime::validation::ActionCheck::UnknownInterface => {
                     crate::runtime::validation::warn_once_unknown_interface(
@@ -295,12 +295,9 @@ impl RuntimeContext {
             }
         }
 
-        // Derive the called block's requires for its own sub-context
-        let called_requires = if info.requires.is_empty() {
-            None // unrestricted
-        } else {
-            Some(Arc::new(info.requires))
-        };
+        // The called block's own `call_block` allowlist for its sub-context
+        // (`None`: unrestricted).
+        let called_requires = info.call_allowlist().map(Arc::new);
 
         // Wrap attachments in an Arc once, consuming the BTreeMap — no deep clone.
         let att_arc: Option<Arc<BTreeMap<String, Attachment>>> = attachments.map(Arc::new);

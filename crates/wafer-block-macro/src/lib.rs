@@ -563,7 +563,10 @@ pub fn wafer_async_trait(
 ///
 /// # Optional attributes
 /// - `instance_mode` — `"per-node"` (default), `"singleton"`, `"per-flow"`, `"per-execution"`
-/// - `requires` — list of block names this block may call (e.g. `["wafer-run/database"]`)
+/// - `requires` — blocks this block may call and cannot run without; `seal()`
+///   refuses to boot while one is unregistered (e.g. `["wafer-run/database"]`)
+/// - `optional_requires` — blocks this block may call but runs without; a call
+///   to an unregistered one fails with `Unimplemented`
 /// - `capabilities(...)` — declare block capabilities (see below)
 /// - `skill(description = "...", parameters = <json-schema>)` — declare the
 ///   LLM-facing tool contract (sets `BlockInfo::tool`). Composes with
@@ -683,6 +686,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         .get_str("instance_mode")
         .unwrap_or_else(|| "per-node".to_string());
     let requires = args.get_str_list("requires")?;
+    let optional_requires = args.get_str_list("optional_requires")?;
 
     let struct_ty = &input.self_ty;
 
@@ -795,16 +799,23 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         quote! { None::<wafer_block::BlockCapabilities> }
     };
 
-    // Build the optional `requires` expression for `block_info()`. The
-    // `requires = [...]` attribute declares which other blocks this block may
-    // `call_block`; the runtime enforces it as an access-control gate (an empty
-    // list means "unrestricted"), so a declared-but-unwired list would silently
-    // disable the restriction.
+    // Build the optional `requires` / `optional_requires` expressions for
+    // `block_info()`. Together the two lists declare which other blocks this
+    // block may `call_block`; the runtime enforces them as an access-control
+    // gate (both empty means "unrestricted"), so a declared-but-unwired list
+    // would silently disable the restriction.
     let requires_expr = if requires.is_empty() {
         quote! {}
     } else {
         quote! {
             info = info.requires(vec![ #( #requires.to_string() ),* ]);
+        }
+    };
+    let optional_requires_expr = if optional_requires.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            info = info.optional_requires(vec![ #( #optional_requires.to_string() ),* ]);
         }
     };
 
@@ -850,6 +861,7 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                     info = info.capabilities(c);
                 }
                 #requires_expr
+                #optional_requires_expr
                 #skill_tool_expr
                 info
             }

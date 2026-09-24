@@ -437,6 +437,20 @@ impl Block for RequiresCallerBlock {
     }
 }
 
+// The block `RequiresCallerBlock` requires: registered so `seal()` accepts
+// the caller, never called.
+struct AllowedBlock;
+
+#[async_trait::async_trait]
+impl Block for AllowedBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/allowed", "0.0.1", "http-handler@v1", "Allowed")
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(Vec::new())
+    }
+}
+
 // Regression for the dispatch perf refactor that reads `requires` from the
 // startup snapshot instead of rebuilding `BlockInfo` on every `run_block`:
 // a declared `requires` list must still be populated and enforced.
@@ -444,6 +458,8 @@ impl Block for RequiresCallerBlock {
 async fn run_block_enforces_requires_read_from_snapshot() {
     let mut w = empty_wafer();
     w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
+        .unwrap();
+    w.register_block("test/allowed", Arc::new(AllowedBlock))
         .unwrap();
     w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
     w.seal().await.expect("seal");
@@ -477,6 +493,8 @@ async fn run_block_enforces_requires_read_from_snapshot() {
 async fn flow_step_enforces_requires() {
     let mut w = empty_wafer();
     w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
+        .unwrap();
+    w.register_block("test/allowed", Arc::new(AllowedBlock))
         .unwrap();
     w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
     w.add_flow(single_step_flow("requires-flow", "test/requires-caller"))
@@ -1144,8 +1162,9 @@ async fn test_execute_nonexistent_flow() {
 
     let result = run_flow(&w, "nonexistent", Message::new("test"), b"data".to_vec()).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
-    // "flow not found" maps to NotFound
-    assert_eq!(result.error().code, ErrorCode::NotFound);
+    // No flow to dispatch to is the runtime's `Unimplemented`; `NotFound` is
+    // reserved for a service.
+    assert_eq!(result.error().code, ErrorCode::Unimplemented);
 }
 
 // ===========================================================================
@@ -1783,7 +1802,7 @@ async fn test_waferflow_not_found() {
     let result = run_flow(&w, "nonexistent", Message::new("test"), vec![]).await;
     assert!(result.is_error(), "expected error, got: {result:?}");
     assert!(
-        result.error().message.contains("not found"),
+        result.error().message.contains("not registered"),
         "error: {:?}",
         result.error().message
     );

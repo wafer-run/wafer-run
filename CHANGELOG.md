@@ -4,6 +4,31 @@
 
 ### Breaking changes
 
+- `NotFound` only ever comes from a service saying the thing a request
+  names does not exist; the runtime no longer answers `NotFound` for "no
+  such block". A client that reads `NotFound` as "unset" or "no row"
+  (`clients::config::get_optional` / `get_default`,
+  `clients::database::upsert_by_field`) used to fall back silently when the
+  service block was not registered at all. Dispatch to an unregistered
+  block (`run_block`, `call_block`, a flow step), to an unregistered flow
+  (`Wafer::run`, `next.flow`) or to a missing `next.step` now fails with
+  `ErrorCode::Unimplemented` (HTTP 501), as a service answers an operation
+  it does not have; a `call_block` action outside the target's declared
+  interface is `Unimplemented` too (was `InvalidArgument`), and so is an
+  unknown `llm.*` / `image.*` operation. Over HTTP that check answers 501
+  where it answered 400: `OPTIONS`, `TRACE` and `CONNECT` map to the
+  `execute` action, which `http-handler@v1` does not declare, so such a
+  request routed to an `http-handler@v1` block gets 501. A wasm guest passing an unknown
+  stream handle to a `__wafer_host_stream_*` import gets `InvalidArgument`
+  (was `NotFound`). `seal()` refuses to boot with
+  `RuntimeError::BlocksNotFound` when a registered block's `requires` names
+  a block that is not registered; the new
+  `BlockReferenceSource::Requires { from_block }` names the requiring
+  block. A dependency a block can run without moves to the new
+  `BlockInfo::optional_requires` (`#[wafer_block(optional_requires = [...])]`):
+  it stays on the block's `call_block` allowlist, is not checked at seal,
+  and a call to it while it is absent fails with `Unimplemented`.
+  `BlockInfo::call_allowlist` returns the combined allowlist.
 - `seal()` downloads only what `wafer.lock` pins, and only bytes matching
   the pin. A flow step, route or block config naming an unregistered
   `org/block` — bare, `@latest` or `@version` — used to make `seal()` fetch

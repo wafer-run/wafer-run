@@ -1,4 +1,5 @@
-//! Test that `#[wafer_block(requires = [...])]` reaches `BlockInfo::requires`.
+//! Test that `#[wafer_block(requires = [...], optional_requires = [...])]`
+//! reaches `BlockInfo::requires` / `BlockInfo::optional_requires`.
 //!
 //! `requires` declares which other blocks this block may `call_block`; the
 //! runtime enforces it as an access-control gate. Regression: the attribute was
@@ -22,7 +23,8 @@ mod declared_block {
         version = "0.1.0",
         interface = "middleware@v1",
         summary = "test",
-        requires = ["wafer-run/database", "wafer-run/crypto"]
+        requires = ["wafer-run/database", "wafer-run/crypto"],
+        optional_requires = ["wafer-run/llm"]
     )]
     impl Declared {
         #[expect(
@@ -68,6 +70,11 @@ fn declared_requires_reaches_block_info() {
             "wafer-run/crypto".to_string(),
         ],
         "declared `requires` list must reach BlockInfo::requires"
+    );
+    assert_eq!(
+        info.optional_requires,
+        vec!["wafer-run/llm".to_string()],
+        "declared `optional_requires` list must reach BlockInfo::optional_requires"
     );
 }
 

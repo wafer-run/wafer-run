@@ -106,9 +106,14 @@ where
     Ok(out)
 }
 
-/// The error for a flow id that names no flow.
+/// The error for a flow id that names no flow. `Unimplemented`, like every
+/// runtime "nothing to dispatch to" error: `NotFound` is reserved for a
+/// service saying the thing a request names does not exist.
 pub(crate) fn flow_not_found(flow_id: &str) -> WaferError {
-    WaferError::new(ErrorCode::NotFound, format!("flow not found: {flow_id}"))
+    WaferError::new(
+        ErrorCode::Unimplemented,
+        format!("flow is not registered: {flow_id}"),
+    )
 }
 
 /// A flow's execution plan: the seal-compiled one, or one compiled for this
@@ -263,8 +268,8 @@ impl Wafer {
         // Resolve alias + look up the target block in one step.
         let Some((resolved, block)) = self.registration.lookup_with_alias(block_name) else {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NotFound,
-                format!("block not found: {block_name}"),
+                ErrorCode::Unimplemented,
+                format!("block is not registered: {block_name}"),
             ));
         };
 

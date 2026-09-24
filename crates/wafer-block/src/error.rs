@@ -135,14 +135,15 @@ pub enum RuntimeError {
 
     // ── Block resolution (seal-time) ────────────────────────────────────
     /// One or more block references could not be resolved during
-    /// `seal()`. Aggregated across all flow steps and router routes;
-    /// the embedded `Vec` always has at least one entry.
+    /// `seal()`. Aggregated across flow steps, block configs (router
+    /// routes) and every registered block's `requires`; the embedded
+    /// `Vec` always has at least one entry.
     ///
-    /// Single-block runtime lookups (lazy init, flow runner) surface
-    /// missing blocks as `WaferError::NOT_FOUND` rather than a typed
-    /// `RuntimeError` variant; `BlocksNotFound` is reserved for the
-    /// seal-time aggregator and carries source information so
-    /// operators can find the link-graph cause inline.
+    /// Dispatch to a block that is not registered (`run_block`,
+    /// `call_block`, a flow step) fails with `ErrorCode::Unimplemented`
+    /// rather than a typed `RuntimeError` variant; `BlocksNotFound` is
+    /// reserved for the seal-time aggregator and carries source
+    /// information so operators can find the link-graph cause inline.
     #[error("{}", render_boot_error_list("referenced block(s) not found", .0, render_block_reference_error))]
     BlocksNotFound(Vec<BlockReferenceError>),
 
@@ -266,6 +267,12 @@ pub enum BlockReferenceSource {
         /// Optional operator-facing detail (e.g. `"GET"`). From
         /// `BlockConfigRef::detail`.
         detail: Option<String>,
+    },
+    /// Block was named in a registered block's `BlockInfo::requires`.
+    Requires {
+        /// Registration name of the block whose `requires` names the
+        /// missing block.
+        from_block: String,
     },
 }
 
@@ -432,6 +439,9 @@ fn render_source(src: &BlockReferenceSource) -> String {
             || format!("      \u{2022} from block `{from_block}` {location}"),
             |d| format!("      \u{2022} from block `{from_block}` {location} {d}"),
         ),
+        BlockReferenceSource::Requires { from_block } => {
+            format!("      \u{2022} required by block `{from_block}`")
+        }
     }
 }
 
@@ -613,6 +623,17 @@ mod tests {
         assert_eq!(
             rendered,
             "      \u{2022} flow `my-flow` step 2 (`call-thing`)",
+        );
+    }
+
+    #[test]
+    fn render_source_renders_requires_variant() {
+        let src = super::BlockReferenceSource::Requires {
+            from_block: "wafer-run/web".to_string(),
+        };
+        assert_eq!(
+            super::render_source(&src),
+            "      \u{2022} required by block `wafer-run/web`",
         );
     }
 

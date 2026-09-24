@@ -91,7 +91,7 @@ pub async fn handle_message(
         ServiceOp::LLM_LOAD_MODEL => load_model(service, ctx, block, body),
         ServiceOp::LLM_UNLOAD_MODEL => unload_model(service.as_ref(), ctx, block, body).await,
         other => OutputStream::error(WaferError::new(
-            ErrorCode::InvalidArgument,
+            ErrorCode::Unimplemented,
             format!("unknown llm operation: {other}"),
         )),
     }
