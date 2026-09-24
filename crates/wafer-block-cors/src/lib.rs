@@ -3,8 +3,8 @@
 //!
 //! Implements RFC 6454 cross-origin request handling: parses the request
 //! `Origin` header, consults a configured allow-list, and sets the
-//! `Access-Control-Allow-*` response headers (plus `Vary: Origin`) on
-//! the outgoing message. OPTIONS preflight requests short-circuit with
+//! `Access-Control-Allow-*` response headers (plus `Vary: Origin` whenever
+//! an allow-list is configured) on the outgoing message. OPTIONS preflight requests short-circuit with
 //! a 204 via [`OutputStream::halt`].
 //!
 //! See the [`CorsBlock`] type for the configuration contract and the
@@ -45,29 +45,56 @@ fn unconfigured_denial_is_loggable(origin: &str) -> bool {
     !origin.is_empty()
 }
 
+/// How a request's `Origin` matched the allow-list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OriginMatch {
+    /// The origin is listed by name.
+    Listed,
+    /// The allow-list is `*`.
+    Wildcard,
+}
+
+/// Match a request's `origin` against `allowed` (`*` or a comma-separated
+/// list). `None` when the request has no `Origin` or the origin is not
+/// allowed; the caller then emits no `Access-Control-Allow-Origin`.
+fn match_origin(allowed: &str, origin: &str) -> Option<OriginMatch> {
+    if origin.is_empty() {
+        None
+    } else if allowed.trim() == "*" {
+        Some(OriginMatch::Wildcard)
+    } else if allowed.split(',').any(|o| o.trim() == origin) {
+        Some(OriginMatch::Listed)
+    } else {
+        None
+    }
+}
+
 /// CorsBlock handles CORS preflight and sets CORS headers.
 ///
 /// # Configuration
 ///
-/// `allowed_origins` is **required** — it must be set either via
-/// block config (parsed at `lifecycle(Init)`) or via per-request
-/// `ctx.config_get("allowed_origins")` (e.g. from a flow step).
+/// `allowed_origins` must be set either via block config (parsed at
+/// `lifecycle(Init)`) or via per-request `ctx.config_get("allowed_origins")`
+/// (e.g. from a flow step). It is `*` or a comma-separated list of origins.
 ///
-/// If neither path supplies a value, the block fails closed:
-/// `lifecycle(Init)` returns an error so the runtime refuses to start,
-/// and per-request `handle()` denies all cross-origin requests (no
+/// If neither path supplies a value, the block fails closed (SEC-087): Init
+/// logs a warning but succeeds, since a flow step may still supply the list
+/// per request, and `handle()` denies every cross-origin request (no
 /// `Access-Control-Allow-Origin` header emitted).
 ///
-/// This is a deliberate change from the previous default of `"*"`,
-/// which silently exposed APIs to any origin (see SEC-087 in the
-/// 2026-04-10 security review).
+/// # Access-Control-Allow-Origin
+///
+/// The header is only ever the request's own `Origin`, and only when that
+/// origin is allowed: listed, or any origin under `*`. A request without an
+/// `Origin` gets none. Credentials are allowed only for a listed origin.
 ///
 /// # Vary: Origin
 ///
-/// Whenever the response includes a reflected `Access-Control-Allow-Origin`
-/// (either via wildcard or allow-list match), the block also sets
-/// `Vary: Origin`. Without it, intermediary caches can serve a response
-/// targeted at Origin A to a request from Origin B — see SEC-088.
+/// Whenever an allow-list is configured the response depends on the
+/// request's `Origin` — including a request without one, or from an origin
+/// that is refused — so the block sets `Vary: Origin` on every such
+/// response. Without it, an intermediary cache can serve a response keyed
+/// for one origin to a request from another — see SEC-088.
 pub struct CorsBlock {
     /// Allow-list resolved at `Init` lifecycle, used as fallback when the
     /// per-request context does not supply `allowed_origins`. Unset until
@@ -148,10 +175,9 @@ impl Block for CorsBlock {
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // Resolve allow-list: per-request config > Init-cached > deny.
-        // No wildcard default — failing closed is the point. Borrow both
-        // sources as `&str` (neither outlives this call) so the hot path
-        // allocates nothing — `allowed` is only compared / split / reflected
-        // below, never stored.
+        // No wildcard default — failing closed is the point. Both sources
+        // are borrowed as `&str`: `allowed` is only compared and split
+        // below, never stored or sent.
         let origins: Option<&str> = ctx
             .config_get("allowed_origins")
             .or_else(|| self.cached_origins());
@@ -172,7 +198,6 @@ impl Block for CorsBlock {
 
         let origin = out_msg.header("Origin").to_string();
         let mut credentials = false;
-        let mut reflected = false;
 
         match origins {
             None => {
@@ -187,25 +212,24 @@ impl Block for CorsBlock {
                     );
                 }
             }
-            Some(allowed) if !origin.is_empty() => {
-                if allowed == "*" {
-                    // Wildcard: reflect origin but credentials MUST stay false per spec.
-                    out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
-                    reflected = true;
-                } else if allowed.split(',').any(|o| o.trim() == origin) {
-                    // Origin explicitly in allowlist: safe to enable credentials.
-                    out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
-                    credentials = true;
-                    reflected = true;
-                }
-                // else: origin not allowed — emit nothing, browser will block.
-            }
             Some(allowed) => {
-                // No `Origin` header on the request — same-origin or non-browser.
-                // For non-`*` configs we still surface the configured value so
-                // intermediaries can verify, but we do not reflect anything.
-                if allowed != "*" {
-                    out_msg.set_meta("resp.header.Access-Control-Allow-Origin", allowed);
+                // SEC-088: with an allow-list the response depends on the
+                // request's `Origin` — present, absent or refused — so a
+                // cache must key on it.
+                out_msg.set_meta("resp.header.Vary", "Origin");
+                match match_origin(allowed, &origin) {
+                    Some(OriginMatch::Listed) => {
+                        // Origin explicitly in allowlist: safe to enable credentials.
+                        out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
+                        credentials = true;
+                    }
+                    Some(OriginMatch::Wildcard) => {
+                        // Credentials MUST stay false under a wildcard, per spec.
+                        out_msg.set_meta("resp.header.Access-Control-Allow-Origin", &origin);
+                    }
+                    // No `Origin` (same-origin or non-browser) or a refused
+                    // one: emit nothing, and the browser blocks a cross-origin read.
+                    None => {}
                 }
             }
         }
@@ -216,14 +240,6 @@ impl Block for CorsBlock {
             out_msg.set_meta("resp.header.Access-Control-Allow-Credentials", "true");
         }
         out_msg.set_meta("resp.header.Access-Control-Max-Age", &max_age);
-
-        // SEC-088: emit `Vary: Origin` whenever the response includes a
-        // reflected `Access-Control-Allow-Origin`. Required so intermediary
-        // caches don't serve a response keyed for Origin A to a request
-        // from Origin B.
-        if reflected {
-            out_msg.set_meta("resp.header.Vary", "Origin");
-        }
 
         // Handle OPTIONS preflight — respond with empty 204 + CORS headers.
         // Uses Halt (not Drop) so the flow executor short-circuits AND the
@@ -340,6 +356,8 @@ wafer_block::register_static_block!("wafer-run/cors", CorsBlock);
 
 #[cfg(test)]
 mod tests {
+    use wafer_block::streams::output::TerminalNotResponse;
+
     use super::*;
 
     #[test]
@@ -532,8 +550,6 @@ mod tests {
 
     #[tokio::test]
     async fn options_preflight_emits_halt_with_cors_meta() {
-        use wafer_block::streams::output::TerminalNotResponse;
-
         let ctx = TestContext::with_origin("https://example.com");
         let block = CorsBlock::new();
         // Init the block with an allowlist that includes our test origin.
@@ -594,6 +610,130 @@ mod tests {
             }
             other => panic!("expected Err(Halt), got {other:?}"),
         }
+    }
+
+    /// Init `CorsBlock` with `allowed_origins`, then run one request carrying
+    /// `origin` (none when empty) through `handle` and return its meta.
+    async fn cors_meta(allowed_origins: Option<&str>, origin: &str) -> Vec<(String, String)> {
+        let block = CorsBlock::new();
+        let cfg = match allowed_origins {
+            Some(v) => serde_json::json!({ "allowed_origins": v }),
+            None => serde_json::json!({}),
+        };
+        block
+            .lifecycle(
+                &TestContext::new(),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: serde_json::to_vec(&cfg).expect("json"),
+                },
+            )
+            .await
+            .expect("init ok");
+        let mut msg = Message::new("http.request");
+        msg.set_meta("http.method", "GET");
+        if !origin.is_empty() {
+            msg.set_meta("http.header.origin", origin);
+        }
+        match block
+            .handle(&TestContext::new(), msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Continue(msg)) => {
+                msg.meta.into_iter().map(|m| (m.key, m.value)).collect()
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    fn meta_value<'a>(meta: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        meta.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    const TWO_ORIGINS: &str = "https://a.example, https://b.example";
+
+    #[tokio::test]
+    async fn a_request_without_origin_gets_no_allow_origin_but_varies() {
+        let meta = cors_meta(Some(TWO_ORIGINS), "").await;
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Origin"),
+            None,
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Vary"),
+            Some("Origin"),
+            "{meta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_origin_gets_no_allow_origin_but_varies() {
+        let meta = cors_meta(Some(TWO_ORIGINS), "https://evil.example").await;
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Origin"),
+            None,
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Vary"),
+            Some("Origin"),
+            "{meta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listed_origin_is_reflected_alone_with_credentials() {
+        let meta = cors_meta(Some(TWO_ORIGINS), "https://b.example").await;
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Origin"),
+            Some("https://b.example"),
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Credentials"),
+            Some("true"),
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Vary"),
+            Some("Origin"),
+            "{meta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_reflects_the_origin_without_credentials() {
+        let meta = cors_meta(Some("*"), "https://any.example").await;
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Origin"),
+            Some("https://any.example"),
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Credentials"),
+            None,
+            "{meta:?}"
+        );
+        assert_eq!(
+            meta_value(&meta, "resp.header.Vary"),
+            Some("Origin"),
+            "{meta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_block_sends_neither_allow_origin_nor_vary() {
+        // Fail closed: no allow-list means nothing depends on `Origin`.
+        let meta = cors_meta(None, "https://a.example").await;
+        assert_eq!(
+            meta_value(&meta, "resp.header.Access-Control-Allow-Origin"),
+            None,
+            "{meta:?}"
+        );
+        assert_eq!(meta_value(&meta, "resp.header.Vary"), None, "{meta:?}");
     }
 
     #[test]
