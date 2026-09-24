@@ -4,6 +4,43 @@
 
 ### Breaking changes
 
+- `seal()` downloads only what `wafer.lock` pins, and only bytes matching
+  the pin. A flow step, route or block config naming an unregistered
+  `org/block` — bare, `@latest` or `@version` — used to make `seal()` fetch
+  the registry's current artifact (the latest one, for a bare name or a
+  typo) and run it with no digest check, from a default registry
+  (`raw.githubusercontent.com/wafer-run/registry/main`) that does not exist.
+  Now such a reference is reported in `BlocksNotFound` and nothing is
+  fetched. The one download left is a `wafer.lock` entry from a
+  `registry+<url>` source whose cache directory is missing: the lockfile
+  loader defers it (instead of failing the build with a cache miss) and
+  `seal()` fetches `{url}/registry/download/{org}/{block}/{version}.wafer` —
+  the URL `wafer install` uses — refusing it unless the tarball hashes to
+  the entry's `sha256` and its `.wasm` to its `wasm_sha256`, then registers
+  it under the entry's name with the entry's `capabilities` bound, like a
+  cached entry. Downloads are capped at `MAX_PACKAGE_BYTES` and unpacked in
+  memory within `MAX_PACKAGE_ENTRIES` / `MAX_UNPACKED_BYTES` (new constants
+  in `wafer_block::lockfile`, shared with `wafer install`). A lockfile entry
+  naming the admin block, cached or not, fails `seal()`. Removed with the
+  old path: the `WAFER_RUN_REGISTRY_BASE_URL` variable and
+  `wafer_run::REGISTRY_BASE_URL_KEY`, the registry manifest format
+  (`manifest.json`, `wasm_url`, `flow_url` — remote flows are no longer
+  downloaded), `wafer_run::{parse_versioned_block, parse_unversioned_block,
+  RemoteBlockRef, ABI_VERSION}`, `RuntimeError::AbiMismatch`, and the
+  versioned-reference aliases (`org/block@version` is not an alias of a
+  downloaded `org/block`; name blocks by `org/block` and pin the version in
+  `wafer.lock`).
+- `wafer install` treats `wafer.lock` as the authority without `--frozen`
+  too: when the lockfile pins the resolved version, a registry sha256 that
+  differs from the pin is an integrity failure, and neither the cache nor
+  `wafer.lock` changes (it used to download the new tarball and re-pin the
+  lockfile to it). A different version — `@version`, a bare `org/block`
+  resolving past the pin, or a bumped `[dependencies]` entry — is what
+  records a new sha. Downloads are refused past the version's advertised
+  `size_bytes` (and never above `MAX_PACKAGE_BYTES`), and extraction past
+  `MAX_PACKAGE_ENTRIES` entries or `MAX_UNPACKED_BYTES` of content, or of
+  any entry that is not a regular file or directory.
+  `registry_client::download_tarball` takes the byte cap.
 - Config reads fail closed. `wafer_core::clients::config::get_default`
   returns `Result<String, WaferError>` (was `String`) and falls back to the
   default only when the key is not set (`ErrorCode::NotFound`); a WRAP
