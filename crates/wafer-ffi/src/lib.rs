@@ -8,10 +8,13 @@
 //!   after spawning the work onto an internal tokio runtime, and invoke the
 //!   supplied `wafer_done_cb` when the work completes. The result pointer
 //!   passed to the callback is owned by Rust and freed after the callback
-//!   returns — callers must copy any data they need before returning.
+//!   returns — callers must copy any data they need before returning. The
+//!   callback is required: each returns [`WAFER_ACCEPTED`], or
+//!   [`WAFER_REFUSED_NULL_CALLBACK`] without doing anything when it is NULL.
 //! - Synchronous ops (`wafer_new`, `wafer_free`, `wafer_register`,
-//!   `wafer_flows_info`, `wafer_has_block`) return immediately with a result;
-//!   strings they return must be freed via `wafer_free_string`.
+//!   `wafer_register_block`, `wafer_flows_info`, `wafer_has_block`) return
+//!   immediately with a result; strings they return must be freed via
+//!   `wafer_free_string`.
 //! - Functions that can fail signal failure via the callback's non-NULL
 //!   result (lifecycle ops) or a JSON error in the returned string
 //!   (synchronous ops).
@@ -34,11 +37,13 @@ use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 ///   is NULL on success, or a JSON error string on failure.
 /// - For `wafer_run`: `result` is always non-NULL — a JSON result string of
 ///   the form `{"action":"respond|drop|error|continue|halt", ...}`. Its
-///   `meta` holds only the canonical response keys (`resp.status`,
-///   `resp.header.*`, `resp.cookie.*`, `resp.content_type`); request state
-///   never crosses this boundary. The wire format (including the `body` vs
-///   `body_base64` rules for `respond` and `halt`) is documented on
-///   [`wafer_run::embed::output_to_json`], which produces it.
+///   `meta` object holds only response entries: `resp.status`,
+///   `resp.content_type`, `resp.header.{name}` and `resp.set_cookie.{id}`,
+///   whose value is one whole `Set-Cookie` directive (read nothing from
+///   `{id}`); request state never crosses this boundary. The wire format
+///   (including the `body` vs `body_base64` rules for `respond` and `halt`)
+///   is documented on [`wafer_run::embed::output_to_json`], which produces
+///   it.
 ///
 /// The `result` pointer is owned by the FFI layer and freed after the
 /// callback returns; callers must copy what they need before returning.
@@ -47,7 +52,20 @@ use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 /// The callback may be invoked from any thread owned by the FFI's internal
 /// tokio runtime; consumers are responsible for thread-safety inside the
 /// callback.
+///
+/// The async entry points take it as `Option<WaferDoneCb>`, which has the
+/// same ABI as the C function pointer with NULL as `None`.
 pub type WaferDoneCb = unsafe extern "C" fn(result: *const c_char, user_data: *mut c_void);
+
+/// Returned by an async entry point that took the work: its callback will be
+/// invoked when the work completes.
+pub const WAFER_ACCEPTED: c_int = 0;
+
+/// Returned by an async entry point whose callback is NULL. Nothing was done
+/// and nothing will call back: every async op's completion is load-bearing
+/// (a `wafer_stop` must finish before `wafer_free`, a `wafer_run`'s result
+/// is its output), so there is no fire-and-forget form.
+pub const WAFER_REFUSED_NULL_CALLBACK: c_int = -1;
 
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
@@ -194,11 +212,14 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 /// messages distinguishable.
 unsafe fn spawn_seal(
     w: *mut WaferRuntime,
-    cb: WaferDoneCb,
+    cb: Option<WaferDoneCb>,
     user_data: *mut c_void,
     panic_label: &str,
     only_if_unsealed: bool,
-) {
+) -> c_int {
+    let Some(cb) = cb else {
+        return WAFER_REFUSED_NULL_CALLBACK;
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             invoke_done(
@@ -232,15 +253,17 @@ unsafe fn spawn_seal(
             UserData(user_data),
         );
     }
+    WAFER_ACCEPTED
 }
 
 /// Resolve all block references in registered flows (async). This is the
 /// canonical seal entry point. A runtime is sealed once: a second
 /// `wafer_resolve` reports an error.
 ///
-/// Returns immediately; invokes `cb` when resolution (`seal()`) completes.
-/// On success the callback's `result` is NULL; on failure it is a JSON
-/// error string.
+/// Returns immediately with [`WAFER_ACCEPTED`], and invokes `cb` when
+/// resolution (`seal()`) completes: its `result` is NULL on success, a JSON
+/// error string on failure. A NULL `cb` is refused
+/// ([`WAFER_REFUSED_NULL_CALLBACK`]).
 ///
 /// `seal()` performs composite-config expansion, `uses` gathering,
 /// capability resolution, remote-block download, and startup-snapshot
@@ -252,16 +275,17 @@ unsafe fn spawn_seal(
 #[no_mangle]
 pub unsafe extern "C" fn wafer_resolve(
     w: *mut WaferRuntime,
-    cb: WaferDoneCb,
+    cb: Option<WaferDoneCb>,
     user_data: *mut c_void,
-) {
-    spawn_seal(w, cb, user_data, "wafer_resolve", false);
+) -> c_int {
+    spawn_seal(w, cb, user_data, "wafer_resolve", false)
 }
 
 /// Start the runtime without spawning block listeners (async).
 ///
 /// Seals the runtime unless [`wafer_resolve`] already did, and reports
-/// completion the same way — so resolve-then-start seals once. After a
+/// completion (and a NULL `cb`) the same way — so resolve-then-start seals
+/// once. After a
 /// failed `wafer_resolve` it reports that failure again. Kept because
 /// existing embedders (e.g. the Go binding, `go/wafer-run-go`) link against
 /// both symbols. Prefer `wafer_resolve` in new code; this entry point may be
@@ -269,19 +293,27 @@ pub unsafe extern "C" fn wafer_resolve(
 #[no_mangle]
 pub unsafe extern "C" fn wafer_start(
     w: *mut WaferRuntime,
-    cb: WaferDoneCb,
+    cb: Option<WaferDoneCb>,
     user_data: *mut c_void,
-) {
-    spawn_seal(w, cb, user_data, "wafer_start", true);
+) -> c_int {
+    spawn_seal(w, cb, user_data, "wafer_start", true)
 }
 
 /// Stop the runtime and shut down all block instances (async).
 ///
-/// Returns immediately; invokes `cb` (with NULL result) when shutdown
-/// completes. Must be called before `wafer_free` for block `lifecycle(Stop)`
-/// handlers to run.
+/// Returns immediately with [`WAFER_ACCEPTED`]; invokes `cb` (with NULL
+/// result) when shutdown completes. Must be called before `wafer_free` for
+/// block `lifecycle(Stop)` handlers to run. A NULL `cb` is refused
+/// ([`WAFER_REFUSED_NULL_CALLBACK`]) and the runtime is not stopped.
 #[no_mangle]
-pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime, cb: WaferDoneCb, user_data: *mut c_void) {
+pub unsafe extern "C" fn wafer_stop(
+    w: *mut WaferRuntime,
+    cb: Option<WaferDoneCb>,
+    user_data: *mut c_void,
+) -> c_int {
+    let Some(cb) = cb else {
+        return WAFER_REFUSED_NULL_CALLBACK;
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             invoke_done(
@@ -305,6 +337,7 @@ pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime, cb: WaferDoneCb, user_
             UserData(user_data),
         );
     }
+    WAFER_ACCEPTED
 }
 
 // ---------------------------------------------------------------------------
@@ -315,45 +348,96 @@ pub unsafe extern "C" fn wafer_stop(w: *mut WaferRuntime, cb: WaferDoneCb, user_
 ///
 /// If `path` ends with `.wasm`, registers a WASM block with the given name,
 /// which must be the name the block reports in its `BlockInfo` (a mismatch is
-/// refused).
+/// refused). Such a block runs with no capabilities, whatever it declares;
+/// [`wafer_register_block`] grants it some.
 /// Otherwise, reads the file as a JSON flow definition. Returns NULL on
 /// success, or a JSON error string on failure. Caller must free the returned
 /// string with `wafer_free_string`.
+///
+/// CALLER CONTRACT: call it from a non-tokio thread, never from inside a
+/// `WaferDoneCb`. It takes the runtime lock with `blocking_write`, which
+/// panics on a tokio thread; that panic comes back as a JSON error string.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_register(
     w: *mut WaferRuntime,
     name: *const c_char,
     path: *const c_char,
 ) -> *mut c_char {
+    with_runtime_write(w, "wafer_register", |wafer| {
+        let Some(name) = c_str_to_str(name) else {
+            return Err("invalid name".to_string());
+        };
+        let Some(path) = c_str_to_str(path) else {
+            return Err("invalid path".to_string());
+        };
+        wafer_run::embed::register_path(wafer, name, path)
+    })
+}
+
+/// Register the WASM block at `path` under `name` (the name the block reports
+/// in its `BlockInfo`), bounded by `capabilities_json`: a JSON
+/// `BlockCapabilities` object such as
+/// `{"collections":{"Only":["acme__widget__items"]},"crypto":true}`. The
+/// block runs under that bound ∩ what it declares; a field the object omits
+/// denies, so `{}` grants nothing. See
+/// [`wafer_run::embed::register_block_path`].
+///
+/// Returns NULL on success, or a JSON error string on failure (including an
+/// invalid `capabilities_json`). Caller must free the returned string with
+/// `wafer_free_string`.
+///
+/// CALLER CONTRACT: call it from a non-tokio thread, never from inside a
+/// `WaferDoneCb`. It takes the runtime lock with `blocking_write`, which
+/// panics on a tokio thread; that panic comes back as a JSON error string.
+#[no_mangle]
+pub unsafe extern "C" fn wafer_register_block(
+    w: *mut WaferRuntime,
+    name: *const c_char,
+    path: *const c_char,
+    capabilities_json: *const c_char,
+) -> *mut c_char {
+    with_runtime_write(w, "wafer_register_block", |wafer| {
+        let Some(name) = c_str_to_str(name) else {
+            return Err("invalid name".to_string());
+        };
+        let Some(path) = c_str_to_str(path) else {
+            return Err("invalid path".to_string());
+        };
+        let Some(caps) = c_str_to_str(capabilities_json) else {
+            return Err("invalid capabilities_json".to_string());
+        };
+        wafer_run::embed::register_block_path(wafer, name, path, caps)
+    })
+}
+
+/// Run `op` on the runtime under its write lock, as a synchronous FFI call:
+/// NULL on success, a JSON error string otherwise (`label` names a panic).
+///
+/// The lock is taken with `blocking_write`, which is a CALLER CONTRACT, not
+/// something this layer can enforce: the registration functions must be
+/// called from a non-tokio thread (e.g. the C caller's own thread), NOT from
+/// inside a `WaferDoneCb`, which may run on a thread owned by the internal
+/// tokio runtime (see the module-level docs on `WaferDoneCb`).
+/// `blocking_write` PANICS if invoked within a tokio runtime context; if a
+/// consumer violates the contract, the surrounding `catch_unwind` converts
+/// that panic into a JSON error string (`"panic in {label}"`) rather than
+/// unwinding across the FFI boundary.
+unsafe fn with_runtime_write(
+    w: *mut WaferRuntime,
+    label: &str,
+    op: impl FnOnce(&mut Wafer) -> Result<(), String>,
+) -> *mut c_char {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             return error_json("null runtime pointer");
         };
-        let Some(name_str) = c_str_to_str(name) else {
-            return error_json("invalid name");
-        };
-        let Some(path_str) = c_str_to_str(path) else {
-            return error_json("invalid path");
-        };
-
-        // register_path is sync — block_on isn't needed. We acquire the
-        // write lock with `blocking_write`, which is a CALLER CONTRACT, not
-        // something this layer can enforce: `wafer_register` must be called
-        // from a non-tokio thread (e.g. the C caller's own thread), NOT from
-        // inside a `WaferDoneCb`, which may run on a thread owned by the
-        // internal tokio runtime (see the module-level docs on
-        // `WaferDoneCb`). `blocking_write` PANICS if invoked within a tokio
-        // runtime context; if a consumer violates the contract, the
-        // surrounding `catch_unwind` converts that panic into a JSON error
-        // string ("panic in wafer_register") rather than unwinding across the
-        // FFI boundary.
         let mut inner = runtime.inner.blocking_write();
-        match wafer_run::embed::register_path(&mut inner, name_str, path_str) {
+        match op(&mut inner) {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => error_json(&e),
         }
     }));
-    result.unwrap_or_else(|_| error_json("panic in wafer_register"))
+    result.unwrap_or_else(|_| error_json(&format!("panic in {label}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -362,17 +446,23 @@ pub unsafe extern "C" fn wafer_register(
 
 /// Run a flow with the given message (body-less). Async.
 ///
-/// Returns immediately; invokes `cb` with the JSON result string when the
-/// flow finishes. `cb`'s `result` is always non-NULL — a JSON object of the
-/// form `{"action":"respond|drop|error|continue|halt", ...}`.
+/// Returns immediately with [`WAFER_ACCEPTED`]; invokes `cb` with the JSON
+/// result string when the flow finishes. `cb`'s `result` is always non-NULL
+/// — a JSON object of the form
+/// `{"action":"respond|drop|error|continue|halt", ...}` (see
+/// [`WaferDoneCb`]). A NULL `cb` is refused
+/// ([`WAFER_REFUSED_NULL_CALLBACK`]) and the flow does not run.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
     w: *mut WaferRuntime,
     flow_id: *const c_char,
     message_json: *const c_char,
-    cb: WaferDoneCb,
+    cb: Option<WaferDoneCb>,
     user_data: *mut c_void,
-) {
+) -> c_int {
+    let Some(cb) = cb else {
+        return WAFER_REFUSED_NULL_CALLBACK;
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let internal_err = |code: &str, msg: &str| {
             // Build with serde_json so the code/message are escaped as valid
@@ -445,6 +535,7 @@ pub unsafe extern "C" fn wafer_run(
             UserData(user_data),
         );
     }
+    WAFER_ACCEPTED
 }
 
 // ---------------------------------------------------------------------------

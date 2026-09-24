@@ -75,7 +75,8 @@ func (w *Wafer) Close() {
 // Register registers a block or flow definition from a file path.
 // If path ends with .wasm, registers a WASM block with the given name, which
 // must be the name the block reports in its BlockInfo (a mismatch is refused).
-// Otherwise, reads the file as a JSON flow definition.
+// Such a block runs with no capabilities, whatever it declares; RegisterBlock
+// grants it some. Otherwise, reads the file as a JSON flow definition.
 //
 // This is a synchronous operation in the FFI layer.
 func (w *Wafer) Register(name, path string) error {
@@ -85,6 +86,29 @@ func (w *Wafer) Register(name, path string) error {
 	defer C.free(unsafe.Pointer(cPath))
 
 	cResult := C.wafer_register(w.ptr, cName, cPath)
+	return parseFFIError(cResult)
+}
+
+// RegisterBlock registers the WASM block at path under name (the name the
+// block reports in its BlockInfo), bounded by capabilitiesJSON: a JSON
+// BlockCapabilities object such as
+//
+//	{"collections": {"Only": ["acme__widget__items"]}, "crypto": true}
+//
+// An allowlist field is "None", "Any" or {"Only": [...]}; a flag is a bool.
+// The block runs under that bound intersected with what it declares. A field
+// the object omits denies, so {} grants nothing. Invalid JSON is an error.
+//
+// This is a synchronous operation in the FFI layer.
+func (w *Wafer) RegisterBlock(name, path, capabilitiesJSON string) error {
+	cName := C.CString(name)
+	cPath := C.CString(path)
+	cCaps := C.CString(capabilitiesJSON)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cPath))
+	defer C.free(unsafe.Pointer(cCaps))
+
+	cResult := C.wafer_register_block(w.ptr, cName, cPath, cCaps)
 	return parseFFIError(cResult)
 }
 
@@ -98,7 +122,8 @@ func (w *Wafer) Resolve() error {
 	})
 }
 
-// Start initializes the runtime. Calls Resolve() if not already resolved.
+// Start initializes the runtime. It seals the runtime unless Resolve already
+// did, and after a failed Resolve it reports that failure again.
 //
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.

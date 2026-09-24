@@ -1,12 +1,14 @@
 //! Shared helpers for embedder bindings (`wafer-ffi`, `wafer-run-node`).
 //!
 //! Both embedder bindings — `wafer-ffi` for C callers and `wafer-run-node`
-//! for Node.js — expose the same two behaviors: encoding a collected
-//! [`OutputStream`] as an `{"action": ...}` JSON string, and registering a
-//! block or flow from a file path. They live here, in the runtime crate both
-//! bindings already depend on, so the host wire format and the
-//! `.wasm`-extension dispatch rule each have exactly one implementation and
-//! one test suite instead of drifting copies per binding.
+//! for Node.js — expose the same behaviors: encoding a collected
+//! [`OutputStream`] as an `{"action": ...}` JSON string, registering a block
+//! or flow from a file path, and registering a WASM block under a JSON
+//! capability bound. They live here, in the runtime crate both bindings
+//! already depend on, so the host wire format, the `.wasm`-extension
+//! dispatch rule and the capability-bound parsing each have exactly one
+//! implementation and one test suite instead of drifting copies per
+//! binding.
 
 use wafer_block::{
     core_types::MetaEntry,

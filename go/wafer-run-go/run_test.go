@@ -101,3 +101,31 @@ func TestRunRefusesARuntimeThatDidNotSeal(t *testing.T) {
 		t.Fatalf("run after a failed resolve must be refused, got %+v (error %+v)", res, res.Error)
 	}
 }
+
+// RegisterBlock registers a guest under a capability bound, which then runs;
+// invalid capabilities JSON is refused and registers nothing.
+func TestRegisterBlockTakesACapabilityBound(t *testing.T) {
+	w := New()
+	defer w.Close()
+	err := w.RegisterBlock("example/echo", echoWasm, `{"collections":"All"}`)
+	if err == nil || !strings.HasPrefix(err.Error(), "invalid capabilities JSON:") {
+		t.Fatalf("invalid capabilities JSON must be refused, got %v", err)
+	}
+	if w.HasBlock("example/echo") {
+		t.Fatal("a refused registration must register nothing")
+	}
+
+	if err := w.RegisterBlock("example/echo", echoWasm, `{"crypto":true}`); err != nil {
+		t.Fatalf("register block: %v", err)
+	}
+	if err := w.Register("smoke", echoFlow); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	if err := w.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer w.Stop()
+	if res := w.Run("smoke", NewMessage("smoke.kind")); !res.IsRespond() {
+		t.Fatalf("expected a respond result, got %+v (error %+v)", res, res.Error)
+	}
+}
