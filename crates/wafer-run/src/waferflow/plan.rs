@@ -8,30 +8,30 @@
 //! "uses accumulator" flag. The executor then does zero parsing and zero
 //! linear searches per step.
 //!
-//! Compilation is behaviorally transparent: anything the uncompiled
-//! executor only rejected at runtime (a missing block, a jump target that
-//! does not exist, an expression that fails to parse) compiles to a form
-//! that reproduces exactly the same runtime error if — and only if — the
-//! offending path is actually taken. Nothing new fails at seal time.
+//! Every flow reaching compilation passed [`wafer_flow::validate`] in
+//! [`Wafer::add_flow`], so its jump targets name top-level steps and its
+//! expressions parse. A block missing at seal time compiles to a form that
+//! reproduces the runtime "block not found" error if — and only if — that
+//! step actually runs. Nothing new fails at seal time.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use wafer_block::{config::parse_config_map, Block};
-use wafer_flow::{CompiledCondition, CompiledPath, CompiledTemplate, Step, WaferFlow};
+use wafer_flow::{CompiledCondition, CompiledPath, CompiledTemplate, OnError, Step, WaferFlow};
 
-use crate::runtime::{flow_policy::FlowConfigExt, slot::BlockSlot, Wafer};
+use crate::runtime::{slot::BlockSlot, Wafer};
 
 /// A flow with every per-step decision precomputed at seal time.
 pub(crate) struct CompiledFlow {
     /// Flow id (error messages + observability).
     pub(crate) id: String,
-    /// Precomputed flow-level timeout (was re-parsed per run).
+    /// The flow's `config` timeout.
     pub(crate) timeout: Option<Duration>,
-    /// Shared step budget for one execution.
+    /// The flow's `config.max_steps` (1000 when unset): the cap on the step
+    /// counter of the transfer chain once this flow is entered.
     pub(crate) max_steps: usize,
-    /// True when `config.on_error` is `"stop"` (the default) — a step error
-    /// short-circuits the flow; any other value records null and continues.
-    pub(crate) on_error_stop: bool,
+    /// The flow's `config.on_error`.
+    pub(crate) on_error: OnError,
     /// True if any step (recursively) reads from or writes to the
     /// accumulator, in which case the flow input must be parsed and stored
     /// under `$.input` (was recomputed per run).
@@ -104,34 +104,30 @@ pub(crate) enum NextTarget {
     /// Jump to the top-level step at this index (was a linear id search per
     /// jump).
     Step(usize),
-    /// `step` names an id that is not a top-level step. Preserved so the
-    /// "next target step '…' not found" error is produced only if the entry
-    /// is actually taken, exactly as the linear search behaved.
+    /// `step` names an id that is not a top-level step. `validate` refuses
+    /// such a flow at `add_flow`; if one is compiled regardless, taking the
+    /// entry fails with `NotFound` rather than jumping anywhere.
     MissingStep(String),
     /// Transfer control to another flow.
     Flow(String),
-    /// Neither `step` nor `flow`: taking the entry ends routing and falls
-    /// through to sequential advance (pre-compile behavior for such
-    /// entries, which only unvalidated flows can contain).
+    /// Neither `step` nor `flow`. `validate` refuses such a flow at
+    /// `add_flow`; if one is compiled regardless, taking the entry ends
+    /// routing and falls through to sequential advance.
     None,
 }
+
+/// The step budget of a flow whose config sets no `max_steps`.
+const DEFAULT_MAX_STEPS: usize = 1000;
 
 /// Compile `flow` against the runtime's current registrations. Called once
 /// per flow at `seal()`; also used as the ad-hoc fallback for flows added
 /// after sealing.
 pub(crate) fn compile_flow(wafer: &Wafer, flow: &WaferFlow) -> CompiledFlow {
-    let max_steps = flow
-        .config
-        .as_ref()
-        .and_then(|c| c.max_steps)
-        .unwrap_or(1000) as usize;
-    let on_error_stop = flow
-        .config
-        .as_ref()
-        .and_then(|c| c.on_error.as_deref())
-        .unwrap_or("stop")
-        == "stop";
-    let timeout = flow.config.as_ref().and_then(|c| c.resolve_timeout());
+    let config = flow.config.clone().unwrap_or_default();
+    // A `max_steps` beyond `usize` (32-bit targets) cannot be reached.
+    let max_steps = config.max_steps.map_or(DEFAULT_MAX_STEPS, |n| {
+        usize::try_from(n.get()).unwrap_or(usize::MAX)
+    });
 
     // Jump-target index over TOP-LEVEL steps only, matching the executor's
     // former `steps.iter().position(...)` search (branch-local ids were
@@ -143,9 +139,9 @@ pub(crate) fn compile_flow(wafer: &Wafer, flow: &WaferFlow) -> CompiledFlow {
 
     CompiledFlow {
         id: flow.id.clone(),
-        timeout,
+        timeout: config.timeout(),
         max_steps,
-        on_error_stop,
+        on_error: config.on_error(),
         uses_accumulator: steps_use_accumulator(&flow.steps),
         steps: flow
             .steps
@@ -181,8 +177,8 @@ fn compile_step(wafer: &Wafer, step: &Step, index: &HashMap<&str, usize>) -> Com
                     .when
                     .as_ref()
                     .map(|w| (w.clone(), CompiledCondition::compile(w))),
-                // Precedence matches the uncompiled executor: `step` wins
-                // over `flow` when an entry (incorrectly) carries both.
+                // `validate` refuses an entry naming both `step` and
+                // `flow`; `step` is read first.
                 target: match (&e.step, &e.flow) {
                     (Some(s), _) => index.get(s.as_str()).map_or_else(
                         || NextTarget::MissingStep(s.clone()),

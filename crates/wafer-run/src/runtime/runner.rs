@@ -11,7 +11,11 @@ use crate::{
     context::RuntimeContext,
     observability::ObservabilityBus,
     platform::Instant,
-    waferflow::{plan::CompiledFlow, ResponderRecord},
+    waferflow::{
+        executor::{FlowOutcome, TransferChain},
+        plan::CompiledFlow,
+        ResponderRecord,
+    },
 };
 
 /// Identity fields for the observability bracket around one block dispatch.
@@ -157,10 +161,7 @@ impl Wafer {
             return refused;
         }
         match self.flow_plan(flow_id) {
-            Some(plan) => {
-                self.run_plan(&plan, msg, input, ResponderRecord::new())
-                    .await
-            }
+            Some(plan) => self.run_plan(plan, msg, input).await,
             None => OutputStream::error(flow_not_found(flow_id)),
         }
     }
@@ -179,39 +180,54 @@ impl Wafer {
         }
     }
 
-    /// Execute `plan` with the observability hooks and its timeout.
-    /// `responder_record` is the executor's record of the `msg` entries a
-    /// responding step wrote (empty unless this is a `next` transfer).
+    /// Execute `plan`, then each flow a `next` transfer hands control to,
+    /// as one [`TransferChain`]: one step budget, deadline and cancellation
+    /// flag, tightened by every flow entered (see the executor's module
+    /// docs). A loop, so a chain of transfers never nests a call.
+    ///
+    /// Observability: each flow fires `flow_start` when entered and
+    /// `flow_end` once the chain has finished, last-entered first, so a
+    /// transferring flow's duration encloses its target's.
     pub(crate) async fn run_plan(
         &self,
-        plan: &CompiledFlow,
+        plan: FlowPlan<'_>,
         msg: Message,
         input: InputStream,
-        responder_record: ResponderRecord,
     ) -> OutputStream {
-        // Observability: flow start
-        self.hooks.fire_flow_start(&plan.id, &msg);
-        let start = Instant::now();
+        let mut chain = TransferChain::new();
+        let mut entered: Vec<(FlowPlan<'_>, Instant)> = Vec::new();
+        let (mut plan, mut msg, mut input) = (plan, msg, input);
+        let mut responder_record = ResponderRecord::new();
 
-        // Set up flow-level timeout via deadline (parsed once at compile).
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let deadline = plan.timeout.map(|t| Instant::now() + t);
+        let output = loop {
+            self.hooks.fire_flow_start(&plan.id, &msg);
+            let start = Instant::now();
+            chain.enter(&plan, start);
+            let outcome = crate::waferflow::execute_waferflow(
+                &plan,
+                msg,
+                input,
+                self,
+                &chain,
+                responder_record,
+            )
+            .await;
+            entered.push((plan, start));
+            match outcome {
+                FlowOutcome::Done(output) => break output,
+                FlowOutcome::Transfer(transfer) => {
+                    plan = transfer.plan;
+                    msg = transfer.msg;
+                    input = InputStream::from_bytes(transfer.body);
+                    responder_record = transfer.responder_record;
+                }
+            }
+        };
 
-        let result = crate::waferflow::execute_waferflow(
-            plan,
-            msg,
-            input,
-            self,
-            &cancelled,
-            deadline,
-            responder_record,
-        )
-        .await;
-
-        // Observability: flow end
-        self.hooks.fire_flow_end(&plan.id, start.elapsed());
-
-        result
+        for (plan, start) in entered.iter().rev() {
+            self.hooks.fire_flow_end(&plan.id, start.elapsed());
+        }
+        output
     }
 
     /// Run a single block by name, bypassing flows. Refused with

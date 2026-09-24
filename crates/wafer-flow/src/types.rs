@@ -3,9 +3,11 @@
 //! These structs mirror the JSON schema published at
 //! `site/public/schema/waferflow/` and are produced by [`crate::parse`].
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt, num::NonZeroU64, str::FromStr, time::Duration};
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::InvalidTimeout;
 
 /// A complete WaferFlow definition: metadata, typed input/output ports,
 /// the ordered list of [`Step`]s to execute, and optional flow-level config.
@@ -134,21 +136,190 @@ pub struct PortSchema {
 
 /// Flow-level execution policy: timeouts and budgets that wrap the whole
 /// step sequence rather than any single step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Every field is typed: an unknown key, an `on_error` other than `"stop"` /
+/// `"continue"`, a zero `max_steps`, or a `timeout` / `timeout_ms` that is
+/// zero, malformed or above [`MAX_FLOW_TIMEOUT`] fails [`crate::parse`]. Setting both
+/// `timeout` and `timeout_ms` fails [`crate::validate`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowConfig {
     /// Hard timeout for the entire flow, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: Option<FlowTimeoutMillis>,
     /// Human-readable timeout (e.g. `"30s"`) — alternative to `timeout_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<String>,
-    /// Cap on the number of step transitions to prevent infinite loops.
+    pub timeout: Option<FlowTimeout>,
+    /// Cap on the number of step executions, to prevent infinite loops.
+    /// Defaults to 1000.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_steps: Option<u64>,
-    /// How the runtime should react when a step errors (e.g. `"stop"`,
-    /// `"continue"`); interpreted by the executor.
+    pub max_steps: Option<NonZeroU64>,
+    /// How the runtime reacts when a step errors. Defaults to [`OnError::Stop`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub on_error: Option<String>,
+    pub on_error: Option<OnError>,
+}
+
+impl FlowConfig {
+    /// The flow's timeout, from whichever of `timeout` / `timeout_ms` is set
+    /// ([`crate::validate`] rejects a config that sets both). `None` means
+    /// the flow has no timeout. Never zero and never above
+    /// [`MAX_FLOW_TIMEOUT`].
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+            .as_ref()
+            .map(FlowTimeout::duration)
+            .or_else(|| self.timeout_ms.map(FlowTimeoutMillis::duration))
+    }
+
+    /// The effective error policy: `on_error`, or [`OnError::Stop`] when unset.
+    pub fn on_error(&self) -> OnError {
+        self.on_error.unwrap_or_default()
+    }
+}
+
+/// What the runtime does when a step returns an error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnError {
+    /// Stop the flow and return the step's error.
+    #[default]
+    Stop,
+    /// Record the failed step's output as `null` and run the next step.
+    Continue,
+}
+
+/// The longest timeout a flow may set: 24 hours. A flow is one request's
+/// work, so anything longer is a typo (a unit slip, extra digits); refusing
+/// it at load also keeps every deadline far inside what the clock can
+/// represent.
+pub const MAX_FLOW_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Check a parsed timeout against the allowed range `(0, MAX_FLOW_TIMEOUT]`.
+fn check_timeout_range(duration: Duration) -> Result<Duration, &'static str> {
+    if duration.is_zero() {
+        Err("a flow timeout must be greater than zero")
+    } else if duration > MAX_FLOW_TIMEOUT {
+        Err("a flow timeout must be at most 24h")
+    } else {
+        Ok(duration)
+    }
+}
+
+/// A flow timeout written as `"<n>ms"`, `"<n>s"`, `"<n>m"`, `"<n>h"`, or a
+/// bare `"<n>"` (seconds), where `<n>` is a decimal integer.
+///
+/// Parsing rejects anything else, zero, and anything above
+/// [`MAX_FLOW_TIMEOUT`]. The text is kept so a flow serializes back to what
+/// its author wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct FlowTimeout {
+    text: String,
+    duration: Duration,
+}
+
+impl FlowTimeout {
+    /// The parsed duration (never zero).
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// The timeout as written.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl FromStr for FlowTimeout {
+    type Err = InvalidTimeout;
+
+    fn from_str(text: &str) -> Result<Self, InvalidTimeout> {
+        let invalid = |reason: &'static str| InvalidTimeout {
+            value: text.to_string(),
+            reason,
+        };
+        let (digits, unit_secs, is_millis) = if let Some(n) = text.strip_suffix("ms") {
+            (n, 1, true)
+        } else if let Some(n) = text.strip_suffix('s') {
+            (n, 1, false)
+        } else if let Some(n) = text.strip_suffix('m') {
+            (n, 60, false)
+        } else if let Some(n) = text.strip_suffix('h') {
+            (n, 3600, false)
+        } else {
+            (text, 1, false)
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid(
+                "expected a whole number followed by ms, s, m or h (e.g. \"30s\")",
+            ));
+        }
+        // A number too wide for u64, or one whose seconds overflow it, is
+        // far above the maximum.
+        let too_long = || invalid("a flow timeout must be at most 24h");
+        let n: u64 = digits.parse().map_err(|_| too_long())?;
+        let duration = if is_millis {
+            Duration::from_millis(n)
+        } else {
+            Duration::from_secs(n.checked_mul(unit_secs).ok_or_else(too_long)?)
+        };
+        Ok(Self {
+            text: text.to_string(),
+            duration: check_timeout_range(duration).map_err(invalid)?,
+        })
+    }
+}
+
+impl TryFrom<String> for FlowTimeout {
+    type Error = InvalidTimeout;
+
+    fn try_from(text: String) -> Result<Self, InvalidTimeout> {
+        text.parse()
+    }
+}
+
+impl From<FlowTimeout> for String {
+    fn from(timeout: FlowTimeout) -> String {
+        timeout.text
+    }
+}
+
+/// A flow's `timeout_ms`: whole milliseconds in `1..=86_400_000` (up to
+/// [`MAX_FLOW_TIMEOUT`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct FlowTimeoutMillis(u64);
+
+impl FlowTimeoutMillis {
+    /// The timeout (never zero, never above [`MAX_FLOW_TIMEOUT`]).
+    pub fn duration(self) -> Duration {
+        Duration::from_millis(self.0)
+    }
+}
+
+impl TryFrom<u64> for FlowTimeoutMillis {
+    type Error = InvalidTimeout;
+
+    fn try_from(millis: u64) -> Result<Self, InvalidTimeout> {
+        check_timeout_range(Duration::from_millis(millis))
+            .map(|_| Self(millis))
+            .map_err(|reason| InvalidTimeout {
+                value: format!("{millis}ms"),
+                reason,
+            })
+    }
+}
+
+impl From<FlowTimeoutMillis> for u64 {
+    fn from(timeout: FlowTimeoutMillis) -> u64 {
+        timeout.0
+    }
+}
+
+impl fmt::Display for FlowTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// One row of [`WaferFlow::config_map`]: a user-facing flow-config key is
@@ -172,4 +343,61 @@ pub struct FlowInfo {
     /// Free-form description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn timeout_units() {
+        for (text, expected) in [
+            ("250ms", Duration::from_millis(250)),
+            ("30s", Duration::from_secs(30)),
+            ("5m", Duration::from_secs(300)),
+            ("2h", Duration::from_secs(7200)),
+            ("45", Duration::from_secs(45)),
+        ] {
+            let timeout: FlowTimeout = text.parse().unwrap();
+            assert_eq!(timeout.duration(), expected, "{text}");
+            assert_eq!(timeout.as_str(), text);
+        }
+    }
+
+    #[test]
+    fn timeout_above_24h_is_an_error() {
+        // The first four are just past 24h; 5124095576030428h fits in u64
+        // seconds (~585 billion years); the last three overflow u64 seconds
+        // or u64 itself.
+        for text in [
+            "25h",
+            "86401s",
+            "1441m",
+            "86400001ms",
+            "5124095576030428h",
+            "5124095576030432h",
+            "18446744073709551615m",
+            "18446744073709551616s",
+        ] {
+            let err = text.parse::<FlowTimeout>().unwrap_err();
+            assert_eq!(err.reason, "a flow timeout must be at most 24h", "{text}");
+        }
+        for text in ["24h", "1440m", "86400s", "86400000ms"] {
+            let timeout: FlowTimeout = text.parse().unwrap();
+            assert_eq!(timeout.duration(), MAX_FLOW_TIMEOUT, "{text}");
+        }
+    }
+
+    #[test]
+    fn timeout_ms_range() {
+        assert_eq!(
+            FlowTimeoutMillis::try_from(86_400_000).unwrap().duration(),
+            MAX_FLOW_TIMEOUT
+        );
+        for bad in [0, 86_400_001, u64::MAX] {
+            assert!(FlowTimeoutMillis::try_from(bad).is_err(), "{bad}");
+        }
+    }
 }

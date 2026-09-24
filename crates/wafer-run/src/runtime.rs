@@ -14,8 +14,6 @@ pub mod config_source;
 /// Seal-time compiled dispatch data: parsed block configs, `requires`
 /// allowlists, compiled flows (PERF-03).
 pub(crate) mod exec_plan;
-/// Flow-level execution policy (timeout resolution) for the dispatch path.
-pub(crate) mod flow_policy;
 /// Runtime-wide wait-for graph of in-flight inits, used to refuse the wait
 /// that would close a cycle when blocks' `Init`s call each other.
 pub(crate) mod init_waits;

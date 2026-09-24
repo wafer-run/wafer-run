@@ -215,7 +215,7 @@ async fn sealed_wafer(blocks: Vec<(&str, Arc<dyn Block>)>, flow: WaferFlow) -> W
     for (name, block) in blocks {
         w.register_block(name, block).unwrap();
     }
-    w.add_flow(flow);
+    w.add_flow(flow).unwrap();
     w.seal().await.expect("seal failed");
     w
 }
@@ -552,17 +552,10 @@ async fn parallel_branch_error_first_in_declaration_order_wins() {
     );
 }
 
-#[tokio::test]
-async fn parallel_branch_step_with_next_routing_is_rejected() {
-    let echo = RecordingEchoBlock {
-        name: "test/echo-next",
-        calls: Arc::new(Mutex::new(Vec::new())),
-    };
-    let join_block = RecordingEchoBlock {
-        name: "test/echo-join2",
-        calls: Arc::new(Mutex::new(Vec::new())),
-    };
-
+/// Branch steps run strictly in order, so `next` cannot route them: such a
+/// flow is refused when added, not when the branch runs.
+#[test]
+fn parallel_branch_step_with_next_routing_is_refused() {
     let mut inner = step_with_input("inner", "test/echo-next", json!({}));
     inner.next = Some(vec![NextEntry {
         when: None,
@@ -573,22 +566,16 @@ async fn parallel_branch_step_with_next_routing_is_rejected() {
     let mut outer = step_with_input("join", "test/echo-join2", json!({}));
     outer.parallel = Some(vec![branch(vec![inner])]);
 
-    let w = sealed_wafer(
-        vec![
-            ("test/echo-next", Arc::new(echo)),
-            ("test/echo-join2", Arc::new(join_block)),
-        ],
-        make_flow("parallel-next", vec![outer]),
-    )
-    .await;
-
-    let err = run_flow(&w, "parallel-next", json!({}))
-        .await
-        .expect_err("next routing inside a parallel branch must be rejected");
-
-    assert!(
-        err.message.contains("next"),
-        "error must name the unsupported 'next' routing, got: {}",
-        err.message
-    );
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
+    match w.add_flow(make_flow("parallel-next", vec![outer])) {
+        Err(RuntimeError::Flow(message)) => assert!(
+            message.contains("step 'inner' is inside a parallel branch"),
+            "error must name the unsupported 'next' routing, got: {message}"
+        ),
+        other => panic!("next routing inside a parallel branch must be refused, got {other:?}"),
+    }
 }

@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+- Flow config is typed and a flow is validated wherever it is added.
+  `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
+  `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:
+  Option<FlowTimeoutMillis>`, `max_steps: Option<NonZeroU64>`, and the struct
+  denies unknown keys. `wafer_flow::parse` refuses an `on_error` other than
+  exactly `"stop"` or `"continue"` (a `"Stop"` used to mean "continue past a
+  failed step"), a `timeout` that is not `<n>ms`/`<n>s`/`<n>m`/`<n>h`/`<n>`
+  (a malformed one used to mean "no timeout"), a `timeout` or `timeout_ms`
+  that is zero or above `wafer_flow::MAX_FLOW_TIMEOUT` (24h; an overflowing
+  value such as `"5124095576030428h"` used to panic the first run), a zero
+  `max_steps`, and a misspelled config key. `validate`
+  also refuses a config setting both `timeout` and `timeout_ms`, a
+  `next.step` naming a step inside a `parallel` branch (the executor only
+  jumps to top-level steps), `next` on a step inside a branch, a `next`
+  entry naming both `step` and `flow`, and a `next.flow` naming the flow
+  itself. `Wafer::add_flow` now validates and returns
+  `Result<(), RuntimeError>`, so flows added through the typed API and flows
+  `seal()` downloads from the registry are validated like `add_flow_json`
+  ones. `wafer_block::config::parse_duration` is removed (its one caller was
+  flow timeouts; `FlowTimeout` parses them).
+- A `next.flow` transfer no longer starts the target with a fresh step
+  budget and deadline. The flows one request passes through share one step
+  counter, deadline and cancellation flag; each flow entered can only
+  tighten them (its `max_steps` caps the running count, its timeout counts
+  from when it is entered). A cycle of transfers ends with
+  `ResourceExhausted` instead of recursing without bound, and transfers run
+  as a loop rather than nested calls. `flow_end` hooks for a chain fire once
+  it finishes, last-entered flow first.
+
 - `wafer_block_security_headers::merge_csp` returns a `CspMerge`
   (`policy` plus the `refused` directives and sources) instead of a
   `String`. The operator `csp` config is now parsed case-insensitively

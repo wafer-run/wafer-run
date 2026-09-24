@@ -156,7 +156,7 @@ fn setup() -> Wafer {
         ("test/multi", Arc::new(MultiChunkBlock)),
     ] {
         w.register_block(name, block).unwrap();
-        w.add_flow(single_flow(name));
+        w.add_flow(single_flow(name)).unwrap();
     }
     w
 }

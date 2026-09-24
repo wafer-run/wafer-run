@@ -1,7 +1,5 @@
 //! Block configuration — common config accessor for blocks.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 use crate::LifecycleEvent;
@@ -114,34 +112,6 @@ pub fn parse_config_map(config: &serde_json::Value) -> std::collections::HashMap
         }
     }
     cfg
-}
-
-/// Parse a duration string of the form `"30s"`, `"500ms"`, `"5m"`, `"2h"`
-/// (or a bare integer = seconds). Returns [`Duration::ZERO`] on empty or
-/// malformed input (logged as a warning).
-pub fn parse_duration(s: &str) -> Duration {
-    if s.is_empty() {
-        return Duration::ZERO;
-    }
-    let s = s.trim();
-    let result = if let Some(rest) = s.strip_suffix("ms") {
-        rest.parse::<u64>().map(Duration::from_millis)
-    } else if let Some(rest) = s.strip_suffix('s') {
-        rest.parse::<u64>().map(Duration::from_secs)
-    } else if let Some(rest) = s.strip_suffix('m') {
-        rest.parse::<u64>().map(|m| Duration::from_secs(m * 60))
-    } else if let Some(rest) = s.strip_suffix('h') {
-        rest.parse::<u64>().map(|h| Duration::from_secs(h * 3600))
-    } else {
-        s.parse::<u64>().map(Duration::from_secs)
-    };
-    match result {
-        Ok(d) => d,
-        Err(_) => {
-            tracing::warn!(input = %s, "invalid duration string, defaulting to zero");
-            Duration::ZERO
-        }
-    }
 }
 
 /// A dispatch target: either a flow or a single block.

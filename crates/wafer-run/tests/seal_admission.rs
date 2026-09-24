@@ -8,6 +8,8 @@
 //!   registration checks as a code-registered one (name identity, config-key
 //!   prefix, grants), is registered under its unversioned `{org}/{block}`,
 //!   and is registered before the grant gate and the capability computation.
+//! - A flow `seal()` downloads from the registry goes through the same
+//!   validation as one an embedder adds.
 //!
 //! Guests are WAT modules whose `__wafer_info` returns a `BlockInfo` built
 //! here, so each test states exactly what the guest declares. The registry
@@ -467,7 +469,7 @@ mod downloaded {
             widget_info().grants(vec![ResourceGrant::read_write("x/reader", "a__victim__*")]);
         let server = registry(&[("1.0.0", guest(&info))]).await;
         let mut w = wafer();
-        w.add_flow(flow_naming("acme/widget@1.0.0"));
+        w.add_flow(flow_naming("acme/widget@1.0.0")).unwrap();
 
         match error_of(seal_against(&server, &mut w).await) {
             RuntimeError::GrantsRejected(errors) => assert!(
@@ -490,7 +492,7 @@ mod downloaded {
         declared.headers.readable = vec!["authorization".to_string()];
         let server = registry(&[("1.0.0", guest(&widget_info().capabilities(declared)))]).await;
         let mut w = wafer();
-        w.add_flow(flow_naming("acme/widget@1.0.0"));
+        w.add_flow(flow_naming("acme/widget@1.0.0")).unwrap();
 
         seal_against(&server, &mut w).await.expect("seal");
         let none = BlockCapabilities::none();
@@ -505,7 +507,7 @@ mod downloaded {
         let server = registry(&[("1.0.0", guest(&widget_info()))]).await;
         let mut w = wafer();
         w.set_admin_block(WIDGET);
-        w.add_flow(flow_naming("acme/widget@1.0.0"));
+        w.add_flow(flow_naming("acme/widget@1.0.0")).unwrap();
 
         let err = error_of(seal_against(&server, &mut w).await);
         assert!(
@@ -534,7 +536,7 @@ mod downloaded {
             Arc::new(WasmiBlock::load_from_bytes(&guest(&widget_info())).expect("loads")),
         )
         .expect("registers");
-        w.add_flow(flow_naming("acme/widget@1.0.0"));
+        w.add_flow(flow_naming("acme/widget@1.0.0")).unwrap();
 
         match error_of(seal_against(&server, &mut w).await) {
             RuntimeError::DuplicateBlock { name } => assert_eq!(name, WIDGET),
@@ -621,5 +623,55 @@ mod downloaded {
             RuntimeError::DuplicateBlock { name } => assert_eq!(name, WIDGET),
             other => panic!("expected DuplicateBlock, got {other}"),
         }
+    }
+
+    /// A downloaded flow is validated like one an embedder adds: a `next`
+    /// into a parallel branch parses, but no executor can route it.
+    #[tokio::test]
+    #[serial]
+    async fn a_downloaded_flow_is_validated() {
+        let server = MockServer::start().await;
+        let flow_path = "/acme/pipeline/1.0.0/flow.json";
+        let manifest = json!({
+            "name": "acme/pipeline",
+            "latest": "1.0.0",
+            "versions": { "1.0.0": {
+                "abi": wafer_run::ABI_VERSION,
+                "wasm_url": null,
+                "flow_url": format!("{}{flow_path}", server.uri()),
+            } },
+        });
+        Mock::given(method("GET"))
+            .and(path("/acme/pipeline/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&manifest))
+            .mount(&server)
+            .await;
+        let flow = json!({
+            "id": "acme/pipeline",
+            "name": "pipeline",
+            "version": "1.0.0",
+            "steps": [
+                { "id": "fan", "block": "acme/widget", "parallel": [
+                    { "steps": [ { "id": "branch-step", "block": "acme/widget" } ] }
+                ] },
+                { "id": "route", "block": "acme/widget", "next": [ { "step": "branch-step" } ] }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path(flow_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&flow))
+            .mount(&server)
+            .await;
+        let mut w = wafer();
+        w.add_block_config("acme/pipeline", json!({}));
+
+        match error_of(seal_against(&server, &mut w).await) {
+            RuntimeError::Flow(message) => assert!(
+                message.contains("'branch-step', which is not a top-level step"),
+                "{message}"
+            ),
+            other => panic!("expected an invalid-flow error, got {other}"),
+        }
+        assert!(w.flow_defs().is_empty(), "the invalid flow was registered");
     }
 }

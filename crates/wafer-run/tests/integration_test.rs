@@ -96,7 +96,7 @@ fn make_flow(id: &str, steps: Vec<wafer_flow::Step>) -> wafer_flow::WaferFlow {
 fn make_flow_with_on_error(
     id: &str,
     steps: Vec<wafer_flow::Step>,
-    on_error: &str,
+    on_error: wafer_flow::OnError,
 ) -> wafer_flow::WaferFlow {
     wafer_flow::WaferFlow {
         id: id.to_string(),
@@ -107,10 +107,8 @@ fn make_flow_with_on_error(
         output: None,
         steps,
         config: Some(wafer_flow::FlowConfig {
-            timeout_ms: None,
-            timeout: None,
-            max_steps: None,
-            on_error: Some(on_error.to_string()),
+            on_error: Some(on_error),
+            ..Default::default()
         }),
         blocks: None,
         config_map: None,
@@ -233,7 +231,8 @@ async fn test_single_block_flow() {
     let mut w = empty_wafer();
     w.register_block("test/upper", Arc::new(UpperBlock))
         .unwrap();
-    w.add_flow(single_step_flow("to-upper", "test/upper"));
+    w.add_flow(single_step_flow("to-upper", "test/upper"))
+        .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(
@@ -257,7 +256,8 @@ async fn flow_added_after_seal_still_runs() {
     w.register_block("test/upper", Arc::new(UpperBlock))
         .unwrap();
     w.seal().await.expect("seal failed");
-    w.add_flow(single_step_flow("late-to-upper", "test/upper"));
+    w.add_flow(single_step_flow("late-to-upper", "test/upper"))
+        .unwrap();
 
     let result = run_flow(
         &w,
@@ -335,7 +335,8 @@ async fn test_sequential_flow() {
             step("b", "test/append-b"),
             step("c", "test/append-c"),
         ],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "abc", Message::new("test"), b"start".to_vec()).await;
@@ -469,7 +470,8 @@ async fn flow_step_enforces_requires() {
     w.register_block("test/requires-caller", Arc::new(RequiresCallerBlock))
         .unwrap();
     w.register_block("test/echo", Arc::new(EchoBlock)).unwrap();
-    w.add_flow(single_step_flow("requires-flow", "test/requires-caller"));
+    w.add_flow(single_step_flow("requires-flow", "test/requires-caller"))
+        .unwrap();
     w.seal().await.expect("seal");
 
     match run_flow(&w, "requires-flow", Message::new("test.req"), Vec::new()).await {
@@ -638,7 +640,8 @@ async fn test_observability_flow_hooks() {
 
     w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
-    w.add_flow(single_step_flow("observed", "test/noop"));
+    w.add_flow(single_step_flow("observed", "test/noop"))
+        .unwrap();
     w.seal().await.expect("seal failed");
 
     run_flow(&w, "observed", Message::new("test"), b"data".to_vec()).await;
@@ -703,7 +706,8 @@ async fn test_observability_block_hooks() {
     w.add_flow(make_flow(
         "two-steps",
         vec![step("s1", "test/step-1"), step("s2", "test/step-2")],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     run_flow(&w, "two-steps", Message::new("test"), vec![]).await;
@@ -838,13 +842,15 @@ async fn test_flow_reference() {
         .unwrap();
 
     // Inner flow: validate
-    w.add_flow(single_step_flow("validation-flow", "test/validate"));
+    w.add_flow(single_step_flow("validation-flow", "test/validate"))
+        .unwrap();
 
     // Outer flow: validate then store
     w.add_flow(make_flow(
         "main-flow",
         vec![step("v", "test/validate"), step("s", "test/store")],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(
@@ -890,7 +896,8 @@ async fn test_drop_short_circuits_flow() {
     w.add_flow(make_flow(
         "drop-short-circuit",
         vec![step("d", "test/dropper"), step("s", "test/should-not-run")],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     // Drop in step 1 causes the entire flow to stop with Drop result
@@ -915,7 +922,7 @@ async fn test_flow_reference_not_found() {
         flow: Some("does-not-exist".to_string()),
     }]);
 
-    w.add_flow(make_flow("bad-ref", vec![s]));
+    w.add_flow(make_flow("bad-ref", vec![s])).unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "bad-ref", Message::new("test"), vec![]).await;
@@ -967,8 +974,9 @@ async fn test_on_error_stop() {
     w.add_flow(make_flow_with_on_error(
         "stop-flow",
         vec![step("f", "test/fail"), step("a", "test/after-fail")],
-        "stop",
-    ));
+        wafer_flow::OnError::Stop,
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "stop-flow", Message::new("test"), vec![]).await;
@@ -1019,8 +1027,9 @@ async fn test_on_error_continue() {
             step("f", "test/fail-counting"),
             step("a", "test/after-fail"),
         ],
-        "continue",
-    ));
+        wafer_flow::OnError::Continue,
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "cont-flow", Message::new("test"), vec![]).await;
@@ -1058,8 +1067,9 @@ async fn test_on_error_continue_no_more_nodes() {
     w.add_flow(make_flow_with_on_error(
         "cont-end",
         vec![step("f", "test/fail-at-end")],
-        "continue",
-    ));
+        wafer_flow::OnError::Continue,
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "cont-end", Message::new("test"), vec![]).await;
@@ -1097,7 +1107,8 @@ async fn test_drop_action() {
     w.add_flow(make_flow(
         "drop-flow",
         vec![step("d", "test/dropper"), step("u", "test/should-not-run")],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "drop-flow", Message::new("test"), b"data".to_vec()).await;
@@ -1158,7 +1169,8 @@ async fn test_block_with_config() {
             "test/configurable",
             serde_json::json!({"prefix": "hello"}),
         )],
-    ));
+    ))
+    .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "config-flow", Message::new("test"), b"world".to_vec()).await;
@@ -1216,7 +1228,8 @@ fn test_message_methods() {
 async fn test_resolve_missing_block() {
     let mut w = empty_wafer();
 
-    w.add_flow(single_step_flow("broken", "unregistered-block"));
+    w.add_flow(single_step_flow("broken", "unregistered-block"))
+        .unwrap();
 
     let err = w.seal().await.unwrap_err().to_string();
     assert!(err.contains("unregistered-block"), "Error: {err}");
@@ -1274,7 +1287,8 @@ async fn test_panic_recovery() {
     w.register_block("test/panicker", Arc::new(PanickerBlock))
         .unwrap();
 
-    w.add_flow(single_step_flow("panic-flow", "test/panicker"));
+    w.add_flow(single_step_flow("panic-flow", "test/panicker"))
+        .unwrap();
     w.seal().await.expect("seal failed");
 
     let result = run_flow(&w, "panic-flow", Message::new("test"), vec![]).await;
@@ -1295,8 +1309,8 @@ fn test_flows_info() {
 
     w.register_block("test/noop", Arc::new(NoopBlock)).unwrap();
 
-    w.add_flow(single_step_flow("flow-a", "test/noop"));
-    w.add_flow(single_step_flow("flow-b", "test/noop"));
+    w.add_flow(single_step_flow("flow-a", "test/noop")).unwrap();
+    w.add_flow(single_step_flow("flow-b", "test/noop")).unwrap();
 
     let info = w.flows_info();
     assert_eq!(info.len(), 2);
@@ -1335,7 +1349,8 @@ async fn test_start_and_stop() {
     w.register_block("test/lifecycle-block", Arc::new(LifecycleBlock))
         .unwrap();
 
-    w.add_flow(single_step_flow("lifecycle-test", "test/lifecycle-block"));
+    w.add_flow(single_step_flow("lifecycle-test", "test/lifecycle-block"))
+        .unwrap();
 
     // Start implicitly resolves if not already resolved
     w.seal().await.expect("start failed");
@@ -1500,7 +1515,8 @@ async fn test_resolve_versioned_block_download_error() {
     w.add_flow(single_step_flow(
         "remote-test",
         "acme/nonexistent-block@v1.0.0",
-    ));
+    ))
+    .unwrap();
 
     let err = w.seal().await.unwrap_err().to_string();
     assert!(
@@ -1520,7 +1536,8 @@ async fn test_resolve_unversioned_block_download_error() {
     w.add_flow(single_step_flow(
         "unversioned-test",
         "acme/nonexistent-block",
-    ));
+    ))
+    .unwrap();
 
     let err = w.seal().await.unwrap_err().to_string();
     assert!(

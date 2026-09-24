@@ -411,6 +411,10 @@ Flows define message flow through a nested tree structure.
 - `"stop"` - If any block returns Error, stop flow and return error
 - `"continue"` - Log error, continue to next block
 
+Any other `on_error` value, and a `timeout` that is not a positive
+`<n>ms`, `<n>s`, `<n>m`, `<n>h` or bare `<n>` (seconds), is refused when
+the flow is loaded.
+
 **timeout behavior:**
 - When a flow exceeds its timeout, the runtime cancels the context (signals `Done()`) and returns an Error result with code `deadline_exceeded`
 - Blocks SHOULD check `ctx.Done()` during long-running operations and return early when cancelled

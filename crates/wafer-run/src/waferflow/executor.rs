@@ -28,8 +28,8 @@
 //!    per item, sequentially in input order, with `$.each.item` and
 //!    `$.each.index` bound for the duration of the iteration. A failing
 //!    item fails the step fail-fast (later items are not invoked) under
-//!    `on_error = "stop"`; other `on_error` modes record `null` for the
-//!    failed item and continue. Without an `input` template the item itself
+//!    `on_error = "stop"`; under `on_error = "continue"` the failed item's
+//!    result is `null` and the fan-out goes on. Without an `input` template the item itself
 //!    is the block's input body. The step's accumulator entry (and the
 //!    pipeline body) is the array of per-item outputs; the transient `each`
 //!    binding is removed afterwards.
@@ -37,8 +37,26 @@
 //!    step has an `input` template (output recorded in the accumulator),
 //!    middleware mode when it doesn't (message passes through).
 //!
-//! `config.max_steps` is charged once per step visit plus once per fan-out
+//! The step budget is charged once per step visit plus once per fan-out
 //! item, shared across concurrent branches.
+//!
+//! # Flow transfer
+//!
+//! A `next` entry naming a `flow` hands the message, the current body and
+//! the record of what responding steps wrote to that flow, which runs in
+//! place of the rest of this one. The flows a request passes through form
+//! one [`TransferChain`]: its step counter, cancellation flag and deadline
+//! carry across every transfer, and each flow entered can only tighten them
+//! — its `max_steps` caps the chain's running step count and its timeout,
+//! counted from when it is entered, can only bring the deadline forward.
+//! Every flow visit charges at least one step before it can transfer, so a
+//! cycle of transfers ends with `ResourceExhausted` once the smallest
+//! `max_steps` on it is spent. The runner drives the chain as a loop
+//! ([`crate::Wafer`]'s `run_plan`), so a transfer never nests a call.
+//!
+//! The deadline is checked before every step and fan-out item, and handed
+//! to each block's context; a block that is already running is not
+//! interrupted.
 //!
 //! # Body ownership
 //!
@@ -117,7 +135,7 @@ use wafer_block::{
         output::{BufferedResponse, OutputStream, TerminalNotResponse},
     },
 };
-use wafer_flow::Accumulator;
+use wafer_flow::{Accumulator, OnError};
 
 use super::{
     plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget},
@@ -125,18 +143,70 @@ use super::{
 };
 use crate::{
     platform::{BoxFuture, Instant},
-    runtime::Wafer,
+    runtime::{runner::FlowPlan, Wafer},
 };
+
+/// The limits and counters one request's chain of flows shares (see the
+/// module docs): the first flow run and every flow it transfers to.
+pub(crate) struct TransferChain {
+    /// Set once the deadline passes; handed to every block context.
+    cancelled: Arc<AtomicBool>,
+    /// Steps charged so far, across the chain and its concurrent branches.
+    steps_used: AtomicUsize,
+    /// The smallest `max_steps` of the flows entered so far.
+    max_steps: usize,
+    /// The earliest deadline of the flows entered so far.
+    deadline: Option<Instant>,
+}
+
+impl TransferChain {
+    /// A chain no flow has entered yet: nothing charged, no limits.
+    pub(crate) fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            steps_used: AtomicUsize::new(0),
+            max_steps: usize::MAX,
+            deadline: None,
+        }
+    }
+
+    /// Enter `flow` at `now`: tighten the chain's limits by the flow's own.
+    pub(crate) fn enter(&mut self, flow: &CompiledFlow, now: Instant) {
+        self.max_steps = self.max_steps.min(flow.max_steps);
+        // A flow timeout is at most `wafer_flow::MAX_FLOW_TIMEOUT` (24h) by
+        // construction, so adding it to the current instant cannot overflow.
+        if let Some(own) = flow.timeout.map(|t| now + t) {
+            self.deadline = Some(self.deadline.map_or(own, |chain| chain.min(own)));
+        }
+    }
+}
+
+/// How one flow of a [`TransferChain`] ended.
+pub(crate) enum FlowOutcome<'w> {
+    /// The chain's terminal.
+    Done(OutputStream),
+    /// The flow handed control to another flow, which runs next.
+    Transfer(Transfer<'w>),
+}
+
+/// What a flow hands the flow it transfers to.
+pub(crate) struct Transfer<'w> {
+    /// The target flow's plan.
+    pub(crate) plan: FlowPlan<'w>,
+    /// The transferring flow's message.
+    pub(crate) msg: Message,
+    /// The transferring flow's current body: the target's input.
+    pub(crate) body: Vec<u8>,
+    /// The `msg` entries responding steps wrote (see the module docs).
+    pub(crate) responder_record: response_meta::ResponderRecord,
+}
 
 /// Immutable per-execution context shared by every step (and every parallel
 /// branch) of one flow run.
 struct StepEnv<'a> {
     flow: &'a CompiledFlow,
     wafer: &'a Wafer,
-    cancelled: &'a Arc<AtomicBool>,
-    deadline: Option<Instant>,
-    /// Step-budget counter, shared across concurrent branches.
-    steps_used: AtomicUsize,
+    chain: &'a TransferChain,
 }
 
 /// Mutable execution state owned by one sequential strand of the flow (the
@@ -157,8 +227,9 @@ struct ExecState {
 enum InvocationOutcome {
     /// The block produced a `Response`; `ExecState::body` holds it.
     Responded,
-    /// The block was middleware (`Continue`) or errored under a non-`stop`
-    /// `on_error` policy; `ExecState::body` holds the restored input.
+    /// The block was middleware (`Continue`), and `ExecState::body` holds
+    /// its input; or it errored under `on_error = "continue"`, and the body
+    /// is empty.
     NoOutput,
 }
 
@@ -215,18 +286,19 @@ fn unwrap_body(body: Arc<Vec<u8>>) -> Vec<u8> {
 ///
 /// Short-circuits on a step's Error (under `on_error = "stop"`), Halt or Drop
 /// terminal, carrying the middleware's response headers onto it (see the
-/// module docs). `responder_record` is the record of the `msg` entries a
-/// responding step already wrote: empty for a fresh run, the transferring
-/// flow's record for a `next` transfer.
-pub(crate) async fn execute(
+/// module docs). A taken `next` entry naming a flow ends this flow with a
+/// [`FlowOutcome::Transfer`] to it. `chain` must have entered `flow`;
+/// `responder_record` is the record of the `msg` entries a responding step
+/// already wrote: empty for the chain's first flow, the transferring flow's
+/// record after a transfer.
+pub(crate) async fn execute<'w>(
     flow: &CompiledFlow,
     msg: Message,
     input: InputStream,
-    wafer: &Wafer,
-    cancelled: &Arc<AtomicBool>,
-    deadline: Option<Instant>,
+    wafer: &'w Wafer,
+    chain: &TransferChain,
     responder_record: response_meta::ResponderRecord,
-) -> OutputStream {
+) -> FlowOutcome<'w> {
     let mut acc = Accumulator::new();
 
     // Collect initial input bytes; in pipeline mode also parse them into
@@ -243,13 +315,7 @@ pub(crate) async fn execute(
         acc.set("input", input_val);
     }
 
-    let env = StepEnv {
-        flow,
-        wafer,
-        cancelled,
-        deadline,
-        steps_used: AtomicUsize::new(0),
-    };
+    let env = StepEnv { flow, wafer, chain };
     let mut state = ExecState {
         acc,
         body: Arc::new(body),
@@ -265,7 +331,7 @@ pub(crate) async fn execute(
         let step = &steps[current];
 
         if let Err(short_circuit) = run_step(&env, step, &mut state).await {
-            return short_circuit.into_output(&state);
+            return FlowOutcome::Done(short_circuit.into_output(&state));
         }
 
         // --- Advance ---
@@ -286,15 +352,17 @@ pub(crate) async fn execute(
                         // design in the expression layer; only genuine
                         // evaluation errors reach here.)
                         Err(e) => {
-                            return ShortCircuit::Error(WaferError::new(
-                                ErrorCode::InvalidArgument,
-                                format!(
-                                    "flow '{}' step '{}': condition '{condition}' failed to \
-                                     evaluate: {e}",
-                                    flow.id, step.id
-                                ),
-                            ))
-                            .into_output(&state);
+                            return FlowOutcome::Done(
+                                ShortCircuit::Error(WaferError::new(
+                                    ErrorCode::InvalidArgument,
+                                    format!(
+                                        "flow '{}' step '{}': condition '{condition}' failed \
+                                         to evaluate: {e}",
+                                        flow.id, step.id
+                                    ),
+                                ))
+                                .into_output(&state),
+                            );
                         }
                     },
                 };
@@ -306,31 +374,33 @@ pub(crate) async fn execute(
                             routed = true;
                         }
                         NextTarget::MissingStep(target_step) => {
-                            return ShortCircuit::Error(WaferError::new(
-                                ErrorCode::NotFound,
-                                format!("next target step '{target_step}' not found"),
-                            ))
-                            .into_output(&state);
+                            return FlowOutcome::Done(
+                                ShortCircuit::Error(WaferError::new(
+                                    ErrorCode::NotFound,
+                                    format!("next target step '{target_step}' not found"),
+                                ))
+                                .into_output(&state),
+                            );
                         }
                         NextTarget::Flow(target_flow) => {
-                            // Flow transfer: execute the target flow (boxed to
-                            // break recursion). Its terminal is returned as-is:
-                            // the target runs with this flow's message and
-                            // responder record, so its own boundary carries
-                            // the middleware's response headers.
-                            let Some(target) = wafer.flow_plan(target_flow) else {
-                                return ShortCircuit::Error(
-                                    crate::runtime::runner::flow_not_found(target_flow),
-                                )
-                                .into_output(&state);
+                            // Flow transfer: the target runs with this flow's
+                            // message and responder record, so its own
+                            // boundary carries the middleware's response
+                            // headers.
+                            let Some(plan) = wafer.flow_plan(target_flow) else {
+                                return FlowOutcome::Done(
+                                    ShortCircuit::Error(crate::runtime::runner::flow_not_found(
+                                        target_flow,
+                                    ))
+                                    .into_output(&state),
+                                );
                             };
-                            return Box::pin(wafer.run_plan(
-                                &target,
-                                state.msg,
-                                InputStream::from_bytes(unwrap_body(state.body)),
-                                state.responder_record,
-                            ))
-                            .await;
+                            return FlowOutcome::Transfer(Transfer {
+                                plan,
+                                msg: state.msg,
+                                body: unwrap_body(state.body),
+                                responder_record: state.responder_record,
+                            });
                         }
                         // Entry with neither `step` nor `flow`: taking it ends
                         // routing without jumping (sequential advance below).
@@ -360,17 +430,20 @@ pub(crate) async fn execute(
         .filter(|e| e.key.starts_with("resp."))
         .cloned()
         .collect();
-    OutputStream::respond_with_meta(unwrap_body(state.body), resp_meta)
+    FlowOutcome::Done(OutputStream::respond_with_meta(
+        unwrap_body(state.body),
+        resp_meta,
+    ))
 }
 
-/// Charge one unit of the shared step budget; error once it is exhausted.
+/// Charge one unit of the chain's step budget; error once it is exhausted.
 fn check_budget(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
-    if env.steps_used.fetch_add(1, Ordering::Relaxed) >= env.flow.max_steps {
+    if env.chain.steps_used.fetch_add(1, Ordering::Relaxed) >= env.chain.max_steps {
         return Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::ResourceExhausted,
             format!(
                 "max steps ({}) exceeded in flow '{}'",
-                env.flow.max_steps, env.flow.id
+                env.chain.max_steps, env.flow.id
             ),
         )));
     }
@@ -379,15 +452,15 @@ fn check_budget(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
 
 /// Fail fast when the flow has been cancelled or its deadline has passed.
 fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
-    if env.cancelled.load(Ordering::Relaxed) {
+    if env.chain.cancelled.load(Ordering::Relaxed) {
         return Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::Cancelled,
             "flow cancelled",
         )));
     }
-    if let Some(dl) = env.deadline {
+    if let Some(dl) = env.chain.deadline {
         if Instant::now() >= dl {
-            env.cancelled.store(true, Ordering::Relaxed);
+            env.chain.cancelled.store(true, Ordering::Relaxed);
             return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::DeadlineExceeded,
                 format!("flow '{}' timed out", env.flow.id),
@@ -665,8 +738,8 @@ async fn run_invocation(
         &env.flow.id,
         &target.name,
         step.config.clone(),
-        env.cancelled.clone(),
-        env.deadline,
+        env.chain.cancelled.clone(),
+        env.chain.deadline,
     );
 
     // --- Execute block (lazy init + observability via the shared
@@ -750,14 +823,14 @@ async fn run_invocation(
             );
             Ok(InvocationOutcome::Responded)
         }
-        Err(TerminalNotResponse::Error(e)) => {
-            if env.flow.on_error_stop {
-                return Err(ShortCircuit::Error(e));
+        Err(TerminalNotResponse::Error(e)) => match env.flow.on_error {
+            OnError::Stop => Err(ShortCircuit::Error(e)),
+            OnError::Continue => {
+                // Clear the body and fall through to the next step.
+                state.body = Arc::new(Vec::new());
+                Ok(InvocationOutcome::NoOutput)
             }
-            // on_error=continue: clear body, fall through
-            state.body = Arc::new(Vec::new());
-            Ok(InvocationOutcome::NoOutput)
-        }
+        },
         Err(TerminalNotResponse::Drop { meta }) => {
             // Short-circuit: block requested drop
             Err(ShortCircuit::Drop(meta))

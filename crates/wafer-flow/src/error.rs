@@ -11,6 +11,17 @@ pub enum ParseError {
     Json(#[from] serde_json::Error),
 }
 
+/// A `timeout` string in a flow's config that is not a positive duration
+/// (see [`FlowTimeout`](crate::FlowTimeout)).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid flow timeout '{value}': {reason}")]
+pub struct InvalidTimeout {
+    /// The rejected text.
+    pub value: String,
+    /// Why it was rejected.
+    pub reason: &'static str,
+}
+
 /// A semantic problem found by [`validate`](crate::validate).
 ///
 /// [`validate`](crate::validate) returns *all* errors it finds, so callers
@@ -27,13 +38,32 @@ pub enum ValidationError {
     #[error("step id '{0}' is reserved (accumulator key owned by the runtime)")]
     ReservedStepId(String),
 
-    /// A `next` entry points at a `step` id that does not exist in the flow.
-    #[error("step '{from}' references unknown step '{target}' in next")]
+    /// A `next` entry's `step` names no top-level step of the flow. Steps
+    /// inside `parallel` branches are not jump targets.
+    #[error("step '{from}' routes next to '{target}', which is not a top-level step of the flow")]
     UnknownNextTarget {
         /// The step that contains the offending `next` entry.
         from: String,
-        /// The unknown step id referenced by the `next` entry.
+        /// The step id the `next` entry names.
         target: String,
+    },
+
+    /// A `next` entry names both a `step` and a `flow`.
+    #[error("step '{0}' has a next entry with both 'step' and 'flow'")]
+    NextEntryWithTwoTargets(String),
+
+    /// A step inside a `parallel` branch has `next` entries. Branch steps
+    /// run strictly in order, so `next` cannot route them.
+    #[error("step '{0}' is inside a parallel branch, where 'next' routing is not allowed")]
+    NextInParallelBranch(String),
+
+    /// A `next` entry transfers control to the flow that contains it.
+    #[error("step '{step}' transfers to its own flow '{flow}'; route to a step instead")]
+    TransferToSelf {
+        /// The step that contains the offending `next` entry.
+        step: String,
+        /// The flow's own id.
+        flow: String,
     },
 
     /// A `next` entry has neither a `step` nor a `flow` target.
@@ -53,6 +83,10 @@ pub enum ValidationError {
         /// The parser error message.
         reason: String,
     },
+
+    /// The flow config sets both `timeout` and `timeout_ms`.
+    #[error("flow config sets both 'timeout' and 'timeout_ms'; set one")]
+    ConflictingTimeouts,
 
     /// The flow contains zero steps.
     #[error("flow has no steps")]

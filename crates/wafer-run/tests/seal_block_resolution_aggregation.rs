@@ -100,13 +100,15 @@ fn step_with_parallel(
 async fn seal_aggregates_multiple_missing_block_refs() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
-    wafer.add_flow(flow_with_steps(
-        "my-flow",
-        vec![
-            step("call-a", "example/missing-a"),
-            step("call-b", "example/missing-b"),
-        ],
-    ));
+    wafer
+        .add_flow(flow_with_steps(
+            "my-flow",
+            vec![
+                step("call-a", "example/missing-a"),
+                step("call-b", "example/missing-b"),
+            ],
+        ))
+        .unwrap();
 
     let result = wafer.seal().await;
     match result {
@@ -136,13 +138,15 @@ async fn seal_aggregates_multiple_missing_block_refs() {
 async fn seal_aggregates_multiple_refs_to_same_missing_block() {
     let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
     let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
-    wafer.add_flow(flow_with_steps(
-        "my-flow",
-        vec![
-            step("first", "example/missing"),
-            step("second", "example/missing"),
-        ],
-    ));
+    wafer
+        .add_flow(flow_with_steps(
+            "my-flow",
+            vec![
+                step("first", "example/missing"),
+                step("second", "example/missing"),
+            ],
+        ))
+        .unwrap();
 
     let result = wafer.seal().await;
     match result {
@@ -190,10 +194,12 @@ async fn seal_succeeds_when_all_flow_block_refs_resolve() {
     wafer
         .register_block("example/present", Arc::new(NoopBlock("example/present")))
         .expect("register_block");
-    wafer.add_flow(flow_with_steps(
-        "my-flow",
-        vec![step("only", "example/present")],
-    ));
+    wafer
+        .add_flow(flow_with_steps(
+            "my-flow",
+            vec![step("only", "example/present")],
+        ))
+        .unwrap();
 
     let result = wafer.seal().await;
     assert!(
@@ -219,7 +225,9 @@ async fn seal_aggregates_block_refs_inside_parallel_branches() {
         "example/outer",
         vec![vec![step("inner-leaf", "example/missing-from-branch")]],
     );
-    wafer.add_flow(flow_with_steps("my-flow", vec![outer]));
+    wafer
+        .add_flow(flow_with_steps("my-flow", vec![outer]))
+        .unwrap();
 
     match wafer.seal().await {
         Err(RuntimeError::BlocksNotFound(errs)) => {
@@ -274,7 +282,9 @@ async fn seal_aggregates_block_refs_at_depth_two() {
         vec![vec![inner_leaf]],
     );
     let outer = step_with_parallel("outer-fanout", "example/outer", vec![vec![middle]]);
-    wafer.add_flow(flow_with_steps("my-flow", vec![outer]));
+    wafer
+        .add_flow(flow_with_steps("my-flow", vec![outer]))
+        .unwrap();
 
     match wafer.seal().await {
         Err(RuntimeError::BlocksNotFound(errs)) => {
