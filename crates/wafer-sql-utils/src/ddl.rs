@@ -10,9 +10,9 @@ fn quote_ident(name: &str) -> String {
 /// Validate a foreign-key referential action against an allowlist.
 ///
 /// Returns the canonical uppercase form (`"CASCADE"`, `"SET NULL"`, etc.) so
-/// it can be spliced directly into DDL. Unknown values are rejected — we do
-/// NOT pass them through `sanitize_ident`, which strips spaces and would turn
-/// `"SET NULL"` into `"SETNULL"` (silently breaking the constraint).
+/// it can be spliced directly into DDL. Unknown values are rejected, never
+/// rewritten: stripping the space would turn `"SET NULL"` into `"SETNULL"`
+/// (silently breaking the constraint).
 fn validate_fk_action(action: &str) -> Result<&'static str, SqlBuildError> {
     match action.trim().to_ascii_uppercase().as_str() {
         "CASCADE" => Ok("CASCADE"),
@@ -252,13 +252,13 @@ pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> cra
 ///
 /// Both `table_name` and `column_name` are quoted as identifiers. `type_sql`
 /// is a dialect column type produced by `data_type_to_sql` (or, for the
-/// lazy column-add path that maps from a `serde_json::Value`, the column type
-/// the backend chose); it is spliced verbatim and must therefore be a trusted
-/// type literal, never untrusted input.
+/// write path's lazy column-add, which maps from a `serde_json::Value`, the
+/// column type the backend chose); it is spliced verbatim and must therefore
+/// be a trusted type literal, never untrusted input.
 ///
-/// This is the primitive the backends' lazy column-add paths use when they
-/// know only a column name and a target type — not a full [`Column`] (which
-/// [`build_add_column`] requires).
+/// This is the primitive behind [`build_add_column_for_value`], for a caller
+/// that knows only a column name and a target type — not a full [`Column`]
+/// (which [`build_add_column`] requires).
 ///
 /// Postgres emits `ADD COLUMN IF NOT EXISTS` for idempotency: the lazy
 /// column-add path may legitimately re-attempt the same add (two concurrent
@@ -285,22 +285,6 @@ pub fn build_add_column_with_type(
         type_sql
     );
     crate::Statement::new(sql, vec![], table_name)
-}
-
-/// Generate an `ALTER TABLE <table> ADD COLUMN <column> TEXT` statement.
-///
-/// Convenience wrapper over [`build_add_column_with_type`] for the lazy
-/// column-add path, where filter/sort/data columns absent from the table are
-/// synthesised as a TEXT column (defaulting to NULL). The TEXT type name is
-/// identical across SQLite and Postgres, so it is shared via
-/// `data_type_to_sql`.
-pub fn build_add_text_column(
-    table_name: &str,
-    column_name: &str,
-    backend: Backend,
-) -> crate::Statement {
-    let type_sql = data_type_to_sql(DataType::Text, backend);
-    build_add_column_with_type(table_name, column_name, type_sql, backend)
 }
 
 /// Pick the dialect column type for a lazily added column holding `value`.
@@ -464,8 +448,8 @@ mod tests {
     }
 
     #[test]
-    fn test_add_text_column_sqlite() {
-        let stmt = build_add_text_column("users", "nickname", Backend::Sqlite);
+    fn test_add_column_with_type_sqlite() {
+        let stmt = build_add_column_with_type("users", "nickname", "TEXT", Backend::Sqlite);
         // SQLite does not support `IF NOT EXISTS` on `ADD COLUMN`.
         assert_eq!(
             stmt.sql,
@@ -476,23 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn test_add_text_column_postgres() {
-        let stmt = build_add_text_column("users", "nickname", Backend::Postgres);
-        // TEXT is identical across dialects; identifiers are quoted. Postgres
-        // gets `IF NOT EXISTS` so a re-attempted lazy add is a no-op rather than
-        // a hard error.
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"users\" ADD COLUMN IF NOT EXISTS \"nickname\" TEXT"
-        );
-        assert_eq!(stmt.collection, "users");
-    }
-
-    #[test]
-    fn test_add_text_column_quotes_identifiers() {
+    fn test_add_column_with_type_quotes_identifiers() {
         // A column name containing a double quote must be escaped, not
         // splatted into the DDL where it could break out of the identifier.
-        let stmt = build_add_text_column("posts", "weird\"name", Backend::Sqlite);
+        let stmt = build_add_column_with_type("posts", "weird\"name", "TEXT", Backend::Sqlite);
         assert_eq!(
             stmt.sql,
             "ALTER TABLE \"posts\" ADD COLUMN \"weird\"\"name\" TEXT"

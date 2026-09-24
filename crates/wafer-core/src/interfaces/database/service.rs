@@ -31,6 +31,10 @@ pub enum DatabaseError {
     /// tell "taken" from a fault. Other constraint violations stay `Internal`.
     #[error("unique constraint violated: {0}")]
     AlreadyExists(String),
+    /// The request names a table or column the executor refuses: one that is
+    /// not a plain identifier, or a column the table does not have.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
     /// Backend-internal failure.
     #[error("database error: {0}")]
     Internal(String),
