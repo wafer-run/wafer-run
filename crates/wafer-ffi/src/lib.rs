@@ -60,8 +60,9 @@ use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 /// `user_data` is opaque to the FFI layer and passed through unchanged.
 ///
 /// The callback may be invoked from any thread owned by the FFI's internal
-/// tokio runtime, or on the caller's own thread before the entry point
-/// returns when the call fails up front (e.g. invalid message JSON);
+/// tokio runtime; on the caller's own thread before the entry point
+/// returns when the call fails up front (e.g. invalid message JSON); or,
+/// for a call [`wafer_free`] cancels, on the thread calling `wafer_free`;
 /// consumers are responsible for thread-safety inside the callback. It is
 /// invoked exactly once per accepted call — see [`wafer_free`] for calls
 /// still in flight when the runtime is freed.
@@ -89,9 +90,10 @@ pub struct WaferRuntime {
     /// The `wafer_run` calls accepted and not yet called back, and whether
     /// `wafer_stop` has closed the runtime to new ones.
     runs: Arc<Runs>,
-    /// Set once the blocks' `lifecycle(Stop)` has run, so a second
-    /// `wafer_stop` waits for the first instead of stopping the blocks again.
-    stopped: Arc<OnceCell<()>>,
+    /// Set once the blocks' `lifecycle(Stop)` has run — to `Some(message)`
+    /// if it panicked — so a second `wafer_stop` waits for the first and
+    /// reports its outcome instead of stopping the blocks again.
+    stopped: Arc<OnceCell<Option<String>>>,
     /// Tokio runtime that drives spawned async work. Not used to block_on
     /// anything; futures are `spawn`'d and signal completion via the caller's
     /// `WaferDoneCb`.
@@ -459,9 +461,12 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
 /// accepted `wafer_run` calls finish and block `lifecycle(Stop)` handlers
 /// run.
 ///
-/// Called from inside a `WaferDoneCb` — on a thread of the runtime being
-/// freed, which cannot wait for itself — it does not wait for callbacks
-/// already running on other threads of the runtime; those still complete.
+/// Called from within any tokio runtime — inside a `WaferDoneCb`, on a
+/// thread of the runtime being freed, or from a Rust embedder's own async
+/// context, where blocking to wait is not allowed — it shuts the runtime
+/// down in the background: the cancelled callbacks have still fired before
+/// it returns, but callbacks already running on the runtime's threads may
+/// finish after it returns.
 ///
 /// CALLER CONTRACT: no other call may use `w` concurrently with or after
 /// this one.
@@ -571,8 +576,9 @@ pub unsafe extern "C" fn wafer_start(
 /// refused (its callback reports `Unavailable`). Once every `wafer_run`
 /// accepted before it has called back, the blocks' `lifecycle(Stop)`
 /// handlers run, and `cb` fires: NULL on success, a JSON error string if
-/// shutdown panicked. A second `wafer_stop` waits for the first and does
-/// not stop the blocks again. Must be called before `wafer_free` for the
+/// shutdown panicked. A second `wafer_stop` waits for the first, reports
+/// the same outcome, and does not stop the blocks again — not even after a
+/// panic. Must be called before `wafer_free` for the
 /// handlers to run. A NULL `cb` is refused ([`WAFER_REFUSED_NULL_CALLBACK`])
 /// and the runtime is not stopped.
 #[no_mangle]
@@ -597,13 +603,19 @@ pub unsafe extern "C" fn wafer_stop(
         let stopped = runtime.stopped.clone();
         let inner = runtime.inner.clone();
         runtime.spawn_call(done, async move {
-            stopped
+            let panicked = stopped
                 .get_or_init(|| async {
                     runs.drained().await;
-                    inner.write().await.shutdown().await;
+                    // Caught here, not by `spawn_call`, so the attempt is
+                    // recorded and a panicking Stop never runs twice.
+                    AssertUnwindSafe(async { inner.write().await.shutdown().await })
+                        .catch_unwind()
+                        .await
+                        .err()
+                        .map(|payload| format!("panic in wafer_stop: {}", panic_message(&*payload)))
                 })
                 .await;
-            None
+            panicked.as_deref().map(error_cstring)
         });
     }));
     WAFER_ACCEPTED

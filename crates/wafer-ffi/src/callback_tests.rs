@@ -204,7 +204,10 @@ fn free_from_inside_a_callback_cancels_the_rest() {
             .recv_timeout(Duration::from_secs(10))
             .expect("wafer_free inside a callback did not return");
 
-        let out = json(run.wait());
+        let out = json(
+            run.fired_within(Duration::ZERO)
+                .expect("the in-flight run did not call back before wafer_free returned"),
+        );
         assert_eq!(out["error"]["code"], "Cancelled", "{out}");
     }
 }
@@ -270,6 +273,23 @@ fn a_panic_in_spawned_work_calls_back() {
             "{err}"
         );
 
+        wafer_free(fx.w);
+    }
+}
+
+/// A second `wafer_stop` after a Stop that panicked reports the same panic
+/// and does not run the blocks' Stop again.
+#[test]
+fn a_second_stop_after_a_panicking_stop_does_not_stop_again() {
+    unsafe {
+        let fx = Fixture::new(true);
+        for _ in 0..2 {
+            let stop = Pending::new();
+            assert_eq!(wafer_stop(fx.w, CB, stop.user_data()), WAFER_ACCEPTED);
+            let err = stop.wait().expect("a panicking stop must report an error");
+            assert!(err.contains("test/gated panics in Stop"), "{err}");
+        }
+        assert_eq!(fx.stops.load(Ordering::SeqCst), 1);
         wafer_free(fx.w);
     }
 }
