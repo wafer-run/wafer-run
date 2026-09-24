@@ -76,19 +76,22 @@ pub enum InitError {
 impl InitError {
     /// Classify a `lifecycle(Init)` failure by its code.
     ///
-    /// `Unavailable`, `DeadlineExceeded`, `Cancelled`, `ResourceExhausted` and
-    /// `Aborted` say the attempt met a condition that can clear on its own (a
-    /// backend down or busy, a budget spent, a conflict), so they are
+    /// `Unavailable`, `DeadlineExceeded`, `Cancelled` and `Aborted` say the
+    /// attempt met a condition that can clear on its own (a backend down or
+    /// busy, a deadline or cancellation, a conflict), so they are
     /// [`Transient`](Self::Transient). Every other code describes the block
     /// or its configuration, which a retry does not change, so it is
-    /// [`Permanent`](Self::Permanent).
+    /// [`Permanent`](Self::Permanent) — including `ResourceExhausted`, which
+    /// the runtime's own limits raise (call depth, the wasm host-memory
+    /// budget, a flow's `max_steps`): an Init that exceeds one does so again
+    /// on every run. An Init that meets a limit which does clear (a rate
+    /// limit) reports it as `Unavailable`.
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
         match e.code {
             ErrorCode::Unavailable
             | ErrorCode::DeadlineExceeded
             | ErrorCode::Cancelled
-            | ErrorCode::ResourceExhausted
             | ErrorCode::Aborted => Self::Transient(msg),
             _ => Self::Permanent(msg),
         }
@@ -283,13 +286,13 @@ mod tests {
             ErrorCode::Unavailable,
             ErrorCode::DeadlineExceeded,
             ErrorCode::Cancelled,
-            ErrorCode::ResourceExhausted,
             ErrorCode::Aborted,
         ] {
             let e = InitError::from_lifecycle_error(&WaferError::new(code, "x"));
             assert!(matches!(e, InitError::Transient(_)), "{code:?} → {e:?}");
         }
         for code in [
+            ErrorCode::ResourceExhausted,
             ErrorCode::Internal,
             ErrorCode::InvalidArgument,
             ErrorCode::FailedPrecondition,

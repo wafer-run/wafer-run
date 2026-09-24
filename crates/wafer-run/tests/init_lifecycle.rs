@@ -56,13 +56,19 @@ struct Probe {
     delay: Option<Duration>,
     /// Blocks Init calls, concurrently; an error fails the Init.
     calls: Vec<&'static str>,
+    /// `kind` of the messages Init sends (a [`Relay`] reads it as a count).
+    call_kind: &'static str,
     init_runs: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 async fn call(ctx: &dyn Context, target: &str) -> Result<(), WaferError> {
+    call_with(ctx, target, "").await
+}
+
+async fn call_with(ctx: &dyn Context, target: &str, kind: &str) -> Result<(), WaferError> {
     match ctx
-        .call_block(target, Message::new(""), InputStream::empty())
+        .call_block(target, Message::new(kind), InputStream::empty())
         .await
         .collect_buffered()
         .await
@@ -94,7 +100,9 @@ impl Block for Probe {
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }
-        let results = futures::future::join_all(self.calls.iter().map(|t| call(ctx, t))).await;
+        let results =
+            futures::future::join_all(self.calls.iter().map(|t| call_with(ctx, t, self.call_kind)))
+                .await;
         let failure = results.iter().find_map(|r| r.clone().err());
         self.seen.lock().unwrap().push(Seen {
             caller_id: ctx.caller_id().map(str::to_string),
@@ -221,7 +229,6 @@ async fn transient_failure_during_eager_init_does_not_wedge_the_block() {
         ErrorCode::Unavailable,
         ErrorCode::DeadlineExceeded,
         ErrorCode::Cancelled,
-        ErrorCode::ResourceExhausted,
         ErrorCode::Aborted,
     ] {
         let wafer = sealed(vec![(
@@ -268,6 +275,51 @@ async fn permanent_init_failure_stays_cached() {
     let again = run(&wafer, "t/broken").await.expect_err("still failed");
     assert_eq!(again.code, ErrorCode::FailedPrecondition, "{again:?}");
     assert_eq!(init_runs.load(Ordering::SeqCst), 1);
+}
+
+/// Guard against retrying a deterministic runtime limit: an Init whose own
+/// call chain exceeds the call-depth limit gets `ResourceExhausted` on every
+/// run, so the failure is permanent — not re-run every backoff forever.
+#[tokio::test]
+async fn init_that_exceeds_the_call_depth_limit_fails_permanently() {
+    let init_runs = Arc::new(AtomicUsize::new(0));
+    let wafer = sealed(vec![
+        (
+            "t/deep",
+            Arc::new(Probe {
+                name: "t/deep",
+                calls: vec!["t/relay"],
+                // More self-calls than the depth limit (16) allows.
+                call_kind: "32",
+                init_runs: init_runs.clone(),
+                ..Probe::default()
+            }),
+        ),
+        (
+            "t/relay",
+            Arc::new(Relay {
+                name: "t/relay",
+                target: "t/db",
+                fan_out: false,
+            }),
+        ),
+        (
+            "t/db",
+            Arc::new(Probe {
+                name: "t/db",
+                ..Probe::default()
+            }),
+        ),
+    ])
+    .await;
+
+    let first = run(&wafer, "t/deep").await.expect_err("Init exceeds depth");
+    assert_eq!(first.code, ErrorCode::FailedPrecondition, "{first:?}");
+    assert!(first.message.contains("ResourceExhausted"), "{first:?}");
+    past_first_backoff().await;
+    let again = run(&wafer, "t/deep").await.expect_err("still failed");
+    assert_eq!(again.code, ErrorCode::FailedPrecondition, "{again:?}");
+    assert_eq!(init_runs.load(Ordering::SeqCst), 1, "not retried");
 }
 
 /// Init reached at the bottom of a deep `call_block` chain gets call depth 0

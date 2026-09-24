@@ -913,11 +913,12 @@
   `lifecycle(Init)` error used to be cached as permanent for the life of the
   process, so one bad moment at boot (a backend `Unavailable`, a spent
   deadline) disabled a block until restart under a tolerant boot. An Init
-  error coded `Unavailable`, `DeadlineExceeded`, `Cancelled`,
-  `ResourceExhausted` or `Aborted` is now `InitError::Transient`
-  (`InitError::from_lifecycle_error`): not cached, retried by the first
-  dispatch after a backoff of 100 ms that doubles per consecutive failure up
-  to 30 s; every other code stays permanent. Init also runs on a context of
+  error coded `Unavailable`, `DeadlineExceeded`, `Cancelled` or `Aborted` is
+  now `InitError::Transient` (`InitError::from_lifecycle_error`): not cached,
+  retried by the first dispatch after a backoff of 100 ms that doubles per
+  consecutive failure up to 30 s; every other code stays permanent, including
+  `ResourceExhausted`, which the runtime's own deterministic limits raise
+  (call depth, wasm host-memory budget, flow `max_steps`). Init also runs on a context of
   its own (`RuntimeContext::for_init`) on every path — eager `init_block`,
   `run_block`, flow steps and `call_block` — with a fresh cancellation flag,
   no deadline, call depth 0, no caller and the block's own `requires`: a
