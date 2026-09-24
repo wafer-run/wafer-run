@@ -966,7 +966,7 @@ mod tests {
     const ARGON2_TAIL: &str = "$AAECAwQFBgcICQoLDA0ODw$AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
     /// Run `f` on its own thread and fail if it has not returned within
-    /// `secs` — the pre-fix behaviour of the cost tests is to run for hours,
+    /// `secs`: a derivation at the costs these tests use runs for hours,
     /// which must read as a failure, not a hung suite.
     fn within_secs<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();

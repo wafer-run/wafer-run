@@ -140,8 +140,9 @@ async fn a_wrong_password_is_still_a_mismatch() {
     assert!(!resp.matches);
 }
 
-/// `expiry_secs` comes off the wire. One past chrono's last date used to
-/// panic the handler — with `panic = "abort"`, the whole process.
+/// `expiry_secs` comes off the wire. One that lands past chrono's last date
+/// must be an error: a panic in the handler aborts a `panic = "abort"`
+/// process.
 #[tokio::test]
 async fn an_unrepresentable_expiry_is_an_error_not_a_panic() {
     let svc = service();
