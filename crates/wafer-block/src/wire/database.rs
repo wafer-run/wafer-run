@@ -104,10 +104,12 @@ pub struct ListRequest {
     /// ORDER BY clause.
     #[serde(default)]
     pub sort: Vec<SortFieldDef>,
-    /// Maximum number of rows to return (0 = backend default).
+    /// Maximum number of rows to return, at least 1; absent returns every
+    /// matching row.
     #[serde(default)]
-    pub limit: i64,
-    /// Number of rows to skip for pagination.
+    pub limit: Option<u32>,
+    /// Number of rows to skip for pagination; a positive offset needs a
+    /// `limit`.
     #[serde(default)]
     pub offset: i64,
     /// When `true`, backends skip the `SELECT COUNT(*)` query and return
@@ -925,7 +927,7 @@ mod tests {
                 field: "created_at".into(),
                 desc: true,
             }],
-            limit: 50,
+            limit: Some(50),
             offset: 100,
             skip_count: false,
             columns: Some(vec!["id".into(), "active".into()]),
@@ -933,7 +935,7 @@ mod tests {
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListRequest = codec::decode(&encoded).expect("decode");
         assert_eq!(decoded.collection, original.collection);
-        assert_eq!(decoded.limit, 50);
+        assert_eq!(decoded.limit, Some(50));
         assert_eq!(decoded.offset, 100);
         assert_eq!(decoded.filters.len(), 1);
         assert_eq!(decoded.sort.len(), 1);
@@ -951,7 +953,7 @@ mod tests {
             collection: "users".into(),
             filters: vec![],
             sort: vec![],
-            limit: 0,
+            limit: None,
             offset: 0,
             skip_count: false,
             columns: None,
@@ -1200,7 +1202,7 @@ mod tests {
             collection: String::new(),
             filters: vec![],
             sort: vec![],
-            limit: 0,
+            limit: None,
             offset: 0,
             skip_count: false,
             columns: None,
@@ -1208,7 +1210,7 @@ mod tests {
         let encoded = codec::encode(&req).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex, "87aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d697400a66f666673657400aa736b69705f636f756e74c2a7636f6c756d6e73c0",
+            hex, "87aa636f6c6c656374696f6ea0a766696c7465727390a4736f727490a56c696d6974c0a66f666673657400aa736b69705f636f756e74c2a7636f6c756d6e73c0",
             "ListRequest schema changed — review consumer impact before updating this literal"
         );
     }
@@ -1228,7 +1230,10 @@ mod tests {
         let decoded: ListRequest = codec::decode(&bytes).expect("decode legacy");
         assert!(!decoded.skip_count);
         assert_eq!(decoded.collection, "");
-        assert_eq!(decoded.limit, 0);
+        // An old encoder always wrote `limit: 0` for "no limit". It decodes
+        // as `Some(0)`, which the select builder refuses (`ZeroLimit`), so an
+        // old guest's list fails loudly instead of returning no rows.
+        assert_eq!(decoded.limit, Some(0));
     }
 
     #[test]

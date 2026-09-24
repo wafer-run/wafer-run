@@ -35,9 +35,10 @@ pub struct ListOptions {
     pub filters: Vec<Filter>,
     /// Sort directives applied in declaration order.
     pub sort: Vec<SortField>,
-    /// Maximum rows to return; `0` means backend-default.
-    pub limit: i64,
-    /// Number of rows to skip before returning results.
+    /// Maximum rows to return, at least 1; `None` returns every matching row.
+    pub limit: Option<u32>,
+    /// Number of rows to skip before returning results. A positive offset
+    /// needs a `limit`.
     pub offset: i64,
     /// When `true`, backends MUST skip the `SELECT COUNT(*)` query and
     /// return `RecordList.total_count = records.len() as i64`. Wrapper

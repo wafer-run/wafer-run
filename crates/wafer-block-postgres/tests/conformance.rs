@@ -111,7 +111,7 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
                         field: "created_at".into(),
                         desc: true,
                     }],
-                    limit: 2,
+                    limit: Some(2),
                     offset,
                     ..Default::default()
                 },

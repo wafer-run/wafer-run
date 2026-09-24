@@ -102,6 +102,17 @@ pub enum SqlBuildError {
         /// The rejected identifier, as supplied by the caller.
         value: String,
     },
+    /// A select asked for `LIMIT 0`. No caller wants an empty page; a `0` is
+    /// a page size that was never set, and "every row" is spelled `None`.
+    #[error("limit must be at least 1; omit it to return every row")]
+    ZeroLimit,
+    /// A select had a positive offset and no limit. SQLite and D1 cannot
+    /// render `OFFSET` without `LIMIT`, so no backend accepts it.
+    #[error("offset {offset} needs a limit")]
+    OffsetWithoutLimit {
+        /// The rejected offset.
+        offset: i64,
+    },
 }
 
 /// Database backend dialect for SQL rendering.

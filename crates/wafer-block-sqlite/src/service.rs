@@ -751,13 +751,14 @@ mod tests {
                 value: serde_json::json!("alice"),
             }],
             sort: vec![],
-            limit: 0,
+            limit: None,
             offset: 0,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Sqlite)
+            .expect("renders");
         let sql = stmt.sql;
         assert!(sql.contains("WHERE"));
         // SQLite uses ? placeholders, not $N
@@ -785,13 +786,14 @@ mod tests {
                     desc: false,
                 },
             ],
-            limit: 10,
+            limit: Some(10),
             offset: 20,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Sqlite);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Sqlite)
+            .expect("renders");
         assert!(stmt.sql.contains("ORDER BY"));
         assert!(stmt.sql.contains("LIMIT"));
         assert!(stmt.sql.contains("OFFSET"));
@@ -1744,7 +1746,7 @@ mod tests {
 
         // With skip_count: true — total_count is records.len(), not full count.
         let opts_skip = ListOptions {
-            limit: 2,
+            limit: Some(2),
             skip_count: true,
             ..Default::default()
         };
@@ -1756,7 +1758,7 @@ mod tests {
 
         // With skip_count: false — total_count is the full collection size.
         let opts_count = ListOptions {
-            limit: 2,
+            limit: Some(2),
             skip_count: false,
             ..Default::default()
         };

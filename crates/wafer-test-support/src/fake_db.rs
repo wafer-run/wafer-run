@@ -187,7 +187,35 @@ impl FakeDb {
     fn handle_list(&self, req: &serde_json::Value) -> OutputStream {
         let collection = req["collection"].as_str().unwrap_or("");
         let filters = req["filters"].as_array().cloned().unwrap_or_default();
-        let limit = req["limit"].as_i64().unwrap_or(i64::MAX).max(0) as usize;
+        // The real executor's pagination rule: an absent limit is every row,
+        // a zero limit and a positive offset without a limit are refused.
+        let limit: Option<u32> = match serde_json::from_value(req["limit"].clone()) {
+            Ok(limit) => limit,
+            Err(e) => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("fake-db: bad limit: {e}"),
+                ));
+            }
+        };
+        let offset = req["offset"].as_i64().unwrap_or(0);
+        match limit {
+            Some(0) => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    "fake-db: limit must be at least 1",
+                ));
+            }
+            None if offset > 0 => {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("fake-db: offset {offset} needs a limit"),
+                ));
+            }
+            _ => {}
+        }
+        let skip = usize::try_from(offset.max(0)).unwrap_or(usize::MAX);
+        let take = limit.map_or(usize::MAX, |n| n as usize);
         let state = self.state.lock();
         let empty = Vec::new();
         let rows = state.collections.get(collection).unwrap_or(&empty);
@@ -197,13 +225,17 @@ impl FakeDb {
         };
         let total_count = matching.len() as i64;
         // Convert to `{id, data}` wire format expected by `RecordList`.
-        let records: Vec<serde_json::Value> =
-            matching.into_iter().take(limit).map(to_record).collect();
+        let records: Vec<serde_json::Value> = matching
+            .into_iter()
+            .skip(skip)
+            .take(take)
+            .map(to_record)
+            .collect();
         let body = serde_json::to_vec(&serde_json::json!({
             "records": records,
             "total_count": total_count,
             "page": 0_i64,
-            "page_size": limit as i64,
+            "page_size": limit.map_or(total_count, i64::from),
         }))
         .unwrap();
         OutputStream::respond(body)

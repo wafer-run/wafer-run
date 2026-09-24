@@ -551,13 +551,14 @@ mod tests {
                 value: serde_json::json!("alice"),
             }],
             sort: vec![],
-            limit: 0,
+            limit: None,
             offset: 0,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("users", &opts, &["id"], Backend::Postgres)
+            .expect("renders");
         let sql = stmt.sql;
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("$1"));
@@ -580,13 +581,14 @@ mod tests {
                     desc: false,
                 },
             ],
-            limit: 10,
+            limit: Some(10),
             offset: 20,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Postgres);
+        let stmt = wafer_sql_utils::query::build_select("items", &opts, &["id"], Backend::Postgres)
+            .expect("renders");
         assert!(stmt.sql.contains("ORDER BY"));
         assert!(stmt.sql.contains("LIMIT"));
         assert!(stmt.sql.contains("OFFSET"));

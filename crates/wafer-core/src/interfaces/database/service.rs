@@ -31,8 +31,9 @@ pub enum DatabaseError {
     /// tell "taken" from a fault. Other constraint violations stay `Internal`.
     #[error("unique constraint violated: {0}")]
     AlreadyExists(String),
-    /// The request names a table or column the executor refuses: one that is
-    /// not a plain identifier, or a column the table does not have.
+    /// The request names a table or column the executor refuses (one that is
+    /// not a plain identifier, or a column the table does not have), or asks
+    /// for a page it cannot render (a zero limit, an offset with no limit).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// Backend-internal failure.
@@ -44,7 +45,8 @@ pub enum DatabaseError {
 }
 
 /// A statement a builder refused to render is the caller's mistake: a name
-/// that is not a plain identifier, or a foreign-key action off the allowlist.
+/// that is not a plain identifier, a foreign-key action off the allowlist, or
+/// a limit/offset pair no backend can render.
 impl From<wafer_sql_utils::SqlBuildError> for DatabaseError {
     fn from(e: wafer_sql_utils::SqlBuildError) -> Self {
         Self::InvalidArgument(e.to_string())
@@ -626,7 +628,7 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     collection,
                     &ListOptions {
                         filters: filters.to_vec(),
-                        limit: 10000,
+                        limit: Some(10_000),
                         ..Default::default()
                     },
                 )
@@ -674,7 +676,7 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 collection,
                 &ListOptions {
                     filters: filters.to_vec(),
-                    limit: 10_000,
+                    limit: Some(10_000),
                     ..Default::default()
                 },
             )
@@ -699,7 +701,7 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 collection,
                 &ListOptions {
                     filters: filters.to_vec(),
-                    limit: 10000,
+                    limit: Some(10_000),
                     ..Default::default()
                 },
             )

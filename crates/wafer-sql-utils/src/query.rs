@@ -6,7 +6,7 @@ use wafer_block::db::{
     ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
 };
 
-use crate::{ident::DynCol, value::json_to_sea_value, Backend};
+use crate::{ident::DynCol, value::json_to_sea_value, Backend, SqlBuildError};
 
 /// Render one [`Filter`] leaf to a sea-query predicate expression.
 ///
@@ -168,7 +168,7 @@ pub fn apply_order(query: &mut SelectStatement, sort: &[SortField]) {
 /// unsorted, unpaged read pays for no introspection.
 #[must_use]
 pub fn orders_rows(opts: &ListOptions) -> bool {
-    !opts.sort.is_empty() || opts.limit > 0 || opts.offset > 0
+    !opts.sort.is_empty() || opts.limit.is_some() || opts.offset > 0
 }
 
 /// Apply `sort`, then the columns of `unique_key` that `sort` does not already
@@ -205,14 +205,37 @@ pub fn apply_order_with_unique_key(
     }
 }
 
-/// Apply limit and offset to a SelectStatement.
-pub fn apply_pagination(query: &mut SelectStatement, limit: i64, offset: i64) {
-    if limit > 0 {
-        query.limit(limit as u64);
+/// Check that `limit`/`offset` can be rendered: a zero limit is
+/// [`SqlBuildError::ZeroLimit`] and a positive offset without a limit is
+/// [`SqlBuildError::OffsetWithoutLimit`] (SQLite and D1 have no `OFFSET`
+/// without `LIMIT`). [`apply_pagination`] applies the same check; an
+/// executor that can answer without rendering a select (a missing table)
+/// calls this first so it refuses the same requests.
+pub fn check_pagination(limit: Option<u32>, offset: i64) -> Result<(), SqlBuildError> {
+    match limit {
+        Some(0) => Err(SqlBuildError::ZeroLimit),
+        None if offset > 0 => Err(SqlBuildError::OffsetWithoutLimit { offset }),
+        _ => Ok(()),
+    }
+}
+
+/// Apply limit and offset to a SelectStatement, after [`check_pagination`].
+///
+/// `None` emits no `LIMIT`, so every matching row comes back. An offset of 0
+/// or less emits no `OFFSET`.
+pub fn apply_pagination(
+    query: &mut SelectStatement,
+    limit: Option<u32>,
+    offset: i64,
+) -> Result<(), SqlBuildError> {
+    check_pagination(limit, offset)?;
+    if let Some(n) = limit {
+        query.limit(u64::from(n));
     }
     if offset > 0 {
         query.offset(offset as u64);
     }
+    Ok(())
 }
 
 /// Build SELECT * FROM {table} with filters, sort, limit, offset.
@@ -220,12 +243,14 @@ pub fn apply_pagination(query: &mut SelectStatement, limit: i64, offset: i64) {
 /// `unique_key` is the table's primary key, appended to the `ORDER BY` so
 /// ties resolve the same way on every query (see
 /// [`apply_order_with_unique_key`]); pass `&[]` for a table that has none.
+/// Fails when `opts.limit`/`opts.offset` cannot be rendered (see
+/// [`apply_pagination`]).
 pub fn build_select(
     table: &str,
     opts: &ListOptions,
     unique_key: &[&str],
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     build_select_with_condition(table, opts, None, unique_key, backend)
 }
 
@@ -242,7 +267,7 @@ pub fn build_select_with_condition(
     extra_condition: Option<Cond>,
     unique_key: &[&str],
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     select_with_projection(table, None, opts, extra_condition, unique_key, backend)
 }
 
@@ -255,7 +280,7 @@ fn select_with_projection(
     extra_condition: Option<Cond>,
     unique_key: &[&str],
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     let mut query = Query::select();
     match columns {
         Some(cols) => {
@@ -276,10 +301,10 @@ fn select_with_projection(
         query.cond_where(extra);
     }
     apply_order_with_unique_key(&mut query, opts, unique_key);
-    apply_pagination(&mut query, opts.limit, opts.offset);
+    apply_pagination(&mut query, opts.limit, opts.offset)?;
 
     let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    Ok(crate::Statement::new(sql, values, table))
 }
 
 /// Build SELECT {columns} FROM {table} with filters, sort, limit, offset.
@@ -305,7 +330,7 @@ fn select_with_projection(
 ///     Some(or_group),
 ///     &["id"],
 ///     Backend::Sqlite,
-/// );
+/// )?;
 /// ```
 pub fn build_select_columns(
     table: &str,
@@ -314,7 +339,7 @@ pub fn build_select_columns(
     extra_condition: Option<Cond>,
     unique_key: &[&str],
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     select_with_projection(
         table,
         Some(columns),
@@ -544,13 +569,13 @@ mod tests {
                 field: "created_at".into(),
                 desc: true,
             }],
-            limit: 10,
+            limit: Some(10),
             offset: 0,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = build_select("users", &opts, &["id"], Backend::Sqlite);
+        let stmt = build_select("users", &opts, &["id"], Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         let values = stmt.values;
         assert!(sql.contains("SELECT"));
@@ -567,13 +592,13 @@ mod tests {
         let opts = ListOptions {
             filters: vec![eq_filter("name", serde_json::json!("alice"))],
             sort: vec![],
-            limit: 0,
+            limit: None,
             offset: 0,
             skip_count: false,
             filter_tree: None,
             columns: None,
         };
-        let stmt = build_select("users", &opts, &["id"], Backend::Postgres);
+        let stmt = build_select("users", &opts, &["id"], Backend::Postgres).expect("renders");
         let sql = stmt.sql;
         let values = stmt.values;
         assert!(sql.contains("$1"));
@@ -927,14 +952,15 @@ mod tests {
                     field: "created_at".into(),
                     desc: true,
                 }],
-                limit: 20,
+                limit: Some(20),
                 offset: 0,
                 ..Default::default()
             },
             Some(or_group),
             &["id"],
             Backend::Sqlite,
-        );
+        )
+        .expect("renders");
         let sql = stmt.sql;
         let values = stmt.values;
 
@@ -1120,7 +1146,7 @@ mod tests {
         }
     }
 
-    fn sorted(sort: &[(&str, bool)], limit: i64, offset: i64) -> ListOptions {
+    fn sorted(sort: &[(&str, bool)], limit: Option<u32>, offset: i64) -> ListOptions {
         ListOptions {
             sort: sort
                 .iter()
@@ -1137,23 +1163,28 @@ mod tests {
 
     #[test]
     fn a_sorted_select_ends_with_the_unique_key_in_the_last_sort_direction() {
-        let opts = sorted(&[("created_at", true)], 0, 0);
-        let sqlite = build_select("t", &opts, &["id"], Backend::Sqlite).sql;
+        let opts = sorted(&[("created_at", true)], None, 0);
+        let sqlite = build_select("t", &opts, &["id"], Backend::Sqlite)
+            .expect("renders")
+            .sql;
         assert_eq!(
             sqlite,
             r#"SELECT * FROM "t" ORDER BY "created_at" DESC, "id" DESC"#
         );
-        let postgres = build_select("t", &opts, &["id"], Backend::Postgres).sql;
+        let postgres = build_select("t", &opts, &["id"], Backend::Postgres)
+            .expect("renders")
+            .sql;
         assert_eq!(
             postgres,
             r#"SELECT * FROM "t" ORDER BY "created_at" DESC, "id" DESC"#
         );
         let asc = build_select(
             "t",
-            &sorted(&[("created_at", false)], 0, 0),
+            &sorted(&[("created_at", false)], None, 0),
             &["id"],
             Backend::Sqlite,
         )
+        .expect("renders")
         .sql;
         assert_eq!(
             asc,
@@ -1163,26 +1194,62 @@ mod tests {
 
     #[test]
     fn a_paged_select_with_no_sort_orders_by_the_unique_key() {
-        for (limit, offset) in [(2, 0), (0, 2), (2, 4)] {
-            let sql = build_select("t", &sorted(&[], limit, offset), &["id"], Backend::Sqlite).sql;
+        for (limit, offset) in [(Some(2), 0), (Some(2), 4)] {
+            let sql = build_select("t", &sorted(&[], limit, offset), &["id"], Backend::Sqlite)
+                .expect("renders")
+                .sql;
             assert!(
                 sql.starts_with(r#"SELECT * FROM "t" ORDER BY "id" ASC"#),
-                "limit {limit} offset {offset}: {sql}"
+                "limit {limit:?} offset {offset}: {sql}"
             );
         }
         // Neither sorted nor paged: no ORDER BY at all.
-        let sql = build_select("t", &sorted(&[], 0, 0), &["id"], Backend::Sqlite).sql;
+        let sql = build_select("t", &sorted(&[], None, 0), &["id"], Backend::Sqlite)
+            .expect("renders")
+            .sql;
         assert_eq!(sql, r#"SELECT * FROM "t""#);
+    }
+
+    /// SQLite has no `OFFSET` without `LIMIT`: the rendered statement would be
+    /// a syntax error there and a whole-table read after the offset on
+    /// Postgres. Both backends refuse it instead.
+    #[test]
+    fn an_offset_without_a_limit_is_refused_on_every_backend() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let err = build_select("t", &sorted(&[], None, 1), &["id"], backend)
+                .expect_err("offset without limit");
+            assert_eq!(
+                err,
+                SqlBuildError::OffsetWithoutLimit { offset: 1 },
+                "{backend:?}"
+            );
+        }
+    }
+
+    /// `Some(0)` is a page size nobody set, not a request for an empty page;
+    /// "every row" is `None`.
+    #[test]
+    fn a_zero_limit_is_refused_and_no_limit_emits_no_limit_clause() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let err = build_select("t", &sorted(&[], Some(0), 0), &["id"], backend)
+                .expect_err("zero limit");
+            assert_eq!(err, SqlBuildError::ZeroLimit, "{backend:?}");
+            let sql = build_select("t", &sorted(&[("id", false)], None, 0), &["id"], backend)
+                .expect("renders")
+                .sql;
+            assert!(!sql.contains("LIMIT"), "{backend:?}: {sql}");
+        }
     }
 
     #[test]
     fn the_unique_key_is_not_repeated_and_every_key_column_is_appended() {
         let sql = build_select(
             "t",
-            &sorted(&[("id", true)], 5, 0),
+            &sorted(&[("id", true)], Some(5), 0),
             &["id"],
             Backend::Sqlite,
         )
+        .expect("renders")
         .sql;
         assert!(
             sql.starts_with(r#"SELECT * FROM "t" ORDER BY "id" DESC LIMIT"#),
@@ -1192,10 +1259,11 @@ mod tests {
         let composite = &["user_id", "role_id"];
         let sql = build_select(
             "t",
-            &sorted(&[("created_at", false)], 0, 0),
+            &sorted(&[("created_at", false)], None, 0),
             composite,
             Backend::Postgres,
         )
+        .expect("renders")
         .sql;
         assert_eq!(
             sql,
@@ -1203,10 +1271,11 @@ mod tests {
         );
         let sql = build_select(
             "t",
-            &sorted(&[("role_id", true)], 0, 0),
+            &sorted(&[("role_id", true)], None, 0),
             composite,
             Backend::Postgres,
         )
+        .expect("renders")
         .sql;
         assert_eq!(
             sql,
@@ -1215,21 +1284,23 @@ mod tests {
         // No primary key: the sort alone.
         let sql = build_select(
             "t",
-            &sorted(&[("created_at", true)], 0, 0),
+            &sorted(&[("created_at", true)], None, 0),
             &[],
             Backend::Sqlite,
         )
+        .expect("renders")
         .sql;
         assert_eq!(sql, r#"SELECT * FROM "t" ORDER BY "created_at" DESC"#);
         // A projection is ordered the same way.
         let sql = build_select_columns(
             "t",
             &["name"],
-            &sorted(&[("name", false)], 0, 0),
+            &sorted(&[("name", false)], None, 0),
             None,
             &["id"],
             Backend::Sqlite,
         )
+        .expect("renders")
         .sql;
         assert_eq!(
             sql,
@@ -1291,10 +1362,11 @@ mod tests {
         for offset in [0, 2, 4] {
             let stmt = build_select(
                 "t",
-                &sorted(&[("created_at", true)], 2, offset),
+                &sorted(&[("created_at", true)], Some(2), offset),
                 &["id"],
                 Backend::Sqlite,
-            );
+            )
+            .expect("renders");
             let params: Vec<i64> = stmt
                 .values
                 .iter()
