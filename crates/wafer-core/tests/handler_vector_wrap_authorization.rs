@@ -177,12 +177,18 @@ mod vec_fakes {
             self.note("list_ids");
             Ok(vec![])
         }
+        async fn rename_index(&self, _from: &str, _to: &str) -> VResult<()> {
+            self.note("rename_index");
+            Ok(())
+        }
     }
 }
 
 // --- Helpers -------------------------------------------------------------
 
 const IDX: &str = "my_org__vector__docs";
+/// `IDX` as an index created before index names had to be lowercase.
+const LEGACY_IDX: &str = "my_org__vector__Docs";
 
 fn msg(kind: &str) -> Message {
     Message::new(kind)
@@ -238,6 +244,10 @@ fn body_for(op: &str) -> Vec<u8> {
             index: IDX.into(),
             filter: wire::MetadataFilter::default(),
         }),
+        ServiceOp::VECTOR_RENAME_INDEX => codec::encode(&wire::RenameIndexRequest {
+            from: LEGACY_IDX.into(),
+            to: IDX.into(),
+        }),
         other => panic!("no body for op {other}"),
     };
     encoded.expect("encode")
@@ -253,12 +263,14 @@ const ALL_OPS: &[&str] = &[
     ServiceOp::VECTOR_LIST_INDEXES,
     ServiceOp::VECTOR_DESCRIBE_INDEX,
     ServiceOp::VECTOR_LIST_IDS,
+    ServiceOp::VECTOR_RENAME_INDEX,
 ];
 const WRITE_OPS: &[&str] = &[
     ServiceOp::VECTOR_CREATE_INDEX,
     ServiceOp::VECTOR_DELETE_INDEX,
     ServiceOp::VECTOR_UPSERT,
     ServiceOp::VECTOR_DELETE,
+    ServiceOp::VECTOR_RENAME_INDEX,
 ];
 const READ_OPS: &[&str] = &[
     ServiceOp::VECTOR_QUERY,
@@ -323,5 +335,117 @@ async fn read_only_grant_allows_read_ops() {
             "read op {op} should succeed under a read-only grant"
         );
         assert_eq!(svc.ran().len(), 1, "read op {op} should reach the service");
+    }
+}
+
+/// Every op is listed in exactly one of the read and write sets, so the
+/// grant-shape tests above cover every op.
+#[test]
+fn every_op_is_classified_read_or_write() {
+    for op in ServiceOp::VECTOR_OPS {
+        assert!(ALL_OPS.contains(op), "op {op} missing from ALL_OPS");
+        assert!(
+            WRITE_OPS.contains(op) != READ_OPS.contains(op),
+            "op {op} must be in exactly one of WRITE_OPS / READ_OPS"
+        );
+    }
+}
+
+// --- rename_index: both names are authorized -----------------------------
+
+/// Grants everything except writes to one named resource.
+struct DenyWriteTo(&'static str);
+
+#[wafer_block::wafer_async_trait]
+impl Context for DenyWriteTo {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("not exercised by decode_and_authorize")
+    }
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        _resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> Result<(), WaferError> {
+        if resource == self.0 && access == ResourceAccess::Write {
+            Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                format!("WRAP: denied for resource '{resource}' (access={access})"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
+    }
+}
+
+/// A rename empties one index and fills another, so a caller needs write
+/// access to both: denying either name alone refuses the op before it
+/// reaches the service.
+#[tokio::test]
+async fn rename_index_needs_write_access_to_both_names() {
+    for denied in [LEGACY_IDX, IDX] {
+        let svc = vec_fakes::Recording::default();
+        let op = ServiceOp::VECTOR_RENAME_INDEX;
+        let out = handle_message(&svc, &DenyWriteTo(denied), &msg(op), &body_for(op)).await;
+        let err = terminal_err(out)
+            .await
+            .unwrap_or_else(|| panic!("rename must be denied when {denied} is not writable"));
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "denied {denied}");
+        assert!(err.message.contains(denied), "{}", err.message);
+        assert!(svc.ran().is_empty(), "denied {denied}: ran {:?}", svc.ran());
+    }
+}
+
+/// Names that break the rename rule are refused as malformed before any
+/// authorization — the same answer with or without grants — and never
+/// reach the service.
+#[tokio::test]
+async fn rename_index_refuses_non_legacy_names_before_authorizing() {
+    for (from, to) in [
+        (IDX, IDX),
+        (LEGACY_IDX, "my_org__vector__other"),
+        ("my_org__vector__Docs", "my_org__vector__Docs"),
+        ("my-org__vector__Docs", "my-org__vector__docs"),
+    ] {
+        let body = codec::encode(&wire::RenameIndexRequest {
+            from: from.into(),
+            to: to.into(),
+        })
+        .expect("encode");
+        let svc = vec_fakes::Recording::default();
+        let out = handle_message(&svc, &DenyCtx, &msg(ServiceOp::VECTOR_RENAME_INDEX), &body).await;
+        let err = terminal_err(out)
+            .await
+            .unwrap_or_else(|| panic!("{from} -> {to} must be refused"));
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidArgument,
+            "{from} -> {to}: {}",
+            err.message
+        );
+        assert!(svc.ran().is_empty(), "{from} -> {to}: ran {:?}", svc.ran());
     }
 }

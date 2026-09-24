@@ -17,8 +17,10 @@ use wafer_block::{
     *,
 };
 
-use super::service::{EmbeddingService, VectorError, VectorService};
-use crate::interfaces::handler_util::{decode_and_authorize, decode_or_err, to_output};
+use super::service::{check_rename, EmbeddingService, VectorError, VectorService};
+use crate::interfaces::handler_util::{
+    decode_and_authorize, decode_and_authorize_all, decode_or_err, to_output,
+};
 
 /// The read-only vector ops (query, count, list_indexes, describe_index,
 /// list_ids) authorize for `ResourceAccess::Read`; every other op mutates
@@ -40,6 +42,7 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::TextRequired
         | VectorError::KeywordQueryRequired(_)
         | VectorError::InvalidIndexName(_)
+        | VectorError::InvalidRename { .. }
         | VectorError::InvalidMetadataFilter(_) => {
             WaferError::new(ErrorCode::InvalidArgument, e.to_string())
         }
@@ -199,6 +202,30 @@ pub async fn handle_message(
             };
             match service.list_ids(&req.index, req.filter).await {
                 Ok(ids) => to_output(&wire::ListIdsResponse { ids }),
+                Err(e) => OutputStream::error(vector_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::VECTOR_RENAME_INDEX => {
+            // Both names are authorized for write: the op empties `from` and
+            // fills `to`. Names that fail the rename rule are refused before
+            // either check, as malformed whatever the caller's grants.
+            let req = match decode_and_authorize_all::<wire::RenameIndexRequest>(
+                ctx,
+                body,
+                "vector.rename_index",
+                |r| {
+                    check_rename(&r.from, &r.to).map_err(vector_error_to_wafer)?;
+                    Ok(vec![
+                        (r.from.clone(), ResourceType::Vector, WRITE),
+                        (r.to.clone(), ResourceType::Vector, WRITE),
+                    ])
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.rename_index(&req.from, &req.to).await {
+                Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(vector_error_to_wafer(e)),
             }
         }

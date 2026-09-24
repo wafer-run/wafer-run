@@ -19,6 +19,8 @@
 //! Parameter binding (the `?N` placeholders) is the caller's
 //! responsibility — the builders only emit the SQL template.
 
+use wafer_block::wire::vector::is_legacy_spelling_of;
+
 use crate::{ident::validate_ident, SqlBuildError};
 
 /// Pre-computed table names for a vector index. Construct once per
@@ -42,9 +44,10 @@ impl VectorIndexSchema {
     /// Compute the three table names for an index.
     ///
     /// `name` is interpolated into SQL identifier positions, so it must be a
-    /// plain identifier (`[A-Za-z0-9_]`, non-empty). Anything else is
-    /// rejected with [`SqlBuildError::InvalidIdentifier`] — fail-closed
-    /// rather than silently renaming the index by stripping characters.
+    /// plain identifier ([`validate_ident`]: 1 to 63 of lowercase ASCII
+    /// letters, digits and `_`). Anything else is rejected with
+    /// [`SqlBuildError::InvalidIdentifier`] — fail-closed rather than
+    /// silently renaming the index by stripping characters.
     pub fn new(name: &str) -> Result<Self, SqlBuildError> {
         let ident = validate_ident(name)?;
         Ok(Self {
@@ -332,6 +335,136 @@ impl VectorIndexSchema {
     }
 }
 
+/// Table names and statements that move a vector index stored under a
+/// legacy name (one with uppercase letters, from before index names had to
+/// be lowercase) to its lowercase spelling.
+///
+/// SQLite folds identifier case, so `Docs_meta` cannot be renamed straight
+/// to `docs_meta` (SQLite reports the target as already taken — by the table
+/// being renamed) and a `docs_vec` vec0 table cannot be created while
+/// `Docs_vec` exists. Every table therefore moves through a staging stem,
+/// `{to}-rename`, which no index can be stored under: index names never
+/// contain `-`. Regular and FTS5 tables are renamed (FTS5 renames its shadow
+/// tables with it). A vec0 table cannot be renamed — sqlite-vec implements
+/// no `xRename`, so `ALTER TABLE` would leave its shadow tables behind under
+/// the old name — so its rows are copied, rowids included, into a new vec0
+/// table declared with the old one's module arguments, and the old table is
+/// dropped. Copying the rowids keeps every vector aligned with its
+/// `{name}_meta` row.
+///
+/// The statements do not check for existing tables; the caller probes the
+/// catalog, and runs them in one transaction.
+#[derive(Debug, Clone)]
+pub struct VectorIndexRename {
+    /// Tables of the index being moved (legacy name).
+    pub from: VectorIndexSchema,
+    /// Tables of the staging stem the move passes through.
+    pub staging: VectorIndexSchema,
+    /// Tables of the index once moved.
+    pub to: VectorIndexSchema,
+}
+
+impl VectorIndexRename {
+    /// Compute the table names for moving `from` to `to`. `from` must be a
+    /// legacy spelling of `to` ([`is_legacy_spelling_of`]); anything else is
+    /// [`SqlBuildError::InvalidIdentifier`] naming the rejected name. That
+    /// rule also keeps `from` to ASCII letters, digits and `_`, so both names
+    /// are safe in identifier positions.
+    pub fn new(from: &str, to: &str) -> Result<Self, SqlBuildError> {
+        let to_schema = VectorIndexSchema::new(to)?;
+        if !is_legacy_spelling_of(from, to) {
+            return Err(SqlBuildError::InvalidIdentifier {
+                value: from.to_string(),
+            });
+        }
+        let names = |stem: &str| VectorIndexSchema {
+            vec_table: format!("{stem}_vec"),
+            meta_table: format!("{stem}_meta"),
+            fts_table: format!("{stem}_fts"),
+        };
+        Ok(Self {
+            from: names(from),
+            staging: names(&format!("{to}-rename")),
+            to: to_schema,
+        })
+    }
+
+    /// The statements that move the index, in execution order. Each holds
+    /// one SQL statement.
+    ///
+    /// - `vec_module_args` is the `vec0(…)` clause of the `from` vec table's
+    ///   `CREATE VIRTUAL TABLE` text, as [`vec0_module_args`] extracts it from
+    ///   `sqlite_master`; the new vec tables are declared with it verbatim.
+    /// - `vec_columns` are that table's declared columns (`pragma_table_info`
+    ///   order), copied with the rowid.
+    /// - `keyword_search` says whether the index has an FTS table to move.
+    pub fn build_statements(
+        &self,
+        vec_module_args: &str,
+        vec_columns: &[String],
+        keyword_search: bool,
+    ) -> Vec<crate::Statement> {
+        let Self { from, staging, to } = self;
+        let columns: String = vec_columns
+            .iter()
+            .map(|c| format!(", {}", quote_ident(c)))
+            .collect();
+        let copy_vec = |src: &str, dst: &str| {
+            format!(
+                "INSERT INTO {dst}(rowid{columns}) SELECT rowid{columns} FROM {src}",
+                src = quote_ident(src),
+                dst = quote_ident(dst),
+            )
+        };
+        let create_vec = |table: &str| {
+            format!(
+                "CREATE VIRTUAL TABLE {} USING {vec_module_args}",
+                quote_ident(table)
+            )
+        };
+        let rename = |a: &str, b: &str| {
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                quote_ident(a),
+                quote_ident(b)
+            )
+        };
+        let drop = |table: &str| format!("DROP TABLE {}", quote_ident(table));
+
+        let mut sql = vec![
+            create_vec(&staging.vec_table),
+            copy_vec(&from.vec_table, &staging.vec_table),
+            drop(&from.vec_table),
+            create_vec(&to.vec_table),
+            copy_vec(&staging.vec_table, &to.vec_table),
+            drop(&staging.vec_table),
+            rename(&from.meta_table, &staging.meta_table),
+            rename(&staging.meta_table, &to.meta_table),
+        ];
+        if keyword_search {
+            sql.push(rename(&from.fts_table, &staging.fts_table));
+            sql.push(rename(&staging.fts_table, &to.fts_table));
+        }
+        sql.into_iter()
+            .map(|sql| crate::Statement::new(sql, vec![], to.meta_table.clone()))
+            .collect()
+    }
+}
+
+/// The module clause (`vec0(embedding float[3])`) of a
+/// `CREATE VIRTUAL TABLE … USING …` statement as `sqlite_master.sql` stores
+/// it, or `None` when `create_sql` has no `USING` clause.
+pub fn vec0_module_args(create_sql: &str) -> Option<&str> {
+    let upper = create_sql.to_ascii_uppercase();
+    let at = upper.find(" USING ")?;
+    Some(create_sql[at + " USING ".len()..].trim())
+}
+
+/// `name` as a double-quoted SQL identifier (`"` doubled).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// Name of the SQL scalar function the `*_filtered` search builders call
 /// as `METADATA_FILTER_FN(metadata, filter_json)`: true when the entry's
 /// `metadata` column satisfies the metadata filter serialized in
@@ -404,6 +537,71 @@ mod tests {
             crate::SqlBuildError::InvalidIdentifier { .. }
         ));
         assert!(VectorIndexSchema::new("").is_err());
+    }
+
+    #[test]
+    fn rename_moves_every_table_through_the_staging_stem() {
+        let r = VectorIndexRename::new("Docs", "docs").expect("legacy spelling");
+        assert_eq!(r.from.vec_table, "Docs_vec");
+        assert_eq!(r.staging.meta_table, "docs-rename_meta");
+        assert_eq!(r.to.fts_table, "docs_fts");
+        let sql: Vec<String> = r
+            .build_statements("vec0(embedding float[3])", &["embedding".into()], true)
+            .into_iter()
+            .map(|s| s.sql)
+            .collect();
+        assert_eq!(
+            sql,
+            vec![
+                "CREATE VIRTUAL TABLE \"docs-rename_vec\" USING vec0(embedding float[3])",
+                "INSERT INTO \"docs-rename_vec\"(rowid, \"embedding\") SELECT rowid, \"embedding\" FROM \"Docs_vec\"",
+                "DROP TABLE \"Docs_vec\"",
+                "CREATE VIRTUAL TABLE \"docs_vec\" USING vec0(embedding float[3])",
+                "INSERT INTO \"docs_vec\"(rowid, \"embedding\") SELECT rowid, \"embedding\" FROM \"docs-rename_vec\"",
+                "DROP TABLE \"docs-rename_vec\"",
+                "ALTER TABLE \"Docs_meta\" RENAME TO \"docs-rename_meta\"",
+                "ALTER TABLE \"docs-rename_meta\" RENAME TO \"docs_meta\"",
+                "ALTER TABLE \"Docs_fts\" RENAME TO \"docs-rename_fts\"",
+                "ALTER TABLE \"docs-rename_fts\" RENAME TO \"docs_fts\"",
+            ]
+        );
+        let without_fts = r.build_statements("vec0(embedding float[3])", &[], false);
+        assert_eq!(without_fts.len(), 8);
+    }
+
+    #[test]
+    fn rename_rejects_anything_but_a_legacy_spelling() {
+        for (from, to, rejected) in [
+            ("docs", "docs", "docs"),
+            ("Docs", "other", "Docs"),
+            (
+                "Docs\"; DROP TABLE x; --",
+                "docs\"; drop table x; --",
+                "docs\"; drop table x; --",
+            ),
+            ("Docs", "Docs", "Docs"),
+        ] {
+            assert_eq!(
+                VectorIndexRename::new(from, to).map(|_| ()),
+                Err(SqlBuildError::InvalidIdentifier {
+                    value: rejected.to_string()
+                }),
+                "{from:?} -> {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vec0_module_args_takes_the_clause_after_using() {
+        assert_eq!(
+            vec0_module_args("CREATE VIRTUAL TABLE Docs_vec USING vec0(embedding float[1024])"),
+            Some("vec0(embedding float[1024])")
+        );
+        assert_eq!(
+            vec0_module_args("create virtual table x using vec0(embedding float[3])"),
+            Some("vec0(embedding float[3])")
+        );
+        assert_eq!(vec0_module_args("CREATE TABLE x(a)"), None);
     }
 
     #[test]

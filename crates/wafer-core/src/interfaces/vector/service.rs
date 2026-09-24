@@ -9,8 +9,8 @@
 
 use thiserror::Error;
 pub use wafer_block::wire::vector::{
-    ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode, VectorEntry,
-    VectorIndexConfig, VectorMatch,
+    is_legacy_spelling_of, ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter,
+    SearchMode, VectorEntry, VectorIndexConfig, VectorMatch,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -20,18 +20,33 @@ pub enum VectorError {
     /// No index exists with the requested name.
     #[error("vector index not found: {0}")]
     IndexNotFound(String),
-    /// `create_index` called with a name that already exists.
+    /// `create_index` called with a name that already exists, or
+    /// `rename_index` called with a target that already exists.
     #[error("vector index already exists: {0}")]
     IndexAlreadyExists(String),
-    /// Index name is not a plain identifier (`[A-Za-z0-9_]`, non-empty).
+    /// Index name is not a plain identifier
+    /// ([`wafer_block::db::is_plain_ident`]: 1 to 63 of lowercase ASCII
+    /// letters, digits and `_`).
     ///
     /// Index names become SQL table names in the SQLite backend, so a
     /// non-identifier name is rejected fail-closed rather than silently
     /// rewritten into a different valid name.
     #[error(
-        "invalid vector index name: {0:?} (only ASCII alphanumerics and underscore are allowed)"
+        "invalid vector index name: {0:?} (1 to 63 of: lowercase ASCII letters, digits, underscore)"
     )]
     InvalidIndexName(String),
+    /// `rename_index` called with a `from` that is not a legacy spelling of
+    /// `to` ([`is_legacy_spelling_of`]): the op only moves a mixed-case
+    /// index name to its lowercase spelling.
+    #[error(
+        "cannot rename vector index {from:?} to {to:?}: `to` must be a valid index name and `from` the same name with some letters uppercase"
+    )]
+    InvalidRename {
+        /// The rejected source name.
+        from: String,
+        /// The rejected target name.
+        to: String,
+    },
     /// Caller requested keyword / hybrid search on a vector-only index.
     #[error("keyword search is not enabled on this index")]
     KeywordSearchNotEnabled,
@@ -66,6 +81,22 @@ pub enum VectorError {
 /// Convenience alias for `Result` types returned by the vector interfaces.
 pub type Result<T> = std::result::Result<T, VectorError>;
 
+/// Check the names of a [`VectorService::rename_index`] call: `from` must be
+/// a legacy spelling of `to` ([`is_legacy_spelling_of`]), or the call is
+/// [`VectorError::InvalidRename`]. Every backend runs this before touching
+/// storage, and the vector handler runs it before authorizing, so the rule
+/// is the same wherever the op is served.
+pub fn check_rename(from: &str, to: &str) -> Result<()> {
+    if is_legacy_spelling_of(from, to) {
+        Ok(())
+    } else {
+        Err(VectorError::InvalidRename {
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+    }
+}
+
 /// Vector store interface — create/destroy indexes, upsert entries, query/delete by id.
 #[wafer_async_trait]
 pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
@@ -89,6 +120,24 @@ pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     async fn delete(&self, index: &str, ids: Vec<String>) -> Result<()>;
     /// Return the number of entries currently stored in `index`.
     async fn count(&self, index: &str) -> Result<u64>;
+    /// Move the index `from` to `to`, entries, metadata and keyword search
+    /// included, so an index created before index names had to be lowercase
+    /// can be reached again.
+    ///
+    /// The names must pass [`check_rename`]: `to` is a plain index name and
+    /// `from` is the same name with some letters uppercase. This is the only
+    /// op that accepts such a `from`; it is matched exactly, never
+    /// case-insensitively. Errors:
+    /// - [`VectorError::InvalidRename`] when the names fail [`check_rename`];
+    /// - [`VectorError::IndexNotFound`] (naming `from`) when no index is
+    ///   stored under exactly `from`. A caller migrating at startup treats
+    ///   this as already done when `to` exists;
+    /// - [`VectorError::IndexAlreadyExists`] (naming `to`) when `to`, or any
+    ///   storage it would occupy, already exists. Two spellings of one name
+    ///   are never merged.
+    ///
+    /// The move is atomic: on any error nothing has changed.
+    async fn rename_index(&self, from: &str, to: &str) -> Result<()>;
     /// List the index stems (storage names, `_meta` suffix stripped) whose
     /// meta tables live under `prefix`, in lexical order. The prefix matches
     /// literally — `_`/`%` in it are not LIKE wildcards.

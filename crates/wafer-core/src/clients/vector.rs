@@ -27,7 +27,7 @@ use wafer_block::{
         CountRequest, CountResponse, CountTokensRequest, CountTokensResponse, CreateIndexRequest,
         DeleteIndexRequest, DeleteRequest, DescribeIndexRequest, EmbedRequest, EmbedResponse,
         ListIdsRequest, ListIdsResponse, ListIndexesRequest, ListIndexesResponse, QueryRequest,
-        QueryResponse, UpsertRequest,
+        QueryResponse, RenameIndexRequest, UpsertRequest,
     },
     WaferError,
 };
@@ -192,6 +192,24 @@ dual_api! {
         )?;
         let resp: ListIdsResponse = decode(&data)?;
         Ok(resp.ids)
+    }
+
+    /// Move the index `from`, whose name has uppercase letters, to `to`, its
+    /// lowercase spelling. `InvalidArgument` unless `from` lowercases to `to`
+    /// and `to` is a valid index name; `NotFound` when no index is named
+    /// exactly `from` (already moved, if `to` exists); `AlreadyExists` when
+    /// `to` exists. The host authorizes writes to both names.
+    pub fn rename_index(ctx, from: &str, to: &str) -> Result<(), WaferError> {
+        let req = RenameIndexRequest { from: from.to_string(), to: to.to_string() };
+        svc!(
+            ctx, VECTOR_BLOCK,
+            ServiceOp::VECTOR_RENAME_INDEX,
+            &req,
+            Some(to),
+            true,
+            Some("vector")
+        )?;
+        Ok(())
     }
 
     /// Call an embedding block to embed the given texts.
