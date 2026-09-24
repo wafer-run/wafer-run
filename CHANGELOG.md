@@ -1356,8 +1356,9 @@
 - Postgres introspection resolves a table name through the session's
   `search_path`, as the (unqualified) statements do, instead of looking
   only in `public`: with another schema first, every existence, column and
-  key check missed the table the statements wrote to. `introspect::
-  build_list_tables[_like]` list the tables an unqualified name reaches,
+  key check missed the table the statements wrote to.
+  `introspect::build_list_tables[_like]` list the tables an unqualified
+  name reaches,
   and `build_table_info`'s Postgres arm no longer matches the name in
   every schema.
 - A table that numbers its own rows gets its id from the database on every
